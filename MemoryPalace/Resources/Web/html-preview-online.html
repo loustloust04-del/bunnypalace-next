@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- 本地模式 OFF 用的联网渲染 shell（W1）。与 html-preview.html 仅 CSP 行不同，
+       其余内容必须逐字一致（Playwright 有 diff 测试守着，改这份记得同步那份） -->
+  <!-- W1 联网渲染：子资源（图片/字体/媒体/样式/脚本）放行 https:，fetch/XHR 仍封（connect-src 'none'），sandbox/桥接隔离不变 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'unsafe-inline' https: blob:; style-src 'unsafe-inline' https: blob:; img-src https: data: blob:; font-src https: data: blob:; media-src https: data: blob:; connect-src 'none'; frame-src about: data: blob:; form-action 'none'">
+  <title>HTML Preview</title>
+  <style>
+    /* shell 和 iframe 全透明：让用户页面自己的 canvas 背景接管整个 WebView
+       （深色页边到边全黑，宿主侧 backdrop 只在加载瞬间可见），默认白底由注入 runtime 提供 */
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: transparent;
+    }
+
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: transparent;
+    }
+  </style>
+</head>
+<body>
+  <!-- allow-scripts 与 allow-same-origin 绝不同开：脚本跑在 opaque origin，摸不到 bridge 和本地文件 -->
+  <iframe id="preview" sandbox="allow-scripts"></iframe>
+  <script>
+    const bridge = window.webkit?.messageHandlers?.memoryPalace;
+    const preview = document.getElementById("preview");
+
+    function post(message) {
+      bridge?.postMessage(message);
+    }
+
+    const errorCaptureRuntime = [
+      // 默认白底：:where 零特异性，挂 body 不挂 html——用户页任何 html/body 背景声明都能赢，
+      // canvas 传播保持浏览器原生行为（body 深色 → 整个视口深色）
+      "<style>:where(body) { background: #ffffff; }</style>",
+      "<script>",
+      "(function () {",
+      "  function send(payload) {",
+      "    try { payload.__mpArtifact = true; parent.postMessage(payload, \"*\"); } catch (_) {}",
+      "  }",
+      "  function report(message) {",
+      "    send({ type: \"artifactError\", message: String(message).slice(0, 500) });",
+      "  }",
+      "  function wrapCallback(fn) {",
+      "    return function () {",
+      "      try { return fn.apply(this, arguments); }",
+      "      catch (e) { report((e && e.message) || e || \"脚本错误\"); }",
+      "    };",
+      "  }",
+      "  // opaque origin 下 onerror 的 message/error 被脱敏成 Script error.，",
+      "  // 所以 timer/rAF 回调包一层 try-catch 拿真实信息（上报后吞掉，避免二次脱敏上报）",
+      "  [\"setTimeout\", \"setInterval\", \"requestAnimationFrame\"].forEach(function (name) {",
+      "    var orig = window[name];",
+      "    window[name] = function (fn) {",
+      "      if (typeof fn !== \"function\") return orig.apply(window, arguments);",
+      "      var args = Array.prototype.slice.call(arguments);",
+      "      args[0] = wrapCallback(fn);",
+      "      return orig.apply(window, args);",
+      "    };",
+      "  });",
+      "  window.addEventListener(\"error\", function (e) {",
+      "    var raw = e.message || \"\";",
+      "    report(!raw || raw === \"Script error.\" ? \"脚本错误（沙箱隐藏了详情）\" : raw);",
+      "  });",
+      "  window.addEventListener(\"unhandledrejection\", function (e) {",
+      "    report((e.reason && (e.reason.message || e.reason)) || \"Promise 未处理拒绝\");",
+      "  });",
+      "  window.addEventListener(\"load\", function () {",
+      "    send({ type: \"pageTitle\", title: String(document.title || \"\").slice(0, 120) });",
+      "  });",
+      "  document.addEventListener(\"click\", function (e) {",
+      "    var link = e.target && e.target.closest ? e.target.closest(\"a[href]\") : null;",
+      "    if (!link) return;",
+      "    var href = link.getAttribute(\"href\") || \"\";",
+      "    if (href.charAt(0) === \"#\") return;",
+      "    e.preventDefault();",
+      "    send({ type: \"openLink\", href: link.href });",
+      "  }, true);",
+      "})();",
+      "<\/script>"
+    ].join("\n");
+
+    // research-chat-cards §13 宿主能力桥：只在原生给了本次运行的令牌时注入 window.mp。
+    // 请求 postMessage 给壳，壳附上令牌转原生；原生判定（确认弹窗是原生画的）后经 receive({type:"cardReply"}) 回来
+    const bridgeRuntime = [
+      "<script>",
+      "(function () {",
+      "  var seq = 0, waiting = {};",
+      "  function call(action, text, opts) {",
+      "    return new Promise(function (resolve, reject) {",
+      "      var id = \"q\" + (++seq) + \"-\" + Date.now().toString(36);",
+      "      var msg = { __mpArtifact: true, type: \"cardRequest\", id: id, action: action,",
+      "                  text: typeof text === \"string\" ? text : String(text == null ? \"\" : text) };",
+      "      if (opts && typeof opts.date === \"string\") msg.date = opts.date;",
+      "      waiting[id] = { resolve: resolve, reject: reject };",
+      "      try { parent.postMessage(msg, \"*\"); }",
+      "      catch (_) { delete waiting[id]; reject(new Error(\"invalid\")); }",
+      "    });",
+      "  }",
+      "  window.addEventListener(\"message\", function (e) {",
+      "    if (e.source !== parent) return;",
+      "    var d = e.data;",
+      "    if (!d || d.__mpArtifact !== true || d.type !== \"cardReply\" || !waiting[d.id]) return;",
+      "    var w = waiting[d.id]; delete waiting[d.id];",
+      "    if (d.ok === true) w.resolve(true); else w.reject(new Error(String(d.error || \"invalid\")));",
+      "  });",
+      "  var mp = {",
+      "    todo: Object.freeze({ add: function (text, opts) { return call(\"todo.add\", text, opts); } }),",
+      "    vocab: Object.freeze({ add: function (word) { return call(\"vocab.add\", word); } }),",
+      "    ask: function (text) { return call(\"ask\", text); },",
+      "    report: function (text) { return call(\"report\", text); }",
+      "  };",
+      "  window.mp = Object.freeze(mp);",
+      "})();",
+      "<\/script>"
+    ].join("\n");
+
+    // 本次运行的令牌（只在壳里，iframe 是 opaque origin 读不到）；null = 不开桥
+    let bridgeToken = null;
+
+    // 卡库 ⑦ 静态模式：不注入任何脚本，只给默认白底
+    const staticRuntime = "<style>:where(body) { background: #ffffff; }</style>";
+
+    function injectRuntime(content, runtime) {
+      const doctypeMatch = /^\s*<!doctype[^>]*>/i.exec(content);
+      if (doctypeMatch) {
+        const end = doctypeMatch.index + doctypeMatch[0].length;
+        return content.slice(0, end) + "\n" + runtime + content.slice(end);
+      }
+      return runtime + "\n" + content;
+    }
+
+    window.memoryPalaceNative = {
+      receive(payload) {
+        if (payload && payload.type === "cardReply") {
+          // 原生的判定结果转回卡片：只带 id / 成败 / 错误码，不带任何数据
+          preview.contentWindow?.postMessage({
+            __mpArtifact: true,
+            type: "cardReply",
+            id: String(payload.id || ""),
+            ok: payload.ok === true,
+            error: typeof payload.error === "string" ? payload.error : ""
+          }, "*");
+          return;
+        }
+        if (!payload || payload.type !== "setContent") return;
+        // 卡库 ⑦：mode=static → sandbox=""（任何脚本都不跑）；否则 allow-scripts。两种都不给 allow-same-origin
+        const isStatic = payload.mode === "static";
+        bridgeToken = !isStatic && typeof payload.bridgeToken === "string" && payload.bridgeToken ? payload.bridgeToken : null;
+        preview.setAttribute("sandbox", isStatic ? "" : "allow-scripts");
+        preview.srcdoc = injectRuntime(payload.content || "",
+          isStatic ? staticRuntime : errorCaptureRuntime + (bridgeToken ? "\n" + bridgeRuntime : ""));
+      }
+    };
+
+    preview.addEventListener("load", () => {
+      post({ type: "pageLoaded" });
+    });
+
+    window.addEventListener("message", (event) => {
+      if (event.source !== preview.contentWindow) return;
+      const data = event.data;
+      if (!data || data.__mpArtifact !== true) return;
+      if (data.type === "artifactError") {
+        post({
+          type: "artifactError",
+          message: typeof data.message === "string" ? data.message : "脚本错误"
+        });
+      } else if (data.type === "openLink" && typeof data.href === "string") {
+        post({
+          type: "openLink",
+          href: data.href
+        });
+      } else if (data.type === "pageTitle" && typeof data.title === "string") {
+        post({
+          type: "pageTitle",
+          title: data.title
+        });
+      } else if (data.type === "cardRequest" && bridgeToken) {
+        // 只转白名单字段，附上令牌；判定全在原生
+        post({
+          type: "cardRequest",
+          id: typeof data.id === "string" ? data.id : "",
+          action: typeof data.action === "string" ? data.action : "",
+          text: typeof data.text === "string" ? data.text : "",
+          date: typeof data.date === "string" ? data.date : undefined,
+          token: bridgeToken
+        });
+      }
+    });
+
+    window.addEventListener("error", (event) => {
+      post({
+        type: "error",
+        message: event.message || "HTML 预览脚本错误"
+      });
+    });
+
+    post({ type: "ready" });
+  </script>
+</body>
+</html>

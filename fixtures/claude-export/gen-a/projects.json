@@ -1,0 +1,24 @@
+[
+ {
+  "uuid": "p-a1",
+  "name": "旧项目",
+  "description": "编的项目",
+  "is_private": true,
+  "is_starter_project": false,
+  "prompt_template": "项目指令：回答简短。",
+  "created_at": "2026-01-01T00:00:00.123456Z",
+  "updated_at": "2026-01-01T00:01:00.123456Z",
+  "creator": {
+   "uuid": "acct-1",
+   "full_name": "测试"
+  },
+  "docs": [
+   {
+    "uuid": "p-a1-d0",
+    "filename": "笔记.md",
+    "content": "# 笔记\n旧项目的文档",
+    "created_at": "2026-01-01T00:00:00.123456Z"
+   }
+  ]
+ }
+]

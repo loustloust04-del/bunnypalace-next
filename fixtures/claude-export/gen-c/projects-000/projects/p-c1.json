@@ -1,0 +1,28 @@
+{
+ "uuid": "p-c1",
+ "name": "新项目",
+ "description": "编的项目",
+ "is_private": true,
+ "is_starter_project": false,
+ "prompt_template": "项目指令：回答简短。",
+ "created_at": "2026-01-01T00:00:00.123456Z",
+ "updated_at": "2026-01-01T00:01:00.123456Z",
+ "creator": {
+  "uuid": "acct-1",
+  "full_name": "测试"
+ },
+ "docs": [
+  {
+   "uuid": "p-c1-d0",
+   "filename": "spec.pdf",
+   "content": "PDF 提取出来的文字",
+   "created_at": "2026-01-01T00:00:00.123456Z"
+  },
+  {
+   "uuid": "p-c1-d1",
+   "filename": "../逃逸.md",
+   "content": "路径不安全的文档名",
+   "created_at": "2026-01-01T00:00:00.123456Z"
+  }
+ ]
+}

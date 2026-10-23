@@ -1,0 +1,556 @@
+name: MemoryPalace
+options:
+  # 本机签名配置 Config/Signing.local.xcconfig 是 gitignore 的：worktree / 集成区里没有就软链主仓那份（#071）
+  preGenCommand: bash scripts/signing-local-link.sh
+  # iOS 部署目标 26.0 → 要 Xcode 26+（iOS 26 SDK）；这项只影响 LastUpgradeCheck
+  xcodeVersion: "26.0"
+  minimumXcodeGenVersion: "2.38"
+
+packages:
+  sherpa-onnx:
+    url: https://github.com/k2-fsa/sherpa-onnx
+    exactVersion: "1.13.8"
+  Grape:
+    url: https://github.com/swiftgraphs/Grape
+    from: "1.1.0"
+  VariableBlur:
+    url: https://github.com/nikstar/VariableBlur
+    from: "1.3.0"
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    from: "0.9.19"
+  # #087 起入库到 Packages/SwiftTerm（上游 v1.13.0 原样 + 宽字符补丁，清单见 Packages/SwiftTerm/MP-PATCHES.md）
+  SwiftTerm:
+    path: Packages/SwiftTerm
+  # #064 终端首页 3D：本机型号名（iPhone18,4 → iPhone Air）。MIT；只挂 iOS（没声明 macOS）；每年 9 月新机后 bump
+  DeviceKit:
+    url: https://github.com/devicekit/DeviceKit
+    exactVersion: "5.9.0"
+  SwiftSoup:
+    url: https://github.com/scinfu/SwiftSoup
+    from: "2.7.0"
+  # W-N3 dsh：解 zstd 多帧会话日志（纯 C、BSD；只挂 mac target）
+  zstd:
+    url: https://github.com/facebook/zstd
+    from: "1.5.7"
+  # P0.D 流式重写：流式 markdown 渲染。ms0911 起 mac 聊天正文也走它（D6=c 推翻）；2026-09-16 第二刀收掉最后 7 个 sheet，**MarkdownUI 已完全退役、包已摘**
+  # P1.x 起改 local fork；2026-09-24 起入库到 Packages/SwiftStreamingMarkdown（git subtree，保留 mp-custom 全历史）。
+  # ~/Projects/Sandbox/SwiftStreamingMarkdown-fork 冻结不再改；渲染器改动直接在工地提交
+  # 9 处 patch：BlockQuote 竖线/ThematicBreak 短线/CodeBlock 浅色/BlockView html artifact hook/段落去 Spacer（抱字）/sizeThatFits nil 提案无约束测量（长段落被裁）/划线高亮重涂层/列表行去 Spacer/有序序号 fixedSize（列表窄条真凶，demo 双实证）
+  SwiftStreamingMarkdown:
+    path: Packages/SwiftStreamingMarkdown
+  # Mac 自动更新（research-magpie §2.9，plan-mac-auto-update）。只挂 macOS target，iOS 不链
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.9.0"
+  # 小芽本地大脑（plan-小芽-v2 §6 / research §8 P0 实测）：钉死 3.31.3。
+  # 不用 3.31.4：它要 swift-syntax 602..<604，跟渲染器的 equatable 1.0.10（600..<602）/ snapshot-testing 1.18.1 解不出来；
+  # 3.31.3 要 600.x，三方都能满足。3.31.3 上 Qwen3 工具调用实测照样全对（research §8 补记）。之后版本还加了 unsafeFlags + traits，升级前重审。
+  # mlx-swift 带 CudaBuild 构建插件（Apple 平台上是空操作），命令行 xcodebuild 需要先在 Xcode 里 Trust 一次或加 -skipPackagePluginValidation
+  mlx-swift-lm:
+    url: https://github.com/ml-explore/mlx-swift-lm
+    exactVersion: "3.31.3"
+  # 分词器只要 Tokenizers；适配层手写（AssistantLocalBackend），不引 MLXHuggingFace 的宏
+  swift-transformers:
+    url: https://github.com/huggingface/swift-transformers
+    exactVersion: "1.3.4"
+
+# 签名 Team（DEVELOPMENT_TEAM）和 bundle ID 前缀（MP_BUNDLE_ID_BASE）从这里来，target 里别再写 DEVELOPMENT_TEAM——
+# 项目级 xcconfig 优先级最低，target 一写就盖掉。默认值给 fork，粟粟本机值在 Config/Signing.local.xcconfig（#071）
+configFiles:
+  Debug: Config/Signing.xcconfig
+  Release: Config/Signing.xcconfig
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    # 模拟器只编 arm64：generic 目的地默认 ARCHS=arm64 x86_64，会把全部 Swift 编两遍
+    # （docs/research-ish-spm-modularize.md §5.3）。条件键，macOS target 无感。
+    "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+    # 私人子应用开关（死亡天平 / 军机处 / 交易 / PMBoard / kimi-p，docs/plan-personal-apps-flag.md）。
+    # 关：命令行 `PERSONAL_APPS_FLAG=`，或导出时改成 ""。三个 target 用 $(inherited) 拼进编译条件（写项目级会盖掉 DEBUG）。
+    PERSONAL_APPS_FLAG: ""
+targets:
+  MemoryPalace:
+    type: application
+    platform: macOS
+    deploymentTarget:
+      macOS: "15.0"
+    sources:
+      - path: MemoryPalace
+        excludes:
+          # A2a 后两份 INFOPLIST_FILE 落在源目录：不 exclude 会被当资源拷进包根，
+          # CFBundle 识别错乱 → devicectl 装真机报 not a valid bundle（09-11 装 Air 实锤）
+          - "Info-iOS.plist"
+          - "Info-macOS.plist"
+      # 思考链回传 Stop hook 脚本：打进 bundle，启动时自检安装到 Application Support（app 自包含）
+      - path: cc-bridge/thinking-hook.py
+        buildPhase: resources
+      # 问问题 CC 桥 PreToolUse/PostToolUse hook 脚本（同款自检安装）
+      - path: cc-bridge/askuser-hook.py
+        buildPhase: resources
+      # cc-bridge v1.1：bun compile 出的 4 个二进制 + 版权声明（preBuildScripts 跑 build-cc-bridge.sh 出）
+      # 4 个二进制是 gitignore 的构建产物：optional 让干净 clone 也能 xcodegen，预构建跑完它们就在
+      - path: build/cc-bridge/hub-arm64
+        type: file
+        buildPhase: resources
+        optional: true
+      - path: build/cc-bridge/hub-x64
+        type: file
+        buildPhase: resources
+        optional: true
+      - path: build/cc-bridge/mcp-server-arm64
+        type: file
+        buildPhase: resources
+        optional: true
+      - path: build/cc-bridge/mcp-server-x64
+        type: file
+        buildPhase: resources
+        optional: true
+      - path: cc-bridge/ATTRIBUTION.md
+        buildPhase: resources
+      - path: cc-bridge/cc-bridge-guide.md
+        buildPhase: resources
+    preBuildScripts:
+      - name: "Build cc-bridge binaries"
+        script: |
+          set -e
+          cd "$SRCROOT"
+          bash scripts/build-cc-bridge.sh
+        inputFiles:
+          - $(SRCROOT)/cc-bridge/hub.ts
+          - $(SRCROOT)/cc-bridge/mcp-server.ts
+          - $(SRCROOT)/cc-bridge/apns.ts
+        outputFiles:
+          - $(SRCROOT)/build/cc-bridge/hub-arm64
+          - $(SRCROOT)/build/cc-bridge/hub-x64
+          - $(SRCROOT)/build/cc-bridge/mcp-server-arm64
+          - $(SRCROOT)/build/cc-bridge/mcp-server-x64
+    # Debug 包「开发」子应用的本地默认图标（版权图不进 git）：脚本自己判 CONFIGURATION==Debug + 本机有图才拷进包，否则静默跳过。
+    # 不声明 inputFiles：源图在仓库外、别的机器上不存在，声明了会报 Build input file cannot be found；
+    # 所以每次编都跑（毫秒级 cmp，没变不写），只写包内资源目录，排在所有相位之后、签名之前。
+    postBuildScripts:
+      - name: "Copy local debug icon (Debug only)"
+        basedOnDependencyAnalysis: false
+        script: bash "$SRCROOT/scripts/copy-local-debug-icon.sh"
+    dependencies:
+      - package: sherpa-onnx
+        product: sherpa-onnx
+      - package: Grape
+      - package: ZIPFoundation
+      - package: SwiftTerm
+      - package: SwiftSoup
+      - package: SwiftStreamingMarkdown   # ms0911 mac-selection L3：mac 聊天正文切 fork（与 iOS 同一份 ChatMarkdownView）
+      - package: zstd
+        product: libzstd   # W-N3 dsh 日志解压，只挂 mac
+      - package: Sparkle   # Mac 自动更新（AppUpdater.swift），只挂 mac
+      - package: mlx-swift-lm   # 小芽本地大脑（模拟器里编进去但运行时绝不初始化，P0 实测一碰就崩）
+        product: MLXLLM
+      - package: mlx-swift-lm
+        product: MLXLMCommon
+      - package: swift-transformers
+        product: Tokenizers
+      # W-N N6：mp-code 拷进 Contents/MacOS，与主程序同签名
+      - target: mp-code
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+    info:
+      path: MemoryPalace/Info-macOS.plist
+      properties:
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.susu.MemoryPalace.mac-dock-entry
+            UTTypeDescription: Mac Workspace Dock Entry
+            UTTypeConformsTo:
+              - public.data
+          - UTTypeIdentifier: com.susu.MemoryPalace.tool-tab
+            UTTypeDescription: 记忆花园工具 tab（面板拖放载荷）
+            UTTypeConformsTo:
+              - public.data
+        # Sparkle 2（AppUpdater.swift / docs/plan-mac-auto-update.md）。私钥只在登录钥匙串，绝不进仓库。
+        SUFeedURL: "https://raw.githubusercontent.com/replica882/mneme-atrium/master/appcast.xml"
+        SUPublicEDKey: "/SgHH+6YYto3qQDlCtWDLm1eVNHiIFklwOGxHdkrThg="
+        SUEnableAutomaticChecks: true     # 默认自动检查（且不弹 Sparkle 的「要不要自动检查」询问）
+        SUAutomaticallyUpdate: true       # 默认后台下载，退出/重启时安装
+        SUScheduledCheckInterval: 21600   # 6 小时（magpie 同款）；Debug 构建由 AppUpdater 拦掉后台检查
+    settings:
+      base:
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
+        PRODUCT_BUNDLE_IDENTIFIER: $(MP_BUNDLE_ID_BASE)
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(PERSONAL_APPS_FLAG)"
+        PRODUCT_NAME: "记忆花园"
+        MARKETING_VERSION: "1.1.0"
+        CURRENT_PROJECT_VERSION: "260924"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: MemoryPalace/Info-macOS.plist
+        INFOPLIST_KEY_CFBundleDisplayName: "记忆花园"
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Susu. All rights reserved."
+        # macOS 15+ 本地网络隐私：Bonjour 发现 claude-proxy（ProxyDiscovery）+ 连本机 CC 桥。
+        # macOS target 的 INFOPLIST_FILE 承载 UTI 声明，其余继续由 GENERATE_INFOPLIST_FILE + INFOPLIST_KEY_* 供给。
+        # NSBonjourServices 是数组，build setting 表达不了；它是 iOS 系专属要求，macOS 不需要。
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "在同一个局域网内查找并连接你 Mac 上运行的服务：Claude Code 桥接 hub，以及本机 AI 代理服务。"
+        # 设备工具（plan-设备工具 P1）：日历/提醒事项 usage keys（macOS 14+ FullAccess 键 + 旧键兜底）
+        INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription: "让 AI 按你的要求查看、创建和删除日历事件。"
+        INFOPLIST_KEY_NSCalendarsUsageDescription: "让 AI 按你的要求查看、创建和删除日历事件。"
+        INFOPLIST_KEY_NSRemindersFullAccessUsageDescription: "让 AI 按你的要求查看、创建和完成提醒事项。"
+        INFOPLIST_KEY_NSRemindersUsageDescription: "让 AI 按你的要求查看、创建和完成提醒事项。"
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: MemoryPalaceMac.entitlements
+        SWIFT_EMIT_LOC_STRINGS: YES
+        ENABLE_PREVIEWS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
+      configs:
+        Debug:
+          CODE_SIGN_STYLE: Automatic
+        Release:
+          CODE_SIGN_STYLE: Automatic
+
+  # W-N N6：随包命令行 mp-code（CLI 子命令 + `mp-code mcp` 的 stdio MCP server），拷进 记忆花园.app/Contents/MacOS/。
+  # sources 写死：编程会话服务层去掉带 AppKit / 界面状态的三件（Library / Resume / Terminal）+ ToolDefinition + main.swift（R-WN6 I1）
+  mp-code:
+    type: tool
+    platform: macOS
+    deploymentTarget:
+      macOS: "15.0"
+    sources:
+      - path: mp-code
+      - path: MemoryPalace/Services/CodingSessions
+        excludes:
+          - "CodingSessionLibrary.swift"
+          - "CodingSessionResume.swift"
+          - "CodingSessionTerminal.swift"
+      - path: MemoryPalace/Services/Tools/ToolDefinition.swift
+    dependencies:
+      - package: zstd
+        product: libzstd
+    settings:
+      base:
+        PRODUCT_NAME: mp-code
+        PRODUCT_BUNDLE_IDENTIFIER: $(MP_BUNDLE_ID_BASE).mp-code
+        # 与 app 同步：包内起时 Bundle.main 就是 app，单独起读嵌进二进制的 Info.plist
+        MARKETING_VERSION: "1.1.0"
+        CURRENT_PROJECT_VERSION: "260924"
+        GENERATE_INFOPLIST_FILE: YES
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        SKIP_INSTALL: YES
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
+      configs:
+        Debug:
+          CODE_SIGN_STYLE: Automatic
+        Release:
+          CODE_SIGN_STYLE: Automatic
+
+  MemoryPalaceIOS:
+    type: application
+    platform: iOS
+    deploymentTarget:
+      iOS: "26.0"
+    sources:
+      - path: MemoryPalace
+        excludes:
+          # 同 mac target：INFOPLIST_FILE 源文件不进资源拷贝（devicectl not a valid bundle 案）
+          - "Info-iOS.plist"
+          - "Info-macOS.plist"
+      - path: LiveActivityShared
+      # 离线沙箱（SBX-T0）：ish 的 ObjC 胶水单独放 Sandbox/ish，只挂 iOS target。
+      # 不能放 MemoryPalace/ —— 两个 target 共用那份 sources，放进去 macOS 也会编。
+      - path: Sandbox/ish
+      # rootfs 必须以 type: file 进 resources，当目录会被 Xcode 平铺
+      # gitignore 的产物，scripts/bootstrap-sandbox.sh 生成；optional 让没跑 bootstrap 也能 xcodegen
+      - path: deps/resources/alpine-rootfs.zip
+        type: file
+        buildPhase: resources
+        optional: true
+    preBuildScripts:
+      # deps/libs/ 是 gitignore 的构建产物；没有这一步，干净 clone 的 iOS build
+      # 会在链接期 file not found。outputFiles 让 Xcode 做增量：产物比输入新就整步跳过
+      # （ninja 内部再兜一层，实测 warm 情况下整步 <1s）。
+      - name: "Build ish static libs ($PLATFORM_NAME)"
+        script: |
+          set -e
+          cd "$SRCROOT"
+          bash scripts/build-ish.sh "$PLATFORM_NAME"
+        inputFiles:
+          - $(SRCROOT)/scripts/build-ish.sh
+          - $(SRCROOT)/deps/ish/meson.build
+        outputFiles:
+          - $(SRCROOT)/deps/libs/$(PLATFORM_NAME)/libish.a
+          - $(SRCROOT)/deps/libs/$(PLATFORM_NAME)/libish_emu.a
+          - $(SRCROOT)/deps/libs/$(PLATFORM_NAME)/libfakefs.a
+    # Debug 包「开发」子应用的本地默认图标（版权图不进 git）：脚本自己判 CONFIGURATION==Debug + 本机有图才拷进包，否则静默跳过。
+    # 不声明 inputFiles：源图在仓库外、别的机器上不存在，声明了会报 Build input file cannot be found；
+    # 所以每次编都跑（毫秒级 cmp，没变不写），只写包内资源目录，排在所有相位之后、签名之前。
+    postBuildScripts:
+      - name: "Copy local debug icon (Debug only)"
+        basedOnDependencyAnalysis: false
+        script: bash "$SRCROOT/scripts/copy-local-debug-icon.sh"
+    dependencies:
+      # ish 静态库要的系统库：libsqlite3=fakefs meta.db，libresolv+SystemConfiguration=ISHKernel DNS
+      - sdk: libsqlite3.tbd
+      - sdk: libresolv.tbd
+      - sdk: SystemConfiguration.framework
+      - package: Grape
+      - package: VariableBlur
+      - package: DeviceKit
+      - package: sherpa-onnx
+        product: sherpa-onnx
+      - package: ZIPFoundation
+      - package: SwiftTerm
+      - package: SwiftSoup
+      - package: SwiftStreamingMarkdown   # P0.D 流式重写实验；ms0911 起 mac target 也挂（正文两端同一渲染器）
+      - package: mlx-swift-lm   # 小芽本地大脑（模拟器里编进去但运行时绝不初始化，P0 实测一碰就崩）
+        product: MLXLLM
+      - package: mlx-swift-lm
+        product: MLXLMCommon
+      - package: swift-transformers
+        product: Tokenizers
+      - target: MemoryPalacePushNSE
+        embed: true
+      - target: MemoryPalaceWidget
+        embed: true
+    info:
+      path: MemoryPalace/Info-iOS.plist
+      properties:
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.susu.MemoryPalace.tool-tab
+            UTTypeDescription: 记忆花园工具 tab（面板拖放载荷）
+            UTTypeConformsTo:
+              - public.data
+        CFBundleVersion: "260904"
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleDisplayName: "记忆花园"
+        NSAppTransportSecurity:
+          # 不要加 NSAllowsLocalNetworking — Apple ATS 文档明确：两者同时设时
+          # NSAllowsArbitraryLoads 被忽略当 NO 处理。结果是 Tailscale CGNAT
+          # 100.x 和 *.ts.net hostname 都被 ATS 拦掉，URLSession silent fail。
+          NSAllowsArbitraryLoads: true
+        NSLocalNetworkUsageDescription: "连接本地 CC Bridge hub（Mac 上跑的 ws 服务），用来和 Claude Code 聊天"
+        ITSAppUsesNonExemptEncryption: false
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        # 让 iOS 把推送当 Communication Notification 渲染（圆头像 + sender 名）
+        # NSE 里 INSendMessageIntent + content.updating(from:) 需要主 app 在 Info.plist
+        # 声明支持这个 intent，否则 iOS 不信任 app 处理 → silent 降级成普通推送（只改 title 不换头像）
+        NSUserActivityTypes:
+          - INSendMessageIntent
+        # 有声书后台播放：AVAudioSession.playback + 这个声明 = 锁屏/切 app 持续播
+        # ⚠️ 这里只写进 MemoryPalace/Info-iOS.plist（被 excludes，不进 iOS 包）；iOS 包真正生效的是
+        # INFOPLIST_FILE 指向的根目录 MemoryPalaceIOS-Info.plist，后台模式改那份（#041 voip 漏在这里）
+        UIBackgroundModes:
+          - audio
+          - voip
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(MP_BUNDLE_ID_BASE).ios
+        PRODUCT_NAME: "记忆花园"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(PERSONAL_APPS_FLAG)"
+        # ---- 离线沙箱（SBX-T0）链接面 ----
+        SWIFT_OBJC_BRIDGING_HEADER: Sandbox/ish/MemoryPalace-Bridging-Header.h
+        # fs/fake.h 顶部有 #ifndef ISH_INTERNAL/#error 闸门；GUEST_ARM64 决定 emu/kernel 走 arm64 分支。
+        # 两个都是上游 Minis pbxproj 里就有的（project.pbxproj:3122-3125），不是可选项。
+        GCC_PREPROCESSOR_DEFINITIONS: "$(inherited) ISH_INTERNAL=1 GUEST_ARM64=1"
+        GCC_C_LANGUAGE_STANDARD: gnu17
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/deps/include
+          - $(SRCROOT)/deps/include/ish
+        # 走 .a 完整路径而不是 -l + LIBRARY_SEARCH_PATHS：device/simulator 的 slice
+        # 必须分目录放，靠 $(PLATFORM_NAME) 选，-L 搜索路径表达不了这件事。
+        # 顺序有讲究：libish 引用 libish_emu 与 libfakefs 的符号，静态链接按序解析。
+        OTHER_LDFLAGS:
+          - $(SRCROOT)/deps/libs/$(PLATFORM_NAME)/libish.a
+          - $(SRCROOT)/deps/libs/$(PLATFORM_NAME)/libish_emu.a
+          - $(SRCROOT)/deps/libs/$(PLATFORM_NAME)/libfakefs.a
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "260904"
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_EMIT_LOC_STRINGS: YES
+        ENABLE_PREVIEWS: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "保存便签和书摘图片到相册"
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "选择照片发送给 AI"
+        INFOPLIST_KEY_NSCameraUsageDescription: "扫描二维码配对 Claude Code 桥接，或拍照发送给 AI。"
+        INFOPLIST_KEY_NSHealthShareUsageDescription: "读取你的步数、睡眠、活动、心率和锻炼，让对话 AI 了解你今天的身体状态（这些信息会随对话发送给你配置的 AI 服务）。"
+        INFOPLIST_KEY_NSHealthUpdateUsageDescription: "记忆花园不会写入任何健康数据。声明此项仅为满足 Apple 在 HealthKit 模板里同时要求读/写说明的规范。"
+        INFOPLIST_KEY_CFBundleDisplayName: "记忆花园"
+        CODE_SIGN_ENTITLEMENTS: MemoryPalaceIOS.entitlements
+        INFOPLIST_FILE: MemoryPalaceIOS-Info.plist
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+      configs:
+        Debug:
+          CODE_SIGN_STYLE: Automatic
+        Release:
+          CODE_SIGN_STYLE: Automatic
+
+  MemoryPalacePushNSE:
+    type: app-extension
+    platform: iOS
+    deploymentTarget:
+      iOS: "26.0"
+    sources:
+      - path: MemoryPalacePushNSE
+    info:
+      path: MemoryPalacePushNSE/Info.plist
+      properties:
+        CFBundleVersion: "260904"
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleDisplayName: "记忆花园 推送服务"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(MP_BUNDLE_ID_BASE).ios.PushNSE
+        PRODUCT_NAME: PushNSE
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "260904"
+        IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_ENTITLEMENTS: MemoryPalacePushNSE/MemoryPalacePushNSE.entitlements
+        INFOPLIST_FILE: MemoryPalacePushNSE/Info.plist
+        SWIFT_EMIT_LOC_STRINGS: YES
+        SKIP_INSTALL: YES
+      configs:
+        Debug:
+          CODE_SIGN_STYLE: Automatic
+        Release:
+          CODE_SIGN_STYLE: Automatic
+
+  MemoryPalaceWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget:
+      iOS: "26.0"
+    sources:
+      - path: MemoryPalaceWidget
+      - path: LiveActivityShared
+      - path: MemoryPalace/Services/CCActivityState.swift
+      - path: MemoryPalace/Resources/Fonts/Silkscreen-Regular.ttf
+        buildPhase: resources
+    info:
+      path: MemoryPalaceWidget/Info.plist
+      properties:
+        CFBundleVersion: "260904"
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleDisplayName: "记忆花园 小组件"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        UIAppFonts:
+          - Silkscreen-Regular.ttf
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(MP_BUNDLE_ID_BASE).ios.Widget
+        PRODUCT_NAME: MemoryPalaceWidget
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "260904"
+        IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_ENTITLEMENTS: MemoryPalaceWidget/MemoryPalaceWidget.entitlements
+        INFOPLIST_FILE: MemoryPalaceWidget/Info.plist
+        SWIFT_EMIT_LOC_STRINGS: YES
+        SKIP_INSTALL: YES
+      configs:
+        Debug:
+          CODE_SIGN_STYLE: Automatic
+        Release:
+          CODE_SIGN_STYLE: Automatic
+
+  StickerProbeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget:
+      iOS: "26.0"
+    sources:
+      - path: StickerProbeUITests
+    dependencies:
+      - target: MemoryPalaceIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(MP_BUNDLE_ID_BASE).ios.uitests
+        TEST_TARGET_NAME: MemoryPalaceIOS
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
+
+  MemoryPalaceTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget:
+      macOS: "15.0"
+    sources:
+      - path: MemoryPalaceTests
+        excludes:
+          - Fixtures/CardFrontends
+      # 卡库第二批 B8：她 25 张前端卡 + 8 份含脚本聊天的脱敏结构用例（只留 DOM / API 调用形状，文字换占位、外链换 .invalid）
+      - path: MemoryPalaceTests/Fixtures/CardFrontends
+        type: folder
+        buildPhase: resources
+      - path: fixtures/live-activity
+        buildPhase: resources
+      # W-N 编程会话 adapter 契约测试的合成样例（Wake MIT，保留目录层级：kimi 两个会话各有 state.json）
+      - path: fixtures/coding-sessions
+        type: folder
+        buildPhase: resources
+      # 推特存档解析的真形状小样本（多 part / 带媒体 / 带回复 / entities 齐全）
+      - path: fixtures/twitter-archive
+        type: folder
+        buildPhase: resources
+      # 推特导出包形态的 zip（全 ZIP64 + 首条偏移 0，ZIPFoundation 读不了）；scripts/make-twitter-zip-fixtures.py 生成
+      - path: fixtures/twitter-zip
+        type: folder
+        buildPhase: resources
+      # 导出包导入（#043）：三代 Claude + ChatGPT 的合成小样本 + ZIP64 小包；scripts/make-claude-export-fixtures.py 生成
+      - path: fixtures/claude-export
+        type: folder
+        buildPhase: resources
+      # #048 RikkaHub 备份 zip 的合成样本（三代存储 + 老包 WAL + 只有设置）；scripts/make-rikkahub-fixtures.py 生成
+      - path: fixtures/rikkahub
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - target: MemoryPalace
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(MP_BUNDLE_ID_BASE).tests
+        # 测试 bundle 一直是不带 Team 的本机签名；不继承项目级 xcconfig 的 Team（#071 保持原样）
+        DEVELOPMENT_TEAM: ""
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(PERSONAL_APPS_FLAG)"
+        GENERATE_INFOPLIST_FILE: YES
+        # #033：主线程碰盘 → 当前测试失败（MainThreadIOTestObserver）
+        INFOPLIST_KEY_NSPrincipalClass: MPMainThreadIOObserver
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/记忆花园.app/Contents/MacOS/记忆花园"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  MemoryPalace:
+    build:
+      targets:
+        MemoryPalace: all
+  MemoryPalaceTests:
+    build:
+      targets:
+        MemoryPalace: all
+        MemoryPalaceTests: all
+    test:
+      targets:
+        - MemoryPalaceTests
+      # #035：测试宿主进程创建即改道到按工位分的临时家目录；AppEntry.main 第一行核对，核不上退出
+      environmentVariables:
+        CFFIXED_USER_HOME: "$(TARGET_TEMP_DIR)/xctest-home"
+        MP_TEST_HOST: "1"
+  MemoryPalaceIOS:
+    build:
+      targets:
+        MemoryPalaceIOS: all
+  StickerProbeUITests:
+    build:
+      targets:
+        MemoryPalaceIOS: all
+        StickerProbeUITests: all
+    test:
+      targets:
+        - StickerProbeUITests

@@ -1,0 +1,22 @@
+{
+ "id": "art1",
+ "kind": "artifact",
+ "visibility": "private",
+ "owner_account": "acct-1",
+ "updated_at": "2026-01-01T00:02:00.123456Z",
+ "versions": [
+  {
+   "id": "1786214368-aaaa",
+   "title": "旧版页面",
+   "description": "",
+   "created_at": "2026-01-01T00:01:00.123456Z"
+  },
+  {
+   "id": "1786214999-bbbb",
+   "title": "小页面",
+   "description": "",
+   "created_at": "2026-01-01T00:02:00.123456Z"
+  }
+ ],
+ "active_version": "1786214999-bbbb"
+}

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- interactive-widget：WebKit 至今未实现（bug 259770），写着纯前向兼容，当 no-op。 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<!-- 皮肤是不可信输入：只许 css/图/字体，JS 一律拒，网络全封。
+     P3 主文档改走 mp-asset:// 后 script-src 收紧成 'self'。 -->
+<!-- 卡库 ⑦：消息里的 HTML 段只许从原生受控的 mp-card: 子文档加载（子文档自带独立 CSP）；
+     宿主 script-src 不放宽。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src mp-asset: data: 'self'; font-src mp-asset: data: 'self'; frame-src mp-card:; connect-src 'none'; form-action 'none'">
+<title>聊天（css自定义）</title>
+<link rel="stylesheet" href="chat-base.css">
+<!-- 基础项（设置页的字号 / 背景图）：在皮肤之前，皮肤写了同名变量以皮肤为准 -->
+<style id="mp-base"></style>
+<!-- 皮肤覆盖层：ChatSkinStore 激活皮肤时由 Swift 注入 cssText 到这个节点（P5） -->
+<style id="mp-skin"></style>
+</head>
+<body>
+<div class="mp-chat" data-theme="light">
+
+  <div class="mp-messages" id="mp-messages" role="log" aria-live="polite"></div>
+
+  <button class="mp-to-bottom" id="mp-to-bottom" type="button" aria-label="回到底部" hidden>↓</button>
+
+  <form class="mp-input" id="mp-input" onsubmit="return false">
+    <div class="mp-chips" id="mp-chips"></div>
+    <div class="mp-input-row">
+      <button class="mp-attach" id="mp-attach" type="button" aria-label="添加附件">+</button>
+      <div class="mp-field" id="mp-field" contenteditable="true" role="textbox"
+           aria-multiline="true" aria-label="输入消息"></div>
+      <button class="mp-send" id="mp-send" type="button" aria-label="发送">↑</button>
+    </div>
+  </form>
+
+</div>
+
+<!-- 消息模板：runtime.js 克隆它建气泡。皮肤作者改样式看 chat-base.css，
+     改结构请等 v2 的模板 API——现在动这里会被下次更新覆盖。 -->
+<template id="mp-msg-template">
+  <article class="mp-msg">
+    <img class="mp-avatar" alt="">
+    <div class="mp-msg-main">
+      <header class="mp-msg-head">
+        <span class="mp-name"></span>
+        <time class="mp-time"></time>
+      </header>
+      <blockquote class="mp-quote" hidden></blockquote>
+      <details class="mp-thinking" hidden>
+        <summary class="mp-thinking-summary">思考过程</summary>
+        <div class="mp-thinking-body"></div>
+      </details>
+      <div class="mp-attachments" hidden></div>
+      <div class="mp-body"></div>
+      <nav class="mp-branches" hidden>
+        <button class="mp-branch-prev" type="button" aria-label="上一个分支">‹</button>
+        <span class="mp-branch-count"></span>
+        <button class="mp-branch-next" type="button" aria-label="下一个分支">›</button>
+      </nav>
+      <button class="mp-more" type="button" aria-label="更多操作">⋯</button>
+    </div>
+  </article>
+</template>
+
+<script src="chat-runtime.js"></script>
+</body>
+</html>

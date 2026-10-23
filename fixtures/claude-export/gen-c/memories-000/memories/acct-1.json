@@ -1,0 +1,19 @@
+{
+ "conversations_memory": "用户叫测试。\n用户喜欢暖色。",
+ "project_memories": {
+  "p-c1": "新项目在做导入功能。"
+ },
+ "memory_files": [
+  {
+   "path": "notes/偏好.md",
+   "content": "# 偏好\n暖色",
+   "updated_at": "2026-01-01T00:01:00.123456Z"
+  },
+  {
+   "path": "../../逃逸.md",
+   "content": "不该写出去",
+   "updated_at": "2026-01-01T00:01:00.123456Z"
+  }
+ ],
+ "account_uuid": "acct-1"
+}

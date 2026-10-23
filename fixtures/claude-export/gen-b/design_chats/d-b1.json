@@ -1,0 +1,55 @@
+{
+ "uuid": "d-b1",
+ "title": "设计一个按钮",
+ "project": {
+  "uuid": "dp-1",
+  "name": "设计项目甲"
+ },
+ "created_at": "2026-01-01T00:00:00.123456Z",
+ "updated_at": "2026-01-01T00:03:00.123456Z",
+ "messages": [
+  {
+   "uuid": "d-b1-m0",
+   "role": "user",
+   "created_at": "2026-01-01T00:01:00.123456Z",
+   "content": {
+    "content": "做个按钮",
+    "role": "user",
+    "authorName": "测试",
+    "authorAccountUuid": "acct-1",
+    "id": "d-b1-m0",
+    "timestamp": "2026-01-01T00:01:00.123456Z",
+    "attachments": [
+     {
+      "id": "att-1",
+      "name": "草图.png",
+      "type": "image",
+      "path": "uploads/草图.png",
+      "aspectRatio": 1.5
+     }
+    ]
+   }
+  },
+  {
+   "uuid": "d-b1-m1",
+   "role": "assistant",
+   "created_at": "2026-01-01T00:02:00.123456Z",
+   "content": {
+    "content": "好的，按钮做好了",
+    "role": "assistant",
+    "authorName": "Claude",
+    "authorAccountUuid": "",
+    "id": "d-b1-m1",
+    "timestamp": "2026-01-01T00:02:00.123456Z",
+    "attachments": [
+     {
+      "id": "att-2",
+      "name": "button.html",
+      "type": "file",
+      "content": "<button>按钮</button>"
+     }
+    ]
+   }
+  }
+ ]
+}

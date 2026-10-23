@@ -1,0 +1,452 @@
+/* ============================================================
+   记忆花园 · 聊天（css自定义）默认皮肤
+   这份文件同时是**皮肤契约的参考实现**：皮肤包的 style.css 覆盖这里的变量和选择器。
+   默认值对齐主聊天的「气泡外观（高级）」那组 @AppStorage，所以默认长得就是主聊天的样子。
+   ============================================================ */
+
+/* ---------- 皮肤变量 ----------
+   这些是**快捷旋钮**，不是围栏。皮肤 CSS 注入在本文件之后，
+   任意选择器覆盖任意规则都生效（伪元素、动画、grid 重排、背景图…全随意）。
+   硬限制只有三条，见文件末尾「不要改这些」。
+   ------------------------------------------------------------ */
+:root {
+  /* ===== 页面 ===== */
+  --mp-page-bg: #FAF7F2;              /* 可以直接写渐变 / url() 背景图 */
+  --mp-page-bg-size: cover;
+  --mp-page-bg-position: center;
+  --mp-page-pad-h: 14px;
+  --mp-page-pad-top: 12px;
+  --mp-page-pad-bottom: 12px;
+
+  /* ===== 色板 ===== */
+  --mp-ink: #2C2A28;
+  --mp-ink-faint: #9A938A;
+  --mp-hairline: #EDE8E1;
+  --mp-accent: #7FB69B;
+  --mp-accent-ink: #FFFFFF;
+
+  /* ===== 排版 ===== */
+  --mp-font: -apple-system, "PingFang SC", system-ui, sans-serif;
+  --mp-font-size: 15px;
+  --mp-font-scale: 1.2;
+  --mp-font-weight: 400;
+  --mp-line-height: 1.45;
+  --mp-para-gap: 1.65em;
+  --mp-letter-spacing: normal;
+
+  /* ===== 消息行 ===== */
+  --mp-bubble-gap: 31px;              /* 消息之间 */
+  --mp-msg-align-user: flex-end;      /* 你的消息靠哪边 */
+  --mp-msg-align-ai: flex-start;
+  --mp-msg-direction-user: row-reverse;  /* 头像在左还是右 */
+  --mp-msg-direction-ai: row;
+  --mp-msg-enter: mp-pop 0.28s cubic-bezier(.2,.9,.3,1.2);
+
+  /* ===== 气泡 ===== */
+  --mp-bubble-radius: 16px;
+  --mp-bubble-radius-user: var(--mp-bubble-radius);   /* 想做「尖角朝自己」就分开设 */
+  --mp-bubble-radius-ai: var(--mp-bubble-radius);
+  --mp-bubble-pad-h: 18px;
+  --mp-bubble-pad-v: 15px;
+  --mp-bubble-max-width: 78%;
+  --mp-bubble-shadow: none;
+  --mp-bubble-shadow-user: var(--mp-bubble-shadow);
+  --mp-bubble-shadow-ai: var(--mp-bubble-shadow);
+  --mp-user-bg: #D9EDE4;              /* 可以是渐变 / 背景图 */
+  --mp-user-ink: var(--mp-ink);
+  --mp-user-border: none;
+  --mp-ai-bg: #FFFFFF;
+  --mp-ai-ink: var(--mp-ink);
+  --mp-ai-border: 1px solid var(--mp-hairline);
+
+  /* ===== 头像 ===== */
+  --mp-avatar-size: 0px;              /* 0 = 不显示（对齐主聊天默认）；设 32px 就出现 */
+  --mp-avatar-radius: 50%;
+  --mp-avatar-gap: 8px;
+  --mp-avatar-align: flex-start;      /* 头像对齐气泡顶部 / center / flex-end */
+  --mp-avatar-border: none;
+  --mp-avatar-shadow: none;
+
+  /* ===== 角色名 / 时间 ===== */
+  --mp-meta-size: 11px;
+  --mp-meta-ink: var(--mp-ink-faint);
+  --mp-meta-gap: 6px;                 /* 名字和时间之间 */
+  --mp-meta-margin: 4px;              /* 元信息和气泡之间 */
+  --mp-meta-order: 0;                 /* 设 2 可以把整条元信息挪到气泡下面 */
+  --mp-name-display: inline;          /* none = 隐藏角色名 */
+  --mp-name-weight: 400;
+  --mp-time-display: inline;          /* none = 隐藏时间戳 */
+
+  /* ===== 引用条 ===== */
+  --mp-quote-bg: transparent;
+  --mp-quote-ink: var(--mp-ink-faint);
+  --mp-quote-border: 2px solid var(--mp-accent);
+  --mp-quote-radius: 0;
+  --mp-quote-pad: 4px 10px;
+  --mp-quote-size: 0.86em;
+
+  /* ===== 思考折叠块 ===== */
+  --mp-thinking-bg: transparent;
+  --mp-thinking-ink: var(--mp-ink-faint);
+  --mp-thinking-size: 0.9em;
+  --mp-thinking-pad: 0;
+  --mp-thinking-radius: 0;
+
+  /* ===== 附件 ===== */
+  --mp-att-gap: 6px;
+  --mp-att-img-max: 180px;
+  --mp-att-img-radius: 10px;
+  --mp-att-file-bg: var(--mp-ai-bg);
+  --mp-att-file-border: 1px solid var(--mp-hairline);
+  --mp-att-file-radius: 10px;
+  --mp-att-file-pad: 8px 12px;
+  --mp-att-file-size: 0.86em;
+
+  /* ===== 分支指示器 ===== */
+  --mp-branch-size: var(--mp-meta-size);
+  --mp-branch-ink: var(--mp-meta-ink);
+  --mp-branch-gap: 6px;
+  --mp-branch-margin: 6px;
+
+  /* ===== ⋯ 操作按钮 ===== */
+  --mp-more-size: var(--mp-meta-size);
+  --mp-more-ink: var(--mp-ink-faint);
+  --mp-more-opacity: .55;
+  --mp-more-margin: 2px;
+
+  /* ===== 回底按钮 ===== */
+  --mp-tobottom-size: 34px;
+  --mp-tobottom-bg: var(--mp-input-bg);
+  --mp-tobottom-ink: var(--mp-ink);
+  --mp-tobottom-border: 1px solid var(--mp-hairline);
+  --mp-tobottom-shadow: none;
+  --mp-tobottom-right: 14px;
+  --mp-tobottom-bottom: 88px;
+
+  /* ===== 输入区 ===== */
+  --mp-input-bg: #FFFDFA;
+  --mp-input-border-top: 1px solid var(--mp-hairline);
+  --mp-input-pad-h: 12px;
+  --mp-input-pad-v: 8px;
+  --mp-input-gap: 8px;
+  --mp-field-bg: #FFFFFF;
+  --mp-field-ink: var(--mp-ink);
+  --mp-field-border: 1px solid var(--mp-hairline);
+  --mp-field-radius: 17px;
+  --mp-field-pad-v: 7px;
+  --mp-field-pad-h: 12px;
+  --mp-field-pad: var(--mp-field-pad-v) var(--mp-field-pad-h);
+  --mp-field-min-h: var(--mp-btn-size);
+  --mp-field-max-h: 120px;
+  --mp-placeholder-ink: var(--mp-ink-faint);
+  --mp-btn-size: 34px;
+  --mp-btn-radius: 17px;
+  --mp-attach-bg: none;
+  --mp-attach-ink: var(--mp-ink-faint);
+  --mp-send-bg: var(--mp-accent);
+  --mp-send-ink: var(--mp-accent-ink);
+  --mp-send-shadow: none;
+  --mp-chip-bg: var(--mp-field-bg);
+  --mp-chip-border: 1px solid var(--mp-hairline);
+  --mp-chip-radius: 8px;
+
+  /* ===== 流式光标 ===== */
+  --mp-caret: "▍";
+  --mp-caret-ink: var(--mp-accent);
+  --mp-caret-anim: mp-blink 1s steps(2) infinite;
+}
+
+/* ---------- 结构层（改这些要小心，会影响键盘避让） ---------- */
+
+/* ⚠️ 必须有：HTML 的 hidden 属性只是最低优先级的 display:none，
+   任何显式 display（.mp-branches 的 flex 等）都会盖掉它 → 该藏的元素全露出来。
+   皮肤改 display 时不用管这条，这里兜住。 */
+[hidden] { display: none !important; }
+
+/* body 定高不滚：WebKit 没得滚就不会在 input focus 时 reveal-scroll。
+   真正滚的是 .mp-messages。⚠️ 皮肤不要给 html/body 加 overflow:auto。 */
+html, body {
+  height: 100%; margin: 0; padding: 0;
+  overflow: hidden;
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  font-family: var(--mp-font);
+  font-size: calc(var(--mp-font-size) * var(--mp-font-scale));
+  font-weight: var(--mp-font-weight);
+  letter-spacing: var(--mp-letter-spacing);
+  line-height: var(--mp-line-height);
+  color: var(--mp-ink);
+  background: var(--mp-page-bg);
+  background-size: var(--mp-page-bg-size);
+  background-position: var(--mp-page-bg-position);
+}
+
+/* 整壳是 fixed，尺寸由 runtime.js 按 visualViewport 定。
+   ⚠️ 皮肤不要改 .mp-chat 的 position/top/height，会打断键盘避让。 */
+.mp-chat {
+  position: fixed; left: 0; width: 100%; top: 0; height: 100%;
+  display: flex; flex-direction: column;
+}
+
+/* ---------- 消息区 ---------- */
+.mp-messages {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: calc(var(--mp-page-pad-top) + env(safe-area-inset-top))
+           var(--mp-page-pad-h) var(--mp-page-pad-bottom);
+}
+
+.mp-msg {
+  display: flex;
+  gap: var(--mp-avatar-gap);
+  margin-bottom: var(--mp-bubble-gap);
+  animation: var(--mp-msg-enter);
+  flex-direction: var(--mp-msg-direction-ai);
+}
+.mp-msg[data-role="user"] { flex-direction: var(--mp-msg-direction-user); }
+
+.mp-avatar {
+  flex: none;
+  width: var(--mp-avatar-size); height: var(--mp-avatar-size);
+  border-radius: var(--mp-avatar-radius);
+  object-fit: cover;
+  align-self: var(--mp-avatar-align);
+  border: var(--mp-avatar-border);
+  box-shadow: var(--mp-avatar-shadow);
+}
+.mp-avatar:not([src]), .mp-avatar[src=""] { visibility: hidden; }
+
+.mp-msg-main {
+  min-width: 0;
+  max-width: var(--mp-bubble-max-width);
+  display: flex; flex-direction: column;
+}
+.mp-msg-main { align-items: var(--mp-msg-align-ai); }
+.mp-msg[data-role="user"] .mp-msg-main { align-items: var(--mp-msg-align-user); }
+
+.mp-msg-head {
+  font-size: var(--mp-meta-size);
+  color: var(--mp-meta-ink);
+  margin-bottom: var(--mp-meta-margin);
+  display: flex; gap: var(--mp-meta-gap);
+  order: var(--mp-meta-order);
+}
+.mp-name { display: var(--mp-name-display); font-weight: var(--mp-name-weight); }
+.mp-time { display: var(--mp-time-display); }
+
+/* 正文气泡 */
+.mp-body {
+  padding: var(--mp-bubble-pad-v) var(--mp-bubble-pad-h);
+  border-radius: var(--mp-bubble-radius);
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* 正文可选中复制（长按菜单挂在 .mp-more，不抢文本选择） */
+  -webkit-user-select: text; user-select: text;
+}
+[data-role="user"] .mp-body {
+  background: var(--mp-user-bg); color: var(--mp-user-ink);
+  border: var(--mp-user-border); border-radius: var(--mp-bubble-radius-user);
+  box-shadow: var(--mp-bubble-shadow-user);
+}
+[data-role="assistant"] .mp-body {
+  background: var(--mp-ai-bg); color: var(--mp-ai-ink);
+  border: var(--mp-ai-border); border-radius: var(--mp-bubble-radius-ai);
+  box-shadow: var(--mp-bubble-shadow-ai);
+}
+.mp-body p { margin: 0 0 var(--mp-para-gap); }
+.mp-body p:last-child { margin-bottom: 0; }
+.mp-body pre { overflow-x: auto; }
+
+/* 流式中 */
+.mp-msg[data-streaming="1"] .mp-body::after {
+  content: var(--mp-caret); color: var(--mp-caret-ink);
+  animation: var(--mp-caret-anim);
+}
+
+/* 引用条 / 思考 / 附件 / 分支 */
+.mp-quote {
+  margin: 0 0 6px; padding: var(--mp-quote-pad);
+  border-left: var(--mp-quote-border);
+  border-radius: var(--mp-quote-radius);
+  background: var(--mp-quote-bg);
+  font-size: var(--mp-quote-size); color: var(--mp-quote-ink);
+}
+.mp-thinking {
+  margin-bottom: 6px; font-size: var(--mp-thinking-size); color: var(--mp-thinking-ink);
+  background: var(--mp-thinking-bg); padding: var(--mp-thinking-pad);
+  border-radius: var(--mp-thinking-radius);
+}
+.mp-thinking-summary { cursor: pointer; }
+
+.mp-attachments { display: flex; flex-wrap: wrap; gap: var(--mp-att-gap); margin-bottom: 6px; }
+.mp-att img { max-width: var(--mp-att-img-max); border-radius: var(--mp-att-img-radius); display: block; }
+.mp-att[data-type="file"] {
+  padding: var(--mp-att-file-pad); border-radius: var(--mp-att-file-radius);
+  background: var(--mp-att-file-bg); border: var(--mp-att-file-border);
+  font-size: var(--mp-att-file-size);
+}
+
+.mp-branches {
+  margin-top: var(--mp-branch-margin); font-size: var(--mp-branch-size); color: var(--mp-branch-ink);
+  display: flex; align-items: center; gap: var(--mp-branch-gap);
+}
+.mp-branches button { border: 0; background: none; color: inherit; font-size: 1.2em; padding: 0 4px; }
+
+.mp-more {
+  align-self: flex-start; margin: var(--mp-more-margin) 0 0;
+  border: 0; background: none; color: var(--mp-more-ink);
+  font-size: var(--mp-more-size); line-height: 1; padding: 2px 6px;
+  opacity: var(--mp-more-opacity);
+  /* 只有这个按钮压系统长按菜单，正文不压（正文要能选中复制） */
+  -webkit-touch-callout: none;
+}
+.mp-msg[data-role="user"] .mp-more { align-self: flex-end; }
+
+/* 收藏/置顶标记：默认不画，皮肤可以自己画图钉/星星 */
+.mp-msg[data-favorite="1"] .mp-msg-main::before { content: none; }
+.mp-msg[data-pinned="1"] .mp-msg-main::before { content: none; }
+
+/* ---------- 消息里的网页（卡库 ⑦） ----------
+   结构：.mp-body > .mp-seg-text | .mp-html > (.mp-html-bar, .mp-html-note, .mp-html-frame > iframe | .mp-html-placeholder, [.mp-html-blocked])
+   .mp-html[data-mode="static|interactive"]；高度由 runtime 写（360 / 展开 720），网页自己内部滚动 */
+.mp-body[data-segmented] { white-space: normal; }
+.mp-seg-text { white-space: pre-wrap; }
+.mp-seg-text + .mp-html, .mp-html + .mp-seg-text, .mp-html + .mp-html { margin-top: 10px; }
+.mp-html {
+  border: 1px solid var(--mp-hairline); border-radius: 12px; overflow: hidden;
+  background: #FFFFFF; min-width: min(300px, 70vw);
+}
+.mp-html-bar {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  font-size: 12px; color: var(--mp-ink-faint); border-bottom: 1px solid var(--mp-hairline);
+}
+.mp-html-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--mp-ink); }
+.mp-html-bar button {
+  border: 1px solid var(--mp-hairline); background: none; color: inherit; font-size: 12px;
+  border-radius: 999px; padding: 2px 10px;
+}
+.mp-html-note { padding: 4px 10px; font-size: 11px; color: var(--mp-ink-faint); background: var(--mp-page-bg); }
+.mp-html-frame { position: relative; }
+.mp-html-iframe { display: block; width: 100%; height: 100%; border: 0; background: #FFFFFF; }
+.mp-html-placeholder {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: var(--mp-ink-faint);
+}
+/* B2 被挡的外部资源：网页下沿右侧小字，点开就地列域名（属于花园的外框，不进卡的网页） */
+.mp-html-blocked { border-top: 1px solid var(--mp-hairline); background: var(--mp-page-bg); padding: 4px 8px 5px; text-align: right; }
+.mp-html-blocked-btn {
+  display: inline-flex; align-items: center; gap: 3px; border: 0; font: inherit; font-size: 10px; color: var(--mp-ink-faint);
+  padding: 1px 6px; border-radius: 8px; background: rgba(61, 54, 51, .05);
+}
+.mp-html-blocked-btn svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
+.mp-html-blocked-list { text-align: left; font-size: 12px; line-height: 1.7; color: var(--mp-ink); padding: 6px 4px 2px; }
+.mp-html-blocked-list b { font-weight: 600; }
+.mp-html-blocked-rows { margin: 6px 0 2px; border-top: .5px solid var(--mp-hairline); }
+.mp-html-blocked-rows div { display: flex; align-items: center; justify-content: space-between; min-height: 30px; border-bottom: .5px solid var(--mp-hairline); }
+.mp-html-blocked-rows code { font: 12px ui-monospace, "SFMono-Regular", Menlo, monospace; }
+.mp-html-blocked-rows span { font-size: 10px; color: var(--mp-ink-faint); background: rgba(61, 54, 51, .06); border-radius: 5px; padding: 1px 6px; }
+.mp-html-blocked-list p { margin: 4px 0 0; font-size: 11px; color: var(--mp-ink-faint); }
+
+/* ---------- 卡库第二批：「edited」（小样 ②，分支行后 11 号浅灰 + 小笔，点开浮层）/ 轻提示 ---------- */
+.mp-branches { position: relative; }
+.mp-branches .mp-edited {
+  display: inline-flex; align-items: center; gap: 3px; margin-left: 4px;
+  font-size: 11px; line-height: 1.5; padding: 1px 6px 1px 4px; border-radius: 8px;
+  background: rgba(61, 54, 51, .05); color: var(--mp-ink-faint);
+}
+.mp-branches .mp-edited svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
+.mp-edited-pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 3; width: max-content; max-width: min(280px, 72vw);
+  padding: 9px 12px; border-radius: 12px; background: #FFFCF8; color: var(--mp-ink); border: 1px solid var(--mp-hairline);
+  box-shadow: 0 6px 24px rgba(61, 54, 51, .14); font-size: 12px; line-height: 1.6; text-align: left;
+}
+.mp-msg[data-role="user"] .mp-edited-pop { left: auto; right: 0; }
+.mp-edited-pop b { font-weight: 600; }
+.mp-edited-pop p { margin: 3px 0 0; font-size: 11px; color: var(--mp-ink-faint); }
+.mp-toast {
+  position: absolute; left: 50%; z-index: 20; max-width: 80%; pointer-events: none; text-align: center;
+  transform: translate(-50%, 8px); opacity: 0; transition: opacity .2s, transform .2s;
+  padding: 8px 14px; border-radius: 14px; background: rgba(44, 42, 40, .86); color: #FFFFFF; font-size: 13px; line-height: 1.5;
+}
+.mp-toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---------- 回底按钮 ---------- */
+.mp-to-bottom {
+  position: absolute; right: var(--mp-tobottom-right); bottom: var(--mp-tobottom-bottom);
+  width: var(--mp-tobottom-size); height: var(--mp-tobottom-size);
+  border-radius: calc(var(--mp-tobottom-size) / 2); border: var(--mp-tobottom-border);
+  background: var(--mp-tobottom-bg); color: var(--mp-tobottom-ink);
+  box-shadow: var(--mp-tobottom-shadow); font-size: 15px;
+}
+
+/* ---------- 输入区 ---------- */
+.mp-input {
+  flex: 0 0 auto;
+  background: var(--mp-input-bg);
+  border-top: var(--mp-input-border-top);
+  padding: var(--mp-input-pad-v) var(--mp-input-pad-h)
+           calc(var(--mp-input-pad-v) + env(safe-area-inset-bottom));
+}
+.mp-chips { display: flex; flex-wrap: wrap; gap: var(--mp-att-gap); }
+.mp-chips:not(:empty) { margin-bottom: 6px; }
+.mp-chip {
+  font-size: 0.8em; padding: 4px 8px; border-radius: var(--mp-chip-radius);
+  background: var(--mp-chip-bg); border: var(--mp-chip-border);
+  display: flex; align-items: center; gap: 4px;
+}
+.mp-chip button { border: 0; background: none; color: var(--mp-ink-faint); padding: 0; }
+
+/* 键盘起来时输入栏贴键盘，不再让 home indicator 那截安全区（runtime 按 visualViewport 切 .kb） */
+.mp-chat.kb .mp-input { padding-bottom: var(--mp-input-pad-v); }
+
+/* 对齐：+ / 发送键的中线 = 输入框**单行**时的中线；输入框变多行时两颗键留在底下，对着最后一行。
+   单行高 = 字号 × 行高 + 上下 padding + 1px 边框×2，全用变量算，皮肤改字号 / 行高 / padding 都跟着对齐。 */
+.mp-input-row {
+  --mp-field-line-h: max(var(--mp-field-min-h),
+    calc(var(--mp-font-size) * var(--mp-font-scale) * var(--mp-line-height) + 2 * var(--mp-field-pad-v) + 2px));
+  display: flex; gap: var(--mp-input-gap); align-items: flex-end;
+}
+.mp-attach, .mp-send {
+  flex: none; width: var(--mp-btn-size); height: var(--mp-btn-size);
+  margin-bottom: max(0px, calc((var(--mp-field-line-h) - var(--mp-btn-size)) / 2));
+  border-radius: var(--mp-btn-radius); border: 0; padding: 0;
+  display: grid; place-items: center;
+  font-size: 17px; line-height: 1;
+}
+.mp-attach { background: var(--mp-attach-bg); color: var(--mp-attach-ink); }
+.mp-send { background: var(--mp-send-bg); color: var(--mp-send-ink); box-shadow: var(--mp-send-shadow); }
+.mp-send[disabled] { opacity: .4; }
+
+.mp-field {
+  box-sizing: border-box;
+  flex: 1; min-height: var(--mp-field-line-h); max-height: var(--mp-field-max-h); overflow-y: auto;
+  padding: var(--mp-field-pad); border-radius: var(--mp-field-radius);
+  border: var(--mp-field-border); background: var(--mp-field-bg); color: var(--mp-field-ink);
+  outline: none; -webkit-user-select: text; user-select: text;
+  caret-color: var(--mp-accent);
+}
+.mp-field:empty::before {
+  content: attr(data-placeholder); color: var(--mp-placeholder-ink); pointer-events: none;
+}
+
+@keyframes mp-pop {
+  from { opacity: 0; transform: translateY(6px) scale(.985); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes mp-blink { 50% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --mp-msg-enter: none; }
+}
+
+/* ---------- 不要改这些（改了键盘避让会坏） ----------
+   1. html, body 的 height:100% / overflow:hidden
+      —— body 一能滚，WebKit 就会在点输入框时自己滚页面
+   2. .mp-chat 的 position / top / height
+      —— runtime 按 visualViewport 实时写这三个
+   3. 皮肤包不能带 .js（CSP 也会拦）、不能外链（url(https://…) 加载不了）
+   除此之外随便：伪元素、动画、grid 重排、背景图、滤镜…… 都行。
+   ------------------------------------------------------------ */

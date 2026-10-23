@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<!-- Mermaid 渲染宿主页（plan-mermaid §2）。两种模式：
+     渲染（默认）：MermaidRenderer 常驻离屏加载，经典 <script> 载 mermaid.min.js，Swift 调 window.mpRender 取 SVG + 尺寸；
+     查看（#view）：全屏大图，不载 mermaid，Swift 调 window.mpShow 放进已缓存的 SVG，缩放交给 WebView 原生手势。
+     file:// 下 ES module / 动态 import 会被 CORS 拒，所以只用经典脚本（research-mermaid §1 踩坑）。
+     无网络：CSP 只放行本地脚本，脚本全在外部文件里，不开 script 'unsafe-inline'。 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=8, user-scalable=yes">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file:; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; -webkit-text-size-adjust: 100%; }
+  #stage { display: inline-block; }
+  #stage > svg { display: block; }
+  body.view { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  body.view #stage { display: block; width: 100%; padding: 16px; box-sizing: border-box; }
+  body.view #stage > svg { width: 100%; height: auto; max-width: none; }
+</style>
+<script src="mermaid-host.js"></script>
+</head>
+<body>
+<div id="stage"></div>
+</body>
+</html>

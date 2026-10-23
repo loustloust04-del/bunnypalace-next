@@ -1,0 +1,46 @@
+[Unit]
+Description=cc-bridge hub (记忆花园 Mac/iOS app 跟本机 Claude Code CLI 的桥)
+Documentation=https://github.com/replica882/MemoryPalace
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ccbridge
+Group=ccbridge
+
+# 工作目录 + token 路径由 install.sh 设
+WorkingDirectory=/opt/cc-bridge
+EnvironmentFile=/etc/cc-bridge/env
+
+# Token 走文件（hub.ts 支持 MP_CC_HUB_TOKEN_FILE）
+# Workdir / Secrets / Port / Host 都从 EnvironmentFile 读
+
+ExecStart=/opt/cc-bridge/run-hub.sh
+
+# 崩了 10s 后重启
+Restart=on-failure
+RestartSec=10
+
+# stdout/stderr 走 journald（journalctl -u cc-bridge 看）
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cc-bridge
+
+# === 安全 hardening（codex review 加，不破坏 tmux/Claude）===
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# 只能写这些目录
+ReadWritePaths=/opt/cc-bridge /var/lib/cc-bridge /etc/cc-bridge
+# 不让 hub 绑非本机/Tailscale 之外的地址（用户主动配 MP_CC_HUB_HOST 才覆盖）
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

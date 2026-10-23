@@ -1,0 +1,51 @@
+/* 示例皮肤 ②「便签」—— 纸纹 + 手写感 + 气泡歪一点 + 头像出现
+   同样只用变量 + 几条选择器。 */
+:root {
+  --mp-page-bg: #F3EADB;
+  --mp-page-bg-size: 22px 22px;
+  --mp-ink: #3A2F26;
+  --mp-ink-faint: #A08F7C;
+  --mp-hairline: #E0D2BC;
+  --mp-accent: #C97B5A;
+
+  --mp-font: "Kaiti SC", "STKaiti", "PingFang SC", serif;
+  --mp-font-size: 16px;
+  --mp-line-height: 1.75;
+
+  --mp-bubble-gap: 26px;
+  --mp-bubble-radius-user: 14px 14px 4px 14px;   /* 尖角朝自己 */
+  --mp-bubble-radius-ai:   14px 14px 14px 4px;
+  --mp-bubble-pad-h: 16px;
+  --mp-bubble-pad-v: 13px;
+  --mp-bubble-shadow-user: 2px 3px 0 rgba(58,47,38,.12);
+  --mp-bubble-shadow-ai:   2px 3px 0 rgba(58,47,38,.10);
+  --mp-user-bg: #FBE6A2;
+  --mp-ai-bg: #FFFCF4;
+  --mp-ai-border: 1px solid #E8DAC2;
+
+  --mp-avatar-size: 30px;               /* 头像出现 */
+  --mp-avatar-radius: 8px;
+  --mp-avatar-border: 2px solid #FFFCF4;
+  --mp-avatar-shadow: 1px 2px 0 rgba(58,47,38,.15);
+
+  --mp-meta-size: 10px;
+  --mp-meta-order: 2;                   /* 名字时间挪到气泡下面 */
+  --mp-meta-margin: 5px;
+
+  --mp-input-bg: #EFE3CE;
+  --mp-field-bg: #FFFCF4;
+  --mp-field-radius: 10px;
+  --mp-btn-radius: 10px;
+  --mp-send-bg: #C97B5A;
+  --mp-send-shadow: 1px 2px 0 rgba(58,47,38,.2);
+  --mp-tobottom-shadow: 1px 2px 0 rgba(58,47,38,.2);
+}
+/* 纸纹：横线本 —— 变量放不下的东西直接写规则 */
+body {
+  background-image:
+    repeating-linear-gradient(transparent, transparent 21px, #E5D8C2 21px, #E5D8C2 22px);
+}
+/* 气泡各歪一点点，像贴上去的便签 */
+[data-role="user"] .mp-body      { transform: rotate(-0.5deg); }
+[data-role="assistant"] .mp-body { transform: rotate(0.4deg); }
+.mp-msg-main { --mp-msg-align-ai: flex-start; }

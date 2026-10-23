@@ -1,0 +1,9 @@
+// 复制成同目录的 Signing.local.xcconfig（已 gitignore）再 xcodegen generate。原样复制就能编模拟器 / 本机。
+// DEVELOPMENT_TEAM：留空 = 不带 Team（只能模拟器 / 本机 ad-hoc）；装真机 / 发行填你的 10 位 Team ID
+//   （developer.apple.com → Membership，或 `security find-identity -v -p codesigning` 括号里那串）。
+// MP_BUNDLE_ID_BASE：各 target 的 bundle ID = 它 + 固定后缀：mac 本体 = 它，iOS = .ios，推送扩展 = .ios.PushNSE，
+//   小组件 = .ios.Widget，命令行 = .mp-code，测试 = .tests / .ios.uitests。签名发行要换成你自己的反向域名。
+// fastlane（fastlane/signing.rb）也读这份，发行时两项都必须有值。
+
+DEVELOPMENT_TEAM =
+MP_BUNDLE_ID_BASE = com.example.MemoryPalace

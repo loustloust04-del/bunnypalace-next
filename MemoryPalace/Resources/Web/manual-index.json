@@ -1,0 +1,403 @@
+[
+ {
+  "name": "connect-model",
+  "title": "接一个模型",
+  "description": "从加一张 API 卡、填 key、拉模型、收藏，到在聊天里选中它，一步步做完。用户问「怎么接 API、怎么填 key、为什么聊天里选不到模型」时看。",
+  "area": "开始",
+  "tier": "free",
+  "platforms": [
+   "macos",
+   "ios"
+  ],
+  "keywords": [
+   "API",
+   "key",
+   "模型",
+   "provider",
+   "收藏",
+   "接入"
+  ],
+  "anchors": [
+   {
+    "id": "connect-model--准备",
+    "title": "准备"
+   },
+   {
+    "id": "connect-model--步骤",
+    "title": "步骤"
+   },
+   {
+    "id": "connect-model--下一步",
+    "title": "下一步"
+   }
+  ]
+ },
+ {
+  "name": "first-import",
+  "title": "导入你的聊天记录",
+  "description": "把 ChatGPT 或 Claude 的导出包（zip、文件夹或 json） 导进记忆花园，从选包到看到结果一步步做完。用户问「怎么导入、怎么迁移聊天记录、导出包怎么用」时看。",
+  "area": "开始",
+  "tier": "free",
+  "platforms": [
+   "macos",
+   "ios"
+  ],
+  "keywords": [
+   "导入",
+   "ChatGPT",
+   "Claude",
+   "zip",
+   "迁移",
+   "导出包"
+  ],
+  "anchors": [
+   {
+    "id": "first-import--准备",
+    "title": "准备"
+   },
+   {
+    "id": "first-import--步骤",
+    "title": "步骤"
+   },
+   {
+    "id": "first-import--下一步",
+    "title": "下一步"
+   }
+  ]
+ },
+ {
+  "name": "main-chat",
+  "title": "主对话阅读",
+  "description": "切换消息版本、查看工具步骤和想起的记忆，以及选择行内展开或弹出面板。",
+  "area": "聊天",
+  "tier": "free",
+  "platforms": [
+   "ios",
+   "macos"
+  ],
+  "keywords": [
+   "聊天",
+   "消息",
+   "分页",
+   "分支",
+   "工具调用",
+   "想起来了",
+   "记忆",
+   "加密卡",
+   "报错"
+  ],
+  "anchors": [
+   {
+    "id": "main-chat--切换消息版本",
+    "title": "切换消息版本"
+   },
+   {
+    "id": "main-chat--查看工具步骤",
+    "title": "查看工具步骤"
+   },
+   {
+    "id": "main-chat--查看想起的记忆",
+    "title": "查看想起的记忆"
+   },
+   {
+    "id": "main-chat--选择展开方式",
+    "title": "选择展开方式"
+   },
+   {
+    "id": "main-chat--填写加密卡",
+    "title": "填写加密卡"
+   },
+   {
+    "id": "main-chat--回应一条消息",
+    "title": "回应一条消息"
+   },
+   {
+    "id": "main-chat--报错与系统通知",
+    "title": "报错与系统通知"
+   }
+  ]
+ },
+ {
+  "name": "model",
+  "title": "模型与 API 卡",
+  "description": "API 卡是什么、内置的提供商、自定义地址、key 存在哪、模型列表怎么来、🌞🌛☆ 三个角色、聊天里怎么切模型，以及 key 没填或填错时看到什么。",
+  "area": "模型与联网",
+  "tier": "free",
+  "platforms": [
+   "macos",
+   "ios"
+  ],
+  "keywords": [
+   "API",
+   "key",
+   "Keychain",
+   "模型列表",
+   "刷新模型",
+   "收藏",
+   "主对话",
+   "副记忆",
+   "自定义",
+   "OpenAI 兼容",
+   "ChatGPT 登录"
+  ],
+  "anchors": [
+   {
+    "id": "model--这是什么",
+    "title": "这是什么"
+   },
+   {
+    "id": "model--怎么进",
+    "title": "怎么进"
+   },
+   {
+    "id": "model--提供商与协议",
+    "title": "提供商与协议"
+   },
+   {
+    "id": "model--key-存在哪",
+    "title": "Key 存在哪"
+   },
+   {
+    "id": "model--模型列表怎么来",
+    "title": "模型列表怎么来"
+   },
+   {
+    "id": "model--三个角色",
+    "title": "🌞🌛☆ 三个角色"
+   },
+   {
+    "id": "model--聊天里切模型",
+    "title": "聊天里切模型"
+   },
+   {
+    "id": "model--全部选项",
+    "title": "全部选项"
+   },
+   {
+    "id": "model--删卡",
+    "title": "删卡"
+   },
+   {
+    "id": "model--边界与限制",
+    "title": "边界与限制"
+   },
+   {
+    "id": "model--相关页面",
+    "title": "相关页面"
+   }
+  ]
+ },
+ {
+  "name": "web-search",
+  "title": "联网搜索",
+  "description": "让 AI 上网查资料：三档权限、搜索服务怎么配、结果数和超时、网页登录态、AI 不读的黑名单。",
+  "area": "模型与联网",
+  "tier": "free",
+  "platforms": [
+   "macos",
+   "ios"
+  ],
+  "keywords": [
+   "联网",
+   "搜索",
+   "搜索服务",
+   "黑名单",
+   "登录态",
+   "Bing",
+   "DuckDuckGo",
+   "Tavily"
+  ],
+  "anchors": [
+   {
+    "id": "web-search--这是什么",
+    "title": "这是什么"
+   },
+   {
+    "id": "web-search--怎么用",
+    "title": "怎么用"
+   },
+   {
+    "id": "web-search--全部选项",
+    "title": "全部选项"
+   },
+   {
+    "id": "web-search--边界与限制",
+    "title": "边界与限制"
+   },
+   {
+    "id": "web-search--常见问题",
+    "title": "常见问题"
+   },
+   {
+    "id": "web-search--相关页面",
+    "title": "相关页面"
+   }
+  ]
+ },
+ {
+  "name": "budget",
+  "title": "预算",
+  "description": "全局花费总闸：默认多少、怎么改、用完了会看到什么、怎么重置。",
+  "area": "模型与联网",
+  "tier": "free",
+  "platforms": [
+   "macos",
+   "ios"
+  ],
+  "keywords": [
+   "预算",
+   "花费",
+   "USD",
+   "重置已用",
+   "限额"
+  ],
+  "anchors": [
+   {
+    "id": "budget--这是什么",
+    "title": "这是什么"
+   },
+   {
+    "id": "budget--怎么用",
+    "title": "怎么用"
+   },
+   {
+    "id": "budget--全部选项",
+    "title": "全部选项"
+   },
+   {
+    "id": "budget--边界与限制",
+    "title": "边界与限制"
+   },
+   {
+    "id": "budget--相关页面",
+    "title": "相关页面"
+   }
+  ]
+ },
+ {
+  "name": "import",
+  "title": "导入",
+  "description": "导入功能全览：认得哪些导出包、每类内容去哪（对话、文件夹、记忆、文件库）、两个开关是什么意思、同一对话只属于一个楼层的规则、每一种结果说明、出错时看到什么。",
+  "area": "数据",
+  "tier": "free",
+  "platforms": [
+   "macos",
+   "ios"
+  ],
+  "keywords": [
+   "导入",
+   "叠加导入",
+   "复制副本",
+   "楼层",
+   "跳过",
+   "保持本地"
+  ],
+  "anchors": [
+   {
+    "id": "import--这是什么",
+    "title": "这是什么"
+   },
+   {
+    "id": "import--怎么用",
+    "title": "怎么用"
+   },
+   {
+    "id": "import--全部选项",
+    "title": "全部选项"
+   },
+   {
+    "id": "import--边界与限制",
+    "title": "边界与限制"
+   },
+   {
+    "id": "import--常见问题",
+    "title": "常见问题"
+   },
+   {
+    "id": "import--相关页面",
+    "title": "相关页面"
+   }
+  ]
+ },
+ {
+  "name": "import-undo",
+  "title": "导入历史与撤回",
+  "description": "每次导入都留一条记录，能整次撤回（连这次建的记忆和文件夹）；撤回会删掉什么、什么情况不能撤回；「清空本楼层 Claude 导入数据」的范围和不可撤销。",
+  "area": "数据",
+  "tier": "pro",
+  "platforms": [
+   "macos",
+   "ios"
+  ],
+  "keywords": [
+   "撤回",
+   "导入历史",
+   "清空",
+   "Claude 数据",
+   "不可撤销"
+  ],
+  "anchors": [
+   {
+    "id": "import-undo--这是什么",
+    "title": "这是什么"
+   },
+   {
+    "id": "import-undo--怎么用",
+    "title": "怎么用"
+   },
+   {
+    "id": "import-undo--全部选项",
+    "title": "全部选项"
+   },
+   {
+    "id": "import-undo--边界与限制",
+    "title": "边界与限制"
+   },
+   {
+    "id": "import-undo--常见问题",
+    "title": "常见问题"
+   },
+   {
+    "id": "import-undo--相关页面",
+    "title": "相关页面"
+   }
+  ]
+ },
+ {
+  "name": "home-screen",
+  "title": "手机主屏",
+  "description": "在 Page 2 自由摆放图标和小组件、更换壁纸与图标，以及保留旧桌面的配置。",
+  "area": "模块",
+  "tier": "free",
+  "platforms": [
+   "ios"
+  ],
+  "keywords": [
+   "主屏",
+   "桌面",
+   "图标",
+   "小组件",
+   "壁纸",
+   "自由摆放",
+   "Dock"
+  ],
+  "anchors": [
+   {
+    "id": "home-screen--这是什么",
+    "title": "这是什么"
+   },
+   {
+    "id": "home-screen--怎么用",
+    "title": "怎么用"
+   },
+   {
+    "id": "home-screen--全部选项",
+    "title": "全部选项"
+   },
+   {
+    "id": "home-screen--边界与限制",
+    "title": "边界与限制"
+   }
+  ]
+ }
+]

@@ -1,0 +1,13 @@
+{
+  "data": [
+    {
+      "idiom": "universal",
+      "filename": "launch-anim.json",
+      "universal-type-identifier": "public.json"
+    }
+  ],
+  "info": {
+    "author": "xcode",
+    "version": 1
+  }
+}

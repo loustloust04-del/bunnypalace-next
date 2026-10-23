@@ -1,0 +1,13 @@
+# codemirror.bundle.js 构建信息（由 scripts/codemirror-bundle/build.sh 生成，勿手改）
+构建时间: 2026-10-02 12:50:20
+bundle 大小: 1192479 bytes
+
+├── @codemirror/lang-markdown@6.5.0
+├── @codemirror/language@6.12.3
+├── @codemirror/search@6.7.0
+├── @codemirror/state@6.6.0
+├── @codemirror/view@6.43.1
+├── @lezer/highlight@1.2.3
+├── codemirror@6.0.2
+└── esbuild@0.23.1
+

@@ -1,0 +1,117 @@
+[
+ {
+  "uuid": "a1",
+  "name": "旧包对话一",
+  "summary": "",
+  "created_at": "2026-01-01T00:00:00.123456Z",
+  "updated_at": "2026-01-01T00:05:00.123456Z",
+  "account": {
+   "uuid": "acct-1"
+  },
+  "chat_messages": [
+   {
+    "uuid": "a1-u",
+    "text": "",
+    "content": [
+     {
+      "type": "text",
+      "text": "问题",
+      "start_timestamp": null,
+      "stop_timestamp": null,
+      "flags": null,
+      "citations": []
+     }
+    ],
+    "sender": "human",
+    "created_at": "2026-01-01T00:00:00.123456Z",
+    "updated_at": "2026-01-01T00:00:00.123456Z",
+    "attachments": [],
+    "files": [],
+    "parent_message_uuid": "00000000-0000-4000-8000-000000000000"
+   },
+   {
+    "uuid": "a1-a0",
+    "text": "",
+    "content": [
+     {
+      "type": "text",
+      "text": "你好",
+      "start_timestamp": null,
+      "stop_timestamp": null,
+      "flags": null,
+      "citations": []
+     }
+    ],
+    "sender": "assistant",
+    "created_at": "2026-01-01T00:01:00.123456Z",
+    "updated_at": "2026-01-01T00:01:00.123456Z",
+    "attachments": [],
+    "files": [],
+    "parent_message_uuid": "a1-u"
+   }
+  ]
+ },
+ {
+  "uuid": "a2",
+  "name": "旧包对话二",
+  "summary": "",
+  "created_at": "2026-01-01T00:00:00.123456Z",
+  "updated_at": "2026-01-01T00:06:00.123456Z",
+  "account": {
+   "uuid": "acct-1"
+  },
+  "chat_messages": [
+   {
+    "uuid": "a2-u",
+    "text": "",
+    "content": [
+     {
+      "type": "text",
+      "text": "问题",
+      "start_timestamp": null,
+      "stop_timestamp": null,
+      "flags": null,
+      "citations": []
+     }
+    ],
+    "sender": "human",
+    "created_at": "2026-01-01T00:00:00.123456Z",
+    "updated_at": "2026-01-01T00:00:00.123456Z",
+    "attachments": [],
+    "files": [],
+    "parent_message_uuid": "00000000-0000-4000-8000-000000000000"
+   },
+   {
+    "uuid": "a2-a0",
+    "text": "",
+    "content": [
+     {
+      "type": "text",
+      "text": "再见",
+      "start_timestamp": null,
+      "stop_timestamp": null,
+      "flags": null,
+      "citations": []
+     }
+    ],
+    "sender": "assistant",
+    "created_at": "2026-01-01T00:01:00.123456Z",
+    "updated_at": "2026-01-01T00:01:00.123456Z",
+    "attachments": [],
+    "files": [],
+    "parent_message_uuid": "a2-u"
+   }
+  ]
+ },
+ {
+  "uuid": "a-empty",
+  "name": "空草稿",
+  "summary": "",
+  "created_at": "2026-01-01T00:00:00.123456Z",
+  "updated_at": "2026-01-01T00:07:00.123456Z",
+  "account": {
+   "uuid": "acct-1"
+  },
+  "chat_messages": []
+ }
+]

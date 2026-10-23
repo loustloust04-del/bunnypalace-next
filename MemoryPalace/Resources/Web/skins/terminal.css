@@ -1,0 +1,54 @@
+/* 示例皮肤 ①「终端」—— 证明连"是不是聊天软件的样子"都能改
+   只用了变量 + 几条选择器，没碰任何结构。 */
+:root {
+  --mp-page-bg: #0C0F0C;
+  --mp-ink: #9DE59D;
+  --mp-ink-faint: #3F6B3F;
+  --mp-hairline: #1C2A1C;
+  --mp-accent: #6FE36F;
+  --mp-accent-ink: #0C0F0C;
+
+  --mp-font: ui-monospace, "SF Mono", Menlo, monospace;
+  --mp-font-size: 13px;
+  --mp-font-scale: 1;
+  --mp-line-height: 1.6;
+
+  --mp-bubble-gap: 10px;
+  --mp-bubble-radius: 0px;
+  --mp-bubble-pad-h: 0px;
+  --mp-bubble-pad-v: 0px;
+  --mp-bubble-max-width: 100%;
+  --mp-msg-align-user: flex-start;      /* 不再左右分栏，全部左对齐像日志 */
+  --mp-msg-direction-user: row;
+  --mp-user-bg: transparent;
+  --mp-ai-bg: transparent;
+  --mp-ai-border: none;
+  --mp-user-ink: #7FD4FF;
+  --mp-ai-ink: #9DE59D;
+
+  --mp-meta-order: 0;
+  --mp-meta-size: 12px;
+  --mp-meta-margin: 0px;
+  --mp-time-display: none;              /* 时间不要 */
+
+  --mp-input-bg: #0C0F0C;
+  --mp-input-border-top: 1px solid #1C2A1C;
+  --mp-field-bg: #0C0F0C;
+  --mp-field-ink: #9DE59D;
+  --mp-field-border: 1px solid #1C2A1C;
+  --mp-field-radius: 0px;
+  --mp-btn-radius: 0px;
+  --mp-send-bg: #1C2A1C;
+  --mp-send-ink: #6FE36F;
+  --mp-placeholder-ink: #3F6B3F;
+
+  --mp-caret: "█";
+  --mp-msg-enter: none;
+}
+/* 每条前面挂提示符——伪元素，结构没动 */
+.mp-msg-head::before { content: "["; }
+.mp-msg-head::after  { content: "]"; }
+.mp-name::before { content: ""; }
+[data-role="user"] .mp-body::before  { content: "$ "; color: #7FD4FF; }
+[data-role="assistant"] .mp-body::before { content: "> "; color: #3F6B3F; }
+.mp-send::after { content: ""; }

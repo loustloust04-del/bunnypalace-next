@@ -1,0 +1,100 @@
+# Xcode
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+*.xcworkspace/
+
+# Build artifacts
+.build/
+build/
+.build-device/
+build-*/
+
+# Secrets (APNs key, push tokens, reply logs)
+cc-bridge/secrets/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Swift Package Manager
+.swiftpm/
+# 渲染器 fork 入库（09-24）：Packages/SwiftStreamingMarkdown 不是 SPM 缓存，要跟踪
+/Packages/*
+!/Packages/SwiftStreamingMarkdown/
+# #087 SwiftTerm 1.13.0 原样入库 + 宽字符补丁（Packages/SwiftTerm/MP-PATCHES.md）
+!/Packages/SwiftTerm/
+Package.pins
+Package.resolved
+# app 的 SPM 版本锁入库（#010 陌生人可编译）：xcodeproj 整个忽略，只逐层放出 Xcode 读的这一份；xcodegen 不碰它
+!/MemoryPalace.xcodeproj/
+/MemoryPalace.xcodeproj/*
+!/MemoryPalace.xcodeproj/project.xcworkspace/
+/MemoryPalace.xcodeproj/project.xcworkspace/*
+!/MemoryPalace.xcodeproj/project.xcworkspace/xcshareddata/
+/MemoryPalace.xcodeproj/project.xcworkspace/xcshareddata/*
+!/MemoryPalace.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+/MemoryPalace.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/*
+!/MemoryPalace.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
+# Bun / cc-bridge build artifacts (release3 v1.1)
+build-mac-archive*/
+build-mac-test/
+build-ios-test/
+build-cc-bridge/
+build/cc-bridge/
+cc-bridge/node_modules/
+spike/SpikeApp/build/
+spike/SpikeApp/build-release/
+spike/SpikeApp/build-mac-archive/
+spike/SpikeApp/SpikeApp.xcodeproj/
+
+# minis 对比批次的原始 transcript（7.5MB，报告已是精简产出）
+docs/minis对比/reports/*.log
+
+# 离线沙箱（SBX-T0）：ish 静态库/头文件/rootfs 都是构建产物，由 scripts/build-ish.sh 生成
+deps/libs/
+deps/include/
+deps/resources/
+
+# 手工 worktree 容器（codegraph 也靠这行不索引它）
+.worktrees/
+
+# manual 构建产物与 node 依赖
+manual/build/
+scripts/manual/node_modules/
+
+# fastlane（docs/plan-fastlane-testflight.md）：认证与产物不进仓库
+fastlane/.env*
+fastlane/report.xml
+fastlane/test_output/
+build/fastlane/
+
+# scripts/mac-shape/shoot-settings.sh 首次运行 swiftc 现编的窗口列表工具
+scripts/mac-shape/winlist
+# ospage 手势录屏视频只留本地（09-10 粟粟裁：不进 git）
+docs/design-refs/ospage-*/**/*.mp4
+
+# 录屏参考不入库（09-20：ospage 线 45 个 mp4 共 1.1G，最大 136MB 超 GitHub 硬限）
+# 原件在 ~/Desktop/ospage-design-refs/
+docs/design-refs/**/*.mp4
+
+# 设计源文件（PSD 过大，只留本地）
+docs/logo-refs/source/
+
+# perf-flash：trace 太大不入库；python 缓存
+perf/bench/traces/
+scripts/perf/__pycache__/
+# python 字节码缓存（全仓）
+__pycache__/
+*.pyc
+# perf-watch：UI 回归原始结果不入库（summary.json + thumbs 入库）
+perf/ui/*/result.xcresult/
+perf/ui/*/attachments/
+perf/ui/*/*.log
+# astra 等审查的原始运行记录（大，不入库；报告 r-*.md 入库）
+docs/prompts/**/reports/*-run.log
+
+# 本机签名（#071）：Team ID / bundle 前缀，模板是 Config/Signing.local.xcconfig.example；worktree 里是 xcodegen 时软链主仓的那份
+Config/Signing.local.xcconfig

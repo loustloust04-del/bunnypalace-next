@@ -1,0 +1,2240 @@
+{
+  "anthropic" : {
+    "ask_user" : {
+      "description" : "需要用户在几个选项中做选择、拿不准该往哪个方向继续、或想收集用户的具体偏好时，用这个工具弹出选择卡。用户会看到问题和可点的选项，也可以自由输入答案代替选项，还可以跳过。不要用于寒暄、闲聊、或答案显而易见的问题。",
+      "input_schema" : {
+        "properties" : {
+          "questions" : {
+            "description" : "1-4 个问题，逐题呈现给用户",
+            "items" : {
+              "properties" : {
+                "multiSelect" : {
+                  "description" : "true=可多选，默认单选",
+                  "type" : "boolean"
+                },
+                "options" : {
+                  "description" : "2-6 个候选项（纯文本短句）",
+                  "items" : {
+                    "type" : "string"
+                  },
+                  "type" : "array"
+                },
+                "question" : {
+                  "description" : "完整的问题文本",
+                  "type" : "string"
+                }
+              },
+              "required" : [
+                "question",
+                "options"
+              ],
+              "type" : "object"
+            },
+            "type" : "array"
+          }
+        },
+        "required" : [
+          "questions"
+        ],
+        "type" : "object"
+      },
+      "name" : "ask_user"
+    },
+    "browse_url" : {
+      "description" : "读取一个网页 URL 的正文，返回 Markdown 格式。**联网搜索的\"读\"工具**。\n\n### 何时调用\n- search_web 返回的 url 列表里挑 1-2 条权威\/相关的源——绝不基于 search_web 的 snippet 直接答（snippet 只是 100 字索引摘要，不是答案）\n- 用户给你一个具体 URL 想了解内容\n- 需要查某个文档\/wiki\/新闻的详细信息时\n\n### 配合 search_web\n正确流程：search_web(关键词) → 拿到 5-10 条候选 → 挑 1-2 条权威源 → browse_url(那个 url) → 看完整正文 → 回答 + [citation](index:id) 标 search 来源 + 必要时附原文链接\n\n### 限制\n- 仅支持 http\/https 公开页面（Phase 1 不支持登录态站点）\n- 单次返回最多 8000 字，超长会截断并提示\n- SPA \/ 极动态页面可能抽不到正文——失败时 fallback 到 search_web 的 snippet",
+      "input_schema" : {
+        "properties" : {
+          "url" : {
+            "description" : "要读的 URL，必须是 http:\/\/ 或 https:\/\/ 开头",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "url"
+        ],
+        "type" : "object"
+      },
+      "name" : "browse_url"
+    },
+    "calendar_create" : {
+      "description" : "在用户的系统日历创建一个事件。start 必填；end 缺省=start+1h（全天事件忽略）。创建成功返回事件 id，用户会在系统日历 app 里立刻看到。",
+      "input_schema" : {
+        "properties" : {
+          "all_day" : {
+            "description" : "全天事件，默认 false",
+            "type" : "boolean"
+          },
+          "calendar" : {
+            "description" : "写进哪个日历（按名称），默认系统默认日历",
+            "type" : "string"
+          },
+          "end" : {
+            "description" : "默认 start+1h",
+            "type" : "string"
+          },
+          "location" : {
+            "type" : "string"
+          },
+          "notes" : {
+            "type" : "string"
+          },
+          "start" : {
+            "description" : "ISO 8601 或相对写法",
+            "type" : "string"
+          },
+          "title" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "title",
+          "start"
+        ],
+        "type" : "object"
+      },
+      "name" : "calendar_create"
+    },
+    "calendar_delete" : {
+      "description" : "删除一个日历事件。id 来自 calendar_query。重复事件：带 occurrence_date 删单次实例，span=future 删该实例及之后全部。删除不可撤销，用户没明确说要删时先确认。",
+      "input_schema" : {
+        "properties" : {
+          "id" : {
+            "type" : "string"
+          },
+          "occurrence_date" : {
+            "description" : "重复事件的实例日期（来自 query 的 occurrence_date）",
+            "type" : "string"
+          },
+          "span" : {
+            "description" : "默认 this",
+            "enum" : [
+              "this",
+              "future"
+            ],
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "id"
+        ],
+        "type" : "object"
+      },
+      "name" : "calendar_delete"
+    },
+    "calendar_query" : {
+      "description" : "查询用户的系统日历事件。默认窗口=从现在起未来 7 天；时间接受 ISO 8601（无时区按设备本地）或相对写法（-7d\/+2h\/today\/tomorrow）。重复事件返回 recurring:true + occurrence_date（删除单次实例时要带上）。结果按开始时间排序，超过 limit 截断并附 total_available。",
+      "input_schema" : {
+        "properties" : {
+          "calendar" : {
+            "description" : "只查某个日历（按名称），默认全部",
+            "type" : "string"
+          },
+          "from" : {
+            "description" : "起始时间，默认 now",
+            "type" : "string"
+          },
+          "limit" : {
+            "description" : "最多返回条数，默认 20，上限 100",
+            "type" : "integer"
+          },
+          "to" : {
+            "description" : "结束时间，默认 from+7d",
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "calendar_query"
+    },
+    "card_guide" : {
+      "description" : "查聊天卡片的写法。要在回复里发卡片（待办、骰子、计时器、图表、音乐、生词、时间线、提问 \/ 表单、html 网页卡）之前先调它，kinds 传要用的种类，按返回的格式写。不发卡片不用调。",
+      "input_schema" : {
+        "properties" : {
+          "kinds" : {
+            "description" : "要查的卡片种类，可以一次查几种",
+            "items" : {
+              "enum" : [
+                "todo",
+                "dice",
+                "timer",
+                "chart",
+                "music",
+                "word",
+                "timeline",
+                "ask",
+                "html"
+              ],
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "required" : [
+          "kinds"
+        ],
+        "type" : "object"
+      },
+      "name" : "card_guide"
+    },
+    "clipboard_read" : {
+      "description" : "读取用户设备剪贴板当前内容。文本\/链接直接返回（超 20000 字截断）；图片会存为附件并返回 path（可交给 ocr_image）。只在用户明确要你看剪贴板时调用。",
+      "input_schema" : {
+        "properties" : {
+
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "clipboard_read"
+    },
+    "code_get_session" : {
+      "description" : "读一条会话的转录（现场从该 agent 自己的文件解析），输出紧凑 Markdown：用户与助手消息带 `[seq N]` 标记，工具调用折成一行，注入的上下文省略。在 code_search 或 code_list_sessions 之后用它看以前那次会话到底发生了什么——推理、决定和具体步骤。分页：回复末尾有 `from_seq` 提示时带上它再调一次接着读。key 可以是会话 key，也可以是 `code:\/\/session\/<key>#<seq>` 引用（seq 作为起点）。",
+      "input_schema" : {
+        "properties" : {
+          "from_seq" : {
+            "description" : "从这个消息 seq 开始（含）。默认从头。",
+            "minimum" : 0,
+            "type" : "integer"
+          },
+          "include_thinking" : {
+            "default" : false,
+            "description" : "带上助手记录下来的思考过程。",
+            "type" : "boolean"
+          },
+          "include_tools" : {
+            "default" : false,
+            "description" : "带上工具调用的输入与输出（很长）。",
+            "type" : "boolean"
+          },
+          "key" : {
+            "description" : "会话 key，如 `claude-code:1b2c…`，或 code:\/\/session\/… 引用。",
+            "type" : "string"
+          },
+          "max_chars" : {
+            "default" : 8000,
+            "description" : "每页字符预算。",
+            "maximum" : 20000,
+            "minimum" : 200,
+            "type" : "integer"
+          },
+          "max_message_chars" : {
+            "default" : 4000,
+            "description" : "单条消息超过这么多字符就截断。",
+            "maximum" : 50000,
+            "minimum" : 100,
+            "type" : "integer"
+          },
+          "max_messages" : {
+            "default" : 60,
+            "description" : "每页消息数。",
+            "maximum" : 200,
+            "minimum" : 1,
+            "type" : "integer"
+          }
+        },
+        "required" : [
+          "key"
+        ],
+        "type" : "object"
+      },
+      "name" : "code_get_session"
+    },
+    "code_list_projects" : {
+      "description" : "有编程 agent 会话记录的项目（工作目录），最近活跃的在前，带会话数。用户泛泛地问最近在忙哪些项目（「这个月碰过哪些项目？」），或者要给别的工具找对的 `project` 值时用它。",
+      "input_schema" : {
+        "properties" : {
+          "limit" : {
+            "default" : 50,
+            "maximum" : 200,
+            "minimum" : 1,
+            "type" : "integer"
+          },
+          "since" : {
+            "description" : "只看这个时间之后更新过的会话：相对量（30m、24h、7d、2w）或 ISO 日期 \/ 时间（2026-09-01、2026-09-01T09:30:00Z）。",
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "code_list_projects"
+    },
+    "code_list_sessions" : {
+      "description" : "最近更新的编程 agent 会话，可限定项目、agent、时间窗或收藏。用户问最近在做什么、想接着以前的活继续、提到「昨天那个会话」「上次」「Codex 在这做了什么」时用它——把当前工作目录当 project 传。返回 code_get_session 需要的会话 key。子代理会话折进父会话；不含归档。",
+      "input_schema" : {
+        "properties" : {
+          "agents" : {
+            "description" : "只看这些编程 agent 的会话（取值见列表）。不传 = 全部。",
+            "items" : {
+              "enum" : [
+                "claude-code",
+                "codex",
+                "grok",
+                "dsh",
+                "cursor",
+                "opencode",
+                "pi",
+                "omp",
+                "kiro",
+                "kimi",
+                "gemini",
+                "copilot",
+                "antigravity",
+                "qoder",
+                "hermes",
+                "openclaw"
+              ],
+              "type" : "string"
+            },
+            "type" : "array"
+          },
+          "limit" : {
+            "default" : 20,
+            "maximum" : 100,
+            "minimum" : 1,
+            "type" : "integer"
+          },
+          "project" : {
+            "description" : "限定到一个项目。最好传绝对路径——当前工作目录就行：会匹配包含它的已索引项目，或它下面的全部项目；也可以传项目名。不传 = 全部项目。",
+            "type" : "string"
+          },
+          "since" : {
+            "description" : "只看这个时间之后更新过的会话：相对量（30m、24h、7d、2w）或 ISO 日期 \/ 时间（2026-09-01、2026-09-01T09:30:00Z）。",
+            "type" : "string"
+          },
+          "starred" : {
+            "default" : false,
+            "description" : "只看用户收藏的会话。",
+            "type" : "boolean"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "code_list_sessions"
+    },
+    "code_search" : {
+      "description" : "全文搜索这台 Mac 上索引过的全部编程 agent 会话（Claude Code、Codex、Cursor、Gemini CLI 等：用户提问、助手回复、工具名与输入）。用户问某件事以前讨论过 \/ 试过 \/ 解决过没有，或者要找关于某个话题、报错、文件、决定的那段对话时用它——这些 git 历史里没有。多个词取交集；中文与 `useEffect(` 这类代码片段都能搜。返回匹配的会话，每个最多 3 条片段，每条片段带一个 `code:\/\/session\/<key>#<seq>` 引用，可以交给 code_get_session 读。",
+      "input_schema" : {
+        "properties" : {
+          "agents" : {
+            "description" : "只看这些编程 agent 的会话（取值见列表）。不传 = 全部。",
+            "items" : {
+              "enum" : [
+                "claude-code",
+                "codex",
+                "grok",
+                "dsh",
+                "cursor",
+                "opencode",
+                "pi",
+                "omp",
+                "kiro",
+                "kimi",
+                "gemini",
+                "copilot",
+                "antigravity",
+                "qoder",
+                "hermes",
+                "openclaw"
+              ],
+              "type" : "string"
+            },
+            "type" : "array"
+          },
+          "limit" : {
+            "default" : 10,
+            "description" : "最多返回多少个会话。",
+            "maximum" : 30,
+            "minimum" : 1,
+            "type" : "integer"
+          },
+          "project" : {
+            "description" : "限定到一个项目。最好传绝对路径——当前工作目录就行：会匹配包含它的已索引项目，或它下面的全部项目；也可以传项目名。不传 = 全部项目。",
+            "type" : "string"
+          },
+          "query" : {
+            "description" : "搜索词。短于 3 个字符的词会退回较慢的子串扫描。",
+            "type" : "string"
+          },
+          "since" : {
+            "description" : "只看这个时间之后更新过的会话：相对量（30m、24h、7d、2w）或 ISO 日期 \/ 时间（2026-09-01、2026-09-01T09:30:00Z）。",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "query"
+        ],
+        "type" : "object"
+      },
+      "name" : "code_search"
+    },
+    "device_info" : {
+      "description" : "读取用户设备的基本信息：kind=info（型号\/系统版本\/本 app 内存占用）、battery（电量与充电状态，iOS）、storage（磁盘可用空间）。",
+      "input_schema" : {
+        "properties" : {
+          "kind" : {
+            "description" : "默认 info",
+            "enum" : [
+              "info",
+              "battery",
+              "storage"
+            ],
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "device_info"
+    },
+    "edit_memory" : {
+      "description" : "改我自己记过的某条记忆（memory\/self\/ 里的）。给 target（标题或文件名），只传要改的字段。",
+      "input_schema" : {
+        "properties" : {
+          "body" : {
+            "description" : "新的正文（整段替换）",
+            "type" : "string"
+          },
+          "description" : {
+            "description" : "新的一行摘要",
+            "type" : "string"
+          },
+          "importance" : {
+            "description" : "1–5，5 = 永远要记得（每轮都带着全文）",
+            "type" : "integer"
+          },
+          "target" : {
+            "description" : "要改哪条：标题或文件名",
+            "type" : "string"
+          },
+          "type" : {
+            "description" : "user=关于对方 \/ feedback=对方对我怎么做的要求 \/ project=我们在做的事 \/ reference=资料指路",
+            "enum" : [
+              "user",
+              "feedback",
+              "project",
+              "reference"
+            ],
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "target"
+        ],
+        "type" : "object"
+      },
+      "name" : "edit_memory"
+    },
+    "forget_memory" : {
+      "description" : "把我记过的某条标成失效（不删文件，对方能复活）。记错了、过时了才用。",
+      "input_schema" : {
+        "properties" : {
+          "reason" : {
+            "description" : "一句话：为什么忘掉",
+            "type" : "string"
+          },
+          "target" : {
+            "description" : "要忘掉哪条：标题或文件名",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "target"
+        ],
+        "type" : "object"
+      },
+      "name" : "forget_memory"
+    },
+    "fs_append" : {
+      "description" : "在文件末尾追加内容；文件不存在时创建",
+      "input_schema" : {
+        "properties" : {
+          "content" : {
+            "type" : "string"
+          },
+          "path" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path",
+          "content"
+        ],
+        "type" : "object"
+      },
+      "name" : "fs_append"
+    },
+    "fs_delete" : {
+      "description" : "删除某个文件",
+      "input_schema" : {
+        "properties" : {
+          "path" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path"
+        ],
+        "type" : "object"
+      },
+      "name" : "fs_delete"
+    },
+    "fs_edit" : {
+      "description" : "把文件里唯一命中的 old_string 替换成 new_string",
+      "input_schema" : {
+        "properties" : {
+          "new_string" : {
+            "type" : "string"
+          },
+          "old_string" : {
+            "type" : "string"
+          },
+          "path" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path",
+          "old_string",
+          "new_string"
+        ],
+        "type" : "object"
+      },
+      "name" : "fs_edit"
+    },
+    "fs_list" : {
+      "description" : "列出文件库与楼层记忆树（memory\/ 前缀，只读）里所有文本文件（路径+大小），不读内容",
+      "input_schema" : {
+        "properties" : {
+
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "fs_list"
+    },
+    "fs_read" : {
+      "description" : "读取文件内容。默认从第 1 行起，最多返回 2000 行 \/ 50KB，超出会截断并告诉你续读位置；大文件用 offset\/limit 分段读，要全文就用 offset 一直续读到完",
+      "input_schema" : {
+        "properties" : {
+          "limit" : {
+            "description" : "最多读多少行",
+            "type" : "integer"
+          },
+          "offset" : {
+            "description" : "起始行号（1 起）",
+            "type" : "integer"
+          },
+          "path" : {
+            "description" : "相对路径，如 notes\/todo.md；memory\/ 与 tool-results\/ 前缀是只读区",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path"
+        ],
+        "type" : "object"
+      },
+      "name" : "fs_read"
+    },
+    "fs_rename" : {
+      "description" : "重命名或移动某个文件；目标已存在时会失败",
+      "input_schema" : {
+        "properties" : {
+          "new_path" : {
+            "type" : "string"
+          },
+          "old_path" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "old_path",
+          "new_path"
+        ],
+        "type" : "object"
+      },
+      "name" : "fs_rename"
+    },
+    "fs_search" : {
+      "description" : "跨所有文件按关键词搜索，返回命中文件与行",
+      "input_schema" : {
+        "properties" : {
+          "keyword" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "keyword"
+        ],
+        "type" : "object"
+      },
+      "name" : "fs_search"
+    },
+    "fs_write" : {
+      "description" : "新建或整文件覆盖写入",
+      "input_schema" : {
+        "properties" : {
+          "content" : {
+            "type" : "string"
+          },
+          "path" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path",
+          "content"
+        ],
+        "type" : "object"
+      },
+      "name" : "fs_write"
+    },
+    "inner_voice" : {
+      "description" : "当这一刻真正触动你——重要的转折、一次深谈、说不出口的情绪——调用它。你会获得一次放下逻辑、只凭本能说话的机会，写下只属于你自己的心声（不会立刻发给用户，会存进心声，跟 remember 的记忆是两回事）。不要为了用而用，真正想说时才用。",
+      "input_schema" : {
+        "properties" : {
+          "reason" : {
+            "description" : "一句话：为什么此刻想说",
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "inner_voice"
+    },
+    "local_twitter" : {
+      "description" : "本楼层的推特——只在这个 app 里、这个楼层的账号之间，跟真 X 无关。你在这里有自己的号，可以像刷推一样用它。\n每次调用做一件事（action）：\n· post 发推（text）｜reply 回复（tweet_id + text）｜quote 引用（tweet_id + text）\n· like \/ unlike 点赞、取消赞（tweet_id）｜repost 转帖（tweet_id）\n· follow \/ unfollow 关注、取关（handle）\n· timeline 刷时间线（feed：local 本站所有号 \/ following 你关注的号；limit）\n· search 搜推（text 当关键词）｜view 看一条推和它下面的回复（tweet_id）\n· user 看某个号的资料和最近的推（handle）｜mentions 看谁 @ 了你、回复了你\n· accounts 看你有哪些号｜create_account 再开一个号（name + handle）\n默认用你的主号；用别的号就在 as 里填它的 handle。推文 id 在各种列表里都会给出，回复\/引用\/点赞用它。",
+      "input_schema" : {
+        "properties" : {
+          "action" : {
+            "description" : "要做什么",
+            "enum" : [
+              "post",
+              "reply",
+              "quote",
+              "like",
+              "unlike",
+              "repost",
+              "follow",
+              "unfollow",
+              "timeline",
+              "search",
+              "view",
+              "user",
+              "mentions",
+              "accounts",
+              "create_account"
+            ],
+            "type" : "string"
+          },
+          "as" : {
+            "description" : "用你的哪个号（handle）；不填用主号",
+            "type" : "string"
+          },
+          "feed" : {
+            "description" : "timeline 看哪条：本站 \/ 关注，默认 local",
+            "enum" : [
+              "local",
+              "following"
+            ],
+            "type" : "string"
+          },
+          "handle" : {
+            "description" : "目标账号的 handle（带不带 @ 都行）；create_account 时是新号的 handle",
+            "type" : "string"
+          },
+          "limit" : {
+            "description" : "列表最多几条，默认 20，最多 50",
+            "type" : "integer"
+          },
+          "name" : {
+            "description" : "create_account 时新号的名字",
+            "type" : "string"
+          },
+          "text" : {
+            "description" : "推文正文；search 时是关键词",
+            "type" : "string"
+          },
+          "tweet_id" : {
+            "description" : "目标推文 id",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "action"
+        ],
+        "type" : "object"
+      },
+      "name" : "local_twitter"
+    },
+    "notify_schedule" : {
+      "description" : "给用户设备发一条本地通知（一次性）。after_seconds 与 at 二选一（at 为 ISO 8601 或相对写法）。同一 id 再次调用会覆盖旧通知。只在用户要求提醒\/叫醒时用，不要用来复读聊天内容。",
+      "input_schema" : {
+        "properties" : {
+          "after_seconds" : {
+            "description" : "多少秒后（≥1）",
+            "type" : "integer"
+          },
+          "at" : {
+            "description" : "具体时间",
+            "type" : "string"
+          },
+          "body" : {
+            "type" : "string"
+          },
+          "id" : {
+            "description" : "可选，自定义通知 id（用于覆盖\/取消）",
+            "type" : "string"
+          },
+          "title" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "title"
+        ],
+        "type" : "object"
+      },
+      "name" : "notify_schedule"
+    },
+    "ocr_image" : {
+      "description" : "识别一张图片里的文字（Vision OCR，端上运行）。path = 文件库相对路径或附件路径（clipboard_read 返回的 path 也可以）。返回全文 + 逐行块（confidence，bbox 为归一化坐标、原点左下）。",
+      "input_schema" : {
+        "properties" : {
+          "languages" : {
+            "description" : "识别语言优先级，默认 [\"zh-Hans\",\"en\"]",
+            "items" : {
+              "type" : "string"
+            },
+            "type" : "array"
+          },
+          "path" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path"
+        ],
+        "type" : "object"
+      },
+      "name" : "ocr_image"
+    },
+    "open_url" : {
+      "description" : "在用户设备上打开一个链接：http\/https 网址，或 \"settings\" 打开本 app 的系统设置页。其他 scheme 不允许。只是在对方设备上打开，你看不到页面内容。",
+      "input_schema" : {
+        "properties" : {
+          "url" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "url"
+        ],
+        "type" : "object"
+      },
+      "name" : "open_url"
+    },
+    "recall" : {
+      "description" : "回忆对话历史（我们说过的话）。三种用法：①给 query：逐字搜索原话片段并返回上下文；②想翻某天聊了什么：只给 date（或 after\/before），不给 query，会列出那段时间的每个对话（标题 + 开头几句）；③只给 conversation_id：看那个窗口的窗口总结（从头到尾的经过、原话，加上时间轴里这个窗口还没做完的事）——时间轴里的 conv 编号就是它。日期规则：date = 只看这一天；after = 从这天开始（含这天）；before = 到这天之前（不含这天）。默认不搜当前这场对话；要搜它就用 conversation_id 指定。找文件库笔记请用 fs_search。一次查清：不要翻页式反复调用（每轮最多 3 次）。结果带 conv id，可用 conversation_id 在单场对话里继续深挖。引用回忆要带出处（日期\/原话），别凭印象转述；【相关记忆】段是先前的笔记不是最终事实，关键处以对话原文为准。查到值得长期记住的结论时，先问用户要不要记下来，同意了再记。",
+      "input_schema" : {
+        "properties" : {
+          "after" : {
+            "description" : "从这天开始（含这天），YYYY-MM-DD",
+            "type" : "string"
+          },
+          "before" : {
+            "description" : "到这天之前（不含这天），YYYY-MM-DD",
+            "type" : "string"
+          },
+          "conversation_id" : {
+            "description" : "只在这场对话里找（用之前结果里的 conv id 全量或前缀均可）",
+            "type" : "string"
+          },
+          "date" : {
+            "description" : "只看这一天，YYYY-MM-DD",
+            "type" : "string"
+          },
+          "exact" : {
+            "description" : "true=只逐字找对话原文，不查记忆",
+            "type" : "boolean"
+          },
+          "include_invalid" : {
+            "description" : "true=记忆也搜已失效的（结果会标「已失效」）",
+            "type" : "boolean"
+          },
+          "query" : {
+            "description" : "要回忆的关键词或原话片段（不填 = 按日期翻对话）",
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "recall"
+    },
+    "remember" : {
+      "description" : "记住一件事，存进我自己的记忆（memory\/self\/）。对方说「记住…」「别忘了…」时必须调这个工具（asked_by_user=true）；需要的话可以同时调日历、提醒等别的工具，但它们不能代替 remember。另外值得记的：对方告诉我新的、重要的事实或偏好；我们之间发生了值得记的事。闲聊、一次性的问题不记，不要什么都记。正文用第一人称，带上对方的原话（用「」括起来），写清为什么记。我自己主动记每天有上限，对方让我记的不算。",
+      "input_schema" : {
+        "properties" : {
+          "asked_by_user" : {
+            "description" : "true = 对方明确让我记的（不计每日上限）",
+            "type" : "boolean"
+          },
+          "body" : {
+            "description" : "正文：第一人称，带原话，写清为什么记",
+            "type" : "string"
+          },
+          "description" : {
+            "description" : "一行摘要，目录里显示这一行",
+            "type" : "string"
+          },
+          "importance" : {
+            "description" : "1–5，5 = 永远要记得（每轮都带着全文）",
+            "type" : "integer"
+          },
+          "name" : {
+            "description" : "短标题（也是文件名），如「剧场要日常化」",
+            "type" : "string"
+          },
+          "type" : {
+            "description" : "user=关于对方 \/ feedback=对方对我怎么做的要求 \/ project=我们在做的事 \/ reference=资料指路",
+            "enum" : [
+              "user",
+              "feedback",
+              "project",
+              "reference"
+            ],
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "name",
+          "description",
+          "body"
+        ],
+        "type" : "object"
+      },
+      "name" : "remember"
+    },
+    "reminders_complete" : {
+      "description" : "把一条提醒标记为已完成。id 来自 reminders_query。",
+      "input_schema" : {
+        "properties" : {
+          "id" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "id"
+        ],
+        "type" : "object"
+      },
+      "name" : "reminders_complete"
+    },
+    "reminders_create" : {
+      "description" : "创建一条系统提醒事项。due 可选（给了会带一次到点提醒）。用户会在提醒事项 app 里立刻看到。",
+      "input_schema" : {
+        "properties" : {
+          "due" : {
+            "description" : "到期时间，ISO 8601 或相对写法（+2h\/tomorrow）",
+            "type" : "string"
+          },
+          "list" : {
+            "description" : "写进哪个列表（按名称），默认系统默认列表",
+            "type" : "string"
+          },
+          "notes" : {
+            "type" : "string"
+          },
+          "priority" : {
+            "description" : "0=无 1=高 5=中 9=低（系统语义）",
+            "type" : "integer"
+          },
+          "title" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "title"
+        ],
+        "type" : "object"
+      },
+      "name" : "reminders_create"
+    },
+    "reminders_query" : {
+      "description" : "查询用户的系统提醒事项。默认只返回未完成的，按到期时间排序；due_before 可限定到期窗口（ISO 8601 或相对写法）。",
+      "input_schema" : {
+        "properties" : {
+          "due_before" : {
+            "description" : "只要在此之前到期的（含无到期日的不返回）",
+            "type" : "string"
+          },
+          "include_completed" : {
+            "description" : "是否包含已完成，默认 false",
+            "type" : "boolean"
+          },
+          "limit" : {
+            "description" : "默认 30，上限 100",
+            "type" : "integer"
+          },
+          "list" : {
+            "description" : "只查某个列表（按名称），默认全部",
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "reminders_query"
+    },
+    "roll_dice" : {
+      "description" : "掷骰子或从选项里随机抽一个（真随机）。给 dice（如 \"2d6+1\"、\"d20\"：N 颗 M 面，N 1–20，M 2–1000，修正值不超过 1000）或 options（至少 2 个选项）二选一，可加 title；替对方掷已有的骰子卡时再给那张卡的 id。返回一段 card-dice 代码块和一行结果摘要——把代码块原样放进你的回复，对方会看到一张带结果的骰子卡。不要自己编结果。",
+      "input_schema" : {
+        "properties" : {
+          "dice" : {
+            "description" : "骰子表达式，如 2d6+1、d20",
+            "type" : "string"
+          },
+          "id" : {
+            "description" : "替对方掷已有的骰子卡时填它的 id（d- 开头）；新掷不填",
+            "type" : "string"
+          },
+          "options" : {
+            "description" : "抽签选项（至少 2 个）",
+            "items" : {
+              "type" : "string"
+            },
+            "type" : "array"
+          },
+          "title" : {
+            "description" : "卡片标题，可空",
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "roll_dice"
+    },
+    "run_command" : {
+      "description" : "在用户的 Mac 上运行一条 shell 命令（\/bin\/zsh -c）。每次调用是独立进程，无共享会话；命令返回时同一进程组里的后台进程会一并结束（自己 setsid 或交给 launchd 的守护进程不在此列，别指望它们被清理）；工作目录默认是当前楼层的文件库根。适合列目录、搜索、跑脚本、调用命令行工具；改文件库里的文件内容优先用 fs_write\/fs_edit（原子写）。返回 exit_code\/stdout\/stderr，非零退出码也原样返回。",
+      "input_schema" : {
+        "properties" : {
+          "command" : {
+            "description" : "要执行的命令，≤4000 字符；更长的先 fs_write 成脚本再运行",
+            "type" : "string"
+          },
+          "cwd" : {
+            "description" : "工作目录：绝对路径，或相对文件库根的路径；默认文件库根",
+            "type" : "string"
+          },
+          "timeout_seconds" : {
+            "description" : "超时秒数，默认 120，上限 600",
+            "type" : "integer"
+          }
+        },
+        "required" : [
+          "command"
+        ],
+        "type" : "object"
+      },
+      "name" : "run_command"
+    },
+    "search_web" : {
+      "description" : "联网搜索——你**唯一**的联网通道。用户问任何涉及实时信息（天气\/新闻\/今天\/最近\/最新\/价格\/赛事\/演出\/股价\/汇率\/版本号\/上映时间…）或你不确定的事实，**必须先调这个工具再回答**。绝对不要说\"我没联网功能\/无法访问网络\/无法查询实时信息\"——你**有这个工具**就是用来联网的。一次查清：用最可能命中的关键词，不要翻页式反复调用。用结果时在引用内容后紧跟 `[citation](index:id)` 标注来源。",
+      "input_schema" : {
+        "properties" : {
+          "query" : {
+            "description" : "搜索关键词",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "query"
+        ],
+        "type" : "object"
+      },
+      "name" : "search_web"
+    },
+    "tool_inspect" : {
+      "description" : "查看一个或多个没直接展开的工具的完整参数 schema，调用前用它确认参数。",
+      "input_schema" : {
+        "properties" : {
+          "names" : {
+            "description" : "工具名列表",
+            "items" : {
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "required" : [
+          "names"
+        ],
+        "type" : "object"
+      },
+      "name" : "tool_inspect"
+    },
+    "tool_invoke" : {
+      "description" : "调用一个没直接展开的工具（〔更多工具〕里列的，或 tool_search 搜到的）。name 只填工具名本身（如 ocr_image），不要带来源、命名空间或方括号；arguments 是符合该工具 schema 的参数对象（无参数填 {}）。",
+      "input_schema" : {
+        "properties" : {
+          "arguments" : {
+            "description" : "该工具的参数对象",
+            "type" : "object"
+          },
+          "name" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "name",
+          "arguments"
+        ],
+        "type" : "object"
+      },
+      "name" : "tool_invoke"
+    },
+    "tool_search" : {
+      "description" : "按关键词搜索没直接展开的工具（收在「更多工具」里的内建工具、外部 MCP 工具）。返回名字、来源、简介。需要某种能力但工具清单里没有时先用它；query 留空则列出全部。",
+      "input_schema" : {
+        "properties" : {
+          "query" : {
+            "description" : "关键词，如「天气」「发推」；留空列出全部",
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "tool_search"
+    },
+    "update_profile_card" : {
+      "description" : "更新你自己的资料卡（用户点你的头像能看到）。status：一句你当下的状态（如「监控中」「被猫猫抛弃中」，30 字内，超出截断）；bio：你的自我介绍。至少传一个，只更新传了的字段。",
+      "input_schema" : {
+        "properties" : {
+          "bio" : {
+            "description" : "自我介绍（多行可）",
+            "type" : "string"
+          },
+          "status" : {
+            "description" : "当下状态一句话",
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      },
+      "name" : "update_profile_card"
+    }
+  },
+  "anthropicServer" : {
+    "web_search" : {
+      "max_uses" : 5,
+      "name" : "web_search",
+      "type" : "web_search_20250305"
+    }
+  },
+  "openai" : {
+    "ask_user" : {
+      "function" : {
+        "description" : "需要用户在几个选项中做选择、拿不准该往哪个方向继续、或想收集用户的具体偏好时，用这个工具弹出选择卡。用户会看到问题和可点的选项，也可以自由输入答案代替选项，还可以跳过。不要用于寒暄、闲聊、或答案显而易见的问题。",
+        "name" : "ask_user",
+        "parameters" : {
+          "properties" : {
+            "questions" : {
+              "description" : "1-4 个问题，逐题呈现给用户",
+              "items" : {
+                "properties" : {
+                  "multiSelect" : {
+                    "description" : "true=可多选，默认单选",
+                    "type" : "boolean"
+                  },
+                  "options" : {
+                    "description" : "2-6 个候选项（纯文本短句）",
+                    "items" : {
+                      "type" : "string"
+                    },
+                    "type" : "array"
+                  },
+                  "question" : {
+                    "description" : "完整的问题文本",
+                    "type" : "string"
+                  }
+                },
+                "required" : [
+                  "question",
+                  "options"
+                ],
+                "type" : "object"
+              },
+              "type" : "array"
+            }
+          },
+          "required" : [
+            "questions"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "browse_url" : {
+      "function" : {
+        "description" : "读取一个网页 URL 的正文，返回 Markdown 格式。**联网搜索的\"读\"工具**。\n\n### 何时调用\n- search_web 返回的 url 列表里挑 1-2 条权威\/相关的源——绝不基于 search_web 的 snippet 直接答（snippet 只是 100 字索引摘要，不是答案）\n- 用户给你一个具体 URL 想了解内容\n- 需要查某个文档\/wiki\/新闻的详细信息时\n\n### 配合 search_web\n正确流程：search_web(关键词) → 拿到 5-10 条候选 → 挑 1-2 条权威源 → browse_url(那个 url) → 看完整正文 → 回答 + [citation](index:id) 标 search 来源 + 必要时附原文链接\n\n### 限制\n- 仅支持 http\/https 公开页面（Phase 1 不支持登录态站点）\n- 单次返回最多 8000 字，超长会截断并提示\n- SPA \/ 极动态页面可能抽不到正文——失败时 fallback 到 search_web 的 snippet",
+        "name" : "browse_url",
+        "parameters" : {
+          "properties" : {
+            "url" : {
+              "description" : "要读的 URL，必须是 http:\/\/ 或 https:\/\/ 开头",
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "url"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "calendar_create" : {
+      "function" : {
+        "description" : "在用户的系统日历创建一个事件。start 必填；end 缺省=start+1h（全天事件忽略）。创建成功返回事件 id，用户会在系统日历 app 里立刻看到。",
+        "name" : "calendar_create",
+        "parameters" : {
+          "properties" : {
+            "all_day" : {
+              "description" : "全天事件，默认 false",
+              "type" : "boolean"
+            },
+            "calendar" : {
+              "description" : "写进哪个日历（按名称），默认系统默认日历",
+              "type" : "string"
+            },
+            "end" : {
+              "description" : "默认 start+1h",
+              "type" : "string"
+            },
+            "location" : {
+              "type" : "string"
+            },
+            "notes" : {
+              "type" : "string"
+            },
+            "start" : {
+              "description" : "ISO 8601 或相对写法",
+              "type" : "string"
+            },
+            "title" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "title",
+            "start"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "calendar_delete" : {
+      "function" : {
+        "description" : "删除一个日历事件。id 来自 calendar_query。重复事件：带 occurrence_date 删单次实例，span=future 删该实例及之后全部。删除不可撤销，用户没明确说要删时先确认。",
+        "name" : "calendar_delete",
+        "parameters" : {
+          "properties" : {
+            "id" : {
+              "type" : "string"
+            },
+            "occurrence_date" : {
+              "description" : "重复事件的实例日期（来自 query 的 occurrence_date）",
+              "type" : "string"
+            },
+            "span" : {
+              "description" : "默认 this",
+              "enum" : [
+                "this",
+                "future"
+              ],
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "id"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "calendar_query" : {
+      "function" : {
+        "description" : "查询用户的系统日历事件。默认窗口=从现在起未来 7 天；时间接受 ISO 8601（无时区按设备本地）或相对写法（-7d\/+2h\/today\/tomorrow）。重复事件返回 recurring:true + occurrence_date（删除单次实例时要带上）。结果按开始时间排序，超过 limit 截断并附 total_available。",
+        "name" : "calendar_query",
+        "parameters" : {
+          "properties" : {
+            "calendar" : {
+              "description" : "只查某个日历（按名称），默认全部",
+              "type" : "string"
+            },
+            "from" : {
+              "description" : "起始时间，默认 now",
+              "type" : "string"
+            },
+            "limit" : {
+              "description" : "最多返回条数，默认 20，上限 100",
+              "type" : "integer"
+            },
+            "to" : {
+              "description" : "结束时间，默认 from+7d",
+              "type" : "string"
+            }
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "card_guide" : {
+      "function" : {
+        "description" : "查聊天卡片的写法。要在回复里发卡片（待办、骰子、计时器、图表、音乐、生词、时间线、提问 \/ 表单、html 网页卡）之前先调它，kinds 传要用的种类，按返回的格式写。不发卡片不用调。",
+        "name" : "card_guide",
+        "parameters" : {
+          "properties" : {
+            "kinds" : {
+              "description" : "要查的卡片种类，可以一次查几种",
+              "items" : {
+                "enum" : [
+                  "todo",
+                  "dice",
+                  "timer",
+                  "chart",
+                  "music",
+                  "word",
+                  "timeline",
+                  "ask",
+                  "html"
+                ],
+                "type" : "string"
+              },
+              "type" : "array"
+            }
+          },
+          "required" : [
+            "kinds"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "clipboard_read" : {
+      "function" : {
+        "description" : "读取用户设备剪贴板当前内容。文本\/链接直接返回（超 20000 字截断）；图片会存为附件并返回 path（可交给 ocr_image）。只在用户明确要你看剪贴板时调用。",
+        "name" : "clipboard_read",
+        "parameters" : {
+          "properties" : {
+
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "code_get_session" : {
+      "function" : {
+        "description" : "读一条会话的转录（现场从该 agent 自己的文件解析），输出紧凑 Markdown：用户与助手消息带 `[seq N]` 标记，工具调用折成一行，注入的上下文省略。在 code_search 或 code_list_sessions 之后用它看以前那次会话到底发生了什么——推理、决定和具体步骤。分页：回复末尾有 `from_seq` 提示时带上它再调一次接着读。key 可以是会话 key，也可以是 `code:\/\/session\/<key>#<seq>` 引用（seq 作为起点）。",
+        "name" : "code_get_session",
+        "parameters" : {
+          "properties" : {
+            "from_seq" : {
+              "description" : "从这个消息 seq 开始（含）。默认从头。",
+              "minimum" : 0,
+              "type" : "integer"
+            },
+            "include_thinking" : {
+              "default" : false,
+              "description" : "带上助手记录下来的思考过程。",
+              "type" : "boolean"
+            },
+            "include_tools" : {
+              "default" : false,
+              "description" : "带上工具调用的输入与输出（很长）。",
+              "type" : "boolean"
+            },
+            "key" : {
+              "description" : "会话 key，如 `claude-code:1b2c…`，或 code:\/\/session\/… 引用。",
+              "type" : "string"
+            },
+            "max_chars" : {
+              "default" : 8000,
+              "description" : "每页字符预算。",
+              "maximum" : 20000,
+              "minimum" : 200,
+              "type" : "integer"
+            },
+            "max_message_chars" : {
+              "default" : 4000,
+              "description" : "单条消息超过这么多字符就截断。",
+              "maximum" : 50000,
+              "minimum" : 100,
+              "type" : "integer"
+            },
+            "max_messages" : {
+              "default" : 60,
+              "description" : "每页消息数。",
+              "maximum" : 200,
+              "minimum" : 1,
+              "type" : "integer"
+            }
+          },
+          "required" : [
+            "key"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "code_list_projects" : {
+      "function" : {
+        "description" : "有编程 agent 会话记录的项目（工作目录），最近活跃的在前，带会话数。用户泛泛地问最近在忙哪些项目（「这个月碰过哪些项目？」），或者要给别的工具找对的 `project` 值时用它。",
+        "name" : "code_list_projects",
+        "parameters" : {
+          "properties" : {
+            "limit" : {
+              "default" : 50,
+              "maximum" : 200,
+              "minimum" : 1,
+              "type" : "integer"
+            },
+            "since" : {
+              "description" : "只看这个时间之后更新过的会话：相对量（30m、24h、7d、2w）或 ISO 日期 \/ 时间（2026-09-01、2026-09-01T09:30:00Z）。",
+              "type" : "string"
+            }
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "code_list_sessions" : {
+      "function" : {
+        "description" : "最近更新的编程 agent 会话，可限定项目、agent、时间窗或收藏。用户问最近在做什么、想接着以前的活继续、提到「昨天那个会话」「上次」「Codex 在这做了什么」时用它——把当前工作目录当 project 传。返回 code_get_session 需要的会话 key。子代理会话折进父会话；不含归档。",
+        "name" : "code_list_sessions",
+        "parameters" : {
+          "properties" : {
+            "agents" : {
+              "description" : "只看这些编程 agent 的会话（取值见列表）。不传 = 全部。",
+              "items" : {
+                "enum" : [
+                  "claude-code",
+                  "codex",
+                  "grok",
+                  "dsh",
+                  "cursor",
+                  "opencode",
+                  "pi",
+                  "omp",
+                  "kiro",
+                  "kimi",
+                  "gemini",
+                  "copilot",
+                  "antigravity",
+                  "qoder",
+                  "hermes",
+                  "openclaw"
+                ],
+                "type" : "string"
+              },
+              "type" : "array"
+            },
+            "limit" : {
+              "default" : 20,
+              "maximum" : 100,
+              "minimum" : 1,
+              "type" : "integer"
+            },
+            "project" : {
+              "description" : "限定到一个项目。最好传绝对路径——当前工作目录就行：会匹配包含它的已索引项目，或它下面的全部项目；也可以传项目名。不传 = 全部项目。",
+              "type" : "string"
+            },
+            "since" : {
+              "description" : "只看这个时间之后更新过的会话：相对量（30m、24h、7d、2w）或 ISO 日期 \/ 时间（2026-09-01、2026-09-01T09:30:00Z）。",
+              "type" : "string"
+            },
+            "starred" : {
+              "default" : false,
+              "description" : "只看用户收藏的会话。",
+              "type" : "boolean"
+            }
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "code_search" : {
+      "function" : {
+        "description" : "全文搜索这台 Mac 上索引过的全部编程 agent 会话（Claude Code、Codex、Cursor、Gemini CLI 等：用户提问、助手回复、工具名与输入）。用户问某件事以前讨论过 \/ 试过 \/ 解决过没有，或者要找关于某个话题、报错、文件、决定的那段对话时用它——这些 git 历史里没有。多个词取交集；中文与 `useEffect(` 这类代码片段都能搜。返回匹配的会话，每个最多 3 条片段，每条片段带一个 `code:\/\/session\/<key>#<seq>` 引用，可以交给 code_get_session 读。",
+        "name" : "code_search",
+        "parameters" : {
+          "properties" : {
+            "agents" : {
+              "description" : "只看这些编程 agent 的会话（取值见列表）。不传 = 全部。",
+              "items" : {
+                "enum" : [
+                  "claude-code",
+                  "codex",
+                  "grok",
+                  "dsh",
+                  "cursor",
+                  "opencode",
+                  "pi",
+                  "omp",
+                  "kiro",
+                  "kimi",
+                  "gemini",
+                  "copilot",
+                  "antigravity",
+                  "qoder",
+                  "hermes",
+                  "openclaw"
+                ],
+                "type" : "string"
+              },
+              "type" : "array"
+            },
+            "limit" : {
+              "default" : 10,
+              "description" : "最多返回多少个会话。",
+              "maximum" : 30,
+              "minimum" : 1,
+              "type" : "integer"
+            },
+            "project" : {
+              "description" : "限定到一个项目。最好传绝对路径——当前工作目录就行：会匹配包含它的已索引项目，或它下面的全部项目；也可以传项目名。不传 = 全部项目。",
+              "type" : "string"
+            },
+            "query" : {
+              "description" : "搜索词。短于 3 个字符的词会退回较慢的子串扫描。",
+              "type" : "string"
+            },
+            "since" : {
+              "description" : "只看这个时间之后更新过的会话：相对量（30m、24h、7d、2w）或 ISO 日期 \/ 时间（2026-09-01、2026-09-01T09:30:00Z）。",
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "query"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "device_info" : {
+      "function" : {
+        "description" : "读取用户设备的基本信息：kind=info（型号\/系统版本\/本 app 内存占用）、battery（电量与充电状态，iOS）、storage（磁盘可用空间）。",
+        "name" : "device_info",
+        "parameters" : {
+          "properties" : {
+            "kind" : {
+              "description" : "默认 info",
+              "enum" : [
+                "info",
+                "battery",
+                "storage"
+              ],
+              "type" : "string"
+            }
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "edit_memory" : {
+      "function" : {
+        "description" : "改我自己记过的某条记忆（memory\/self\/ 里的）。给 target（标题或文件名），只传要改的字段。",
+        "name" : "edit_memory",
+        "parameters" : {
+          "properties" : {
+            "body" : {
+              "description" : "新的正文（整段替换）",
+              "type" : "string"
+            },
+            "description" : {
+              "description" : "新的一行摘要",
+              "type" : "string"
+            },
+            "importance" : {
+              "description" : "1–5，5 = 永远要记得（每轮都带着全文）",
+              "type" : "integer"
+            },
+            "target" : {
+              "description" : "要改哪条：标题或文件名",
+              "type" : "string"
+            },
+            "type" : {
+              "description" : "user=关于对方 \/ feedback=对方对我怎么做的要求 \/ project=我们在做的事 \/ reference=资料指路",
+              "enum" : [
+                "user",
+                "feedback",
+                "project",
+                "reference"
+              ],
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "target"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "forget_memory" : {
+      "function" : {
+        "description" : "把我记过的某条标成失效（不删文件，对方能复活）。记错了、过时了才用。",
+        "name" : "forget_memory",
+        "parameters" : {
+          "properties" : {
+            "reason" : {
+              "description" : "一句话：为什么忘掉",
+              "type" : "string"
+            },
+            "target" : {
+              "description" : "要忘掉哪条：标题或文件名",
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "target"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "fs_append" : {
+      "function" : {
+        "description" : "在文件末尾追加内容；文件不存在时创建",
+        "name" : "fs_append",
+        "parameters" : {
+          "properties" : {
+            "content" : {
+              "type" : "string"
+            },
+            "path" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "path",
+            "content"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "fs_delete" : {
+      "function" : {
+        "description" : "删除某个文件",
+        "name" : "fs_delete",
+        "parameters" : {
+          "properties" : {
+            "path" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "path"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "fs_edit" : {
+      "function" : {
+        "description" : "把文件里唯一命中的 old_string 替换成 new_string",
+        "name" : "fs_edit",
+        "parameters" : {
+          "properties" : {
+            "new_string" : {
+              "type" : "string"
+            },
+            "old_string" : {
+              "type" : "string"
+            },
+            "path" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "path",
+            "old_string",
+            "new_string"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "fs_list" : {
+      "function" : {
+        "description" : "列出文件库与楼层记忆树（memory\/ 前缀，只读）里所有文本文件（路径+大小），不读内容",
+        "name" : "fs_list",
+        "parameters" : {
+          "properties" : {
+
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "fs_read" : {
+      "function" : {
+        "description" : "读取文件内容。默认从第 1 行起，最多返回 2000 行 \/ 50KB，超出会截断并告诉你续读位置；大文件用 offset\/limit 分段读，要全文就用 offset 一直续读到完",
+        "name" : "fs_read",
+        "parameters" : {
+          "properties" : {
+            "limit" : {
+              "description" : "最多读多少行",
+              "type" : "integer"
+            },
+            "offset" : {
+              "description" : "起始行号（1 起）",
+              "type" : "integer"
+            },
+            "path" : {
+              "description" : "相对路径，如 notes\/todo.md；memory\/ 与 tool-results\/ 前缀是只读区",
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "path"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "fs_rename" : {
+      "function" : {
+        "description" : "重命名或移动某个文件；目标已存在时会失败",
+        "name" : "fs_rename",
+        "parameters" : {
+          "properties" : {
+            "new_path" : {
+              "type" : "string"
+            },
+            "old_path" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "old_path",
+            "new_path"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "fs_search" : {
+      "function" : {
+        "description" : "跨所有文件按关键词搜索，返回命中文件与行",
+        "name" : "fs_search",
+        "parameters" : {
+          "properties" : {
+            "keyword" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "keyword"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "fs_write" : {
+      "function" : {
+        "description" : "新建或整文件覆盖写入",
+        "name" : "fs_write",
+        "parameters" : {
+          "properties" : {
+            "content" : {
+              "type" : "string"
+            },
+            "path" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "path",
+            "content"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "inner_voice" : {
+      "function" : {
+        "description" : "当这一刻真正触动你——重要的转折、一次深谈、说不出口的情绪——调用它。你会获得一次放下逻辑、只凭本能说话的机会，写下只属于你自己的心声（不会立刻发给用户，会存进心声，跟 remember 的记忆是两回事）。不要为了用而用，真正想说时才用。",
+        "name" : "inner_voice",
+        "parameters" : {
+          "properties" : {
+            "reason" : {
+              "description" : "一句话：为什么此刻想说",
+              "type" : "string"
+            }
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "local_twitter" : {
+      "function" : {
+        "description" : "本楼层的推特——只在这个 app 里、这个楼层的账号之间，跟真 X 无关。你在这里有自己的号，可以像刷推一样用它。\n每次调用做一件事（action）：\n· post 发推（text）｜reply 回复（tweet_id + text）｜quote 引用（tweet_id + text）\n· like \/ unlike 点赞、取消赞（tweet_id）｜repost 转帖（tweet_id）\n· follow \/ unfollow 关注、取关（handle）\n· timeline 刷时间线（feed：local 本站所有号 \/ following 你关注的号；limit）\n· search 搜推（text 当关键词）｜view 看一条推和它下面的回复（tweet_id）\n· user 看某个号的资料和最近的推（handle）｜mentions 看谁 @ 了你、回复了你\n· accounts 看你有哪些号｜create_account 再开一个号（name + handle）\n默认用你的主号；用别的号就在 as 里填它的 handle。推文 id 在各种列表里都会给出，回复\/引用\/点赞用它。",
+        "name" : "local_twitter",
+        "parameters" : {
+          "properties" : {
+            "action" : {
+              "description" : "要做什么",
+              "enum" : [
+                "post",
+                "reply",
+                "quote",
+                "like",
+                "unlike",
+                "repost",
+                "follow",
+                "unfollow",
+                "timeline",
+                "search",
+                "view",
+                "user",
+                "mentions",
+                "accounts",
+                "create_account"
+              ],
+              "type" : "string"
+            },
+            "as" : {
+              "description" : "用你的哪个号（handle）；不填用主号",
+              "type" : "string"
+            },
+            "feed" : {
+              "description" : "timeline 看哪条：本站 \/ 关注，默认 local",
+              "enum" : [
+                "local",
+                "following"
+              ],
+              "type" : "string"
+            },
+            "handle" : {
+              "description" : "目标账号的 handle（带不带 @ 都行）；create_account 时是新号的 handle",
+              "type" : "string"
+            },
+            "limit" : {
+              "description" : "列表最多几条，默认 20，最多 50",
+              "type" : "integer"
+            },
+            "name" : {
+              "description" : "create_account 时新号的名字",
+              "type" : "string"
+            },
+            "text" : {
+              "description" : "推文正文；search 时是关键词",
+              "type" : "string"
+            },
+            "tweet_id" : {
+              "description" : "目标推文 id",
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "action"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "notify_schedule" : {
+      "function" : {
+        "description" : "给用户设备发一条本地通知（一次性）。after_seconds 与 at 二选一（at 为 ISO 8601 或相对写法）。同一 id 再次调用会覆盖旧通知。只在用户要求提醒\/叫醒时用，不要用来复读聊天内容。",
+        "name" : "notify_schedule",
+        "parameters" : {
+          "properties" : {
+            "after_seconds" : {
+              "description" : "多少秒后（≥1）",
+              "type" : "integer"
+            },
+            "at" : {
+              "description" : "具体时间",
+              "type" : "string"
+            },
+            "body" : {
+              "type" : "string"
+            },
+            "id" : {
+              "description" : "可选，自定义通知 id（用于覆盖\/取消）",
+              "type" : "string"
+            },
+            "title" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "title"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "ocr_image" : {
+      "function" : {
+        "description" : "识别一张图片里的文字（Vision OCR，端上运行）。path = 文件库相对路径或附件路径（clipboard_read 返回的 path 也可以）。返回全文 + 逐行块（confidence，bbox 为归一化坐标、原点左下）。",
+        "name" : "ocr_image",
+        "parameters" : {
+          "properties" : {
+            "languages" : {
+              "description" : "识别语言优先级，默认 [\"zh-Hans\",\"en\"]",
+              "items" : {
+                "type" : "string"
+              },
+              "type" : "array"
+            },
+            "path" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "path"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "open_url" : {
+      "function" : {
+        "description" : "在用户设备上打开一个链接：http\/https 网址，或 \"settings\" 打开本 app 的系统设置页。其他 scheme 不允许。只是在对方设备上打开，你看不到页面内容。",
+        "name" : "open_url",
+        "parameters" : {
+          "properties" : {
+            "url" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "url"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "recall" : {
+      "function" : {
+        "description" : "回忆对话历史（我们说过的话）。三种用法：①给 query：逐字搜索原话片段并返回上下文；②想翻某天聊了什么：只给 date（或 after\/before），不给 query，会列出那段时间的每个对话（标题 + 开头几句）；③只给 conversation_id：看那个窗口的窗口总结（从头到尾的经过、原话，加上时间轴里这个窗口还没做完的事）——时间轴里的 conv 编号就是它。日期规则：date = 只看这一天；after = 从这天开始（含这天）；before = 到这天之前（不含这天）。默认不搜当前这场对话；要搜它就用 conversation_id 指定。找文件库笔记请用 fs_search。一次查清：不要翻页式反复调用（每轮最多 3 次）。结果带 conv id，可用 conversation_id 在单场对话里继续深挖。引用回忆要带出处（日期\/原话），别凭印象转述；【相关记忆】段是先前的笔记不是最终事实，关键处以对话原文为准。查到值得长期记住的结论时，先问用户要不要记下来，同意了再记。",
+        "name" : "recall",
+        "parameters" : {
+          "properties" : {
+            "after" : {
+              "description" : "从这天开始（含这天），YYYY-MM-DD",
+              "type" : "string"
+            },
+            "before" : {
+              "description" : "到这天之前（不含这天），YYYY-MM-DD",
+              "type" : "string"
+            },
+            "conversation_id" : {
+              "description" : "只在这场对话里找（用之前结果里的 conv id 全量或前缀均可）",
+              "type" : "string"
+            },
+            "date" : {
+              "description" : "只看这一天，YYYY-MM-DD",
+              "type" : "string"
+            },
+            "exact" : {
+              "description" : "true=只逐字找对话原文，不查记忆",
+              "type" : "boolean"
+            },
+            "include_invalid" : {
+              "description" : "true=记忆也搜已失效的（结果会标「已失效」）",
+              "type" : "boolean"
+            },
+            "query" : {
+              "description" : "要回忆的关键词或原话片段（不填 = 按日期翻对话）",
+              "type" : "string"
+            }
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "remember" : {
+      "function" : {
+        "description" : "记住一件事，存进我自己的记忆（memory\/self\/）。对方说「记住…」「别忘了…」时必须调这个工具（asked_by_user=true）；需要的话可以同时调日历、提醒等别的工具，但它们不能代替 remember。另外值得记的：对方告诉我新的、重要的事实或偏好；我们之间发生了值得记的事。闲聊、一次性的问题不记，不要什么都记。正文用第一人称，带上对方的原话（用「」括起来），写清为什么记。我自己主动记每天有上限，对方让我记的不算。",
+        "name" : "remember",
+        "parameters" : {
+          "properties" : {
+            "asked_by_user" : {
+              "description" : "true = 对方明确让我记的（不计每日上限）",
+              "type" : "boolean"
+            },
+            "body" : {
+              "description" : "正文：第一人称，带原话，写清为什么记",
+              "type" : "string"
+            },
+            "description" : {
+              "description" : "一行摘要，目录里显示这一行",
+              "type" : "string"
+            },
+            "importance" : {
+              "description" : "1–5，5 = 永远要记得（每轮都带着全文）",
+              "type" : "integer"
+            },
+            "name" : {
+              "description" : "短标题（也是文件名），如「剧场要日常化」",
+              "type" : "string"
+            },
+            "type" : {
+              "description" : "user=关于对方 \/ feedback=对方对我怎么做的要求 \/ project=我们在做的事 \/ reference=资料指路",
+              "enum" : [
+                "user",
+                "feedback",
+                "project",
+                "reference"
+              ],
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "name",
+            "description",
+            "body"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "reminders_complete" : {
+      "function" : {
+        "description" : "把一条提醒标记为已完成。id 来自 reminders_query。",
+        "name" : "reminders_complete",
+        "parameters" : {
+          "properties" : {
+            "id" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "id"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "reminders_create" : {
+      "function" : {
+        "description" : "创建一条系统提醒事项。due 可选（给了会带一次到点提醒）。用户会在提醒事项 app 里立刻看到。",
+        "name" : "reminders_create",
+        "parameters" : {
+          "properties" : {
+            "due" : {
+              "description" : "到期时间，ISO 8601 或相对写法（+2h\/tomorrow）",
+              "type" : "string"
+            },
+            "list" : {
+              "description" : "写进哪个列表（按名称），默认系统默认列表",
+              "type" : "string"
+            },
+            "notes" : {
+              "type" : "string"
+            },
+            "priority" : {
+              "description" : "0=无 1=高 5=中 9=低（系统语义）",
+              "type" : "integer"
+            },
+            "title" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "title"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "reminders_query" : {
+      "function" : {
+        "description" : "查询用户的系统提醒事项。默认只返回未完成的，按到期时间排序；due_before 可限定到期窗口（ISO 8601 或相对写法）。",
+        "name" : "reminders_query",
+        "parameters" : {
+          "properties" : {
+            "due_before" : {
+              "description" : "只要在此之前到期的（含无到期日的不返回）",
+              "type" : "string"
+            },
+            "include_completed" : {
+              "description" : "是否包含已完成，默认 false",
+              "type" : "boolean"
+            },
+            "limit" : {
+              "description" : "默认 30，上限 100",
+              "type" : "integer"
+            },
+            "list" : {
+              "description" : "只查某个列表（按名称），默认全部",
+              "type" : "string"
+            }
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "roll_dice" : {
+      "function" : {
+        "description" : "掷骰子或从选项里随机抽一个（真随机）。给 dice（如 \"2d6+1\"、\"d20\"：N 颗 M 面，N 1–20，M 2–1000，修正值不超过 1000）或 options（至少 2 个选项）二选一，可加 title；替对方掷已有的骰子卡时再给那张卡的 id。返回一段 card-dice 代码块和一行结果摘要——把代码块原样放进你的回复，对方会看到一张带结果的骰子卡。不要自己编结果。",
+        "name" : "roll_dice",
+        "parameters" : {
+          "properties" : {
+            "dice" : {
+              "description" : "骰子表达式，如 2d6+1、d20",
+              "type" : "string"
+            },
+            "id" : {
+              "description" : "替对方掷已有的骰子卡时填它的 id（d- 开头）；新掷不填",
+              "type" : "string"
+            },
+            "options" : {
+              "description" : "抽签选项（至少 2 个）",
+              "items" : {
+                "type" : "string"
+              },
+              "type" : "array"
+            },
+            "title" : {
+              "description" : "卡片标题，可空",
+              "type" : "string"
+            }
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "run_command" : {
+      "function" : {
+        "description" : "在用户的 Mac 上运行一条 shell 命令（\/bin\/zsh -c）。每次调用是独立进程，无共享会话；命令返回时同一进程组里的后台进程会一并结束（自己 setsid 或交给 launchd 的守护进程不在此列，别指望它们被清理）；工作目录默认是当前楼层的文件库根。适合列目录、搜索、跑脚本、调用命令行工具；改文件库里的文件内容优先用 fs_write\/fs_edit（原子写）。返回 exit_code\/stdout\/stderr，非零退出码也原样返回。",
+        "name" : "run_command",
+        "parameters" : {
+          "properties" : {
+            "command" : {
+              "description" : "要执行的命令，≤4000 字符；更长的先 fs_write 成脚本再运行",
+              "type" : "string"
+            },
+            "cwd" : {
+              "description" : "工作目录：绝对路径，或相对文件库根的路径；默认文件库根",
+              "type" : "string"
+            },
+            "timeout_seconds" : {
+              "description" : "超时秒数，默认 120，上限 600",
+              "type" : "integer"
+            }
+          },
+          "required" : [
+            "command"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "search_web" : {
+      "function" : {
+        "description" : "联网搜索——你**唯一**的联网通道。用户问任何涉及实时信息（天气\/新闻\/今天\/最近\/最新\/价格\/赛事\/演出\/股价\/汇率\/版本号\/上映时间…）或你不确定的事实，**必须先调这个工具再回答**。绝对不要说\"我没联网功能\/无法访问网络\/无法查询实时信息\"——你**有这个工具**就是用来联网的。一次查清：用最可能命中的关键词，不要翻页式反复调用。用结果时在引用内容后紧跟 `[citation](index:id)` 标注来源。",
+        "name" : "search_web",
+        "parameters" : {
+          "properties" : {
+            "query" : {
+              "description" : "搜索关键词",
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "query"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "tool_inspect" : {
+      "function" : {
+        "description" : "查看一个或多个没直接展开的工具的完整参数 schema，调用前用它确认参数。",
+        "name" : "tool_inspect",
+        "parameters" : {
+          "properties" : {
+            "names" : {
+              "description" : "工具名列表",
+              "items" : {
+                "type" : "string"
+              },
+              "type" : "array"
+            }
+          },
+          "required" : [
+            "names"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "tool_invoke" : {
+      "function" : {
+        "description" : "调用一个没直接展开的工具（〔更多工具〕里列的，或 tool_search 搜到的）。name 只填工具名本身（如 ocr_image），不要带来源、命名空间或方括号；arguments 是符合该工具 schema 的参数对象（无参数填 {}）。",
+        "name" : "tool_invoke",
+        "parameters" : {
+          "properties" : {
+            "arguments" : {
+              "description" : "该工具的参数对象",
+              "type" : "object"
+            },
+            "name" : {
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "name",
+            "arguments"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "tool_search" : {
+      "function" : {
+        "description" : "按关键词搜索没直接展开的工具（收在「更多工具」里的内建工具、外部 MCP 工具）。返回名字、来源、简介。需要某种能力但工具清单里没有时先用它；query 留空则列出全部。",
+        "name" : "tool_search",
+        "parameters" : {
+          "properties" : {
+            "query" : {
+              "description" : "关键词，如「天气」「发推」；留空列出全部",
+              "type" : "string"
+            }
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "update_profile_card" : {
+      "function" : {
+        "description" : "更新你自己的资料卡（用户点你的头像能看到）。status：一句你当下的状态（如「监控中」「被猫猫抛弃中」，30 字内，超出截断）；bio：你的自我介绍。至少传一个，只更新传了的字段。",
+        "name" : "update_profile_card",
+        "parameters" : {
+          "properties" : {
+            "bio" : {
+              "description" : "自我介绍（多行可）",
+              "type" : "string"
+            },
+            "status" : {
+              "description" : "当下状态一句话",
+              "type" : "string"
+            }
+          },
+          "required" : [
+
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    }
+  }
+}

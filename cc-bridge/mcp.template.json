@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cc-bridge": {
+      "command": "bun",
+      "args": ["run", "REPLACE_WITH_ABSOLUTE_PATH/cc-bridge/mcp-server.ts"]
+    }
+  }
+}

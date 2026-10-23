@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- Tailscale CGNAT 100.x 被 ATS 当公网，拦明文 ws://，必须豁免（出国走 Tailscale 才连得上）。
+		     注意：project.yml info.properties 里也写了 ATS 但没生效——INFOPLIST_FILE 指向本文件，
+		     不是 xcodegen 从 info.properties 生成的 Info-iOS.plist。见 plan-cc-bridge-tailscale-switch.md -->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<!-- 历史：iOS 17+ 系统朗读引擎麦克风 TCC 自检（2026-07-12 Air 三连闪退实锤）。
+	     2026-08-24 更新：语音通话已真实录音转写（CallTranscriber input tap），旧文案「App 不会录音」失真，按实际用途改写。 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>语音通话时录制你的声音并在设备上实时转写；朗读播放使用的系统语音引擎也需要此权限说明。</string>
+	<!-- 扫码配对（CCPairingViews AVCaptureDevice）同类雷：无键点扫码即 TCC 崩。
+	     文案与 project.yml 的 INFOPLIST_KEY_NSCameraUsageDescription 保持逐字一致（build setting 覆盖本文件，两处同文=消歧）。 -->
+	<key>NSCameraUsageDescription</key>
+	<string>扫描二维码配对 Claude Code 桥接，或拍照发送给 AI。</string>
+	<!-- 摇一摇反馈（ShakeMonitor/CMMotionManager）冷启动即跑；缺键访问 Motion 数据会被系统终止（2026-08-23 PERM 批次 verify CONFIRMED，与朗读 TCC 事故同类）。 -->
+	<key>NSMotionUsageDescription</key>
+	<string>摇一摇快速反馈使用设备运动传感器检测摇晃动作。</string>
+	<!-- 本地网络：原文案写在 project.yml info.properties 生成的 Info-iOS.plist 里，但 INFOPLIST_FILE 指向本文件，
+	     那份是孤儿资源系统不认（2026-08-23 PERM 批次 verify CONFIRMED）——归位到这里。
+	     2026-08-24 扩写：pp0823 刀2 起同一条权限还要覆盖 Bonjour 发现本机 claude-proxy，
+	     文案改成同时说明两种用途（一个权限键只能有一份文案，不新增重复键）。 -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>在同一个局域网内查找并连接你 Mac 上运行的服务：Claude Code 桥接 hub，以及本机 AI 代理服务。</string>
+	<!-- Bonjour 发现 claude-proxy（ProxyDiscovery，服务类型契约 C1）。iOS 14+ 不声明的服务类型
+	     NWBrowser/NetService 一律浏览不到，且不会报错——只会安静地零结果。 -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_mpclaude._tcp</string>
+	</array>
+	<!-- 设备工具（plan-设备工具 P1）：AI 经 calendar_*/reminders_* 工具读写日历与提醒；iOS 17+ 用 FullAccess 键，旧键留作兜底。 -->
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>让 AI 按你的要求查看、创建和删除日历事件。</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>让 AI 按你的要求查看、创建和删除日历事件。</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>让 AI 按你的要求查看、创建和完成提醒事项。</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>让 AI 按你的要求查看、创建和完成提醒事项。</string>
+	<!-- voip：PushKit 只在声明了 voip 后台模式时才发 VoIP token；缺它 NativeVoiceCall 报 enabled=false，
+	     hub 删设备 → CC 来电报 "device has not enabled native calls"（#041，曾只写进 project.yml 生成的孤儿 Info-iOS.plist）。 -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>voip</string>
+	</array>
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>INSendMessageIntent</string>
+	</array>
+	<!-- 以下两键原只写在 project.yml info.properties（进孤儿 Info-iOS.plist，iOS 包不认），#041 归位，值照搬。
+	     出口合规：fastlane 上传已传 uses_non_exempt_encryption: false，这里是包内双保险。 -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<!-- iPad 面板 tab 拖放载荷（ToolTabDrag.swift UTType(exportedAs:)）；不声明 SwiftUI 拖放桥会丢类型（222f9809c）。 -->
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>记忆花园工具 tab（面板拖放载荷）</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.susu.MemoryPalace.tool-tab</string>
+		</dict>
+	</array>
+	<key>NSUbiquitousContainers</key>
+	<dict>
+		<key>iCloud.com.susu.MemoryPalace</key>
+		<dict>
+			<key>NSUbiquitousContainerIsDocumentScopePublic</key>
+			<true/>
+			<key>NSUbiquitousContainerName</key>
+			<string>记忆宫殿</string>
+			<key>NSUbiquitousContainerSupportedFolderLevels</key>
+			<string>Any</string>
+		</dict>
+	</dict>
+	<!-- 系统启动屏 = 纸色底 + 原尺寸居中的 LaunchSplash；bake-splash.mjs 将该图更新为 CA 分层动画第 0 帧。
+	     project.yml 里原来的 INFOPLIST_KEY_UILaunchScreen_Generation 已删——build setting 会盖掉本文件同名键。 -->
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchPaper</string>
+		<key>UIImageName</key>
+		<string>LaunchSplash</string>
+		<key>UIImageRespectsSafeAreaInsets</key>
+		<false/>
+	</dict>
+</dict>
+</plist>

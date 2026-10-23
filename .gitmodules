@@ -1,0 +1,6 @@
+[submodule "deps/ish"]
+	path = deps/ish
+	url = https://github.com/OpenMinis/ish-arm64.git
+	# 故意不写 branch：feature/fork-guard 的 tip 已经从我们钉的 19c690c 走到了
+	# 123143f0，留着 branch 字段的话 `git submodule update --remote` 会静默把
+	# 子模块推到新 tip。要升级请显式改 gitlink SHA 并 review diff。

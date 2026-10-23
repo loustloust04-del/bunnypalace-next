@@ -1,0 +1,299 @@
+{
+  "tools" : [
+    {
+      "description" : "读取一个网页 URL 的正文，返回 Markdown 格式。**联网搜索的\"读\"工具**。\n\n### 何时调用\n- search_web 返回的 url 列表里挑 1-2 条权威\/相关的源——绝不基于 search_web 的 snippet 直接答（snippet 只是 100 字索引摘要，不是答案）\n- 用户给你一个具体 URL 想了解内容\n- 需要查某个文档\/wiki\/新闻的详细信息时\n\n### 配合 search_web\n正确流程：search_web(关键词) → 拿到 5-10 条候选 → 挑 1-2 条权威源 → browse_url(那个 url) → 看完整正文 → 回答 + [citation](index:id) 标 search 来源 + 必要时附原文链接\n\n### 限制\n- 仅支持 http\/https 公开页面（Phase 1 不支持登录态站点）\n- 单次返回最多 8000 字，超长会截断并提示\n- SPA \/ 极动态页面可能抽不到正文——失败时 fallback 到 search_web 的 snippet",
+      "name" : "browse_url",
+      "parameters" : {
+        "properties" : {
+          "url" : {
+            "description" : "要读的 URL，必须是 http:\/\/ 或 https:\/\/ 开头",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "url"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "在文件末尾追加内容；文件不存在时创建",
+      "name" : "fs_append",
+      "parameters" : {
+        "properties" : {
+          "content" : {
+            "type" : "string"
+          },
+          "path" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path",
+          "content"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "删除某个文件",
+      "name" : "fs_delete",
+      "parameters" : {
+        "properties" : {
+          "path" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "把文件里唯一命中的 old_string 替换成 new_string",
+      "name" : "fs_edit",
+      "parameters" : {
+        "properties" : {
+          "new_string" : {
+            "type" : "string"
+          },
+          "old_string" : {
+            "type" : "string"
+          },
+          "path" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path",
+          "old_string",
+          "new_string"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "列出文件库与楼层记忆树（memory\/ 前缀，只读）里所有文本文件（路径+大小），不读内容",
+      "name" : "fs_list",
+      "parameters" : {
+        "properties" : {
+
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "读取某个文件的全文",
+      "name" : "fs_read",
+      "parameters" : {
+        "properties" : {
+          "path" : {
+            "description" : "相对路径，如 notes\/todo.md",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "重命名或移动某个文件；目标已存在时会失败",
+      "name" : "fs_rename",
+      "parameters" : {
+        "properties" : {
+          "new_path" : {
+            "type" : "string"
+          },
+          "old_path" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "old_path",
+          "new_path"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "跨所有文件按关键词搜索，返回命中文件与行",
+      "name" : "fs_search",
+      "parameters" : {
+        "properties" : {
+          "keyword" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "keyword"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "新建或整文件覆盖写入",
+      "name" : "fs_write",
+      "parameters" : {
+        "properties" : {
+          "content" : {
+            "type" : "string"
+          },
+          "path" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path",
+          "content"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "当这一刻真正触动你——重要的转折、一次深谈、说不出口的情绪——调用它。你会获得一次放下逻辑、只凭本能说话的机会，写下只属于你自己的心声（不会立刻发给用户，会存进你的记忆树）。不要为了用而用，真正想说时才用。",
+      "name" : "inner_voice",
+      "parameters" : {
+        "properties" : {
+          "reason" : {
+            "description" : "一句话：为什么此刻想说",
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "回忆对话历史（我们说过的话），逐字搜索并返回原话片段及上下文。找文件库笔记请用 fs_search。一次查清：用最可能命中的关键词查询，不要翻页式反复调用（每轮最多 3 次）。查询范围太宽（如\"昨天说的话\"）时不要穷举——先和用户确认具体主题再查。结果带 conv id，可用 conversation_id 在单场对话里继续深挖；已知 conv id 时直接限定它查，别再全库广搜。引用回忆要带出处（日期\/原话），别凭印象转述；【记忆】段是先前的笔记不是最终事实，关键处以【对话原文】为准。查到值得长期记住的结论时，先问用户要不要存进记忆树，同意了再写。",
+      "name" : "recall",
+      "parameters" : {
+        "properties" : {
+          "after" : {
+            "description" : "只看这天之后，YYYY-MM-DD",
+            "type" : "string"
+          },
+          "before" : {
+            "description" : "只看这天之前，YYYY-MM-DD",
+            "type" : "string"
+          },
+          "conversation_id" : {
+            "description" : "只在这场对话里找（用之前结果里的 conv id 全量或前缀均可）",
+            "type" : "string"
+          },
+          "exact" : {
+            "description" : "true=只逐字找对话原文",
+            "type" : "boolean"
+          },
+          "query" : {
+            "description" : "要回忆的关键词或原话片段",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "query"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "联网搜索——你**唯一**的联网通道。用户问任何涉及实时信息（天气\/新闻\/今天\/最近\/最新\/价格\/赛事\/演出\/股价\/汇率\/版本号\/上映时间…）或你不确定的事实，**必须先调这个工具再回答**。绝对不要说\"我没联网功能\/无法访问网络\/无法查询实时信息\"——你**有这个工具**就是用来联网的。一次查清：用最可能命中的关键词，不要翻页式反复调用。用结果时在引用内容后紧跟 `[citation](index:id)` 标注来源。",
+      "name" : "search_web",
+      "parameters" : {
+        "properties" : {
+          "query" : {
+            "description" : "搜索关键词",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "query"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "查看一个或多个外部工具的完整参数 schema，调用前用它确认参数。",
+      "name" : "tool_inspect",
+      "parameters" : {
+        "properties" : {
+          "names" : {
+            "description" : "工具名列表",
+            "items" : {
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "required" : [
+          "names"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "调用一个外部工具。name 只填工具名本身（如 current_time），不要带来源、命名空间或方括号；arguments 是符合该工具 schema 的参数对象（无参数填 {}）。",
+      "name" : "tool_invoke",
+      "parameters" : {
+        "properties" : {
+          "arguments" : {
+            "description" : "该工具的参数对象",
+            "type" : "object"
+          },
+          "name" : {
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "name",
+          "arguments"
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "按关键词搜索可用的外部工具（MCP）。返回匹配工具的名字、所属服务、简介。需要某种外部能力但不确定有哪些工具时先用它；query 留空则列出全部。",
+      "name" : "tool_search",
+      "parameters" : {
+        "properties" : {
+          "query" : {
+            "description" : "关键词，如「天气」「发推」；留空列出全部",
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      }
+    },
+    {
+      "description" : "更新你自己的资料卡（用户点你的头像能看到）。status：一句你当下的状态（如「监控中」「被猫猫抛弃中」，30 字内，超出截断）；bio：你的自我介绍。至少传一个，只更新传了的字段。",
+      "name" : "update_profile_card",
+      "parameters" : {
+        "properties" : {
+          "bio" : {
+            "description" : "自我介绍（多行可）",
+            "type" : "string"
+          },
+          "status" : {
+            "description" : "当下状态一句话",
+            "type" : "string"
+          }
+        },
+        "required" : [
+
+        ],
+        "type" : "object"
+      }
+    }
+  ],
+  "version" : 1
+}

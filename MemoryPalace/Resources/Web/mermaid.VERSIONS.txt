@@ -1,0 +1,7 @@
+# mermaid.min.js 来源信息（由 scripts/mermaid-bundle/fetch.sh 生成，勿手改）
+来源: npm mermaid@12.0.0 的 dist/mermaid.min.js（原样拷贝，未改动）
+许可: MIT（全文见 Resources/Licenses/mermaid.txt）
+获取命令: bash scripts/mermaid-bundle/fetch.sh 12.0.0
+获取时间: 2026-09-30 09:16:01
+大小: 5575485 bytes
+sha256: 28fca7ae6ebc7ed7bb63bde63136a74bfef14f296a57e403657eeb8b32836073

@@ -1,0 +1,5 @@
+// 签名 Team 和 bundle ID 前缀（project.yml 项目级 configFiles，所有 target 共用）。
+// 值只在本机的 Signing.local.xcconfig（gitignore）：第一次编之前 cp Config/Signing.local.xcconfig.example Config/Signing.local.xcconfig。
+// 故意不给默认值：缺了它 xcodegen 直接报错（scripts/signing-local-link.sh），免得悄悄编出另一个 bundle ID 的 app。
+
+#include "Signing.local.xcconfig"

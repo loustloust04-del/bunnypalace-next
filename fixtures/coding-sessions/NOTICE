@@ -1,0 +1,6 @@
+Synthetic fixtures copied from Wake (https://github.com/iAmCorey/Wake, v0.6.3, crates/wake-core/tests/fixtures/):
+claude, codex, kimi, pi, gemini, kiro, cursor, qoder, grok, openclaw, dsh/session.jsonl and image_content_shapes.json.
+dsh/session.jsonl.zstd is that plaintext re-packed with the zstd CLI as two concatenated frames (header line + events), matching the writer's layout.
+SQLite fixtures (Copilot, OpenCode stable + next, Antigravity, Hermes, OpenClaw) are built at test time from the SQL in Wake's tests/common/mod.rs, copied into the MemoryPalaceTests sources.
+Wake is MIT licensed: Copyright (c) Corey. See https://github.com/iAmCorey/Wake/blob/main/LICENSE.
+All data is synthetic (no real sessions).

@@ -1,0 +1,4 @@
+# bun test 预加载：测试进程 import hub.ts 之前就把 secrets 指到临时目录、tmux 干跑
+# （2026-06-11 测试打进生产 hub 事故的另一半防线；spawn 出来的测试 hub 在 hub.test.ts 里另有显式 env）
+[test]
+preload = ["./test-preload.ts"]

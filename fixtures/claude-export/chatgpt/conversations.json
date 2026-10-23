@@ -1,0 +1,57 @@
+[
+ {
+  "id": "g1",
+  "title": "ChatGPT 对话",
+  "create_time": 1700000000,
+  "update_time": 1700000100,
+  "current_node": "g1-a",
+  "mapping": {
+   "g1-root": {
+    "id": "g1-root",
+    "parent": null,
+    "children": [
+     "g1-u"
+    ],
+    "message": null
+   },
+   "g1-u": {
+    "id": "g1-u",
+    "parent": "g1-root",
+    "children": [
+     "g1-a"
+    ],
+    "message": {
+     "id": "g1-u",
+     "author": {
+      "role": "user"
+     },
+     "create_time": 1700000000,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "问"
+      ]
+     }
+    }
+   },
+   "g1-a": {
+    "id": "g1-a",
+    "parent": "g1-u",
+    "children": [],
+    "message": {
+     "id": "g1-a",
+     "author": {
+      "role": "assistant"
+     },
+     "create_time": 1700000000,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "答"
+      ]
+     }
+    }
+   }
+  }
+ }
+]

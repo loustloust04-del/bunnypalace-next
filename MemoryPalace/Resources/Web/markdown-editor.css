@@ -1,0 +1,257 @@
+:root {
+  color-scheme: light;
+  /* 底色透明：纸面由 SwiftUI 那层 Theme.mainBg 透上来，和顶栏 / 浮条同一色（10-02 实机三块颜色不一）。
+     字色由 Swift 每次 setContent 带 Theme 当前值注入（applyColors），这里只是首帧兜底 */
+  --mp-bg: transparent;
+  --mp-paper: #ffffff;
+  --mp-accent: #e7eeec;
+  --mp-accent-strong: #cfdcd8;
+  --mp-text: #3f332b;
+  --mp-muted: #8a7b71;
+  --mp-caret: #5f7f76;
+  --mp-selection: rgba(95, 127, 118, 0.22);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--mp-bg);
+  color: var(--mp-text);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+#editor {
+  width: 100%;
+  height: 100%;
+}
+
+.fallback-editor {
+  display: block;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  border: 0;
+  outline: none;
+  padding: 16px 22px;
+  background: var(--mp-bg);
+  color: var(--mp-text);
+  caret-color: var(--mp-caret);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
+}
+
+.fallback-editor::selection {
+  background: var(--mp-selection);
+}
+
+/* 字号 / 行高 / 正文留白在 markdown-editor.js 的 EditorView.theme 里：写在这里会被 CodeMirror 基础主题压掉。
+   正文 15px < 16px：防 iOS 聚焦自动放大（长行出屏）靠 html viewport 的 maximum-scale=1 + user-scalable=no。 */
+.cm-editor {
+  width: 100%;
+  height: 100%;
+  background: var(--mp-bg);
+  color: var(--mp-text);
+}
+
+.cm-editor.cm-focused {
+  outline: none;
+}
+
+.cm-scroller {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
+}
+
+.cm-content {
+  min-height: 100%;
+  caret-color: var(--mp-caret);
+}
+
+.cm-activeLine {
+  background: rgba(231, 238, 236, 0.52);
+}
+
+.cm-activeLineGutter {
+  background: transparent;
+}
+
+.cm-selectionBackground,
+.cm-content ::selection {
+  background: var(--mp-selection) !important;
+}
+
+/* 行号 + 折叠列默认关（「…」里开）。!important：基础主题的 .cm-gutters 选择器特异性相同、注入在后 */
+.mp-hide-gutters .cm-gutters {
+  display: none !important;
+}
+
+/* 关行号 = 纸 + 字：当前行也不铺底色 */
+.mp-hide-gutters .cm-activeLine {
+  background: transparent !important;
+}
+
+.cm-gutters {
+  background: var(--mp-bg);
+  color: var(--mp-muted);
+  border-right: 1px solid rgba(207, 220, 216, 0.72);
+}
+
+.cm-cursor {
+  border-left-color: var(--mp-caret) !important;
+}
+
+.cm-focused .cm-matchingBracket,
+.cm-focused .cm-nonmatchingBracket {
+  background: var(--mp-accent);
+}
+
+.cm-searchMatch {
+  background-color: rgba(95, 127, 118, 0.18) !important;
+  border-bottom: 1px solid rgba(95, 127, 118, 0.42);
+}
+
+.cm-searchMatch-selected {
+  background-color: rgba(95, 127, 118, 0.34) !important;
+  border-bottom-color: rgba(95, 127, 118, 0.72);
+}
+
+.cm-lineWrapping {
+  word-break: break-word;
+}
+
+/* Live preview decorations（标题字号由 HighlightStyle 按 token 放大，这里只做块级间距，避免 em 叠乘） */
+.cm-line.mp-md-heading-line {
+  padding-top: 0.42em;
+  padding-bottom: 0.12em;
+}
+
+.cm-line.mp-md-heading-1 {
+  padding-top: 0.6em;
+}
+
+.cm-line.mp-md-codeblock-line {
+  background: rgba(231, 238, 236, 0.4);
+}
+
+/* .cm-content 前缀提特异性：HighlightStyle 注入的 token 样式在文档后部，单类会被它压掉 */
+.cm-content .mp-md-strong {
+  font-weight: 720;
+}
+
+.cm-content .mp-md-inline-code {
+  background: rgba(231, 238, 236, 0.58);
+  border-radius: 4px;
+  padding: 0.05em 0.15em;
+}
+
+.cm-content .mp-md-link-text {
+  color: #56786f;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+}
+
+.cm-content .mp-md-link-url {
+  color: var(--mp-muted);
+  opacity: 0.75;
+}
+
+.cm-content .mp-md-wiki-link {
+  color: #56786f;
+  background: rgba(142, 189, 159, 0.16);
+  border-radius: 4px;
+  padding: 0.04em 0.22em;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.cm-line.mp-md-quote-line {
+  border-left: 3px solid var(--mp-accent-strong);
+  padding-left: 10px;
+}
+
+.cm-content .mp-md-task-checkbox {
+  accent-color: #8ebd9f;
+  margin-right: 6px;
+  vertical-align: -0.12em;
+}
+
+.cm-line.mp-md-task-done {
+  color: var(--mp-muted);
+  text-decoration: line-through;
+  text-decoration-color: rgba(138, 123, 113, 0.45);
+}
+
+.mp-md-table-widget {
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.mp-md-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.mp-md-table th,
+.mp-md-table td {
+  border: 1px solid var(--mp-accent-strong);
+  padding: 4px 10px;
+  text-align: left;
+}
+
+.mp-md-table th {
+  background: var(--mp-accent);
+  font-weight: 640;
+}
+
+.mp-md-table tbody tr:nth-child(even) td {
+  background: rgba(231, 238, 236, 0.28);
+}
+
+/* frontmatter 属性卡：照阅读模式 FrontmatterCard（Obsidian properties 式）——左键 muted 小字定宽、右值，
+   行间 0.5px 细线，整块 r8 细描边，不垫色块（配色铁律：薄荷不套薄荷）。键列宽由 js 按最长键内联 */
+.mp-md-frontmatter {
+  margin: 2px 0 10px;
+  border: 0.5px solid color-mix(in srgb, var(--mp-muted) 22%, transparent);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+
+.mp-md-frontmatter-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 12px;
+}
+
+.mp-md-frontmatter-row + .mp-md-frontmatter-row {
+  border-top: 0.5px solid color-mix(in srgb, var(--mp-muted) 16%, transparent);
+}
+
+.mp-md-frontmatter-key {
+  flex: none;
+  color: var(--mp-muted);
+  overflow-wrap: anywhere;
+}
+
+.mp-md-frontmatter-value {
+  flex: 1;
+  min-width: 0;
+  color: color-mix(in srgb, var(--mp-text) 82%, transparent);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* 露源码态：等宽小字，颜色由 HighlightStyle 的 tags.meta（muted）给 */
+.cm-line.mp-md-frontmatter-line {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}

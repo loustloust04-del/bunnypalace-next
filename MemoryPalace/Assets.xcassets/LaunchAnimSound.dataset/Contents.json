@@ -1,0 +1,13 @@
+{
+  "data": [
+    {
+      "idiom": "universal",
+      "filename": "launch-splash.caf",
+      "universal-type-identifier": "com.apple.coreaudio-format"
+    }
+  ],
+  "info": {
+    "author": "xcode",
+    "version": 1
+  }
+}

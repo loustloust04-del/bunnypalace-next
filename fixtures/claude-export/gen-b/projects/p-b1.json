@@ -1,0 +1,22 @@
+{
+ "uuid": "p-b1",
+ "name": "中期项目",
+ "description": "编的项目",
+ "is_private": true,
+ "is_starter_project": false,
+ "prompt_template": "项目指令：回答简短。",
+ "created_at": "2026-01-01T00:00:00.123456Z",
+ "updated_at": "2026-01-01T00:01:00.123456Z",
+ "creator": {
+  "uuid": "acct-1",
+  "full_name": "测试"
+ },
+ "docs": [
+  {
+   "uuid": "p-b1-d0",
+   "filename": "代码.py",
+   "content": "print('hi')",
+   "created_at": "2026-01-01T00:00:00.123456Z"
+  }
+ ]
+}

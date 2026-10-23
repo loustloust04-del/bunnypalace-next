@@ -1,0 +1,1355 @@
+<!doctype html>
+<html lang="zh-CN" data-mode="app">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>记忆花园 · 说明书</title>
+<style>
+:root{
+  --bg:#FFFCF8; --sidebar:#EDF4EF; --text:#3D3633; --text-2:#807870; --text-3:#ADA69E;
+  --line:#E7EEEC; --accent:#8EBD9F; --danger:#E08585; --favorite:#F0CC8F;
+  --font-scale:1.2; --base:13px;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#121311; --sidebar:#171916; --text:#EEE7DF; --text-2:#C8C0B6; --text-3:#948E86;
+         --line:#27302D; --accent:#7FB993; --danger:#D77D7D; --favorite:#D6B06F; }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:none}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:calc(var(--base) * var(--font-scale))/1.7 -apple-system,"PingFang SC","Hiragino Sans GB","Helvetica Neue",sans-serif;
+  -webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.app{display:flex;min-height:100vh}
+nav.toc{width:240px;flex:none;background:var(--sidebar);border-right:1px solid var(--line);
+  position:sticky;top:0;height:100vh;overflow:auto;padding:14px 12px 24px}
+nav.toc .search{position:relative;margin-bottom:12px}
+nav.toc input{width:100%;padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--text);font:inherit;font-size:.92em;outline:none}
+nav.toc input:focus{border-color:var(--accent)}
+.results{position:absolute;left:0;right:0;top:100%;margin-top:4px;background:var(--bg);border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 8px 24px rgba(0,0,0,.08);max-height:60vh;overflow:auto;z-index:5;display:none}
+.results.on{display:block}
+.results a{display:block;padding:7px 10px;color:var(--text);border-bottom:1px solid var(--line);font-size:.92em}
+.results a small{display:block;color:var(--text-3);font-size:.85em}
+.results a:hover,.results a.active{background:var(--sidebar);text-decoration:none}
+.area{margin:10px 0 2px;font-size:.72em;letter-spacing:.06em;color:var(--text-3);text-transform:uppercase}
+nav.toc ul{list-style:none;margin:0;padding:0}
+nav.toc li a{display:block;padding:4px 8px;border-radius:7px;color:var(--text-2);font-size:.95em}
+nav.toc li a.active{background:var(--bg);color:var(--text);font-weight:600}
+nav.toc li a .badge{margin-left:4px}
+main{flex:1;min-width:0;padding:28px 34px 60px;max-width:820px}
+section.page{display:none}
+section.page.active{display:block}
+h1{font-size:1.7em;margin:0 0 .3em;font-weight:700}
+h2{font-size:1.2em;margin:1.8em 0 .5em;padding-top:.3em;border-top:1px solid var(--line);font-weight:650;scroll-margin-top:12px}
+h3{font-size:1.02em;margin:1.3em 0 .4em}
+blockquote{margin:0 0 1.2em;padding:.2em 0 .2em 12px;border-left:3px solid var(--accent);color:var(--text-2)}
+p,ul,ol{margin:0 0 .9em}
+li{margin:.15em 0}
+code{font-family:"SF Mono",Menlo,monospace;font-size:.88em;background:var(--sidebar);padding:.1em .35em;border-radius:5px}
+pre{background:var(--sidebar);padding:12px 14px;border-radius:10px;overflow:auto}
+pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:0 0 1.2em;font-size:.94em}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}
+th{background:var(--sidebar);font-weight:600}
+img{max-width:100%;border-radius:10px;border:1px solid var(--line);display:block;margin:.5em 0 1em}
+.badge{display:inline-block;font-size:.68em;line-height:1;padding:.3em .5em;border-radius:6px;vertical-align:middle;
+  background:var(--sidebar);color:var(--text-2);border:1px solid var(--line);font-weight:600;letter-spacing:.03em}
+.badge.pro{background:var(--accent);color:#fff;border-color:transparent}
+.note{background:var(--sidebar);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:0 0 1em;font-size:.94em;color:var(--text-2)}
+.note.lite{display:none}
+html.lite .note.lite{display:block}
+.platform{position:relative;border:1px dashed var(--line);border-radius:10px;padding:10px 12px 2px;margin:0 0 1em}
+.platform::before{content:attr(data-label);position:absolute;top:-.8em;left:10px;background:var(--bg);padding:0 6px;font-size:.72em;color:var(--text-3);letter-spacing:.05em}
+html.platform-macos .platform[data-platform="ios"],html.platform-ios .platform[data-platform="macos"]{display:none}
+html.platform-macos .platform,html.platform-ios .platform{border:none;padding:0;margin:0}
+html.platform-macos .platform::before,html.platform-ios .platform::before{display:none}
+.pager{display:flex;justify-content:space-between;margin-top:3em;padding-top:1em;border-top:1px solid var(--line);font-size:.94em}
+.topbar{display:none}
+.platform-switch{display:none;gap:4px;margin:0 0 12px}
+html[data-mode="site"] .platform-switch{display:flex}
+.platform-switch button{font:inherit;font-size:.8em;padding:3px 9px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text-2)}
+.platform-switch button.on{background:var(--accent);color:#fff;border-color:transparent}
+@media (max-width:720px){
+  .app{display:block}
+  .topbar{display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:6;background:var(--sidebar);border-bottom:1px solid var(--line);padding:10px 14px}
+  .topbar button{font:inherit;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;color:var(--text)}
+  .topbar .title{font-weight:600;font-size:.95em;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  nav.toc{position:fixed;left:0;top:0;bottom:0;width:min(84vw,320px);height:auto;transform:translateX(-102%);transition:transform .22s;z-index:8;padding-top:14px}
+  nav.toc.open{transform:none;box-shadow:0 0 40px rgba(0,0,0,.18)}
+  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:7;display:none}
+  .scrim.on{display:block}
+  main{padding:18px 16px 50px}
+  h2{scroll-margin-top:58px}
+}
+</style>
+</head>
+<body>
+<div class="topbar"><button id="tocBtn">≡ 目录</button><span class="title" id="topTitle"></span></div>
+<div class="scrim" id="scrim"></div>
+<div class="app">
+<nav class="toc" id="toc">
+  <div class="search"><input id="q" type="search" placeholder="搜索文档…" autocomplete="off"><div class="results" id="results"></div></div>
+  <div class="platform-switch" id="pswitch"><button data-p="">全部</button><button data-p="macos">macOS</button><button data-p="ios">iOS</button></div>
+  <div class="area">开始</div>
+<ul>
+<li><a href="#connect-model">接一个模型</a></li>
+<li><a href="#first-import">导入你的聊天记录</a></li>
+</ul>
+<div class="area">聊天</div>
+<ul>
+<li><a href="#main-chat">主对话阅读</a></li>
+</ul>
+<div class="area">模型与联网</div>
+<ul>
+<li><a href="#model">模型与 API 卡</a></li>
+<li><a href="#web-search">联网搜索</a></li>
+<li><a href="#budget">预算</a></li>
+</ul>
+<div class="area">数据</div>
+<ul>
+<li><a href="#import">导入</a></li>
+<li><a href="#import-undo">导入历史与撤回<span class="badge pro">pro</span></a></li>
+</ul>
+<div class="area">模块</div>
+<ul>
+<li><a href="#home-screen">手机主屏</a></li>
+</ul>
+
+</nav>
+<main id="main">
+<section class="page" id="connect-model" data-area="00-start" data-tier="free" data-platforms="macos,ios">
+<h1>接一个模型</h1>
+<blockquote>
+<p>做完这页，<span data-var="char">AI</span>就能用你选的模型跟你聊天了。</p>
+</blockquote>
+<h2 id="connect-model--准备">准备</h2>
+<p>你需要一把 API key。去模型提供商的官网申请，拿到一串以 <code>sk-</code> 开头的密钥。</p>
+<h2 id="connect-model--步骤">步骤</h2>
+<ol>
+<li>打开设置。</li>
+</ol>
+<div class="platform" data-platform="macos" data-label="macOS">
+
+<p>按 ⌘,（或点侧栏底部的齿轮图标）打开设置窗口，在左侧目录点「API」。</p>
+</div>
+
+
+<div class="platform" data-platform="ios" data-label="iOS">
+
+<p>点对话列表页底部的齿轮图标，点「API」或「模型（API）」。</p>
+</div>
+
+
+<p><img src="manual-connect-model-01-settings-lite.png" alt="lite 模式设置根，最下面是「模型（API）」" loading="lazy"></p>
+<ol start="2">
+<li>点「API Keys」标题右侧的 + 按钮。弹出「新建 API」页。</li>
+</ol>
+<p><img src="manual-connect-model-02-api-page.png" alt="API 页：卡列表、全部模型、联网搜索、预算" loading="lazy"></p>
+<ol start="3">
+<li><p>选一个 Emoji，给这张卡起个昵称。Emoji 不能和已有的卡重复，被占用的会标「占」。</p>
+</li>
+<li><p>在「提供商」下拉里选你的服务商。内置 17 家预设，选好后地址自动填好。如果你的服务商不在列表里，选「自定义」，再选协议、填 Base URL。</p>
+</li>
+</ol>
+<p><img src="manual-connect-model-03-new-card.png" alt="新建 API：身份、提供商、API Key" loading="lazy"></p>
+<ol start="5">
+<li><p>在「API Key」栏粘贴你的 key。点旁边的眼睛键可以看明文。保存后只显示前 4 后 4 位，真 key 进 Keychain。</p>
+</li>
+<li><p>点「测试连接」。成功会显示「连接成功 (200)」。</p>
+</li>
+</ol>
+<p><img src="manual-connect-model-04-test-ok.png" alt="测试连接成功" loading="lazy"></p>
+<ol start="7">
+<li><p>点右上角「保存」。按钮短暂变成「✓」后自动关闭页面。</p>
+</li>
+<li><p>在卡列表里点刚才建的卡，进入「编辑 API」。在「模型」区点「刷新模型」，等它拉回这家提供商的模型列表。</p>
+</li>
+</ol>
+<p><img src="manual-connect-model-05-models.png" alt="编辑 API 的「模型」区：刷新模型、手动添加模型" loading="lazy"></p>
+<ol start="9">
+<li>回到 API 页，点「全部模型」。找到你要用的模型，点行尾的 ☆ 收藏。聊天页的选择器只列收藏过的模型，不收藏就看不见。</li>
+</ol>
+<p><img src="manual-connect-model-06-all-models.png" alt="全部模型：每行 🌞 🌛 ☆ 三个键" loading="lazy"></p>
+<ol start="10">
+<li>回到聊天页，点输入栏右侧的模型胶囊。在选择器里点你刚收藏的模型，选中即可开始聊天。</li>
+</ol>
+<p><img src="manual-connect-model-07-picker.png" alt="聊天页模型选择器，按卡分组列收藏模型" loading="lazy"></p>
+<h2 id="connect-model--下一步">下一步</h2>
+<p>想了解 API 卡的全部选项和模型管理细节，见<a href="#model">模型与 API 卡</a>。</p>
+
+<div class="pager"><span></span><span><a href="#first-import">导入你的聊天记录 →</a></span></div>
+</section>
+
+<section class="page" id="first-import" data-area="00-start" data-tier="free" data-platforms="macos,ios">
+<h1>导入你的聊天记录</h1>
+<blockquote>
+<p>把 ChatGPT、Claude、Gemini、RikkaHub 或 Kelivo 的对话导入记忆花园，做完就能浏览全部聊天记录。</p>
+</blockquote>
+<h2 id="first-import--准备">准备</h2>
+<p>一份 ChatGPT、Claude、Gemini、RikkaHub 或 Kelivo 的导出包。导入全程在本机完成，不联网。</p>
+<h2 id="first-import--步骤">步骤</h2>
+<ol>
+<li>打开导入页面。</li>
+</ol>
+<div class="platform" data-platform="macos" data-label="macOS">
+
+<p>点侧栏搜索行右侧的导入键（悬停提示「导入对话」）。</p>
+</div>
+
+
+<div class="platform" data-platform="ios" data-label="iOS">
+
+<p>打开 设置 › 数据与备份 › 导入，点「导入对话」。看不到「数据与备份」时，走 设置 › 通用 › 楼层。点「编辑当前楼层」或「新建楼层」，再点「导入聊天记录」。保存后导入页面自动打开。对话列表为空时也可以点空状态卡上的「导入聊天记录」。</p>
+</div>
+
+
+<ol start="2">
+<li>点「选择导出包」。</li>
+</ol>
+<p>弹出系统文件选择器。zip、文件夹、单个导出文件都行，可以一次多选。不用区分来源，记忆花园会自动识别。不确定怎么导出，展开页面上的「怎么拿到导出包」。</p>
+<ol start="3">
+<li>选好文件，确认打开。</li>
+</ol>
+<p>页面显示「正在识别」。大包要十几秒。</p>
+<ol start="4">
+<li>看到识别结果，点「开始导入」。</li>
+</ol>
+<p>页面列出识别到的内容，按来源和类别分行。默认全部勾选，确认后点「开始导入」。</p>
+<ol start="5">
+<li>等待导入完成。</li>
+</ol>
+<p>页面显示当前阶段和进度条，做完的阶段会划掉。大包要几分钟，别关这个页面。</p>
+<ol start="6">
+<li>看到结果，点「完成」。</li>
+</ol>
+<p>页面按类别列出本次新增和跳过的条数。关闭后，导入的对话出现在侧栏列表里。</p>
+<h2 id="first-import--下一步">下一步</h2>
+<p>导入页上还有「叠加导入」和「复制已在其他楼层的对话」两个开关，这次不用开。想了解这两个开关和结果页每项的含义，见<a href="#import">导入</a>。每次导入会生成一条记录，需要时可以整次撤回，见<a href="#import-undo">导入历史与撤回</a>。</p>
+
+<div class="pager"><span><a href="#connect-model">← 接一个模型</a></span><span><a href="#main-chat">主对话阅读 →</a></span></div>
+</section>
+
+<section class="page" id="main-chat" data-area="10-chat" data-tier="free" data-platforms="ios,macos">
+<h1>主对话阅读</h1>
+<h2 id="main-chat--切换消息版本">切换消息版本</h2>
+<p>消息有多个版本时，气泡下方会显示 <code>‹ 2 / 3 ›</code>。点左右箭头切换版本，点中间数字打开版本列表。到了第一个或最后一个版本，相应箭头会变灰。</p>
+<p>普通模式和气泡模式都能切换版本。你的分页器靠右，助手的靠左。</p>
+<h2 id="main-chat--查看工具步骤">查看工具步骤</h2>
+<p>助手使用工具时，先显示一句过程总览，例如「在文件库搜了两次，读了卡片说明」。点这句话，查看每一步的动作、工具名称和完成状态。点某一步，可以继续查看参数、输出或打开完整结果。</p>
+<p>工具还在运行时，总览显示进度；完成后可能更新为更自然的总结。总结生成失败仍可查看步骤和结果。</p>
+<h2 id="main-chat--查看想起的记忆">查看想起的记忆</h2>
+<p>助手回复下方的宫殿门廊图标旁会显示「想起来了 N 件事」，并预览一条相关记忆。点开可以查看这轮想起的记忆。</p>
+<p>记忆列表支持反馈、修改、停用与恢复，以及跳到来源。列表显示记忆现在的内容；已删除的记忆会保留当时的快照并标记状态。</p>
+<h2 id="main-chat--选择展开方式">选择展开方式</h2>
+<p>进入 <strong>设置 › 外观 › 消息显示</strong>，分别设置「工具调用」和「想起来了」：</p>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>点开后</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>原地展开</td>
+<td>在对话里查看</td>
+</tr>
+<tr>
+<td>弹出显示</td>
+<td>在独立面板里查看</td>
+</tr>
+<tr>
+<td>隐藏</td>
+<td>不显示这一行</td>
+</tr>
+</tbody></table>
+<p>两项可以选择不同方式。隐藏工具过程不会隐藏工具生成的结果卡。</p>
+<h2 id="main-chat--填写加密卡">填写加密卡</h2>
+<p>密码等敏感值使用加密卡。点豆沙绿底白字的「填写」打开填写面板，填写并保存；已经填过的卡可点「修改」。</p>
+<h2 id="main-chat--回应一条消息">回应一条消息</h2>
+<p>长按消息，点回应图标表达赞、喜欢、庆祝等回应。已经选中的再点一次即可取消。消息旁的回应角标也能点按取消。</p>
+<p>回应会随下次消息捎带给助手；发送前取消会撤掉捎带，发送后取消会另行告知。</p>
+<h2 id="main-chat--报错与系统通知">报错与系统通知</h2>
+<p>报错、停止和送达异常以居中胶囊显示。回复中途出错时，已经生成的正文保留，错误提示显示在气泡外。有「重试」或「重发」按钮时，可以直接重试。</p>
+
+<div class="pager"><span><a href="#first-import">← 导入你的聊天记录</a></span><span><a href="#model">模型与 API 卡 →</a></span></div>
+</section>
+
+<section class="page" id="model" data-area="20-model" data-tier="free" data-platforms="macos,ios">
+<h1>模型与 API 卡</h1>
+<blockquote>
+<p>管理你的 API 卡和模型，让记忆花园连上各家大模型。</p>
+</blockquote>
+<h2 id="model--这是什么">这是什么</h2>
+<p>API 卡是记忆花园接入模型的单位。一张卡包含一把 key、一个 emoji、一个昵称、一家提供商，以及这张卡能用的模型列表。你可以建任意多张卡，同一家提供商也能建多张。</p>
+<p>卡不绑定任何对话。所有卡在 app 层面共享，任何对话都能选任何卡里的模型。</p>
+<h2 id="model--怎么进">怎么进</h2>
+<div class="platform" data-platform="macos" data-label="macOS">
+
+<p>⌘,（或侧栏底部齿轮）› 设置窗口左侧目录「API」。</p>
+</div>
+
+
+<div class="platform" data-platform="ios" data-label="iOS">
+
+<p>对话列表页底部齿轮 › 设置 › 「API」（pro 模式）或「模型（API）」（lite 模式）。</p>
+</div>
+
+
+<p><img src="manual-model-01-api-page.png" alt="API 页" loading="lazy"></p>
+<p>API 页从上到下依次是：「API Keys」卡列表、「全部模型」、「联网搜索」、「预算（全局总闸）」、「iCloud Keychain 同步」。一张卡都没有时显示「还没加 API。点右上 + 加一张」。</p>
+<h2 id="model--提供商与协议">提供商与协议</h2>
+<p>新建卡时在「提供商」下拉里选。内置 17 家预设：</p>
+<p>GPT OAuth (账号登录)、Anthropic、OpenAI、OpenRouter、DeepSeek、Groq、xAI、SiliconFlow、通义千问 (DashScope)、智谱 (GLM)、豆包 (Volcengine)、Google Gemini、Moonshot / Kimi、Ollama (本地)、claude-p、Claude Code (本地)、Codex (本地)。另有「自定义」。</p>
+<p>底层协议只有四种：OpenAI 兼容、Anthropic、CC Bridge（本地 Claude Code 桥）、ChatGPT 账号登录。除 Anthropic / claude-p 走 Anthropic 协议、Claude Code / Codex 走 CC Bridge、GPT OAuth 走账号登录外，其余预设全部走 OpenAI 兼容协议。</p>
+<p>预设只是模板。选完后协议、地址、预填模型复制进卡，卡本身独立保存。</p>
+<h3>自定义卡</h3>
+<p>选「自定义」后要填三样：协议（OpenAI 兼容或 Anthropic）、Base URL、key。已保存的卡不能再改协议。</p>
+<h3>内置预设卡</h3>
+<p>只要填 key。Base URL 只读展示。</p>
+<h3>特殊卡</h3>
+<p><strong>GPT OAuth</strong>：app 启动自动出现在卡列表，不用手动新建。在卡详情里点「用 ChatGPT 账号登录」完成授权。</p>
+<div class="platform" data-platform="ios" data-label="iOS">
+
+<p>登录分三步：先在 Safari 中登录，Safari 会显示「无法连接到服务器」，复制那段 <code>http://localhost:1455/...</code> 整段 URL，回 app 粘贴完成登录。</p>
+</div>
+
+
+<div class="platform" data-platform="macos" data-label="macOS">
+
+<p>系统浏览器打开登录页，登录后自动收回调。</p>
+</div>
+
+
+<p>登录成功后自动拉一次模型列表。页脚说明：「用你的 ChatGPT 账号（订阅）登录后可调 GPT-5.2 等模型，无需买 API key。Token 存本机 Keychain。实验性：codex backend 未公开，可能随时不可用。」</p>
+<p><strong>claude-p</strong>：同一 Wi-Fi 自动发现正在跑 claude-proxy 的 Mac，点一下整笔安装（探活、建卡、拉模型、收藏默认模型），失败自动回滚。这张卡「仅文字聊天：这张卡不转发图片，也不会调用工具。」</p>
+<p><strong>Claude Code / Codex</strong>：配了 Claude Code 桥后自动配平一张 Codex 卡，两张本地卡的模型首次自动收藏一次。GPT OAuth 和 Claude Code 各只能有一张卡。</p>
+<div class="platform" data-platform="ios" data-label="iOS">
+
+<p>Claude Code 卡用「扫码配对」全屏扫码器。</p>
+</div>
+
+
+<div class="platform" data-platform="macos" data-label="macOS">
+
+<p>Claude Code 卡弹出「我是 hub」二维码。</p>
+</div>
+
+
+<h2 id="model--key-存在哪">Key 存在哪</h2>
+<p>Key 存在系统 Keychain。保存后界面只显示前 4 位和后 4 位，中间遮罩。</p>
+<p>「iCloud Keychain 同步」开关在 API 页底部，默认关。打开后所有 key 同步到你登录同一 Apple ID 的设备。副文案：「开启后 API Key 在你登录同一 Apple ID 的设备间同步。对话数据不会同步。」切换后提示「已同步到 iCloud Keychain」或「已切回本机 Keychain」；部分切换失败时提示「切换失败 N 个，请重试或重新输入 key」。</p>
+<p>备份不含 key：整机备份不导出凭据表和 Keychain；设置导出含卡元数据但排除 key 和模型列表。</p>
+<h2 id="model--模型列表怎么来">模型列表怎么来</h2>
+<p>三种来源：</p>
+<ol>
+<li><strong>预设预填</strong>：选提供商时自动带入一批模型。</li>
+<li><strong>刷新模型</strong>：在卡详情点「刷新模型」，从服务端拉 <code>/models</code> 接口。只加新的、不删旧的。拉回来的列表会过滤掉 embed、tts、whisper、dall-e、moderation、davinci、babbage 等非聊天模型，按模型 ID 字母序排列。</li>
+<li><strong>手动添加模型</strong>：填模型 ID 即可。提示：「ID 会原样发给这家服务。填错了不会立刻报错，要到聊天时才会。」</li>
+</ol>
+<p>卡详情的「模型」区显示前 8 个模型。超出部分提示「…还有 N 个，在「全部模型」页查看」。页脚说明：「刷新拉回来的是这家推荐的清单，不是全部。想用清单外的（比如上一代模型），手动填 ID 就能用。」</p>
+<h2 id="model--三个角色">🌞🌛☆ 三个角色</h2>
+<p>在「全部模型」页给模型分配角色。这个页面汇总所有卡的模型，支持按卡筛选、搜索（模型 ID / 名称 / 卡名 / 协议关键词）、只看收藏。</p>
+<p>每个模型行尾有三个按钮：</p>
+<table>
+<thead>
+<tr>
+<th>角色</th>
+<th>图标</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>主对话</td>
+<td>🌞</td>
+<td>设为全局默认聊天模型</td>
+</tr>
+<tr>
+<td>副记忆</td>
+<td>🌛</td>
+<td>后台记忆提取等任务优先用这个模型</td>
+</tr>
+<tr>
+<td>收藏</td>
+<td>☆</td>
+<td>聊天页模型选择器只列收藏过的模型</td>
+</tr>
+</tbody></table>
+<p>不收藏就不会出现在聊天页的模型选择器里。CC Bridge 卡（Claude Code / Codex）的模型首次自动收藏。</p>
+<h2 id="model--聊天里切模型">聊天里切模型</h2>
+<p>聊天页输入栏右侧有模型胶囊，显示当前模型名。点它打开模型选择器，按卡分组列出所有收藏模型。选中后立刻切换。</p>
+<div class="platform" data-platform="ios" data-label="iOS">
+
+<p>模型选择器以底部 sheet 弹出。</p>
+</div>
+
+
+<div class="platform" data-platform="macos" data-label="macOS">
+
+<p>模型选择器以 popover 弹出。</p>
+</div>
+
+
+<p>模型选择按对话记住。每个对话可以用不同的模型。切换时同时更新全局默认，新对话会用你最后选的模型。</p>
+<p>没有收藏任何模型时，选择器显示「还没有 API」，提示「去 设置 → API 加一张 API key 卡，再到「全部模型」里 ☆ 收藏几个模型。」</p>
+<p>解析顺序：对话自己选的模型 → 全局默认 → 第一个有 key 的卡的第一个模型 → 硬兜底 <code>openrouter/anthropic/claude-sonnet-4</code>。</p>
+<h2 id="model--全部选项">全部选项</h2>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>在哪</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Emoji</td>
+<td>卡详情「身份」</td>
+<td>池里第一个未占用</td>
+<td>全局唯一，列表和选择器前缀显示</td>
+</tr>
+<tr>
+<td>昵称</td>
+<td>卡详情「身份」</td>
+<td>空（保存时为空写入「未命名」）</td>
+<td>卡列表的主标题</td>
+</tr>
+<tr>
+<td>提供商</td>
+<td>卡详情「提供商」</td>
+<td>自定义</td>
+<td>决定协议、地址、预填模型</td>
+</tr>
+<tr>
+<td>协议</td>
+<td>自定义卡</td>
+<td>OpenAI 兼容</td>
+<td>OpenAI 兼容或 Anthropic；已存卡不能改</td>
+</tr>
+<tr>
+<td>Base URL</td>
+<td>自定义卡</td>
+<td>—</td>
+<td>请求根地址；缺 <code>/v1</code> 时自动补</td>
+</tr>
+<tr>
+<td>API Key</td>
+<td>卡详情「API Key」</td>
+<td>—</td>
+<td>存 Keychain；列表只显示前 4 后 4 位</td>
+</tr>
+<tr>
+<td>工具调用</td>
+<td>卡详情（非 OAuth / CC Bridge 卡）</td>
+<td>开</td>
+<td>关掉后请求不带工具，system 不提工具</td>
+</tr>
+<tr>
+<td>🌞 主对话</td>
+<td>全部模型页</td>
+<td>—</td>
+<td>写入全局默认聊天模型</td>
+</tr>
+<tr>
+<td>🌛 副记忆</td>
+<td>全部模型页</td>
+<td>—</td>
+<td>后台记忆提取优先用这个模型</td>
+</tr>
+<tr>
+<td>☆ 收藏</td>
+<td>全部模型页</td>
+<td>—</td>
+<td>聊天选择器只列收藏模型</td>
+</tr>
+<tr>
+<td>iCloud Keychain 同步</td>
+<td>API 页底部</td>
+<td>关</td>
+<td>所有 key 在同一 Apple ID 设备间同步</td>
+</tr>
+</tbody></table>
+<h2 id="model--删卡">删卡</h2>
+<div class="platform" data-platform="ios" data-label="iOS">
+
+<p>卡列表左滑「删除」。</p>
+</div>
+
+
+<div class="platform" data-platform="macos" data-label="macOS">
+
+<p>卡列表右键菜单「删除」。</p>
+</div>
+
+
+<p>也可以在卡详情底部点「删除这张 API 卡」。删卡同时清除 Keychain 里的 key，并清理失效的主模型设置与收藏。</p>
+<p>删卡不影响已有对话。对话记住的模型 ID 失效后，自动回退到全局默认或第一个可用模型，聊天继续。</p>
+<h2 id="model--边界与限制">边界与限制</h2>
+<ul>
+<li>选了模型但卡没有 key：发送时气泡显示「⚠️ 未设置 &lt;卡名&gt; 的 API Key」。去卡详情补上 key。CC Bridge 卡不需要 key。</li>
+<li>卡被删了但对话还记着它：气泡显示「⚠️ 找不到提供商: &lt;卡id&gt;」。重新选一个模型即可。</li>
+<li>一张卡都没有：硬兜底指向不存在的卡，发送会得到「找不到提供商: openrouter」。去 API 页加一张卡。</li>
+<li>key 填错：测试连接报「API Key 无效 (401)：&lt;服务端消息&gt;」。聊天时服务端返回的错误消息原样写进气泡；解析不出时显示「API 错误 (状态码)」。</li>
+<li>网络失败：气泡显示系统错误描述。连上但没内容时显示「未收到回复」。</li>
+<li>测试连接的判定比较宽松：除了 200、201 算成功外，非 401 / 403 的状态码也一律算成功，显示「端点可达 (状态码)」。比如 404 也算通过。</li>
+<li>Anthropic 卡测试固定用 <code>claude-haiku-4-5</code>。OpenAI 兼容卡按首选模型、上次用的、第一个非 embedding 模型、<code>gpt-3.5-turbo</code> 依次挑选。</li>
+<li>刷模型失败：卡详情「模型」区红字显示错误，如「请求失败 (状态码)」「解析响应失败」「未设置 API Key」。CC Bridge 卡显示「CC Bridge 不支持拉取模型列表」。已有模型不受影响。</li>
+<li>「拉取成功但 0 个模型」：地址正确但服务端没返回模型时会出现这个提示。</li>
+<li>凭据表损坏时逐条兜底，坏的跳过，面包屑记「凭据表有 N 条解码失败，已跳过」。</li>
+</ul>
+<h2 id="model--相关页面">相关页面</h2>
+<ul>
+<li>见<a href="#connect-model">接一个模型</a>— 从新建卡到聊天选中的完整步骤。</li>
+<li>见<a href="#web-search">联网搜索</a>— 搜索权限、搜索服务配置、黑名单。</li>
+<li>见<a href="#budget">预算</a>— 全局花费总闸、进度条、用完怎么办。</li>
+</ul>
+
+<div class="pager"><span><a href="#main-chat">← 主对话阅读</a></span><span><a href="#web-search">联网搜索 →</a></span></div>
+</section>
+
+<section class="page" id="web-search" data-area="20-model" data-tier="free" data-platforms="macos,ios">
+<h1>联网搜索</h1>
+<blockquote>
+<p>控制<span data-var="char">AI</span>能不能上网查资料，以及用哪家搜索服务。</p>
+</blockquote>
+<h2 id="web-search--这是什么">这是什么</h2>
+<p>联网搜索让<span data-var="char">AI</span>在聊天中搜网页、获取最新信息。你设三档权限决定是否允许，再选一家搜索服务。Anthropic Claude 模型直连 Anthropic 自带的搜索工具，其他模型用你配好的搜索服务。</p>
+<p><img src="manual-web-search-01-section.png" alt="联网搜索区" loading="lazy"></p>
+<h2 id="web-search--怎么用">怎么用</h2>
+<div class="platform" data-platform="macos" data-label="macOS">
+
+<p>打开 设置 › API，滚到「联网搜索」。</p>
+</div>
+
+
+<div class="platform" data-platform="ios" data-label="iOS">
+
+<p>打开 设置 › API（lite 版为 设置 › 模型（API）），滚到「联网搜索」。</p>
+</div>
+
+
+<p><strong>开启搜索</strong></p>
+<ol>
+<li>把「启用联网搜索」改为「自动允许」或「每次询问」。</li>
+<li>点「搜索服务」进入配置页。</li>
+<li>点「添加搜索服务」，从 13 家中选一家。</li>
+<li>Bing 和 DuckDuckGo 免 key，直接添加。其余 11 家需要填 key。</li>
+<li>添加后点「测试」确认可用。</li>
+<li>选中一家作为活跃服务。</li>
+</ol>
+<p>Tavily、Exa、SearXNG 支持自定义端点。</p>
+<div class="platform" data-platform="macos" data-label="macOS">
+
+<p>「搜索服务」「网页登录态」「黑名单」以弹窗打开，点「关闭」返回。</p>
+</div>
+
+
+<div class="platform" data-platform="ios" data-label="iOS">
+
+<p>「搜索服务」「网页登录态」「黑名单」以推入页面打开。</p>
+</div>
+
+
+<p><strong>网页登录态</strong></p>
+<p>有些网页需要登录才能看完整内容。点「网页登录态」，用内置浏览器登录目标网站。<span data-var="char">AI</span>访问同域网页时会带上登录态。不再需要时点「撤销登录」。</p>
+<p><strong>黑名单</strong></p>
+<p>不想让<span data-var="char">AI</span>读取的网站，加进黑名单。点「黑名单（AI 不读）」：</p>
+<ul>
+<li>点「导入推荐黑名单」，一次加入 9 个支付、银行、邮箱相关域名。</li>
+<li>点「添加域名」手动添加。</li>
+</ul>
+<p>黑名单按后缀匹配。加了 <code>example.com</code>，<code>sub.example.com</code> 也会被屏蔽。</p>
+<h2 id="web-search--全部选项">全部选项</h2>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>在哪</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>启用联网搜索</td>
+<td>联网搜索</td>
+<td>不允许</td>
+<td>三档：「自动允许」「每次询问」「不允许」</td>
+</tr>
+<tr>
+<td>搜索服务</td>
+<td>联网搜索 › 搜索服务</td>
+<td>未配置</td>
+<td>13 家可选；单选一家为活跃服务；每家可测试和编辑</td>
+</tr>
+<tr>
+<td>结果数</td>
+<td>联网搜索</td>
+<td>10</td>
+<td>范围 1–20</td>
+</tr>
+<tr>
+<td>超时</td>
+<td>联网搜索</td>
+<td>5 秒</td>
+<td>范围 1–30 秒</td>
+</tr>
+<tr>
+<td>网页登录态</td>
+<td>联网搜索 › 网页登录态</td>
+<td>—</td>
+<td>内置浏览器登录站点后，AI 同域访问带登录态；可「撤销登录」</td>
+</tr>
+<tr>
+<td>黑名单（AI 不读）</td>
+<td>联网搜索 › 黑名单</td>
+<td>空</td>
+<td>后缀匹配，子域名一并屏蔽；可导入推荐黑名单（9 个域名）</td>
+</tr>
+</tbody></table>
+<h2 id="web-search--边界与限制">边界与限制</h2>
+<ul>
+<li>权限为「不允许」时，<span data-var="char">AI</span>不会发起搜索。</li>
+<li>开启了搜索但没配搜索服务，<span data-var="char">AI</span>返回错误「没有配置任何搜索服务」。配一家即可。</li>
+<li>Anthropic Claude 模型自带搜索，不使用你配的搜索服务。</li>
+<li>「结果数」和「超时」仅在权限不是「不允许」时显示。</li>
+</ul>
+<h2 id="web-search--常见问题">常见问题</h2>
+<p><strong>用 Claude 模型还需要配搜索服务吗？</strong>
+不需要。Claude 直连 Anthropic 自带的搜索工具。如果你同时用其他模型，仍需配一家搜索服务。</p>
+<h2 id="web-search--相关页面">相关页面</h2>
+<ul>
+<li><a href="#model">模型与 API 卡</a>— 管理 API 卡和模型收藏。</li>
+<li><a href="#budget">预算</a>— 设置全局花费上限。</li>
+</ul>
+
+<div class="pager"><span><a href="#model">← 模型与 API 卡</a></span><span><a href="#budget">预算 →</a></span></div>
+</section>
+
+<section class="page" id="budget" data-area="20-model" data-tier="free" data-platforms="macos,ios">
+<h1>预算</h1>
+<blockquote>
+<p>控制所有 API 调用的花费上限，用完即停。</p>
+</blockquote>
+<h2 id="budget--这是什么">这是什么</h2>
+<p>预算是一道全局总闸，不分卡、不分模型。所有主对话和后台任务的花费累加在一起。到了上限就拦住，消息不会发出。</p>
+<p><img src="manual-budget-01-budget.png" alt="预算（全局总闸）" loading="lazy"></p>
+<h2 id="budget--怎么用">怎么用</h2>
+<p>打开设置，进入 API 页，往下滚到「预算（全局总闸）」。</p>
+<div class="platform" data-platform="ios" data-label="iOS">
+
+<p>Lite 模式入口：设置 › 模型（API）› 预算（全局总闸）。</p>
+</div>
+
+
+<p>预算默认开启，上限默认 10 美元。「预算（USD）」字段未填时显示 10.00，旁边带一个「默认」胶囊。</p>
+<p>改上限：在字段里填一个数字，保存即生效。清空字段再保存，回到默认的 10 美元。</p>
+<p>填 0 是特殊值：所有调用都会被拦下。</p>
+<p>想从零开始计数，点「重置已用」。弹出确认「清空已用花费？」后清零，上限不变。</p>
+<p>关掉「启用预算限额」开关，整个区块变半透明，不再限制花费。</p>
+<h2 id="budget--全部选项">全部选项</h2>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>在哪</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>启用预算限额</td>
+<td>预算（全局总闸）</td>
+<td>开</td>
+<td>关掉后不限花费，区块变半透明</td>
+</tr>
+<tr>
+<td>预算（USD）</td>
+<td>同上</td>
+<td>10.00（未填时显示「默认」胶囊）</td>
+<td>填数字保存；清空回默认 10；填 0 = 全部拦下</td>
+</tr>
+<tr>
+<td>已使用 / 进度条</td>
+<td>同上</td>
+<td>0</td>
+<td>进度 ≥80% 变黄，≥100% 变红</td>
+</tr>
+<tr>
+<td>重置已用</td>
+<td>同上</td>
+<td>—</td>
+<td>弹「清空已用花费？」确认后清零，上限保留</td>
+</tr>
+</tbody></table>
+<h2 id="budget--边界与限制">边界与限制</h2>
+<p>预算用完后发消息，弹出提示：「「&lt;卡名&gt;」预算已用完：$x / $y。去「API 设置 → 预算（保险闸）」点「重置已用」，或加预算上限。」按「好」关闭，消息不发出。</p>
+<p>上限填 0 时，提示文案变为「…预算上限是 $0，所有调用都会被拦下…」。</p>
+<p>后台任务被拦时不弹提示，静默跳过。</p>
+<p>进度条到 80% 只变颜色，聊天页没有任何提醒。</p>
+<p>花费按估算计入：取输入 token 的粗估值，加上预设最大输出 token 的全额，按内置定价表折算。不是精确账单。</p>
+<h2 id="budget--相关页面">相关页面</h2>
+<ul>
+<li><a href="#model">模型与 API 卡</a>— 了解卡的添加、删除和管理。</li>
+<li><a href="#connect-model">接一个模型</a>— 从零接入第一个模型。</li>
+</ul>
+
+<div class="pager"><span><a href="#web-search">← 联网搜索</a></span><span><a href="#import">导入 →</a></span></div>
+</section>
+
+<section class="page" id="import" data-area="50-data" data-tier="free" data-platforms="macos,ios">
+<h1>导入</h1>
+<blockquote>
+<p>把 Claude、ChatGPT、Gemini、RikkaHub 或 Kelivo 的聊天数据导进记忆花园。全程本地读取，不联网。</p>
+</blockquote>
+<h2 id="import--这是什么">这是什么</h2>
+<p>导入读取 Claude、ChatGPT、Gemini 的导出包和 RikkaHub、Kelivo 的备份。接受 <code>.zip</code>、<code>.json</code>、<code>.html</code>、文件夹和没有扩展名的文件，可以一次多选。不用手动选来源，记忆花园按内容自动识别。</p>
+<p>能导进来的内容：</p>
+<table>
+<thead>
+<tr>
+<th>类别</th>
+<th>去向</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Claude 对话</td>
+<td>本楼层</td>
+</tr>
+<tr>
+<td>Claude 设计对话</td>
+<td>本楼层，带项目名的归进同名文件夹</td>
+</tr>
+<tr>
+<td>Claude 项目</td>
+<td>本楼层文件夹（项目指令进「文件夹说明」）；项目文档进文件库「Claude 项目」</td>
+</tr>
+<tr>
+<td>Claude 记忆</td>
+<td>花园记忆（一段一条）；记忆文件进文件库「Claude 记忆」</td>
+</tr>
+<tr>
+<td>Claude Artifacts</td>
+<td>文件库「Claude Artifacts」，只取当前版本</td>
+</tr>
+<tr>
+<td>ChatGPT 对话</td>
+<td>本楼层，保留分支、思考、工具和联网搜索；包里的图片和上传文件能对上的存进文件库</td>
+</tr>
+<tr>
+<td>Gemini 活动记录（实验性）</td>
+<td>本楼层对话</td>
+</tr>
+<tr>
+<td>AI Studio 对话（实验性）</td>
+<td>本楼层对话；内嵌图片存进文件库</td>
+</tr>
+<tr>
+<td>RikkaHub 对话（实验性）</td>
+<td>本楼层，多版本导成可切的分支；按助手/文件夹归进花园文件夹；附件进文件库</td>
+</tr>
+<tr>
+<td>RikkaHub 助手记忆（实验性）</td>
+<td>花园记忆（前面带助手名，不钉住）</td>
+</tr>
+<tr>
+<td>Kelivo 对话</td>
+<td>本楼层，重新生成的多个版本导成可切的分支；包里的图片和文件存进文件库</td>
+</tr>
+</tbody></table>
+<p>不导入：账号信息、登录记录、分享链接、消息反馈、群聊、购物、Sora、月度回顾、Takeout 里其他 Google 产品的活动记录等。Claude 客户端注入的系统文本不导。ChatGPT 的自定义指令、system 消息和视觉隐藏的消息导成隐藏消息，界面不显示。AI Studio 的系统指令和运行参数只记在对话来源信息里，不套用。RikkaHub 的设置和 API key、助手设定和提示词、世界书、模式注入、快捷消息、收藏、生图记录、工作区、技能包、字体不导；对话自带的系统提示词和置顶只记在来源信息里，不套用。Kelivo 的设置和 API key、助手、供应商、MCP、记忆、快捷短语不导；助手名和系统提示词只记在对话来源信息里，不套用。酒馆（SillyTavern）聊天不在这里导，去卡库导入。</p>
+<h2 id="import--怎么用">怎么用</h2>
+<h3>在哪打开</h3>
+<div class="platform" data-platform="macos" data-label="macOS">
+
+<ul>
+<li>侧栏搜索行右侧导入键（悬停提示「导入对话」）</li>
+<li>设置 › 数据与备份 › 导入 ›「导入对话」</li>
+<li>设置 › 通用 › 楼层 › 新建楼层／编辑当前楼层 ›「导入聊天记录」</li>
+</ul>
+</div>
+
+
+<div class="platform" data-platform="ios" data-label="iOS">
+
+<ul>
+<li>设置 › 通用 › 楼层 › 新建楼层／编辑当前楼层 ›「导入聊天记录」</li>
+<li>对话列表空状态卡「导入聊天记录」（列表为空时出现）</li>
+<li>设置 › 数据与备份 › 导入 ›「导入对话」（仅 Pro）</li>
+<li>新手引导陪伴线教练屏「导入聊天记录」</li>
+</ul>
+</div>
+
+
+<p>所有入口打开同一个导入页面。楼层编辑页的入口在保存楼层后弹出。</p>
+<p><img src="manual-import-01-import-page.png" alt="导入页" loading="lazy"></p>
+<h3>选文件</h3>
+<p>点「选择导出包」打开系统文件选择器。zip、文件夹、json、html、没有扩展名的文件都行，可以一次多选。改过名的文件也能按内容识别。</p>
+<p>页面有「怎么拿到导出包」可展开：</p>
+<ul>
+<li>Claude：「claude.ai › 设置 › 隐私 › 导出数据。邮件里的链接 24 小时内有效；新版会给好几个 zip，全部下载后一起选进来（或选它们所在的文件夹）。」</li>
+<li>ChatGPT：「两种导法，都能导：① 全包（带图片和上传的文件）：privacy.openai.com › Download my data。邮件里下载的大 zip 里套着好几个 zip，直接选外面那个。② 只有对话：chatgpt.com › 设置 › 数据控制 › 导出数据。邮件里下载 zip，直接选这个 zip。」</li>
+<li>Gemini（实验性）：「takeout.google.com 里只勾「我的活动」，在它的选项里只留 Gemini Apps，格式选 JSON（HTML 也能读，但更容易认不全）。下载的 zip 直接选进来。导出里没有会话编号的问答，会按时间间隔推测分段。」</li>
+<li>AI Studio（实验性）：「AI Studio 的对话存在 Google Drive 的「Google AI Studio」文件夹里：把文件下载下来直接选（没有扩展名也行），或者用 Takeout 导出 Drive 后选 zip。」</li>
+<li>RikkaHub（实验性）：「在 RikkaHub（安卓）的备份设置里导出本地备份，记得包含数据库；把 zip 传到这台设备再选它。设置和 API key 不会导入。」</li>
+<li>Kelivo：「Kelivo › 设置 › 数据备份：在「备份管理」里勾上「聊天记录」，要带图片再勾「文件」（新版在「备份与导入内容」里勾，供应商、MCP 这些不用勾，反正不导）；然后「本地备份」›「导出为文件」，把 zip 传到这台设备再选它。新旧两代备份都认，设置和 API key 不会导入。」</li>
+</ul>
+<h3>下载 Claude 导出包</h3>
+<p>只选了 Claude 新版导出的清单文件时，进入下载页面「从 claude.ai 下载导出包」。</p>
+<p>页面顶部显示导出时间和剩余有效时长。每个包一行，标明类别（对话、项目、记忆等）。点「在浏览器里下载」在系统浏览器打开链接，点过变「已在浏览器打开」。反馈、账号信息标「不用下」。</p>
+<p>每个链接可能只能用一次，点过别再点。要先在浏览器里登录 claude.ai。下好的 zip 在「下载」文件夹，点「下好了，选文件夹导入」重新选文件。</p>
+<p>链接 24 小时内有效。过期后页面只显示红字提示，要回 claude.ai 重新导出。</p>
+<p>页面底部有折叠区「在花园里登录 claude.ai 自动下载（有风险）」。展开有风险说明，确认后打开 claude.ai 登录页。登录只在这个页面有效，关掉就丢，不会存下来。用 Google 账号登录可能被拒绝，换邮箱验证码登录。点「登好了，开始下载」后逐个下载到临时目录，全部下完自动进预览。没登录上会停下来让你重新登录。一个都没下下来会提示链接可能已经用过或过期。</p>
+<p>从预览页面可以点「去下载没选到的包」回到下载页，只下这次没选到的包，已选进来的标「这次选进来了」。</p>
+<h3>预览与导入</h3>
+<p>识别完成后显示预览，每类一行，可勾选，默认全勾。不需要的类别取消勾选即可跳过。</p>
+<p>有对话已在其他楼层时，多出一组「已在其他楼层 · N 段」，按楼层列出段数。有在那边回收站里的单独标出。楼层还在的行尾有「去看看」可切过去查看，切过去后导入页关闭，选的包要重新选。楼层已删但数据还在的会提示挡住了导入。下方选「跳过」或「复制一份到本楼层」。本楼层已经有副本的，选复制也不会再多一份。</p>
+<p>「已有对话怎么处理」区有「叠加导入」开关。</p>
+<p>Gemini 和 AI Studio 的预览下方有提示：「格式是照公开资料推的，还没拿真导出包对过，导完对照原对话看一眼。已有的对话只有打开「叠加导入」才会补上新问答。」</p>
+<p>RikkaHub 的预览下方列出不导入的内容，并提示「消息时间按这台设备的时区算。」</p>
+<p>Kelivo 的预览下方提示：「不导入：设置和 API key、助手、供应商、MCP、记忆、快捷短语。助手名和系统提示词只记在对话来源里，不套用。」</p>
+<p>点「开始导入」。导入过程中不能关闭页面，不能取消。大包要几分钟。完成后查看结果，点「完成」关闭。</p>
+<p>一步步操作见<a href="#first-import">导入你的聊天记录</a>。</p>
+<h3>结果说明</h3>
+<p>完成后每类一张卡，只列非零项。</p>
+<p><strong>对话：</strong></p>
+<table>
+<thead>
+<tr>
+<th>结果</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>新增</td>
+<td>本地没有，新导入。</td>
+</tr>
+<tr>
+<td>更新</td>
+<td>「本地已有，用文件里的版本更新了（可撤回）。」仅叠加模式出现。</td>
+</tr>
+<tr>
+<td>复制为副本</td>
+<td>「原本在其他楼层，复制了一份到本楼层；原楼层没动。」</td>
+</tr>
+<tr>
+<td>本地已有，跳过</td>
+<td>本楼层已有同一条对话，不重复导入。</td>
+</tr>
+<tr>
+<td>已在其他楼层</td>
+<td>按楼层列出段数和在那边回收站里的段数；已删除的楼层单独列。这些没动。</td>
+</tr>
+<tr>
+<td>未导入</td>
+<td>「空白草稿或没有有效内容。」</td>
+</tr>
+</tbody></table>
+<p>想要「已在其他楼层」的对话，重新导入时选「复制一份到本楼层」。比预览多出来的（消息 id 撞了别的楼层、导入前查不出来）会标明段数。</p>
+<p><strong>文件夹：</strong></p>
+<table>
+<thead>
+<tr>
+<th>结果</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>新建</td>
+<td>「项目指令放进了「文件夹说明」。」</td>
+</tr>
+<tr>
+<td>已有，没动</td>
+<td>本楼层已有同 id 或同名文件夹，直接用。</td>
+</tr>
+</tbody></table>
+<p><strong>花园记忆：</strong></p>
+<table>
+<thead>
+<tr>
+<th>结果</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>新增 N 条</td>
+<td>「来源记为 Claude 导入，没钉住，园丁会照常整理。」</td>
+</tr>
+<tr>
+<td>已有，跳过 N 条</td>
+<td>本楼层已有同来源同内容的记忆。</td>
+</tr>
+</tbody></table>
+<p><strong>RikkaHub 文件夹和记忆：</strong></p>
+<table>
+<thead>
+<tr>
+<th>结果</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>新建文件夹</td>
+<td>「按助手 / RikkaHub 文件夹分，说明留空。」</td>
+</tr>
+<tr>
+<td>文件夹已有，没动</td>
+<td>本楼层已有同名文件夹，直接用。</td>
+</tr>
+<tr>
+<td>新增记忆 N 条</td>
+<td>「来源记为 RikkaHub 导入，没钉住，园丁会照常整理。」</td>
+</tr>
+<tr>
+<td>记忆已有，跳过 N 条</td>
+<td>本楼层已有同来源同内容的记忆。</td>
+</tr>
+</tbody></table>
+<p>RikkaHub 和 Kelivo 的对话计入「对话」卡。</p>
+<p><strong>文件库：</strong></p>
+<table>
+<thead>
+<tr>
+<th>结果</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>写入 N 个文件</td>
+<td>写入当前楼层的文件库。</td>
+</tr>
+<tr>
+<td>同名已有，没覆盖</td>
+<td>文件库已有同名文件，保留原文件。</td>
+</tr>
+<tr>
+<td>跳过</td>
+<td>「不是文本文件，或缺当前版本。」</td>
+</tr>
+<tr>
+<td>写失败</td>
+<td>列出前 3 个路径。</td>
+</tr>
+</tbody></table>
+<p><strong>注意事项：</strong></p>
+<p>有需要留意的情况时多出一张卡，折叠显示「N 条，点开看」。常见情况：包里缺文件（部分导入）、文件不完整、格式读不出来、图片或附件包里没有放了占位等。</p>
+<p>Gemini / AI Studio 导入后，页脚还会列出补充说明：按时间推测切分的段数、没有回答的提问数、只放了占位的附件和图片数等。RikkaHub 导入后，页脚提示消息时间所用的时区。Kelivo 导入后，页脚列出旧版修复的记录数、按本机时区算的时间数、包里没有的附件数等。</p>
+<p>普通导入下跳过了本地已有的 ChatGPT 对话时，页脚提示：「有 N 段 ChatGPT 对话本地已有，这次跳过了。想让它们也带上思考、工具和图片，打开「叠加导入」再导一次同一个包（可撤回）。」</p>
+<p>什么都没变时显示「没有新变化：这些内容本楼层都已经有了。」</p>
+<p>页脚提示可在导入历史整次撤回（对话、记忆、文件夹一起撤）。文件库里的文件不随撤回删除。详见<a href="#import-undo">导入历史与撤回</a>。</p>
+<h2 id="import--全部选项">全部选项</h2>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>在哪</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>各类别勾选</td>
+<td>预览页每行</td>
+<td>全勾</td>
+<td>不勾的类别整步不做</td>
+</tr>
+<tr>
+<td>叠加导入</td>
+<td>预览页</td>
+<td>关</td>
+<td>开：已有对话按规则更新；关：跳过</td>
+</tr>
+<tr>
+<td>已在其他楼层的对话</td>
+<td>预览页（有冲突时出现）</td>
+<td>跳过</td>
+<td>「跳过」或「复制一份到本楼层」</td>
+</tr>
+</tbody></table>
+<h3>叠加导入</h3>
+<p>副文案：「本地已有的对话，用文件里的版本更新：补上新消息，标题和改过的消息也以文件为准。导入前留快照，可在导入历史撤回。关掉则已有对话不动。」</p>
+<p>关闭时，本楼层已有的对话一律跳过，只导入新对话。</p>
+<p>打开时，已有对话满足任一条件才更新：</p>
+<ul>
+<li>文件里有本地没有的消息</li>
+<li>元数据不同，且文件更新时间不早于本地</li>
+<li>某条消息内容不同，且文件更新时间不早于本地</li>
+</ul>
+<p>都不满足则保持本地版本。一旦合并，共同消息和元数据按文件覆盖。合并只增不删，本地多出的消息保留。同一个包原样再导一次，没有实际改动就不会误判为「更新」。</p>
+<h3>已在其他楼层的对话</h3>
+<p>同一条对话只能属于一个楼层。对话或其中任一消息 id 已在其他楼层时，默认整条跳过。</p>
+<p>预览会按楼层列出冲突段数。在那边回收站里的单独标出。楼层还在的行尾有「去看看」可切过去查看。楼层已删但数据还在的会提示「删楼层时没删数据：你看不到它们，但它们会挡住导入。」下方选「跳过」或「复制一份到本楼层」：</p>
+<ul>
+<li>跳过：「这些对话留在原楼层，本楼层看不到也搜不到。」</li>
+<li>复制一份到本楼层：「本楼层多一份，原楼层不动，可在导入历史撤回。」本楼层已经有副本的，选复制也不会再多一份。</li>
+</ul>
+<p>选「复制」后，冲突对话用派生 id 复制进本楼层。同一文件对同一楼层再次复制不会翻倍。每次选新包回到「跳过」。</p>
+<p>部分冲突只在写入时才发现（如消息 id 撞别的楼层、ChatGPT 缺 id 的对话），预览查不出来，也按这个选择处理。</p>
+<h2 id="import--边界与限制">边界与限制</h2>
+<ul>
+<li>接受 <code>.zip</code>、<code>.json</code>、<code>.html</code>、文件夹和没有扩展名的文件，可多选。直接选中的文件不看文件名，按内容识别。</li>
+<li>多选的包共用一份预算：条目数 ≤ 20000、单个文件解压后 ≤ 2 GB、累计 ≤ 4 GB、压缩比 ≤ 1000 倍。</li>
+<li>导入目标固定为当前楼层。</li>
+<li>导入过程中不能关闭页面，不能取消。</li>
+<li>Claude 图片和文档在原位插带名字的文件占位。文本附件保留导出自带的文字内容。语音笔记的转写文字作为正文导入。</li>
+<li>Claude 空对话（无有效消息）计入「未导入」。ChatGPT 对话只要有消息节点就导入，不按内容过滤。RikkaHub 和 Kelivo 空对话不导，计「未导入」。</li>
+<li>ChatGPT 对话缺 id 时按内容算出固定 id，再导还是同一条。</li>
+<li>已有对话的文件夹归属不改。</li>
+<li>多个文件里出现同一段对话时，自动合成一段，不丢消息。</li>
+<li>文件库同名文件不覆盖。Artifacts 只收文本类型（md、markdown、html、htm、txt、json、css、js）。</li>
+<li>导入中途出错，前面已写入的批次保留。对话每 200 段一批。各来源之间互不连累。</li>
+<li>Gemini 活动有链接的按链接归成一段对话，没链接的按时间推测分段（超过 30 分钟或跨天断开）。</li>
+<li>Takeout 默认会删 18 个月前的活动。推测分段的首条被删后 id 会变，再导会多出一份，不影响已有数据。</li>
+<li>Gemini Takeout 附件只放带名字的占位，没有文件本体。</li>
+<li>AI Studio 思考块会成为折叠的思考段。内嵌图片超过 20 MB 或解不出时换成占位。Drive 里的图片只放占位，不联网取。</li>
+<li>RikkaHub 消息时间没带时区，按设备当前时区解析。</li>
+<li>RikkaHub 附件在包里的导进文件库，不在包里的放占位。</li>
+<li>RikkaHub 同一备份再导一次不重复。</li>
+<li>RikkaHub 备份版本比已知的新时照常导入，会提示可能有没读到的内容。</li>
+<li>Kelivo 新旧两代备份都认。新版按清单核对数据库完整性，对不上时跳过。</li>
+<li>Kelivo 重新生成的多个版本：选中的那版串成主线，其余挂成兄弟分支。</li>
+<li>Kelivo 旧版备份自动修复重复、悬空和归属不对的记录。</li>
+<li>Kelivo 附件在包里的导进文件库，网络图片不下载，包里没有的放占位。</li>
+<li>Kelivo 新版时间戳带时区；旧版不带时区的按设备当前时区算。</li>
+<li>Kelivo 同一备份再导一次不重复。</li>
+<li>Claude 新版导出清单里的下载链接 24 小时内有效。花园里登录自动下载用独立的临时会话，关掉就丢，不会存下来。</li>
+<li>每次导入生成导入记录。详见<a href="#import-undo">导入历史与撤回</a>。</li>
+</ul>
+<h3>出错时看到什么</h3>
+<table>
+<thead>
+<tr>
+<th>文案</th>
+<th>该怎么办</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>「导出包太大：…」</td>
+<td>检查是否超出预算，原因会具体列出。</td>
+</tr>
+<tr>
+<td>「读不了「&lt;文件名&gt;」」</td>
+<td>zip 损坏或路径不存在，换一份文件重试。</td>
+</tr>
+<tr>
+<td>「这里面没找到 Claude、ChatGPT、Gemini、RikkaHub 或 Kelivo 的导出数据。」</td>
+<td>确认选的是正确的导出包。</td>
+</tr>
+<tr>
+<td>「这是酒馆（SillyTavern）的数据，这里不导。去 卡库 › 导入酒馆整包，那边连角色卡、世界书一起导。」</td>
+<td>选到的只有酒馆数据。去卡库导入。</td>
+</tr>
+<tr>
+<td>「这个 RikkaHub 备份没带聊天数据库（备份时没勾&quot;数据库&quot;），里面只有设置，不导入。」</td>
+<td>重新导出时勾上「数据库」。</td>
+</tr>
+<tr>
+<td>「这个 Kelivo 备份没勾「聊天记录」，里面只有设置，不导入。」</td>
+<td>重新导出时勾上「聊天记录」。</td>
+</tr>
+<tr>
+<td>「Kelivo 备份里的聊天数据库和清单对不上（大小或校验和），可能下载不完整」</td>
+<td>备份可能没下载完整，重新下载后再试。</td>
+</tr>
+<tr>
+<td>「RikkaHub 数据库损坏：…」</td>
+<td>这个包跳过，其他包照导。换一份备份重试。</td>
+</tr>
+<tr>
+<td>「选文件出错：…」</td>
+<td>重新打开导入页再试。</td>
+</tr>
+<tr>
+<td>「没导完」+「「&lt;步骤&gt;」这步出错：&lt;原因&gt;。」</td>
+<td>前面已导进来的部分可在导入历史撤回。</td>
+</tr>
+<tr>
+<td>「这份清单已经过期（导出于 &lt;时间&gt;，链接 24 小时内有效）。」</td>
+<td>回 claude.ai 重新导出，邮件里会有新的清单和链接。</td>
+</tr>
+<tr>
+<td>「一个都没下下来。链接可能已经用过或过期」</td>
+<td>回 claude.ai 重新导出后再试，或关掉改用浏览器下载。</td>
+</tr>
+</tbody></table>
+<h2 id="import--常见问题">常见问题</h2>
+<p><strong>同一文件导两次会重复吗？</strong> 不会。普通模式下已有对话跳过；叠加模式按规则判断是否更新。</p>
+<p><strong>能导入到别的楼层吗？</strong> 目标固定为当前楼层。先切到目标楼层再导入。</p>
+<p><strong>新版 Claude 给了好几个 zip 怎么办？</strong> 全部下载后一起选进来，或选它们所在的文件夹。多个文件里的同一段对话会自动合成。也可以只选清单文件，在下载页面逐个下载。</p>
+<p><strong>Gemini 对话怎么导？</strong> 在 takeout.google.com 导出「我的活动」里的 Gemini Apps，zip 直接选进来。</p>
+<p><strong>RikkaHub 怎么导？</strong> 在 RikkaHub 的备份设置里导出本地备份，记得包含数据库。把 zip 传到这台设备再选进来。</p>
+<p><strong>Kelivo 怎么导？</strong> 在 Kelivo 的备份管理里勾上「聊天记录」导出，把 zip 传到这台设备再选进来。新旧两代备份都认。</p>
+<p><strong>旧版导入的 ChatGPT 对话能补上思考和工具吗？</strong> 打开「叠加导入」再导一次同一个包，会补上思考、工具和图片。有快照可撤回。</p>
+<h2 id="import--相关页面">相关页面</h2>
+<ul>
+<li><a href="#first-import">导入你的聊天记录</a>— 从拿到文件到看到结果的一步步教程。</li>
+<li><a href="#import-undo">导入历史与撤回</a>— 查看导入记录、撤回某次导入、清空 Claude 导入数据。</li>
+</ul>
+
+<div class="pager"><span><a href="#budget">← 预算</a></span><span><a href="#import-undo">导入历史与撤回 →</a></span></div>
+</section>
+
+<section class="page" id="import-undo" data-area="50-data" data-tier="pro" data-platforms="macos,ios">
+<h1>导入历史与撤回 <span class="badge pro">pro</span></h1>
+<div class="note lite">这一项在 pro 模式里。打开设置，点右上角的开关切到 pro 就能看到入口。</div>
+<blockquote>
+<p>每次导入都留记录，可以整次撤回；这页说明撤回删什么、什么时候撤不了，以及「清空本楼层 Claude 导入数据」的范围。</p>
+</blockquote>
+<h2 id="import-undo--这是什么">这是什么</h2>
+<p>每次导入完成，按来源各生成一条导入记录。一次导入里同时有 Claude 和 ChatGPT 就会出两条记录。记录列在设置 › 数据与备份 › 导入历史。你可以点进详情查看每个来源文件的去向，也可以整次撤回——把那次新增的对话、记忆、文件夹一起删掉，被更新的对话恢复原样。</p>
+<h2 id="import-undo--怎么用">怎么用</h2>
+<h3>查看导入历史</h3>
+<p>打开设置 › 数据与备份 › 导入历史。每条记录显示文件名、来源（ChatGPT、Claude、Gemini、AI Studio、RikkaHub 或 Kelivo）。下一行显示导入方式（普通导入或叠加导入）、新增、更新、保持本地的数量和时间。有「已在其他楼层」或「未导入」时额外显示对应数量。对话计数都是零时显示「对话没有变化」。没有记录时显示「还没有导入记录」。</p>
+<p>不可撤回的记录在行右侧标「不可撤回」，旧格式记录标「旧记录」。</p>
+<h3>查看导入详情</h3>
+<p>点一条记录进入导入详情页。顶部显示来源、时间、方式、结果。下方按来源文件分行，展开可看每个文件里的对话去了哪、跳过了哪些。再往下列出新建的对话和更新的对话（按文件夹分组）、新建的文件夹、写进花园的记忆。</p>
+<h3>撤回一次导入</h3>
+<ol>
+<li>打开设置 › 数据与备份 › 导入历史。</li>
+<li>点进要撤回的那条记录，进入导入详情页。</li>
+<li>滚到底部，点红字按钮「撤回此次导入」。</li>
+<li>弹出确认框「确认撤回」。普通导入显示「将撤回这次普通导入新增的 N 条对话。」叠加导入显示「将撤回这次叠加导入：新增 N 条，更新 N 条。撤回后会恢复到导入前状态。」如果那次还建了记忆或文件夹，追加显示「这次导进来的N 条花园记忆、N 个文件夹也会删掉（导入后内容被改过的记忆会留着）。文件库里的文件不删。」</li>
+<li>点「撤回此次导入」开始执行。</li>
+<li>进度显示「正在撤回 x/N」。完成后记录消失，自动回到列表。</li>
+</ol>
+<h3>清空本楼层 Claude 导入数据</h3>
+<ol>
+<li>打开设置 › 数据与备份 › 开发（危险操作）。</li>
+<li>点「清空本楼层 Claude 导入数据」。</li>
+<li>确认框「清空 Claude 数据」显示「本楼层将删除 N 条 Claude 对话 · N 条消息 · N 条导入记录。不可撤销。」</li>
+<li>点「清除」开始执行。</li>
+<li>完成后显示「已清除 N 条对话 · N 条消息 · N 条导入记录。现在可以重新导入。」</li>
+</ol>
+<h2 id="import-undo--全部选项">全部选项</h2>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>在哪</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>撤回此次导入</td>
+<td>设置 › 数据与备份 › 导入历史 › 导入详情（底部）</td>
+<td>—</td>
+<td>删除该次新增的对话及其收藏和用户卡，恢复该次更新过的对话到导入前快照，删除该次建的记忆和文件夹，然后删除这条记录</td>
+</tr>
+<tr>
+<td>清空本楼层 Claude 导入数据</td>
+<td>设置 › 数据与备份 › 开发（危险操作）</td>
+<td>—</td>
+<td>删除本楼层全部 Claude 来源的对话（含设计对话）及其消息、收藏、用户卡引用，以及 Claude 的导入记录和变更；导入时顺带建的记忆和文件夹按撤回规则一起清</td>
+</tr>
+</tbody></table>
+<h2 id="import-undo--边界与限制">边界与限制</h2>
+<p><strong>能撤回的条件：</strong> 那次导入新增或更新了对话、建了记忆、或建了文件夹。都没有的记录显示「不可撤回」。只导了文件库类（Artifacts 或记忆文件）的记录也不可撤回。</p>
+<p><strong>旧格式记录：</strong> 行内显示「N 条对话 · 暂不支持安全撤回」，详情页底部显示「旧记录，暂不支持安全撤回。」，无法撤回。</p>
+<p><strong>撤回新增对话的范围：</strong> 删除整条对话的全部消息，包括导入后你自己追加的消息。同时删除该对话的收藏和指向这些消息的用户卡。</p>
+<p><strong>撤回更新对话的范围：</strong> 删除导入前快照里没有的消息，然后恢复快照。导入后你追加的消息也会被删。</p>
+<p><strong>撤回记忆的范围：</strong> 只删内容仍等于导入原文的记忆。园丁改写过或你编辑过的留着。</p>
+<p><strong>撤回文件夹的范围：</strong> 文件夹删掉，里面的对话移回「全部」，挂在文件夹上的收藏清掉。</p>
+<p><strong>文件库里的文件不随撤回删除。</strong></p>
+<p><strong>撤回不能二次撤回。</strong> 记录和快照一并删除，无法恢复。</p>
+<p><strong>撤回按每 25 条保存一次。</strong> 中途出错时，已保存的部分保留，按钮下方显示「撤回中途出错，已撤回的部分保留，可以再点一次。」</p>
+<p><strong>清空 Claude 数据的范围：</strong> 本楼层 Claude 来源的对话（含设计对话）及其消息、收藏、用户卡引用，加上 Claude 的导入记录和变更。导入时顺带建的记忆和文件夹按撤回规则一起清。不动 ChatGPT、Gemini、AI Studio、RikkaHub、Kelivo、API、预设、你自己的记忆。</p>
+<p><strong>清空 Claude 数据不可撤销。</strong></p>
+<p><strong>清空的用途：</strong> 页面说明写的是「用于切换到新 segments 格式前清理旧导入。只清 Claude（含导入时顺带建的记忆和文件夹），不动 ChatGPT / API / 预设 / 你自己的记忆。」</p>
+<h2 id="import-undo--常见问题">常见问题</h2>
+<p><strong>撤回后，导入的对话里我自己补的消息也会没？</strong>
+会。撤回新增对话时删全部消息，不区分来源。撤回更新对话时恢复到导入前的快照，快照之后的内容都会消失。</p>
+<p><strong>撤回后，导入时顺带建的记忆也会没？</strong>
+内容没改过的会删。园丁改写过或你自己编辑过的留着。</p>
+<p><strong>清空 Claude 数据后能重新导入吗？</strong>
+能。完成提示就是「现在可以重新导入」。</p>
+<h2 id="import-undo--相关页面">相关页面</h2>
+<ul>
+<li>见<a href="#import">导入</a>— 来源格式、两个开关、结果说明的每一项。</li>
+<li>见<a href="#first-import">导入你的聊天记录</a>— 从拿到导出文件到看见「导入完成」的完整步骤。</li>
+</ul>
+
+<div class="pager"><span><a href="#import">← 导入</a></span><span><a href="#home-screen">手机主屏 →</a></span></div>
+</section>
+
+<section class="page" id="home-screen" data-area="60-modules" data-tier="free" data-platforms="ios">
+<h1>手机主屏</h1>
+<blockquote>
+<p>把常用的工具和想随时看见的内容，摆在自己的主屏上。</p>
+</blockquote>
+<h2 id="home-screen--这是什么">这是什么</h2>
+<p>Page 2 主屏是 App 内的桌面。图标和小组件按页、行、列排列，可以留空位、混排。从主屏打开的应用全屏显示，切回来保持离开时的样子。</p>
+<h2 id="home-screen--怎么用">怎么用</h2>
+<h3>自由摆放</h3>
+<p>长按图标或小组件先显示菜单，继续按住或开始拖动后进入编辑。拖动时其他图标沿行序让位，遇到空格即停。松手后保存一次布局。你可以刻意留出空白，位置会保存。</p>
+<p>每次布局保存为独立文件。写入失败时保留上次布局。也可撤销最近一次变更。</p>
+<p>编辑态下轻点项目，可配置组件尺寸、更换图标、「钉到 Dock」或「从主屏移除」。</p>
+<h3>小组件与文件夹</h3>
+<p>组件库提供已启用工具的组件，以及宠物、待办、花园、通讯录等。组件预览是示例数据，不启动业务。旧六组件的完整内容入口保留；新增工具摘要读取现有数据，不在主屏执行命令或审批。</p>
+<p>把图标拖到另一个图标中心稍作停留，会显示文件夹并展开预览；松手保存。编辑态下可展开文件夹并改名，内部应用可重新排列，拖到面板外才会移出。Dock 也支持创建文件夹和拖入、拖出应用。</p>
+<p>拖动小组件右下角手柄可改变尺寸，周围项目会让位。同尺寸组件可叠放；悬停显示预览，移开取消，松手保存。上下滑动切换内容，从菜单打开「编辑叠放」可添加、排序和移除成员。</p>
+<h3>搜索与资源库</h3>
+<p>点「搜索」或在主屏向下拉，打开键盘上方的搜索框；点空白处回到原页。末页继续向左滑进入资源库，按分类浏览；聚焦搜索栏会显示工具列表。</p>
+<h3>全屏应用与后台</h3>
+<p>从主屏打开的应用全屏显示。最近打开的最多保留 4 个；打开第 5 个时移出最久没用的那个。</p>
+<p>应用底部有「返回」「全部应用」「回桌面」三个按钮。「返回」先退应用里的一层（浏览器网页、读书阅读器），再回上一个打开的应用，都没有时变灰。</p>
+<p>左上角有一段沿屏幕圆角的细线，点它下方回桌面；深色模式下变白。</p>
+<p>点「全部应用」或在底部按钮上往上划，进入后台。卡片是离开各应用时的画面，可逐个关闭；左下「+」可打开资源库。</p>
+<p>读书时离开再回来仍停在原处。应用被系统结束后重新打开，会回到离开时的应用和那本书。</p>
+<h3>换壁纸和图标</h3>
+<p>编辑主屏后打开自定面板，可选默认、深色、透明或着色外观，以及明暗和大图标。壁纸通过独立编辑页选图。</p>
+<p>想改一个应用的图标，进入编辑后轻点它，选择换符号或本地图片。图标覆盖值在主屏和 Dock 共用。</p>
+<h3>旧桌面与数据</h3>
+<p>第一次使用从经典或针脚桌面迁移旧配置。</p>
+<p>「从主屏移除」只移除入口，不删除工具数据。工具被关闭或在 Lite 隐藏时，原来的位置仍会保留。</p>
+<h2 id="home-screen--全部选项">全部选项</h2>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>在哪</th>
+<th>默认</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>外观风格</td>
+<td>自定面板</td>
+<td>默认</td>
+<td>默认、深色、透明、着色四选一</td>
+</tr>
+<tr>
+<td>明暗</td>
+<td>自定面板</td>
+<td>—</td>
+<td>切换明暗外观</td>
+</tr>
+<tr>
+<td>大图标</td>
+<td>自定面板</td>
+<td>—</td>
+<td>放大图标尺寸</td>
+</tr>
+<tr>
+<td>壁纸</td>
+<td>独立编辑页</td>
+<td>—</td>
+<td>选择壁纸图片</td>
+</tr>
+<tr>
+<td>图标覆盖</td>
+<td>编辑态 › 轻点应用</td>
+<td>—</td>
+<td>换符号或本地图片，主屏与 Dock 共用</td>
+</tr>
+</tbody></table>
+<h2 id="home-screen--边界与限制">边界与限制</h2>
+<ul>
+<li>这是 App 内的主屏，不是 iOS 系统桌面，也不是 WidgetKit 扩展。</li>
+<li>全屏应用只用于 iPhone 和 iPad 竖屏；iPad 横屏面板和 Mac 不变。</li>
+<li>组件内容遵守现有数据范围；待办和宠物使用原有全局服务，楼层数据按当前楼层读取。</li>
+<li>Dock 超量项目仍可横向滚动访问。</li>
+</ul>
+
+<div class="pager"><span><a href="#import-undo">← 导入历史与撤回</a></span><span></span></div>
+</section>
+
+</main>
+</div>
+<script id="idx" type="application/json">[{"name":"connect-model","title":"接一个模型","description":"从加一张 API 卡、填 key、拉模型、收藏，到在聊天里选中它，一步步做完。用户问「怎么接 API、怎么填 key、为什么聊天里选不到模型」时看。","area":"开始","tier":"free","platforms":["macos","ios"],"keywords":["API","key","模型","provider","收藏","接入"],"anchors":[{"id":"connect-model--准备","title":"准备"},{"id":"connect-model--步骤","title":"步骤"},{"id":"connect-model--下一步","title":"下一步"}]},{"name":"first-import","title":"导入你的聊天记录","description":"把 ChatGPT 或 Claude 的导出包（zip、文件夹或 json） 导进记忆花园，从选包到看到结果一步步做完。用户问「怎么导入、怎么迁移聊天记录、导出包怎么用」时看。","area":"开始","tier":"free","platforms":["macos","ios"],"keywords":["导入","ChatGPT","Claude","zip","迁移","导出包"],"anchors":[{"id":"first-import--准备","title":"准备"},{"id":"first-import--步骤","title":"步骤"},{"id":"first-import--下一步","title":"下一步"}]},{"name":"main-chat","title":"主对话阅读","description":"切换消息版本、查看工具步骤和想起的记忆，以及选择行内展开或弹出面板。","area":"聊天","tier":"free","platforms":["ios","macos"],"keywords":["聊天","消息","分页","分支","工具调用","想起来了","记忆","加密卡","报错"],"anchors":[{"id":"main-chat--切换消息版本","title":"切换消息版本"},{"id":"main-chat--查看工具步骤","title":"查看工具步骤"},{"id":"main-chat--查看想起的记忆","title":"查看想起的记忆"},{"id":"main-chat--选择展开方式","title":"选择展开方式"},{"id":"main-chat--填写加密卡","title":"填写加密卡"},{"id":"main-chat--回应一条消息","title":"回应一条消息"},{"id":"main-chat--报错与系统通知","title":"报错与系统通知"}]},{"name":"model","title":"模型与 API 卡","description":"API 卡是什么、内置的提供商、自定义地址、key 存在哪、模型列表怎么来、🌞🌛☆ 三个角色、聊天里怎么切模型，以及 key 没填或填错时看到什么。","area":"模型与联网","tier":"free","platforms":["macos","ios"],"keywords":["API","key","Keychain","模型列表","刷新模型","收藏","主对话","副记忆","自定义","OpenAI 兼容","ChatGPT 登录"],"anchors":[{"id":"model--这是什么","title":"这是什么"},{"id":"model--怎么进","title":"怎么进"},{"id":"model--提供商与协议","title":"提供商与协议"},{"id":"model--key-存在哪","title":"Key 存在哪"},{"id":"model--模型列表怎么来","title":"模型列表怎么来"},{"id":"model--三个角色","title":"🌞🌛☆ 三个角色"},{"id":"model--聊天里切模型","title":"聊天里切模型"},{"id":"model--全部选项","title":"全部选项"},{"id":"model--删卡","title":"删卡"},{"id":"model--边界与限制","title":"边界与限制"},{"id":"model--相关页面","title":"相关页面"}]},{"name":"web-search","title":"联网搜索","description":"让 AI 上网查资料：三档权限、搜索服务怎么配、结果数和超时、网页登录态、AI 不读的黑名单。","area":"模型与联网","tier":"free","platforms":["macos","ios"],"keywords":["联网","搜索","搜索服务","黑名单","登录态","Bing","DuckDuckGo","Tavily"],"anchors":[{"id":"web-search--这是什么","title":"这是什么"},{"id":"web-search--怎么用","title":"怎么用"},{"id":"web-search--全部选项","title":"全部选项"},{"id":"web-search--边界与限制","title":"边界与限制"},{"id":"web-search--常见问题","title":"常见问题"},{"id":"web-search--相关页面","title":"相关页面"}]},{"name":"budget","title":"预算","description":"全局花费总闸：默认多少、怎么改、用完了会看到什么、怎么重置。","area":"模型与联网","tier":"free","platforms":["macos","ios"],"keywords":["预算","花费","USD","重置已用","限额"],"anchors":[{"id":"budget--这是什么","title":"这是什么"},{"id":"budget--怎么用","title":"怎么用"},{"id":"budget--全部选项","title":"全部选项"},{"id":"budget--边界与限制","title":"边界与限制"},{"id":"budget--相关页面","title":"相关页面"}]},{"name":"import","title":"导入","description":"导入功能全览：认得哪些导出包、每类内容去哪（对话、文件夹、记忆、文件库）、两个开关是什么意思、同一对话只属于一个楼层的规则、每一种结果说明、出错时看到什么。","area":"数据","tier":"free","platforms":["macos","ios"],"keywords":["导入","叠加导入","复制副本","楼层","跳过","保持本地"],"anchors":[{"id":"import--这是什么","title":"这是什么"},{"id":"import--怎么用","title":"怎么用"},{"id":"import--全部选项","title":"全部选项"},{"id":"import--边界与限制","title":"边界与限制"},{"id":"import--常见问题","title":"常见问题"},{"id":"import--相关页面","title":"相关页面"}]},{"name":"import-undo","title":"导入历史与撤回","description":"每次导入都留一条记录，能整次撤回（连这次建的记忆和文件夹）；撤回会删掉什么、什么情况不能撤回；「清空本楼层 Claude 导入数据」的范围和不可撤销。","area":"数据","tier":"pro","platforms":["macos","ios"],"keywords":["撤回","导入历史","清空","Claude 数据","不可撤销"],"anchors":[{"id":"import-undo--这是什么","title":"这是什么"},{"id":"import-undo--怎么用","title":"怎么用"},{"id":"import-undo--全部选项","title":"全部选项"},{"id":"import-undo--边界与限制","title":"边界与限制"},{"id":"import-undo--常见问题","title":"常见问题"},{"id":"import-undo--相关页面","title":"相关页面"}]},{"name":"home-screen","title":"手机主屏","description":"在 Page 2 自由摆放图标和小组件、更换壁纸与图标，以及保留旧桌面的配置。","area":"模块","tier":"free","platforms":["ios"],"keywords":["主屏","桌面","图标","小组件","壁纸","自由摆放","Dock"],"anchors":[{"id":"home-screen--这是什么","title":"这是什么"},{"id":"home-screen--怎么用","title":"怎么用"},{"id":"home-screen--全部选项","title":"全部选项"},{"id":"home-screen--边界与限制","title":"边界与限制"}]}]</script>
+<script>
+(function(){
+  var idx = JSON.parse(document.getElementById('idx').textContent || '[]');
+  var pages = Array.prototype.slice.call(document.querySelectorAll('section.page'));
+  var byName = {}; pages.forEach(function(s){ byName[s.id] = s; });
+  var toc = document.getElementById('toc'), scrim = document.getElementById('scrim');
+  var html = document.documentElement;
+
+  function currentName(){
+    var h = (location.hash || '').replace(/^#/, '');
+    if (!h) return pages.length ? pages[0].id : '';
+    var name = h.split('--')[0];
+    return byName[name] ? name : (pages.length ? pages[0].id : '');
+  }
+  function show(){
+    var name = currentName(), h = (location.hash || '').replace(/^#/, '');
+    pages.forEach(function(s){ s.classList.toggle('active', s.id === name); });
+    var links = toc.querySelectorAll('li a');
+    links.forEach(function(a){ a.classList.toggle('active', a.getAttribute('href') === '#' + name); });
+    var t = byName[name] && byName[name].querySelector('h1');
+    document.getElementById('topTitle').textContent = t ? t.textContent.replace(/\s*(pro)?$/, '') : '';
+    if (h && h.indexOf('--') > 0) {
+      var el = document.getElementById(h);
+      if (el) setTimeout(function(){ el.scrollIntoView({block:'start'}); }, 0);
+    } else { window.scrollTo(0,0); }
+    closeToc();
+  }
+  function closeToc(){ toc.classList.remove('open'); scrim.classList.remove('on'); }
+  document.getElementById('tocBtn').onclick = function(){ toc.classList.add('open'); scrim.classList.add('on'); };
+  scrim.onclick = closeToc;
+  window.addEventListener('hashchange', show);
+
+  // 搜索：标题 / description / h2
+  var q = document.getElementById('q'), results = document.getElementById('results');
+  q.addEventListener('input', function(){
+    var s = q.value.trim().toLowerCase(); results.innerHTML = '';
+    if (!s) { results.classList.remove('on'); return; }
+    var hits = [];
+    idx.forEach(function(p){
+      var hay = (p.title + ' ' + p.description + ' ' + (p.keywords||[]).join(' ')).toLowerCase();
+      if (hay.indexOf(s) >= 0) hits.push({href:'#'+p.name, title:p.title, sub:p.description});
+      (p.anchors||[]).forEach(function(a){
+        if (a.title.toLowerCase().indexOf(s) >= 0) hits.push({href:'#'+a.id, title:a.title, sub:p.title});
+      });
+    });
+    hits.slice(0,12).forEach(function(h){
+      var a = document.createElement('a'); a.href = h.href; a.textContent = h.title;
+      var sm = document.createElement('small'); sm.textContent = h.sub; a.appendChild(sm);
+      a.onclick = function(){ results.classList.remove('on'); q.value=''; };
+      results.appendChild(a);
+    });
+    results.classList.toggle('on', hits.length > 0);
+  });
+  q.addEventListener('keydown', function(e){ if (e.key === 'Escape') { q.value=''; results.classList.remove('on'); } });
+  document.addEventListener('click', function(e){ if (!results.contains(e.target) && e.target !== q) results.classList.remove('on'); });
+
+  // 平台
+  function setPlatform(p){
+    html.classList.remove('platform-macos','platform-ios');
+    if (p === 'macos' || p === 'ios') html.classList.add('platform-' + p);
+    document.querySelectorAll('#pswitch button').forEach(function(b){ b.classList.toggle('on', b.getAttribute('data-p') === (p||'')); });
+  }
+  document.querySelectorAll('#pswitch button').forEach(function(b){ b.onclick = function(){ setPlatform(b.getAttribute('data-p')); }; });
+  if (html.getAttribute('data-mode') === 'site') {
+    setPlatform(/iPhone|iPad/.test(navigator.userAgent) ? 'ios' : '');
+  }
+
+  // 变量名
+  function setVars(charName, userName){
+    document.querySelectorAll('[data-var="char"]').forEach(function(e){ e.textContent = charName || 'AI'; });
+    document.querySelectorAll('[data-var="user"]').forEach(function(e){ e.textContent = userName || '你'; });
+  }
+
+  // App 注入
+  var cssMap = {mainBg:'--bg', sidebarBg:'--sidebar', textPrimary:'--text', textSecondary:'--text-2', textMuted:'--text-3',
+                accent:'--line', branchIndicator:'--accent', danger:'--danger', favorite:'--favorite'};
+  window.memoryPalaceNative = {
+    receive: function(p){
+      if (!p) return;
+      if (p.colors) Object.keys(cssMap).forEach(function(k){ if (p.colors[k]) html.style.setProperty(cssMap[k], p.colors[k]); });
+      if (p.scheme) html.style.colorScheme = p.scheme;
+      if (p.fontScale) html.style.setProperty('--font-scale', String(p.fontScale));
+      if (p.platform) setPlatform(p.platform);
+      if (typeof p.isPro === 'boolean') html.classList.toggle('lite', !p.isPro);
+      if (p.charName || p.userName) setVars(p.charName, p.userName);
+      if (p.anchor) { if (location.hash !== '#' + p.anchor) location.hash = p.anchor; else show(); }
+    }
+  };
+  setVars();
+  show();
+  try { window.webkit.messageHandlers.memoryPalace.postMessage({type:'ready'}); } catch (e) {}
+})();
+</script>
+</body>
+</html>

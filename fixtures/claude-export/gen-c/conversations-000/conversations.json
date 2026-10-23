@@ -1,0 +1,106 @@
+[
+ {
+  "uuid": "c1",
+  "name": "新版对话",
+  "summary": "",
+  "created_at": "2026-01-01T00:00:00.123456Z",
+  "updated_at": "2026-01-01T00:09:00.123456Z",
+  "account": {
+   "uuid": "acct-1"
+  },
+  "chat_messages": [
+   {
+    "uuid": "c1-u",
+    "text": "",
+    "content": [
+     {
+      "type": "text",
+      "text": "看这张图",
+      "start_timestamp": null,
+      "stop_timestamp": null,
+      "flags": null,
+      "citations": []
+     },
+     {
+      "type": "image",
+      "file_uuid": "f-img",
+      "source": null,
+      "start_timestamp": null,
+      "stop_timestamp": null,
+      "flags": null
+     },
+     {
+      "type": "document",
+      "file_uuid": "f-doc",
+      "title": "季度报告",
+      "start_timestamp": null,
+      "stop_timestamp": null,
+      "flags": null
+     },
+     {
+      "type": "injected_prompt_block",
+      "injection_source": "date_note",
+      "prompt": "今天是某天（系统注入）",
+      "initial_turn_only": false,
+      "skip_on_truncated_continuation": false,
+      "start_timestamp": "2026-01-01T00:00:00.123456Z",
+      "stop_timestamp": "2026-01-01T00:00:00.123456Z",
+      "flags": null
+     },
+     {
+      "type": "voice_note",
+      "title": "语音",
+      "text": "这是语音转写"
+     }
+    ],
+    "sender": "human",
+    "created_at": "2026-01-01T00:00:00.123456Z",
+    "updated_at": "2026-01-01T00:00:00.123456Z",
+    "attachments": [
+     {
+      "file_name": "附件.txt",
+      "file_size": 3,
+      "file_type": "txt",
+      "extracted_content": "附件正文"
+     }
+    ],
+    "files": [
+     {
+      "file_name": "截图.png",
+      "file_uuid": "f-img"
+     },
+     {
+      "file_name": "报告.pdf",
+      "file_uuid": "f-doc"
+     },
+     {
+      "file_name": "只在末尾.png",
+      "file_uuid": "f-tail"
+     }
+    ],
+    "parent_message_uuid": "00000000-0000-4000-8000-000000000000"
+   },
+   {
+    "uuid": "c1-a",
+    "text": "",
+    "content": [
+     {
+      "type": "text",
+      "text": "看到了",
+      "start_timestamp": null,
+      "stop_timestamp": null,
+      "flags": null,
+      "citations": []
+     }
+    ],
+    "sender": "assistant",
+    "created_at": "2026-01-01T00:01:00.123456Z",
+    "updated_at": "2026-01-01T00:01:00.123456Z",
+    "attachments": [],
+    "files": [],
+    "parent_message_uuid": "c1-u"
+   }
+  ],
+  "project_uuid": "p-c1"
+ }
+]
