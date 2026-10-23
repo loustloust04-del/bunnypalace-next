@@ -360,7 +360,24 @@ struct VocabWordDetailSheet: View {
                 sourceLabel = "考古笔记 · \(srcWord)"
             } else if let ref = progress.sourceBookRef,
                       let topicPath = VocabCollector.parseTopicRef(ref) {
+                #if PERSONAL_APPS
+                #if DEBUG
+                // 预检卡文件还在（删了/归档挪了就不渲染跳转样式）
+                if let pid = profileManager?.currentProfile.id,
+                   let card = TopicBoxStore.loadCard(
+                       relPath: topicPath,
+                       rootURL: FileLibraryStore.libraryRoot(profileId: pid)) {
+                    topicJumpPath = topicPath
+                    sourceLabel = "话题盒 · \(card.title)"
+                } else {
+                    sourceLabel = "话题盒（卡片已删除）"
+                }
+                #else
                 _ = topicPath   // 话题盒只在粟粟的 Debug 包里（#096）：别的包不显示这条出处
+                #endif
+                #else
+                _ = topicPath   // 话题盒只在粟粟的 Debug 包里（#096）：别的包不显示这条出处
+                #endif
             } else if let ref = progress.sourceBookRef,
                       let nid = VocabCollector.parseThinkingRef(ref) ?? VocabCollector.parseChatRef(ref) {
                 // 预检 node 还在（学划线收藏页：查不到就不渲染跳转样式）
@@ -480,8 +497,29 @@ struct VocabWordDetailSheet: View {
             }
             .buttonStyle(.plain)
         } else if let path = topicJumpPath {
+            #if PERSONAL_APPS
+            #if DEBUG
+            Button {
+                dismiss()
+                // sheet 收起后再跳（叠层里直接跳会被自己盖住）——ContentView 切工具 + 面板开卡
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    NotificationCenter.default.post(
+                        name: .openTopicBoxTool, object: nil,
+                        userInfo: ["topicPath": path]
+                    )
+                }
+            } label: {
+                content.contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            #else
             let _ = path
             content
+            #endif
+            #else
+            let _ = path
+            content
+            #endif
         } else {
             content
         }
@@ -503,7 +541,11 @@ struct VocabWordDetailSheet: View {
     }
 
     private var emptyStateHint: String {
+        #if PERSONAL_APPS
+        "夜里的考古触发器会慢慢补，也可以在学习卡点「问\(assistantName)」"
+        #else
         "点下面「考古这个词」，用你配的模型写一篇；也可以在学习卡点「问\(assistantName)」"
+        #endif
     }
 
     private var emptyState: some View {

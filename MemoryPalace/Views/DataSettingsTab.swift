@@ -6,7 +6,15 @@ import SwiftData
 struct DataSettingsTab: View {
     /// 备份照样带有声书数据；只有粟粟的 Debug 包里有有声书，别的包文案不提（#096）
     private static var audiobookMention: String {
+        #if PERSONAL_APPS
+        #if DEBUG
+        return "有声书、"
+        #else
         return ""
+        #endif
+        #else
+        return ""
+        #endif
     }
     @Environment(\.settingsMetrics) private var m
     @Environment(\.modelContext) private var modelContext

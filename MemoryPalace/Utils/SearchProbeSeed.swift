@@ -27,6 +27,13 @@ enum SearchProbeSeed {
                                   hashtagsJoined: i % 10 == 0 ? "薄荷" : ""))
         }
 
+        #if PERSONAL_APPS
+        ctx.insert(TickerEntry(profileId: pid, symbol: "MINT", displayName: "薄荷科技"))
+        let trade = TradeEntry(profileId: pid, symbol: "NVDA", side: "long", quantity: 10, price: 100,
+                               reason: "探针成交：看好薄荷色显卡", openedAt: day(3))
+        trade.reviewNote = "复盘：薄荷行情没来"
+        ctx.insert(trade)
+        #endif
 
         ctx.insert(WeightEntry(profileId: pid, date: day(5), weightKg: 50, note: "喝完薄荷茶称的"))
         ctx.insert(Medication(profileId: pid, name: "薄荷片", dosage: "1 片", timesOfDay: [480], reminderEnabled: false))

@@ -132,6 +132,11 @@ struct DashboardView: View {
             case .garden:   GardenWidgetView(size: inst.size)
             case .contacts: ContactsWidgetView(size: inst.size)
             case .vocab:    VocabWidgetView(size: inst.size)
+            #if PERSONAL_APPS
+            #if DEBUG
+            case .topicBox: TopicWidgetView(size: inst.size)
+            #endif
+            #endif
             }
         }
         .frame(width: width, height: height)

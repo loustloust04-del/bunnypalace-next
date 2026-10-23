@@ -51,6 +51,11 @@ final class MusicCardPlayer {
     static let shared: MusicCardPlayer = {
         let player = MusicCardPlayer(engine: AVMusicEngine(), isOffline: { LocalMode.isOn }, willPlay: {
             VoiceMessagePlayer.shared.stop()
+            #if PERSONAL_APPS
+            #if DEBUG
+            AudiobookPlayer.shared.pause()
+            #endif
+            #endif
         }, builtinFile: { await BuiltinMusic.fileURL(for: $0) }, levels: { await BuiltinMusic.levels(forFile: $0) })
         player.observeLocalMode()
         return player

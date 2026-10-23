@@ -2081,6 +2081,19 @@ struct ChatInputBar: View {
 
     /// 返回 true 表示发送成功（子 view 应清空 text），false = 预算被拦（text 保留）
     private func send(_ text: String) -> Bool {
+        #if PERSONAL_APPS
+        // 死亡天平暗号（plan-death-scale §4.2）：本地拦下，不建消息、不发 AI、不转 CC；编辑中的草稿在 stash 里，不动
+        if DeathScaleUnlock.matches(text) {
+            if viewModel.editingMessage == nil {
+                viewModel.selectedConversation?.draftText = ""
+                viewModel.selectedConversation?.draftAttachmentsData = nil
+                viewModel.selectedConversation?.draftQuotePreview = ""
+                viewModel.selectedConversation?.draftQuoteReplyTo = ""
+            }
+            DeathScaleUnlock.post()
+            return true
+        }
+        #endif
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !selectedAttachments.isEmpty else { return false }
 

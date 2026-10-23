@@ -79,10 +79,15 @@ final class GardenWallpaperTests: XCTestCase {
         XCTAssertFalse(Page2Appearance.isPaleGlass("flora", daylight: true))
         XCTAssertEqual(Page2AppearancePatch.wallpapers["garden"], "花园四季")
         XCTAssertNoThrow(try Page2AppearancePatch(wallpaper: "garden").validate())
+        #if PERSONAL_APPS
+        XCTAssertEqual(Page2Appearance().wallpaper, "ios26")
+        XCTAssertEqual(Page2Appearance().resolvedWallpaper, "ios26")
+        #else
         XCTAssertEqual(Page2Appearance().wallpaper, "garden")
         var stale = Page2Appearance()
         stale.wallpaper = "ios26"
         XCTAssertEqual(stale.resolvedWallpaper, "garden")
+        #endif
     }
 
     func testRenderProducesFrameAndExportsSamples() throws {

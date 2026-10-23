@@ -33,6 +33,10 @@ enum SearchResourceKind: String, CaseIterable {
     case memory
     /// 文件库（文件名 + 开头 4KB，searchFiles）
     case file
+    #if PERSONAL_APPS
+    /// 交易：标的 + 成交（S3-3）
+    case trading
+    #endif
     /// 健康：四类备注 + 药名 / 剂量（S3-4；亲密记录跟面板开关）
     case health
     /// 书房：纸书书名 / 作者 / 批注 / 书签 + 有声书标题 / 书签备注（S3-5）
@@ -1434,6 +1438,9 @@ extension SearchResourceKind {
         case .worldbook: self = .worldBook
         case .memory: self = .memory
         case .file: self = .file
+        #if PERSONAL_APPS
+        case .trading: self = .trading
+        #endif
         case .health: self = .health
         case .library: self = .library
         case .twitter: self = .twitter
@@ -1450,6 +1457,9 @@ extension SearchResourceKind {
         case .worldBook: .worldbook
         case .memory: .memory
         case .file: .file
+        #if PERSONAL_APPS
+        case .trading: .trading
+        #endif
         case .health: .health
         case .library: .library
         case .twitter: .twitter

@@ -27,6 +27,11 @@ final class RightPanelToolManager {
             "xiaoya",   // 小芽助手：创作门槛恰恰压在 lite 用户身上（plan-小芽助手 Q2）
             "study",    // 学堂：点一下就能开课，lite 新用户也要看得见（plan-study-zero-engine P4）
         ]
+        #if PERSONAL_APPS
+        #if DEBUG
+        ids.formUnion(["topicBox", "audiobook"])   // 话题盒 / 有声书只进粟粟的 Debug 包（#096）
+        #endif
+        #endif
         return ids
     }()
 
@@ -168,13 +173,35 @@ final class RightPanelToolManager {
         RightPanelTool(id: "browser",     name: "浏览器",  icon: "globe",                          order: 8),
         ]
         // 话题盒 / 有声书只进粟粟的 Debug 包（#096）：TF（Release）和开源快照都没有；order 和数组位置不变
+        #if PERSONAL_APPS
+        #if DEBUG
+        tools += [
+        RightPanelTool(id: "audiobook",   name: "有声书",  icon: "headphones",                     order: 9),
+        ]
+        #endif
+        #endif
         tools += [
         RightPanelTool(id: "vocab",       name: "单词",    icon: "abc",                            order: 10),
         RightPanelTool(id: "reading",     name: "书房",    icon: "books.vertical",                 order: 11),
         ]
+        #if PERSONAL_APPS
+        #if DEBUG
+        tools += [
+        // icon 字段是 SF 兜底值；pill/抽屉对 topicBox 特例走 PixelGlyph.lightbulb（粟粟拍的像素灯泡）
+        RightPanelTool(id: "topicBox",    name: "话题盒",  icon: "lightbulb",                      order: 12),
+        ]
+        #endif
+        #endif
         tools += [
         RightPanelTool(id: "health",      name: "健康",    icon: "heart",                          order: 13),
         ]
+        #if PERSONAL_APPS
+        tools += [
+        // [Bunny patch BP-001] 军机处 / 交易依赖粟粟 Mac 上的服务，小兔这边默认关（代码保留，设置里可再打开）
+        RightPanelTool(id: "warroom",     name: "军机处",  icon: "ri-sword",                       isEnabled: false, order: 14),
+        RightPanelTool(id: "trading",     name: "交易",    icon: "chart.line.uptrend.xyaxis",      isEnabled: false, order: 15),
+        ]
+        #endif
         tools += [
         // 面 4.3（A4）：正则从设置页也进右栏，同一份 RegexPage；两端都露（G11 她批），lite 白名单不加
         RightPanelTool(id: "regex",       name: "正则",    icon: "textformat.abc",                 order: 16),
@@ -185,17 +212,38 @@ final class RightPanelToolManager {
         // page2「学堂」（plan-study-zero-engine）：内置学习说明的文件夹 + 开课；两端都上。21 是 Debug 的「开发」
         RightPanelTool(id: "study",       name: "学堂",    icon: "graduationcap",                  order: 22),
         ]
+        #if PERSONAL_APPS
+        tools += [
+        // 死亡天平（plan-death-scale）：默认关，只有输暗号才打开；未启用时不在任何工具列表里露面
+        RightPanelTool(id: "deathScale",  name: "Mort sans sépulture", icon: "scalemass", isEnabled: false, order: 23),
+        ]
+        #endif
         return tools + platformTools + debugTools
     }()
 
+    #if PERSONAL_APPS
+    static let secretToolIds: Set<String> = ["deathScale"]
+    #else
     static let secretToolIds: Set<String> = []
+    #endif
 
     /// 不经实例读存档里的工具状态（AI 工具门控用，那里拿不到环境里的 manager）
     static func storedTool(_ id: String) -> RightPanelTool? {
         load().first { $0.id == id }
     }
 
+    #if PERSONAL_APPS
+    /// 只进粟粟的 Debug 包：pmBoard = 手机上看 / 跟 Mac 上各 session 说话（plan-dev-subapp-v2，数据靠她 Mac 上的看板服务 4793）
+    private static var debugTools: [RightPanelTool] {
+        #if DEBUG
+        [RightPanelTool(id: "pmBoard", name: "pmBoard", icon: "person.3", order: 21)]
+        #else
+        []
+        #endif
+    }
+    #else
     private static var debugTools: [RightPanelTool] { [] }
+    #endif
 
     /// 平台专属工具。macOS：「运行」（正在跑的 run_command 进程 + 端口，plan-离线沙箱-phase1 §1.7）；
     /// iOS：「聊天（css自定义）」（Page2 的 WKWebView 聊天渲染器，plan-page2-chat-webview）。

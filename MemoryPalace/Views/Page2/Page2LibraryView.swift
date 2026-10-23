@@ -27,10 +27,29 @@ struct Page2LibraryView: View {
         Category(title: "创作与资料", ids: ["worldBook", "cardLibrary", "prompt", "fileLibrary"]),
         Category(title: "工具", ids: Self.toolIds)
     ]
+    #if PERSONAL_APPS
+    private static var toolIds: [String] { ["browser", "ccTerminal", "warroom", "trading", "cssChat"] + debugToolIds }
+    private static var debugToolIds: [String] {
+        #if DEBUG
+        ["pmBoard"]
+        #else
+        []
+        #endif
+    }
+    #else
     private static var toolIds: [String] { ["browser", "ccTerminal", "cssChat"] }
+    #endif
     /// 话题盒 / 有声书只进粟粟的 Debug 包（#096）
     private static func debugAppIds(_ ids: [String]) -> [String] {
+        #if PERSONAL_APPS
+        #if DEBUG
+        return ids
+        #else
         return []
+        #endif
+        #else
+        return []
+        #endif
     }
     private var tools: [RightPanelTool] { manager?.pinnedTools ?? [] }
     private var shownCategories: [Category] {
@@ -230,7 +249,17 @@ enum Page2WidgetCatalog {
         case "memory", "garden": return "记住生活里的小事"
         case "contacts": return "你和助手的资料卡"
         case "vocab": return "serendipity\n意外发现的美好"
+        #if PERSONAL_APPS
+        #if DEBUG
+        case "topicBox": return "最近有什么值得记住的瞬间？"
+        #endif
+        #endif
         case "reading": return "从上次停下的地方，继续阅读"
+        #if PERSONAL_APPS
+        #if DEBUG
+        case "audiobook": return "听完这一段故事"
+        #endif
+        #endif
         default: return "\(name(kind))的最新内容与快捷入口"
         }
     }

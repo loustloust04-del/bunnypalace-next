@@ -70,6 +70,24 @@ import { planReap, reapLogLine, reapThresholdMs, reapUnknownLogLine } from "./se
 import { effortArg, effortChange, normalizeEffort } from "./effort.ts"
 import { buildSessionPhaseFrame, phaseFrameChanged, sendPhaseAfter, sessionPhaseSnapshotFrames } from "./session-phase.ts"
 import { ToolActivityTracker } from "./tool-activity.ts"
+// #if PERSONAL_APPS
+import { setTradingBroadcaster, pendingTradingReports, ackTradingReport, runTickerResearch, saveWatchlist } from "./trading-research.ts"
+import { openIndexerWithRetry, WarroomIndexer } from "./warroom-indexer.ts"
+import { k2Enabled, WarroomScanWorker, warroomScanRunner } from "./warroom-scan-client"
+import { WarroomLedger, TargetBusy, retryBusy, type TaskRow } from "./warroom-ledger.ts"
+import { WarroomDispatcher, realSpawnT2, type TargetInfo } from "./warroom-dispatch.ts"
+import { PM_FRAMES, pmRelay } from "./pm-relay.ts"
+import { TmuxState, parsePaneTitles, parsePaneMeta, TMUX_PANES_ARGS, type PaneMeta } from "./tmux-state.ts"
+import { PaneStream } from "./tmux-pane-stream.ts"
+import { chainTmuxWrite, fetchPanes, k1Enabled, sharedTmuxControl, startSharedTmuxControl, TmuxCommandError, TmuxUncertainError, tmuxLoadBuffer, tmuxRun, tmuxRunCounts, waitTmuxWriteSettled } from "./tmux-control"
+import { findCodexRollout, locateEditArea, SendStatusBook, transcriptCursor, type EditArea, type SendStatusFrame, type TranscriptCursor } from "./send-verify"
+import { SendTracker, type InjectResult } from "./send-track"
+import { LagLog, classifyConnect, classifyTerminalOpen, parseConnectReport, parseTerminalReport, appendLedger, FAST_MS } from "./connect-ledger.ts"
+import {
+  buildInspectorPrompt, buildInspectorCommand, parseVerdict, buildReworkTask, buildDeskNotice,
+  reworkDepth, type EvidencePack,
+} from "./warroom-inspector.ts"
+// #endif
 
 // 阻塞调用账（plan-hub-perf §3.2）：主线程上的同步 tmux / 文件调用全部计时，卡顿时按调用点归因。只计时，行为不变。
 // 账本和包装在 block-ledger.ts：hub 带起来的各模块（warroom / agora / 账本…）记进同一本
@@ -77,6 +95,113 @@ export { blockLedger }
 const execFileSync = timedExecFileSync()
 const { unlinkSync, existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, statSync, readdirSync, appendFileSync, renameSync } = timedSyncFs("")
 
+// #if PERSONAL_APPS
+// 军机处 M0：普查 indexer（startHub 里初始化；null = 未就绪，端点回 503）
+let warroomIndexer: WarroomIndexer | null = null
+let warroomLastScan: { at: string; scanned: number; changed: number; ms: number } | null = null
+// 军机处 M1：奏折账本 + 派发器
+let warroomLedger: WarroomLedger | null = null
+let warroomDispatcher: WarroomDispatcher | null = null
+// dispatch 权限：只有中枢会话（御前）能开/派奏折。header 可伪造无妨——端点本身 loopback+token。
+function warroomCentralSessions(): Set<string> {
+  const base = ["mp-cc", "mp-cc-6", "mp-cc-2521523d"]
+  const extra = (process.env.MP_WARROOM_CENTRAL ?? "").split(",").map(s => s.trim()).filter(Boolean)
+  return new Set([...base, ...extra])
+}
+const WARROOM_DESK_SESSION = process.env.MP_WARROOM_DESK ?? "mp-cc-2521523d"
+/** M3：看板快照（app WS 拉取）。奏折按板块分好，统计一并给。 */
+export function warroomBoardSnapshot(): object {
+  if (!warroomLedger || !warroomIndexer) return { ready: false, tasks: [], stats: {} }
+  const tasks = warroomLedger.queryTasks({ limit: 50 }).map(t => {
+    let receiptObj: any = null
+    try { receiptObj = t.receipt ? JSON.parse(t.receipt) : null } catch {}
+    // M5.1/M5.2：可 resume 的完整 uuid——resume/tmux 单查普查表；
+    // repo 单用它出生的新会话 id（收据里的 session_id），干完活还能被她 resume 接着聊
+    const resumeId = t.target_kind !== "repo"
+      ? (warroomLookupTarget(t.target_ref)?.sessionId ?? null)
+      : (typeof receiptObj?.session_id === "string" ? receiptObj.session_id : null)
+    return {
+      task_id: t.task_id, title: t.title, status: t.status, approval: t.approval,
+      target_ref: t.target_ref, engine: t.engine, created_by: t.created_by,
+      resume_id: resumeId,
+      target_kind: t.target_kind,
+      parent_task: t.parent_task, epic: t.epic, depends_on: t.depends_on,
+      created_at: t.created_at, done_at: t.done_at,
+      cost_usd: Math.round(t.cost_usd * 100) / 100,
+      verdict: t.verdict ? (() => { try { return JSON.parse(t.verdict!) } catch { return null } })() : null,
+      receipt_summary: receiptObj ? String(receiptObj.result ?? receiptObj.summary ?? "").slice(0, 400) : null,
+    }
+  })
+  // M5.2 任务导向布局：需求（EPIC 根）也下发——app 按需求分组显示进度
+  const requests = warroomLedger.db.query(
+    "SELECT request_id, text, status, created_at FROM requests ORDER BY created_at DESC LIMIT 20").all()
+  const s = warroomIndexer.db.query(
+    `SELECT COUNT(*) as total,
+            SUM(alive) as alive,
+            SUM(CASE WHEN alive=1 AND tmux_session IS NULL THEN 1 ELSE 0 END) as zombies
+     FROM sessions`).get() as any
+  const cost = warroomLedger.db.query("SELECT COALESCE(SUM(cost_usd),0) as c FROM tasks").get() as any
+  return {
+    ready: true, tasks, requests,
+    stats: { sessions_total: s?.total ?? 0, sessions_alive: s?.alive ?? 0, zombies: s?.zombies ?? 0, total_cost_usd: Math.round((cost?.c ?? 0) * 100) / 100 },
+  }
+}
+
+/// 定时轮（K3 审查 R1-6）：前半（异步）没跑完时下一 tick 整轮跳过；后半一定排在本轮前半之后。
+/// 前半抛了照跑后半（只记一行），返回 false = 这一 tick 跳过了
+export function serialRound(first: () => Promise<unknown>, then: () => void, onError: (e: unknown) => void): () => boolean {
+  let running = false
+  return () => {
+    if (running) return false
+    running = true
+    void first().catch(onError).then(() => { running = false; then() }).catch(onError)
+    return true
+  }
+}
+
+/// T1 交卷检测（K3）：只看在等收据的单（dispatched / working）各自的 receipts/<task_id>.json，异步读；
+/// 没单在等就不碰盘（原来每 30s 同步列整个目录）。一轮最多看 limit 单，按 task_id 游标轮转（审查 R1-3：
+/// 只看最新的会饿死旧单），cursor 由调用方跨轮保存。返回这次收下几份
+export async function scanT1Receipts(ledger: WarroomLedger, receiptDir: string, cursor = { after: "" }, limit = 500): Promise<number> {
+  const page = (after: string) => ledger.db.query(
+    "SELECT task_id FROM tasks WHERE status IN ('dispatched', 'working') AND task_id > ? ORDER BY task_id LIMIT ?",
+  ).all(after, limit) as Array<{ task_id: string }>
+  let waiting = page(cursor.after)
+  if (waiting.length < limit && cursor.after) waiting = [...waiting, ...page("").filter((t) => t.task_id <= cursor.after)].slice(0, limit)
+  cursor.after = waiting.length === limit ? waiting[waiting.length - 1].task_id : ""
+  let n = 0
+  for (const { task_id: taskId } of waiting) {
+    const f = `${taskId}.json`
+    let raw: string
+    try { raw = await readFile(join(receiptDir, f), "utf8") } catch { continue }
+    const task = ledger.getTask(taskId)
+    if (!task || (task.status !== "dispatched" && task.status !== "working")) continue
+    try {
+      const receipt = JSON.parse(raw)
+      await retryBusy(() => ledger.acceptReceipt(taskId, receipt, "t1-receipt", "evidence_in", "hub", "t1 receipt file arrived"))
+      console.log(`[warroom] t1 receipt: ${taskId} → evidence_in`)
+      n++
+    } catch (e: any) { console.warn(`[warroom] bad receipt ${f}: ${e?.message}`) }
+  }
+  return n
+}
+
+/** 普查表 → TargetInfo（session_id 精确/前缀，或 tmux 名） */
+function warroomLookupTarget(ref: string): TargetInfo | null {
+  if (!warroomIndexer) return null
+  const row = warroomIndexer.db.query(
+    `SELECT session_id, engine, alive, tmux_session, cwd, transcript_path FROM sessions
+     WHERE session_id = ?1 OR session_id LIKE ?1 || '%' OR tmux_session = ?1
+     ORDER BY last_active_at DESC LIMIT 1`
+  ).get(ref) as any
+  if (!row) return null
+  return {
+    sessionId: row.session_id, engine: row.engine,
+    alive: row.alive === 1, tmuxSession: row.tmux_session,
+    cwd: row.cwd, transcriptPath: row.transcript_path,
+  }
+}
+// #endif
 
 // CR-2 阅读在场信号：app 上报的快照落 agent/reading-status.json（消费在 CR-4 触发时机判断）。
 // 形状校验 + 尺寸上限，防畸形消息写爆。导出供测试。
@@ -1787,6 +1912,10 @@ function clearSessionState(name: string): void {
 
 function reapProtectedSessions(): Set<string> {
   const names = new Set<string>()
+  // #if PERSONAL_APPS
+  for (const n of warroomCentralSessions()) names.add(n)
+  names.add(WARROOM_DESK_SESSION)
+  // #endif
   return names
 }
 
@@ -2042,6 +2171,14 @@ const askUserIO: AskUserIO = {
   capturePane: (session) => tmuxCapture(session, ["-S", "-40"]),
   sleep: (s) => new Promise<void>((resolve) => setTimeout(resolve, s * 1000)),
 }
+// #if PERSONAL_APPS
+// 交易 T0.5：研报回投广播出口（同款）
+setTradingBroadcaster((frame) => {
+  for (const c of mpClients) {
+    try { c.send(frame) } catch {}
+  }
+})
+// #endif
 // CC 小克 memory 同步（plan-cc-memory-sync）：文件夹一变只广播「变了」，不带内容，手机自己来拉
 watchMemoryDir(CC_MEMORY_DIR, () => {
   const frame = JSON.stringify({ type: "cc_memory_changed" })
@@ -3416,6 +3553,157 @@ export function startHub(): WebSocketServer {
         ...(BENCH_HEALTH ? { bench: { lags: lagLog.list(), block: blockLedger.top(30) } } : {}) }))
       return
     }
+    // #if PERSONAL_APPS
+    // GET /warroom/sessions（军机处 M0 普查查询）：loopback + token。
+    // 参数：cwd=（LIKE 模糊）alive=0|1 engine=claude|codex zombies=1 limit=N
+    if (req.method === "GET" && path === "/warroom/sessions") {
+      if (!isTrustedLocal(req)) { res.writeHead(403); res.end("forbidden"); return }
+      const u = new URL(req.url ?? "", "http://localhost")
+      if (u.searchParams.get("token") !== HUB_TOKEN) { res.writeHead(401); res.end("unauthorized"); return }
+      if (!warroomIndexer) { res.writeHead(503); res.end(JSON.stringify({ error: "indexer not ready" })); return }
+      try {
+        const rows = warroomIndexer.querySessions({
+          cwd: u.searchParams.get("cwd") ?? undefined,
+          alive: u.searchParams.get("alive") ?? undefined,
+          engine: u.searchParams.get("engine") ?? undefined,
+          zombies: u.searchParams.get("zombies") === "1",
+          limit: Number(u.searchParams.get("limit")) || undefined,
+        })
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ sessions: rows, scan: warroomLastScan }))
+      } catch (e: any) {
+        res.writeHead(500); res.end(JSON.stringify({ error: e?.message }))
+      }
+      return
+    }
+    // GET /warroom/tasks（奏折账本查询）：loopback + token
+    if (req.method === "GET" && path === "/warroom/tasks") {
+      if (!isTrustedLocal(req)) { res.writeHead(403); res.end("forbidden"); return }
+      const u = new URL(req.url ?? "", "http://localhost")
+      if (u.searchParams.get("token") !== HUB_TOKEN) { res.writeHead(401); res.end("unauthorized"); return }
+      if (!warroomLedger) { res.writeHead(503); res.end(JSON.stringify({ error: "ledger not ready" })); return }
+      const rows = warroomLedger.queryTasks({
+        status: u.searchParams.get("status") ?? undefined,
+        target: u.searchParams.get("target") ?? undefined,
+        limit: Number(u.searchParams.get("limit")) || undefined,
+      })
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ tasks: rows }))
+      return
+    }
+    // POST /warroom/dispatch（开奏折并派发）：loopback + token + 中枢名单
+    if (req.method === "POST" && path === "/warroom/dispatch") {
+      if (!isTrustedLocal(req)) { res.writeHead(403); res.end("forbidden"); return }
+      const u = new URL(req.url ?? "", "http://localhost")
+      if (u.searchParams.get("token") !== HUB_TOKEN) { res.writeHead(401); res.end("unauthorized"); return }
+      let body = ""
+      req.on("data", (c) => { body += c; if (body.length > 100_000) { res.writeHead(413); res.end(); req.destroy() } })
+      req.on("end", () => {
+        void (async () => {
+          const respond = (code: number, obj: object) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)) }
+          if (!warroomLedger || !warroomDispatcher) return respond(503, { error: "warroom not ready" })
+          let p: any
+          try { p = JSON.parse(body) } catch { return respond(400, { error: "bad json" }) }
+          const actor = String(p.actor ?? "")
+          if (!warroomCentralSessions().has(actor)) return respond(403, { error: `actor "${actor}" 不在中枢名单——只有御前会话可批奏折` })
+          if (!p.title || !p.body || !p.target_ref) return respond(400, { error: "need title/body/target_ref" })
+          const ledger = warroomLedger, dispatcher = warroomDispatcher
+          try {
+            const task = await retryBusy(() => ledger.createTask({
+              title: String(p.title), body: String(p.body),
+              target_kind: p.target_kind === "tmux" ? "tmux" : p.target_kind === "repo" ? "repo" : "resume",
+              target_ref: String(p.target_ref),
+              engine: p.engine === "codex" ? "codex" : "claude",
+              created_by: actor, approval: p.approval === "ask_susu" ? "ask_susu" : undefined,
+              filescope: typeof p.filescope === "string" ? p.filescope : null,
+              depends_on: Array.isArray(p.depends_on) ? p.depends_on.map(String) : undefined,
+              epic: typeof p.epic === "string" ? p.epic : null,
+            }))
+            if (task.approval === "ask_susu") {
+              return respond(200, { task_id: task.task_id, status: task.status, note: "危险工单已立案但未派发——需要粟粟亲批（approval=ask_susu）" })
+            }
+            if (!ledger.depsSatisfied(task)) {
+              return respond(200, { task_id: task.task_id, status: "draft", note: "已立案排队——依赖未全部朱批，DAG 定时器会在前置完成后自动放行" })
+            }
+            // M2：记 git base——验收时 diff <base> 就是这张奏折的全部变更
+            // repo 单的 cwd = target_ref 本身（普查表查不到）
+            const baseCwd = task.target_kind === "repo" ? task.target_ref : warroomLookupTarget(task.target_ref)?.cwd
+            if (baseCwd) {
+              try {
+                const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: baseCwd }).toString().trim()
+                await retryBusy(() => ledger.attachEvidence(task.task_id, { git_base: base }, "hub"))
+              } catch { /* cwd 无 git，验收官只审 transcript */ }
+            }
+            const r = await dispatcher.dispatch(task.task_id, actor, p.budget_ok === true)
+            return respond(200, { task_id: task.task_id, status: ledger.getTask(task.task_id)!.status, channel: r.channel, note: r.note })
+          } catch (e: any) {
+            const code = e instanceof TargetBusy ? 409 : 400
+            return respond(code, { error: e?.message })
+          }
+        })()
+      })
+      return
+    }
+    // POST /warroom/verdict（御裁签字）：loopback + token + 中枢名单
+    if (req.method === "POST" && path === "/warroom/verdict") {
+      if (!isTrustedLocal(req)) { res.writeHead(403); res.end("forbidden"); return }
+      const u = new URL(req.url ?? "", "http://localhost")
+      if (u.searchParams.get("token") !== HUB_TOKEN) { res.writeHead(401); res.end("unauthorized"); return }
+      let vbody = ""
+      req.on("data", (c) => { vbody += c; if (vbody.length > 50_000) { res.writeHead(413); res.end(); req.destroy() } })
+      req.on("end", () => {
+        const respond = (code: number, obj: object) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)) }
+        if (!warroomLedger) return respond(503, { error: "ledger not ready" })
+        let p: any
+        try { p = JSON.parse(vbody) } catch { return respond(400, { error: "bad json" }) }
+        if (!warroomCentralSessions().has(String(p.actor ?? ""))) return respond(403, { error: "只有御前会话可签朱批" })
+        const task = warroomLedger.getTask(String(p.task_id ?? ""))
+        if (!task) return respond(404, { error: "task not found" })
+        try {
+          if (p.decision === "release") {
+            // 御批放行：ask_susu 危险单经粟粟点头 → 降 approval 并立即派发
+            void (async () => {
+              try {
+                if (task.approval === "ask_susu") {
+                  await retryBusy(() => warroomLedger!.db.query("UPDATE tasks SET approval = 'auto' WHERE task_id = ?").run(task.task_id))
+                }
+                if (!warroomLedger!.depsSatisfied(warroomLedger!.getTask(task.task_id)!)) {
+                  res.writeHead(200, { "content-type": "application/json" })
+                  res.end(JSON.stringify({ task_id: task.task_id, status: "draft", note: "已放行但依赖未满足——DAG 定时器会自动派" }))
+                  return
+                }
+                const r = await warroomDispatcher!.dispatch(task.task_id, p.actor, p.budget_ok === true)
+                res.writeHead(200, { "content-type": "application/json" })
+                res.end(JSON.stringify({ task_id: task.task_id, status: warroomLedger!.getTask(task.task_id)!.status, channel: r.channel, note: `御批放行: ${r.note}` }))
+              } catch (e: any) {
+                res.writeHead(400, { "content-type": "application/json" })
+                res.end(JSON.stringify({ error: e?.message }))
+              }
+            })()
+            return
+          }
+          if (p.decision !== "approve" && p.decision !== "reject" && p.decision !== "fail") return respond(400, { error: "decision must be approve|reject|fail" })
+          // K2 审查 R1-1：账本写撞上 scan worker 的批事务 → 异步退避重试，最终失败照旧回 400
+          const ledger = warroomLedger
+          void (async () => {
+            try {
+              if (p.decision === "approve") {
+                await retryBusy(() => ledger.attachVerdict(task.task_id, { verdict: "approved", reasons: [String(p.reason ?? "御批")], by: p.actor }, p.actor))
+                await retryBusy(() => ledger.transition(task.task_id, "approved", p.actor, String(p.reason ?? "御批")))
+              } else if (p.decision === "reject") {
+                await retryBusy(() => ledger.attachVerdict(task.task_id, { verdict: "rejected", reasons: [String(p.reason ?? "御驳")], by: p.actor }, p.actor))
+                await retryBusy(() => ledger.transition(task.task_id, "rejected", p.actor, String(p.reason ?? "御驳")))
+              } else {
+                await retryBusy(() => ledger.transition(task.task_id, "failed", p.actor, String(p.reason ?? "废案")))
+              }
+              respond(200, { task_id: task.task_id, status: ledger.getTask(task.task_id)!.status })
+            } catch (e: any) { respond(400, { error: e?.message }) }
+          })()
+        } catch (e: any) { return respond(400, { error: e?.message }) }
+      })
+      return
+    }
+    // #endif
     // /pair：Phase 2 主体收紧——loopback 也强制 ?token= 校验，堵本机原生进程免鉴权拿 token
     if (req.method === "GET" && path === "/pair") {
       const provided = new URL(req.url ?? "", "http://localhost").searchParams.get("token")
@@ -3870,6 +4158,12 @@ export function startHub(): WebSocketServer {
         try { ws.send(JSON.stringify({ type: "agent_book_note", ...p })) } catch {}
       }
 
+      // #if PERSONAL_APPS
+      // 交易 T0.5：补投未 ack 的研报（app 端 uuid 去重，重复无害）
+      for (const p of pendingTradingReports()) {
+        try { ws.send(JSON.stringify({ type: "trading_report_result", ...p })) } catch {}
+      }
+      // #endif
 
       if (transportPolicies.size) { try { ws.send(transportPoliciesFrame()) } catch {} }   // 传输策略以 hub 为准，连上就对齐
       // 问问题 CC 桥：pending 问题重发（先验 TUI 还挂着；死了/无 session 按 declined 收账）
@@ -4499,6 +4793,33 @@ export function startHub(): WebSocketServer {
           // 楼层语音设置 → CLAUDE.md 标记块（app 发送前/设置改动时按内容去重同步）
           const r = writeVoiceInstructions(msg.content)
           try { ws.send(JSON.stringify({ type: "voice_instructions_result", ...r })) } catch {}
+          // #if PERSONAL_APPS
+        } else if (msg.type === "warroom_board") {
+          // M3：iOS 军机处看板拉取（快照式——最近奏折 + 普查统计）
+          try { ws.send(JSON.stringify({ type: "warroom_board_result", ...warroomBoardSnapshot() })) } catch {}
+        } else if (msg.type === "warroom_request") {
+          // M5：粟粟在 app 看板上一句话派单 → 存档原文 → 注入中枢拆 EPIC
+          const text = typeof msg.text === "string" ? msg.text.trim() : ""
+          if (!text || !warroomLedger) {
+            try { ws.send(JSON.stringify({ type: "warroom_request_result", ok: false, error: !text ? "empty" : "not ready" })) } catch {}
+          } else {
+            // K2 审查 R1-1：撞锁异步重试；最终失败回 WS 错误（原来同步抛 → 这个 async 回调 reject → unhandledRejection → hub 退出）
+            const ledger = warroomLedger
+            void retryBusy(() => ledger.createRequest(text.slice(0, 4000))).then((req) => {
+              const desk = process.env.MP_WARROOM_DESK ?? "mp-cc-2521523d"
+              const tag = `<channel source="warroom-request" request_id="${req.request_id}">【御笔亲批的新需求 ${req.request_id}】${text.replace(/\n/g, " ")} —— 中枢流程：拆粗颗粒 roadmap → warroom_dispatch 子奏折（epic 一律填 "${req.request_id}"，能并行的并行、有先后的用 depends_on 串；工单正文里要求执行者按 research→plan→执行→review 循环干活）→ 全部终态后 hub 会叫你终审。先用 bridge 回粟粟你拆出的 roadmap。</channel>`
+              void ensureSessionAndSendAsync(desk, tag).catch((e: any) => console.warn(`[warroom] request inject fail: ${e?.message}`))
+              try { ws.send(JSON.stringify({ type: "warroom_request_result", ok: true, request_id: req.request_id })) } catch {}
+              console.log(`[warroom] request ${req.request_id} → desk (${text.slice(0, 60)})`)
+            }).catch((e: any) => {
+              console.warn(`[warroom] request 存档失败：${e?.message}`)
+              try { ws.send(JSON.stringify({ type: "warroom_request_result", ok: false, error: String(e?.message ?? e) })) } catch {}
+            })
+          }
+        } else if (PM_FRAMES.has(msg.type)) {
+          // 手机「开发」子应用：只转发给本机 session 看板服务 4793（pm-relay.ts，异步 + 超时，不阻塞消息循环）
+          void pmRelay(msg).then((r) => { try { ws.send(JSON.stringify(r)) } catch {} })
+          // #endif
         } else if (msg.type === "agent_status") {
           // R5：iOS 拉 agent 状态（config/用量/活动）
           try { ws.send(JSON.stringify({ type: "agent_status_result", ...agentStatusSnapshot() })) } catch {}
@@ -4540,6 +4861,22 @@ export function startHub(): WebSocketServer {
             ackBookNote(msg.uuid)
             console.log(`[hub] book_note ack ← ${msg.uuid.slice(0, 8)}`)
           }
+          // #if PERSONAL_APPS
+        } else if (msg.type === "ticker_research") {
+          // 交易 T0.5：档案页「跑研究」→ headless axismundi（mode: full=按钮全量 / auto=夜跑增量优先）
+          if (typeof msg.symbol === "string" && /^[A-Z]{1,5}$/.test(msg.symbol)) {
+            const mode = typeof msg.mode === "string" ? msg.mode : "full"
+            void runTickerResearch(msg.symbol, typeof msg.request_id === "string" ? msg.request_id : "", mode)
+          }
+        } else if (msg.type === "trading_report_ack") {
+          if (typeof msg.uuid === "string") {
+            ackTradingReport(msg.uuid)
+            console.log(`[hub] trading_report ack ← ${msg.uuid.slice(0, 8)}`)
+          }
+        } else if (msg.type === "trading_watchlist") {
+          // 交易夜跑：app 关注列表 + 夜跑参数全量上报 → 落盘给 trading-daily 读
+          saveWatchlist(msg.symbols, msg.nightly ?? null)
+          // #endif
         } else if (msg.type === "reading_context") {
           // CR-4 P1：她读到哪，章文本缓存到哪（ReaderDaemon 的阅读材料）
           if (typeof msg.safeName === "string" && typeof msg.text === "string" && Number.isFinite(msg.chapter)) {
@@ -4927,6 +5264,196 @@ export function startHub(): WebSocketServer {
     }
   }, 5 * 60_000)
 
+  // #if PERSONAL_APPS
+  // 军机处 M0：普查 indexer——30s 后首扫（大盘 934MB 只在 scan_state 空时真读全量），
+  // 之后每 5min 增量（未变文件 stat 即跳，常态 <100ms）。只读不注入。
+  // K2：扫描（stat / 读文件 / sqlite 写）在 Worker 线程跑，主线程只留读查询和奏折账本；MP_HUB_PERF_K2=0 回主线程
+  // 粟粟 10-11：军机处先关——默认不起（不开库、不扫、不建定时器、不建收据目录），MP_CC_WARROOM=1 才打开；
+  // 关着时 /warroom/* 回 503、看板 ready:false、warroom_request 回 not ready
+  if (process.env.MP_CC_WARROOM !== "1") {
+    console.log("[warroom] 军机处默认关闭（MP_CC_WARROOM=1 打开）")
+  } else {
+    const indexerOpts = {
+      dbPath: join(SECRETS_DIR, "warroom.db"),
+      ccProjectsRoot: process.env.MP_CC_WARROOM_CC_ROOT ?? join(homedir(), ".claude", "projects"),
+      codexSessionsRoot: process.env.MP_CC_WARROOM_CODEX_ROOT ?? join(homedir(), ".codex", "sessions"),
+    }
+    // K2 审查 R1-5：开库（切 WAL）撞上旧连接的活动事务会失败——异步退避重开，拿到库才往下初始化（第一次成功就是同步的）
+    openIndexerWithRetry(indexerOpts, (indexer) => { try {
+      warroomIndexer = indexer
+      // 编译版：bun --compile 只认字符串字面量 + 额外入口的 worker，build-cc-bridge.sh 还没加 → 退回主线程扫描
+      const compiledHub = import.meta.path.startsWith("/$bunfs/")
+      const mainDb = indexer.db
+      // K2 审查 R1-4：worker 真的就绪（发了 ready）才宣布 K2、才把 WAL 检查点交给 worker（主线程的账本写不顺带搬 WAL）；
+      // 起不来连试 3 次后退回主线程扫描，恢复主连接自动检查点。空闲 worker 已 unref，hub 的 process.exit 走 exit 钩子终止它
+      const scanWorker = k2Enabled() && !compiledHub ? new WarroomScanWorker({
+        indexer: indexerOpts,
+        onReady: () => { mainDb.exec("PRAGMA wal_autocheckpoint = 0"); console.log("[warroom] 普查扫描：Worker 线程（K2）就绪") },
+      }) : null
+      if (scanWorker) process.on("exit", () => scanWorker.terminate())
+      else console.log(`[warroom] 普查扫描：主线程（K2 关${compiledHub ? "：编译版" : ""}）`)
+      const runScan = warroomScanRunner({
+        scanMain: () => warroomIndexer!.scanAllAsync(),
+        worker: scanWorker,
+        load5: () => loadavg()[1],
+        onScan: (s) => { warroomLastScan = s },
+        onFallback: () => mainDb.exec("PRAGMA wal_autocheckpoint = 1000"),
+      })
+      setTimeout(() => void runScan("initial"), 30_000)
+      setInterval(() => void runScan("incremental"), 5 * 60_000)
+      // M1：账本 + 派发器（复用 indexer 同一个 db 文件，单写者=hub 进程）
+      warroomLedger = new WarroomLedger(warroomIndexer.db)
+      const receiptDir = join(homedir(), ".mp-warroom", "receipts")
+      try { mkdirSync(receiptDir, { recursive: true }) } catch {}
+      warroomDispatcher = new WarroomDispatcher({
+        ledger: warroomLedger,
+        lookupTarget: warroomLookupTarget,
+        sendTmux: (tag, session) => tmux.send(tag, session),
+        spawnT2: realSpawnT2,
+        receiptDir,
+        onT2Settled: (taskId) => console.log(`[warroom] t2 settled: ${taskId} → ${warroomLedger?.getTask(taskId)?.status}`),
+      })
+      console.log(`[warroom] ledger + dispatcher armed (central: ${[...warroomCentralSessions()].join(",")})`)
+
+      // ── M2：验收 loop ──
+      const DESK_SESSION = WARROOM_DESK_SESSION
+      const notifyDesk = (task: TaskRow, verdict: ReturnType<typeof parseVerdict>, event: Parameters<typeof buildDeskNotice>[2]) => {
+        const notice = buildDeskNotice(task, verdict, event)
+        if (tmux.hasSession(DESK_SESSION)) {
+          void tmux.send(notice, DESK_SESSION).catch((e: any) => console.warn(`[warroom] desk notify fail: ${e?.message}`))
+        } else console.log(`[warroom] desk offline, notice dropped: ${notice.slice(0, 120)}`)
+      }
+      // 孤儿恢复：hub 重启会杀掉 in-flight 的 T2/T4 子进程（headless claude 是 hub 的 child），
+      // 这些任务的收据永远不会来 → 启动时把 dispatched 状态的 resume/repo 单全部标 failed + 知会。
+      // （T1 注入的不算孤儿——对方窗口独立于 hub 活着，收据文件还会来。）
+      try {
+        const orphans = warroomLedger.queryTasks({ status: "dispatched", limit: 100 })
+          .filter(t => t.target_kind === "resume" || t.target_kind === "repo")
+        for (const o of orphans) {
+          warroomLedger.transition(o.task_id, "failed", "hub", "hub restart orphaned in-flight T2/T4 (子进程已随旧 hub 死亡)")
+          notifyDesk(warroomLedger.getTask(o.task_id)!, null, "failed")
+          console.warn(`[warroom] orphaned task ${o.task_id} → failed`)
+        }
+        // reviewing 卡死救援：重启杀掉的是验收官子进程——任务退回 evidence_in，
+        // inspection loop 会重新开庭（验收官只读无副作用，重跑幂等）。
+        const stuck = warroomLedger.queryTasks({ status: "reviewing", limit: 100 })
+        for (const s of stuck) {
+          warroomLedger.db.query("UPDATE tasks SET status = 'evidence_in' WHERE task_id = ?").run(s.task_id)
+          console.warn(`[warroom] reviewing-stuck task ${s.task_id} → back to evidence_in (验收官重开庭)`)
+        }
+      } catch (e: any) { console.warn(`[warroom] orphan sweep fail: ${e?.message}`) }
+      // T1 交卷检测：receipts/<task_id>.json 落盘 → attachReceipt → evidence_in
+      const receiptCursor = { after: "" }
+      const scanReceipts = async () => { if (warroomLedger) await scanT1Receipts(warroomLedger, receiptDir, receiptCursor) }
+      // 验收官：evidence_in → reviewing → 三分支。并发 1，单任务重试 2 次后升级。
+      let inspectorBusy = false
+      const inspectRetries = new Map<string, number>()
+      const runInspection = async () => {
+        if (inspectorBusy || !warroomLedger || !warroomIndexer) return
+        const pending = warroomLedger.queryTasks({ status: "evidence_in", limit: 1 })
+        if (!pending.length) return
+        const task = pending[0]
+        inspectorBusy = true
+        try {
+          const target = warroomLookupTarget(task.target_ref)
+          let evObj: Record<string, unknown> = {}
+          try { evObj = task.evidence ? JSON.parse(task.evidence) : {} } catch {}
+          const pack: EvidencePack = {
+            taskId: task.task_id, workOrder: task.body, filescope: task.filescope,
+            gitBase: (evObj.git_base as string) ?? null,
+            // ⚠️ repo 单的 cwd 就是 target_ref——普查表查不到它，fallback 到 hub cwd 会让
+            // 验收官在错误目录开庭制造冤案（zz-0726-10 实案：真实 581 行被判"编造"）
+            cwd: task.target_kind === "repo" ? task.target_ref : (target?.cwd ?? null),
+            transcriptPath: target?.transcriptPath ?? null,
+            receiptJson: task.receipt, reworkRound: reworkDepth(warroomLedger, task),
+          }
+          const ledger = warroomLedger
+          await retryBusy(() => ledger.transition(task.task_id, "reviewing", "inspector", "对手协议开庭"))
+          const cmd = buildInspectorCommand(buildInspectorPrompt(pack))
+          // spawn cwd 必须与 pack.cwd 一致——上次只修了证据包描述没修进程目录，
+          // 验收官在 hub 目录开庭连环制造 cwd 罗生门（zz-0726-13~16 实案）
+          const { stdout, exitCode, timedOut } = await realSpawnT2(cmd, pack.cwd, 8 * 60_000)
+          // 验收官自己的成本也入账（透明）
+          try {
+            const outer = JSON.parse(stdout.trim())
+            if (typeof outer?.total_cost_usd === "number") await retryBusy(() => ledger.attachEvidence(task.task_id, { inspector_cost_usd: outer.total_cost_usd }, "inspector"))
+          } catch {}
+          const verdict = timedOut || exitCode !== 0 ? null : parseVerdict(stdout)
+          if (!verdict) {
+            const n = (inspectRetries.get(task.task_id) ?? 0) + 1
+            inspectRetries.set(task.task_id, n)
+            if (n <= 2) {
+              // 回 evidence_in 等下轮重试（reviewing→evidence_in 不在状态机——直接置回，留审计）
+              await retryBusy(() => ledger.db.query("UPDATE tasks SET status = 'evidence_in' WHERE task_id = ?").run(task.task_id))
+              console.warn(`[warroom] inspector unparseable for ${task.task_id} (retry ${n}/2)`)
+            } else {
+              await retryBusy(() => ledger.attachVerdict(task.task_id, { verdict: "unsure", reasons: ["验收官连续失败"] }, "inspector"))
+              notifyDesk(task, null, "escalate")
+              console.warn(`[warroom] inspector gave up on ${task.task_id} → escalate（停在 reviewing）`)
+            }
+            return
+          }
+          await retryBusy(() => ledger.attachVerdict(task.task_id, verdict, "inspector"))
+          if (verdict.verdict === "approved") {
+            await retryBusy(() => ledger.transition(task.task_id, "approved", "inspector", verdict.reasons.slice(0, 2).join("；")))
+            notifyDesk(ledger.getTask(task.task_id)!, verdict, "approved")
+          } else if (verdict.verdict === "rejected") {
+            await retryBusy(() => ledger.transition(task.task_id, "rejected", "inspector", verdict.reasons.slice(0, 2).join("；")))
+            const spec = buildReworkTask(ledger, task, verdict)
+            if (spec && warroomDispatcher) {
+              try {
+                const rework = await retryBusy(() => ledger.createTask(spec))
+                await warroomDispatcher.dispatch(rework.task_id, "inspector")
+                notifyDesk(task, verdict, "rejected_rework")
+                console.log(`[warroom] rework dispatched: ${rework.task_id} (parent ${task.task_id})`)
+              } catch (e: any) {
+                notifyDesk(task, verdict, "escalate")
+                console.warn(`[warroom] rework dispatch fail for ${task.task_id}: ${e?.message} → escalate`)
+              }
+            } else {
+              notifyDesk(task, verdict, "escalate")   // 轮数用尽
+            }
+          } else {
+            notifyDesk(task, verdict, "escalate")      // unsure：停在 reviewing 等御裁
+          }
+        } catch (e: any) {
+          console.warn(`[warroom] inspection error for ${task.task_id}: ${e?.message}`)
+        } finally { inspectorBusy = false }
+      }
+      // M4 DAG 自动放行：依赖全朱批的排队单自动起飞（EPIC 流水线自转）
+      const releaseQueued = async () => {
+        if (!warroomLedger || !warroomDispatcher) return
+        for (const t of warroomLedger.readyQueuedTasks()) {
+          try {
+            const r = await warroomDispatcher.dispatch(t.task_id, "dag")
+            console.log(`[warroom] dag release: ${t.task_id} → ${r.channel}`)
+          } catch (e: any) { console.warn(`[warroom] dag release fail ${t.task_id}: ${e?.message}`) }
+        }
+      }
+      // M5 EPIC 终审叫醒：某需求下全部奏折终态 → 注入中枢做对账终审（对照原文，不对照转述）
+      const wakeFinalReview = () => {
+        if (!warroomLedger) return
+        for (const e of warroomLedger.epicsReadyForFinalReview()) {
+          warroomLedger.setRequestStatus(e.request_id, "reviewing")
+          const tag = `<channel source="warroom-epic-done" request_id="${e.request_id}">【EPIC ${e.request_id} 全部终态，请终审】原始需求原文：「${e.text.replace(/\n/g, " ")}」。战果：${e.total} 张奏折，${e.approved} 张朱批。用 warroom_tasks（epic=${e.request_id}）逐张对照原文：哪些完成、哪些没完成、哪些中途需求变了。终审报告用 bridge 发粟粟，然后不用再动账本。</channel>`
+          if (tmux.hasSession(DESK_SESSION)) {
+            void tmux.send(tag, DESK_SESSION).catch((err: any) => console.warn(`[warroom] epic-done notify fail: ${err?.message}`))
+          }
+          console.log(`[warroom] epic ${e.request_id} ready for final review (${e.approved}/${e.total})`)
+        }
+      }
+      // 先收据后开庭：上一轮收据还没读完（swap 时可能 >30s）就整轮跳过，开庭一定排在本轮收据之后
+      const warroomRound = serialRound(scanReceipts, () => {
+        void runInspection().catch((e) => console.warn(`[warroom] 开庭轮失败: ${e}`))
+        void releaseQueued().catch((e) => console.warn(`[warroom] DAG 放行轮失败: ${e}`))
+        wakeFinalReview()
+      },
+                                       (e) => console.warn(`[warroom] 收据 / 开庭轮失败: ${e}`))
+      setInterval(warroomRound, 30_000)
+      console.log(`[warroom] M2 inspection loop armed (desk: ${DESK_SESSION})`)
+    } catch (e: any) { console.warn(`[warroom] indexer init fail: ${e?.message}`) } })
+  }
+  // #endif
 
   // 闲置回收（判定见 session-reap.ts）：扫活着的会话而不是内存活动表——后者 hub 一重启就空了。
   // 启动 5 分钟后先扫一次（hub 一小时内重启过就永远等不到整点那次），之后每小时

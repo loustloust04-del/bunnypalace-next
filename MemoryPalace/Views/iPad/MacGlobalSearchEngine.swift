@@ -112,9 +112,15 @@ enum MacGlobalSearchEngine {
             }
             var hits: [MacSearchRecord] = []
             if wantsFloorResources {
+                #if PERSONAL_APPS
+                for kind in [MacSearchKind.trading, .health, .library, .twitter] where kinds.contains(kind) {
+                    hits += await resourceHits(kind, words: words, profileId: pid, container: container)
+                }
+                #else
                 for kind in [MacSearchKind.health, .library, .twitter] where kinds.contains(kind) {
                     hits += await resourceHits(kind, words: words, profileId: pid, container: container)
                 }
+                #endif
             }
             records = await chat + branch + sticker + memory + world + file + coding + cards + hits
         }
@@ -340,6 +346,9 @@ enum MacGlobalSearchEngine {
         filter.sortOrder = .recent
         let hits: [ResourceHit]
         switch kind {
+        #if PERSONAL_APPS
+        case .trading: hits = await SearchService.searchTrading(filter: filter, profileId: profileId, container: container)
+        #endif
         case .health:
             hits = await SearchService.searchHealth(filter: filter, profileId: profileId,
                                                     includeIntimacy: HealthLogStore.showIntimacyCard, container: container)

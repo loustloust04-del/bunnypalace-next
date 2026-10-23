@@ -27,7 +27,11 @@ final class AppIconTests: XCTestCase {
 
     /// 17 家预设一个不漏：要么有品牌图，要么有非空 monogram。
     func testEveryPresetResolvesToIconOrMonogram() {
+        #if PERSONAL_APPS
+        XCTAssertEqual(APIProvider.presets.count, 19, "预设数量变了，映射表要跟着核一遍（测试跑 Debug，含 kimi-p；mac 上含本机模型）")
+        #else
         XCTAssertEqual(APIProvider.presets.count, 18, "预设数量变了，映射表要跟着核一遍（mac 上含本机模型）")
+        #endif
         for preset in APIProvider.presets {
             if let asset = ProviderIcon.assetName(presetId: preset.id) {
                 XCTAssertTrue(asset.hasPrefix("ri-"), "\(preset.id) 映射到了非资产名 \(asset)")
@@ -56,6 +60,9 @@ final class AppIconTests: XCTestCase {
             "moonshot": "ri-moonshotai",
             "ollama": "ri-ollama",
         ]
+        #if PERSONAL_APPS
+        expected["kimi-p"] = "ri-moonshotai"
+        #endif
         XCTAssertEqual(ProviderIcon.assetByPresetId, expected)
         // 映射表里的 id 必须都是真预设，不能是手抖拼错的字符串
         let presetIds = Set(APIProvider.presets.map(\.id))

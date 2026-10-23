@@ -34,8 +34,16 @@ enum PermissionLevel: Int, CaseIterable, Identifiable {
 enum PermissionDomain: String, CaseIterable, Identifiable {
     // 注入类（AI 能看什么）—— 三档
     case healthApple, healthWeight, healthMeds, healthCycle, healthIntimacy
+    #if PERSONAL_APPS
+    case trading
+    #endif
     case memory, images, fileLibrary
     // 话题盒只进粟粟的 Debug 包（#096）
+    #if PERSONAL_APPS
+    #if DEBUG
+    case topicBox
+    #endif
+    #endif
     // 工具类（AI 能做什么）—— 三档
     case toolsMaster, webSearch, voiceProactive, pocket
     // 设备工具（plan-设备工具 P1）：三档；notifications 两档（AI 主动打扰，无对话语境）
@@ -60,9 +68,17 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         case .healthMeds: return ("health.inject.meds", true)
         case .healthCycle: return ("health.inject.cycle", false)
         case .healthIntimacy: return ("health.inject.intimacy", false)
+        #if PERSONAL_APPS
+        case .trading: return ("trading.inject.watchlist", false)
+        #endif
         case .memory: return ("mem_master", true)
         case .images: return ("sendImagesToModel", true)
         case .fileLibrary: return ("fileLibraryEnabled", true)
+        #if PERSONAL_APPS
+        #if DEBUG
+        case .topicBox: return ("topicBoxInjectionEnabled", true)
+        #endif
+        #endif
         case .toolsMaster: return ("sendToolsEnabled", true)
         case .webSearch: return ("webSearchEnabled", false)
         case .voiceProactive: return ("voice_proactive_enabled", false)
@@ -83,12 +99,25 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
     /// 新装默认档（§4 收紧：健康组全关；其余映射旧默认）。
     var defaultLevel: PermissionLevel {
         switch self {
+        #if PERSONAL_APPS
+        case .healthApple, .healthWeight, .healthMeds, .healthCycle, .healthIntimacy,
+             .trading, .webSearch, .voiceProactive, .pocket,
+             .calendar, .reminders, .clipboard, .notifications:
+            return .notAllowed
+        #else
         case .healthApple, .healthWeight, .healthMeds, .healthCycle, .healthIntimacy,
              .webSearch, .voiceProactive, .pocket,
              .calendar, .reminders, .clipboard, .notifications:
             return .notAllowed
+        #endif
         case .memory, .images, .fileLibrary, .toolsMaster, .twitter:
             return .bypass
+        #if PERSONAL_APPS
+        #if DEBUG
+        case .topicBox:
+            return .bypass
+        #endif
+        #endif
         case .shell:
             return .askOnce   // 每对话首次弹卡问一次（粟粟 08-25 拍）
         #if os(macOS)
@@ -105,9 +134,17 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         case .healthMeds: return "用药记录"
         case .healthCycle: return "月经周期"
         case .healthIntimacy: return "亲密记录"
+        #if PERSONAL_APPS
+        case .trading: return "交易"
+        #endif
         case .memory: return "记忆"
         case .images: return "历史图片"
         case .fileLibrary: return "文件库"
+        #if PERSONAL_APPS
+        #if DEBUG
+        case .topicBox: return "话题盒"
+        #endif
+        #endif
         case .toolsMaster: return "工具调用"
         case .webSearch: return "联网搜索"
         case .voiceProactive: return "主动语音"
@@ -132,9 +169,17 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         case .healthMeds: return "用药计划与今日打卡随对话发给 AI"
         case .healthCycle: return "周期阶段与预测随对话发给 AI"
         case .healthIntimacy: return "当天是否有亲密记录随对话发给 AI（不含备注）"
+        #if PERSONAL_APPS
+        case .trading: return "关注列表、持仓与开仓理由随对话发给 AI"
+        #endif
         case .memory: return "楼层记忆参与注入与提取"
         case .images: return "历史消息里的图片作为附件发给 AI"
         case .fileLibrary: return "AI 可读写文件库（含资料卡）"
+        #if PERSONAL_APPS
+        #if DEBUG
+        case .topicBox: return "话题盒约定注入对话"
+        #endif
+        #endif
         case .toolsMaster: return "请求携带工具，AI 可以调用"
         case .webSearch: return "AI 可搜索网页并读取链接"
         case .voiceProactive: return "AI 可主动发语音条"
@@ -175,8 +220,16 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
     }
 
     static var injectionDomains: [PermissionDomain] {
+        #if PERSONAL_APPS
+        var domains: [PermissionDomain] = [.healthApple, .healthWeight, .healthMeds, .healthCycle, .healthIntimacy,
+                                           .trading, .memory, .images, .fileLibrary]
+        #if DEBUG
+        domains.append(.topicBox)
+        #endif
+        #else
         var domains: [PermissionDomain] = [.healthApple, .healthWeight, .healthMeds, .healthCycle, .healthIntimacy,
                                            .memory, .images, .fileLibrary]
+        #endif
         #if os(macOS)
         domains.append(.codingSessions)
         #endif
@@ -257,9 +310,15 @@ enum PermissionCenter {
         }
         // §4 二值域默认收紧（nudge/夜跑），同款保护：老装机无显式值 → 写入旧默认 true
         if existingInstall {
+            #if PERSONAL_APPS
+            for (key, oldDefault) in [("ccNudgeEnabled", true), ("trading.nightly.enabled", true)] where d.object(forKey: key) == nil {
+                d.set(oldDefault, forKey: key)
+            }
+            #else
             for (key, oldDefault) in [("ccNudgeEnabled", true)] where d.object(forKey: key) == nil {
                 d.set(oldDefault, forKey: key)
             }
+            #endif
         }
         d.set(true, forKey: sentinel)
     }

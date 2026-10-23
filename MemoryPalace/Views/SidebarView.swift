@@ -233,6 +233,14 @@ struct SidebarView: View {
     @State private var renamingFavoriteTag: String? = nil
     @State private var favoriteTagRenameText = ""
     /// 划线列表里点交易 / 话题卡的划线 → 打开对应页面
+    #if PERSONAL_APPS
+    @State private var highlightTicker: String? = nil
+    #endif
+    #if PERSONAL_APPS
+    #if DEBUG
+    @State private var highlightTopic: String? = nil
+    #endif
+    #endif
     /// R5-1 收藏页点词卡划线 → 打开词详情 sheet。
     @State private var highlightJumpWord: String? = nil
     @State private var deletedNodes: [(node: MessageNode, convTitle: String)] = []
@@ -749,6 +757,24 @@ struct SidebarView: View {
         // 换分段：各段的 tag 不一样，筛选回到「全部」
         .onChange(of: favoritesKind) { _, _ in setFavoriteTagFilter(nil) }
         // 点交易 / 话题卡上的划线：sheet 挂在这里（挂在外层整条 modifier 链上会让类型检查超时）
+        #if PERSONAL_APPS
+        .sheet(item: Binding(
+            get: { highlightTicker.map { SidebarJumpWord(word: $0) } },
+            set: { if $0 == nil { highlightTicker = nil } }
+        )) { t in
+            TickerDetailSheet(symbol: t.word)
+        }
+        #endif
+        #if PERSONAL_APPS
+        #if DEBUG
+        .sheet(item: Binding(
+            get: { highlightTopic.map { SidebarJumpWord(word: $0) } },
+            set: { if $0 == nil { highlightTopic = nil } }
+        )) { t in
+            TopicCardSheet(relPath: t.word, profileId: profileManager?.currentProfile.id ?? "")
+        }
+        #endif
+        #endif
     }
 
     /// 收藏页某一类空着时的一句话
@@ -1727,6 +1753,9 @@ struct SidebarView: View {
         case .worldBook: return "世界书"
         case .memory: return "记忆"
         case .file: return "文件"
+        #if PERSONAL_APPS
+        case .trading: return "交易"
+        #endif
         case .health: return "健康"
         case .library: return "书房"
         case .twitter: return "推特"
@@ -1745,7 +1774,11 @@ struct SidebarView: View {
         case .worldBook: return worldBookEntryResults.count
         case .memory: return memoryResults.count
         case .file: return fileResults.count
+        #if PERSONAL_APPS
+        case .trading, .health, .library: return resourceHits.count
+        #else
         case .health, .library: return resourceHits.count
+        #endif
         case .twitter: return tweetTotal
         }
     }
@@ -3119,6 +3152,14 @@ struct SidebarView: View {
             // R5-1：词卡划线（合成锚）混排进收藏，标来源，点击开词详情
             if anchor.hasPrefix("vocab:") { return item("\(anchor.dropFirst("vocab:".count)) 的考古笔记") }
             if anchor.hasPrefix("vocabnote:") { return item("\(anchor.dropFirst("vocabnote:".count)) 的词条笔记") }
+            #if PERSONAL_APPS
+            if anchor.hasPrefix("ticker:") { return item("$\(anchor.dropFirst("ticker:".count)) 的笔记") }
+            #endif
+            #if PERSONAL_APPS
+            #if DEBUG
+            if anchor.hasPrefix("topic:") { return item("话题卡") }
+            #endif
+            #endif
             let nid = ChatHighlightListItem.messageNodeId(anchor)
             guard let node = nodeMap[nid], !node.isTrashed else { return nil }
             let title = titleMap[node.conversationId] ?? "未知对话"
@@ -3129,6 +3170,12 @@ struct SidebarView: View {
     /// 点划线行：回到它所在的地方
     private func openHighlight(_ item: ChatHighlightListItem) {
         let anchor = item.place.primary.nodeId
+        #if PERSONAL_APPS
+        if anchor.hasPrefix("ticker:") {
+            highlightTicker = String(anchor.dropFirst("ticker:".count))
+            return
+        }
+        #endif
         if let node = item.node {
             navigateToNode(node)
             if anchor.hasPrefix("thinking:") {
@@ -3142,6 +3189,12 @@ struct SidebarView: View {
         } else if let w = VocabCollector.parseVocabAnchor(anchor) {
             highlightJumpWord = w
         } else if anchor.hasPrefix("topic:") {
+            #if PERSONAL_APPS
+            #if DEBUG
+            let rest = anchor.dropFirst("topic:".count)
+            highlightTopic = String(rest[..<(rest.lastIndex(of: "#") ?? rest.endIndex)])
+            #endif
+            #endif
         }
     }
 
@@ -3355,6 +3408,16 @@ struct SidebarView: View {
                         fileResults = files
                     }
                 }
+            #if PERSONAL_APPS
+            case .trading:
+                let hits = await SearchService.searchTrading(filter: filter, profileId: pid, container: container)
+                await MainActor.run {
+                    commitSearch(gen, kind: kind, t0: t0, hits: hits.count, cancelled: Task.isCancelled) {
+                        clearResults(except: kind)
+                        resourceHits = hits
+                    }
+                }
+            #endif
             case .health:
                 let hits = await SearchService.searchHealth(filter: filter, profileId: pid, includeIntimacy: includeIntimacy,
                                                             container: container)
@@ -3513,6 +3576,10 @@ struct SidebarView: View {
                             ).count)
                         case .file:
                             return (kind, await SearchService.searchFiles(filter: kindFilter, profileId: pid).count)
+                        #if PERSONAL_APPS
+                        case .trading:
+                            return (kind, await SearchService.searchTrading(filter: kindFilter, profileId: pid, container: container).count)
+                        #endif
                         case .health:
                             let hits = await SearchService.searchHealth(filter: kindFilter, profileId: pid,
                                                                         includeIntimacy: includeIntimacy, container: container)
@@ -4131,6 +4198,10 @@ struct SidebarView: View {
             return Text("\(memoryResults.count) 条记忆")
         case .file:
             return Text("\(fileResults.count) 个文件")
+        #if PERSONAL_APPS
+        case .trading:
+            return Text("\(resourceHits.count) 条交易")
+        #endif
         case .health:
             return Text("\(resourceHits.count) 条健康记录")
         case .library:
@@ -5263,6 +5334,9 @@ struct AdvancedSearchPanel: View {
                     typeChip("📚 世界书", kind: .worldBook)
                     typeChip("🧠 记忆", kind: .memory)
                     typeChip("📄 文件", kind: .file)
+                    #if PERSONAL_APPS
+                    typeChip("📈 交易", kind: .trading)
+                    #endif
                     typeChip("❤️ 健康", kind: .health)
                     typeChip("📖 书房", kind: .library)
                     typeChip("🕊️ 推特", kind: .twitter)

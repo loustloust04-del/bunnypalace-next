@@ -6,6 +6,9 @@ import Foundation
 /// 偏离原型的只有两处：多一个 `coding`（编程会话，mac 独有），`in:workspace` 的文案叫「当前楼层」。
 enum MacSearchKind: String, CaseIterable, Identifiable, Sendable {
     case chat, file, branch, sticker, assistant, worldbook, memory
+    #if PERSONAL_APPS
+    case trading
+    #endif
     case health, library, twitter, note, coding
 
     var id: String { rawValue }
@@ -19,6 +22,9 @@ enum MacSearchKind: String, CaseIterable, Identifiable, Sendable {
         case .assistant: "助手模板"
         case .worldbook: "世界书"
         case .memory: "记忆"
+        #if PERSONAL_APPS
+        case .trading: "交易"
+        #endif
         case .health: "健康"
         case .library: "书房"
         case .twitter: "推特"
@@ -36,6 +42,9 @@ enum MacSearchKind: String, CaseIterable, Identifiable, Sendable {
         case .assistant: "person"
         case .worldbook: "books.vertical"
         case .memory: "brain"
+        #if PERSONAL_APPS
+        case .trading: "chart.line.uptrend.xyaxis"
+        #endif
         case .health: "heart"
         case .library: "book"
         case .twitter: "bird"
@@ -201,6 +210,11 @@ enum MacSearchQuery {
         "书房": "library", "书": "library", "读书": "library", "阅读": "library", "有声书": "library",
         "tweet": "twitter", "tweets": "twitter", "推特": "twitter", "推文": "twitter",
         ]
+        #if PERSONAL_APPS
+        alias.merge([
+        "trade": "trading", "trades": "trading", "stock": "trading", "stocks": "trading", "交易": "trading", "股票": "trading",
+        ]) { current, _ in current }
+        #endif
         return alias
     }()
 
@@ -290,7 +304,11 @@ enum MacSearchQuery {
                     if !values.contains(mapped) { values.append(mapped) }
                 }
                 if values.contains(where: { $0 != "all" && MacSearchKind(rawValue: $0) == nil }) {
+                    #if PERSONAL_APPS
+                    invalid("使用 chat、file、branch、sticker、assistant、worldbook、memory、trading、health、library、twitter、note、coding 或 all")
+                    #else
                     invalid("使用 chat、file、branch、sticker、assistant、worldbook、memory、health、library、twitter、note、coding 或 all")
+                    #endif
                 } else {
                     f.types = values.contains("all") ? [] : values.compactMap(MacSearchKind.init(rawValue:))
                 }

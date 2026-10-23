@@ -1,6 +1,36 @@
 import Foundation
 import Observation
 
+#if PERSONAL_APPS
+@MainActor
+@Observable
+final class Page2WarroomSnapshot {
+    static let shared = Page2WarroomSnapshot()
+    private(set) var tasks: [WarroomTask] = []
+    private(set) var pendingCount = 0
+    private(set) var firstTitle: String?
+    private(set) var firstID: String?
+    private(set) var updatedAt: Date?
+
+    private var requestedAt: Date?
+
+    func refreshIfNeeded() {
+        guard CCBridgeWebSocketClient.shared.isConnected,
+              requestedAt.map({ Date().timeIntervalSince($0) > 30 }) ?? true else { return }
+        requestedAt = Date()
+        CCBridgeWebSocketClient.shared.send(["type": "warroom_board"]) { _ in }
+    }
+
+    func update(tasks: [WarroomTask]) {
+        self.tasks = tasks
+        pendingCount = tasks.filter(\.needsSusu).count
+        let first = tasks.first(where: \.needsSusu) ?? tasks.first(where: \.isActive) ?? tasks.first
+        firstTitle = first?.title
+        firstID = first?.id
+        updatedAt = Date()
+    }
+}
+#endif
 
 @MainActor
 @Observable

@@ -306,6 +306,11 @@ struct MacDesktopGrid: View {
             case .garden: GardenWidgetView(size: item.size)
             case .contacts: ContactsWidgetView(size: item.size)
             case .vocab: VocabWidgetView(size: item.size)
+            #if PERSONAL_APPS
+            #if DEBUG
+            case .topicBox: TopicWidgetView(size: item.size)
+            #endif
+            #endif
             }
         }
     }

@@ -21,7 +21,11 @@ struct TweetSearchCursor: Equatable {
 
 extension SearchResourceKind {
     /// 结果是 ResourceHit 的几类（S3）
+    #if PERSONAL_APPS
+    static let resourceHitKinds: Set<SearchResourceKind> = [.trading, .health, .library, .twitter]
+    #else
     static let resourceHitKinds: Set<SearchResourceKind> = [.health, .library, .twitter]
+    #endif
     var usesResourceHits: Bool { Self.resourceHitKinds.contains(self) }
 }
 
@@ -67,6 +71,43 @@ extension SearchService {
         }
     }
 
+    #if PERSONAL_APPS
+    // MARK: - 交易（标的 + 成交，量小，内存过滤）
+
+    static func searchTrading(filter: SearchFilter, profileId: String, container: ModelContainer) async -> [ResourceHit] {
+        let words = searchWords(filter)
+        guard !words.isEmpty else { return [] }
+        return await detached {
+            let context = ModelContext(container)
+            context.autosaveEnabled = false
+            let pid = profileId
+            var hits: [ResourceHit] = []
+            let tickers = (try? context.fetch(FetchDescriptor<TickerEntry>(predicate: #Predicate { $0.profileId == pid }))) ?? []
+            for t in tickers {
+                let name = t.displayName ?? ""
+                guard let hit = firstHit([("代码", t.symbol), ("名称", name)], words: words) else { continue }
+                hits.append(ResourceHit(
+                    id: "ticker:\(t.id.uuidString)", symbol: "chart.line.uptrend.xyaxis",
+                    title: name.isEmpty ? "$\(t.symbol)" : "$\(t.symbol) \(name)", tag: "标的 · \(hit.field)",
+                    preview: MacSearchQuery.excerpt(hit.text, words: words), date: t.createdAt,
+                    tool: "trading", target: t.symbol))
+            }
+            if Task.isCancelled { return [] }
+            let trades = (try? context.fetch(FetchDescriptor<TradeEntry>(predicate: #Predicate { $0.profileId == pid }))) ?? []
+            for t in trades {
+                let fields = [("代码", t.symbol), ("理由", t.reason), ("复盘", t.reviewNote ?? "")]
+                guard let hit = firstHit(fields, words: words) else { continue }
+                let side = t.side == "short" ? "空" : "多"
+                hits.append(ResourceHit(
+                    id: "trade:\(t.id.uuidString)", symbol: "arrow.left.arrow.right",
+                    title: "$\(t.symbol) \(side) \(Int(t.quantity))", tag: "成交 · \(hit.field)",
+                    preview: MacSearchQuery.excerpt(hit.text, words: words), date: t.openedAt,
+                    tool: "trading", target: "trade:\(t.id.uuidString)"))
+            }
+            return ordered(hits, filter: filter, words: words)
+        }
+    }
+    #endif
 
     // MARK: - 健康（四类备注 + 药名 / 剂量；归档的药不搜；亲密记录由调用方按开关决定带不带）
 
@@ -146,6 +187,25 @@ extension SearchService {
                                             preview: hit.text, date: m.createdAt, tool: "reading", target: b.id))
                 }
             }
+            #if PERSONAL_APPS
+            #if DEBUG
+            let audios = (try? context.fetch(FetchDescriptor<AudiobookItem>(predicate: #Predicate { $0.profileId == pid }))) ?? []
+            for a in audios {
+                guard let hit = firstHit([("标题", a.title)], words: words) else { continue }
+                hits.append(ResourceHit(id: "audio:\(a.id.uuidString)", symbol: "headphones", title: a.title, tag: "有声书 · \(hit.field)",
+                                        preview: "", date: a.lastPlayedAt ?? a.importedAt,
+                                        tool: "audiobook", target: a.id.uuidString))
+            }
+            if Task.isCancelled { return [] }
+            let marks = (try? context.fetch(FetchDescriptor<AudiobookBookmark>(predicate: #Predicate { $0.profileId == pid && $0.note != "" }))) ?? []
+            for m in marks {
+                guard let hit = firstHit([("书签备注", m.note)], words: words) else { continue }
+                hits.append(ResourceHit(id: "audiomark:\(m.id.uuidString)", symbol: "bookmark", title: m.bookTitleSnapshot,
+                                        tag: "有声书书签", preview: MacSearchQuery.excerpt(hit.text, words: words), date: m.updatedAt,
+                                        tool: "audiobook", target: m.bookId.uuidString))
+            }
+            #endif
+            #endif
             return ordered(hits, filter: filter, words: words)
         }
     }

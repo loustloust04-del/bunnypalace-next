@@ -127,8 +127,13 @@ extension SettingsSearchEntry {
             return "settingsFold.aiExt"
         case .claudeCode, .codex, .agent, .terminal, .myComputer:
             return "settingsFold.devTools"
+        #if PERSONAL_APPS
+        case .sticker, .health, .calendar, .trading, .reading, .vocab, .groupChat:
+            return "settingsFold.modules"
+        #else
         case .sticker, .health, .calendar, .reading, .vocab, .groupChat:
             return "settingsFold.modules"
+        #endif
         case .fileLibrary, .sandbox:
             return "settingsFold.storage"
         case .general, .permissions, .data, .config, .appearance, .persona,
@@ -246,6 +251,12 @@ extension SettingsSearchEntry {
             .init(id: "page-calendar", title: "日历", subtitle: "设置 › 模块", systemImage: "calendar",
                   tab: .calendar, keywords: ["月历", "日记", "纪念日", "倒数日", "铅笔", "星孔", "calendar", "journal", "anniversary"]),
         ]
+        #if PERSONAL_APPS
+        entries += [
+            .init(id: "page-trading", title: "交易", subtitle: "设置 › 模块", systemImage: "chart.line.uptrend.xyaxis",
+                  tab: .trading, keywords: ["夜跑", "投研", "持仓", "行情", "trading", "market", "portfolio"]),
+        ]
+        #endif
         entries += [
             .init(id: "page-reading", title: "书房", subtitle: "设置 › 模块", systemImage: "books.vertical",
                   tab: .reading, keywords: ["读书", "读书模型", "共读", "书", "阅读", "书摘", "reading", "book", "study"]),
@@ -310,7 +321,23 @@ extension SettingsSearchEntry {
         #endif
     }
 
+    #if PERSONAL_APPS
+    private static var leafPersonal: [SettingsSearchEntry] { leafDeathScale }
+
+    /// 死亡天平开关只在解锁过之后登记（plan-death-scale ⧫：不暴露这个应用）
+    private static var leafDeathScale: [SettingsSearchEntry] {
+        guard UserDefaults.standard.bool(forKey: "deathScale.unlocked") else { return [] }
+        #if os(macOS)
+        let tab = SettingsView.SettingsTab.macWorkspace, page = "Mac 工作区"
+        #else
+        let tab = SettingsView.SettingsTab.subApps, page = "子应用"
+        #endif
+        return [.init(id: "leaf-death-scale", title: "Mort sans sépulture", subtitle: "\(page) › Mort sans sépulture",
+                      systemImage: "scalemass", tab: tab, keywords: ["mort", "sépulture", "balance", "显示", "隐藏"])]
+    }
+    #else
     private static var leafPersonal: [SettingsSearchEntry] { [] }
+    #endif
 
     #if os(iOS)
     /// 子应用 › 聊天（css自定义）：二级页，只跳到「子应用」页不滚
@@ -855,6 +882,19 @@ extension SettingsSearchEntry {
             .init(id: "leaf-calendar-rebuild", title: "重新统计聊天", subtitle: "日历 › 统计", systemImage: "arrow.clockwise",
                   tab: .calendar, keywords: ["统计", "重建", "热力图", "rebuild", "stats"]),
         ]
+        #if PERSONAL_APPS
+        entries += [
+            .init(id: "leaf-trading-nightly", title: "夜跑", subtitle: "交易 › 夜跑", systemImage: "moon.stars",
+                  tab: .trading, keywords: ["夜跑", "自动研究", "nightly", "research"]),
+            .init(id: "leaf-trading-watchlist", title: "自动研究关注列表", subtitle: "交易 › 夜跑", systemImage: "list.star",
+                  tab: .trading, keywords: ["关注", "自选", "watchlist"]),
+            .init(id: "leaf-trading-visible", title: "AI 会看到", subtitle: "交易 › AI 会看到", systemImage: "eye",
+                  tab: .trading, keywords: ["持仓", "可见", "visible", "portfolio"]),
+            .init(id: "leaf-vocab-archeology", title: "考古用", subtitle: "单词 › 考古", systemImage: "scroll",
+                  tab: .vocab, keywords: ["考古", "词源", "claude", "archeology"],
+                  anchor: "leaf-vocab-archeology"),
+        ]
+        #endif
         entries += [
             .init(id: "leaf-reading-model", title: "当前读书模型", subtitle: "书房 › AI 读书", systemImage: "book",
                   tab: .reading, keywords: ["读书", "模型", "reading", "model"]),
@@ -973,6 +1013,14 @@ extension SettingsSearchEntry {
         )
         #endif
         // 话题盒只进粟粟的 Debug 包（#096）；FileLibrarySettingsTab 那张卡同样包着
+        #if PERSONAL_APPS
+        #if DEBUG
+        // 仓内话题盒身份是 PixelGlyph.lightbulb；这里对齐成 SF lightbulb（registry 只吃字符串，画不了 PixelIcon）
+        entries.append(.init(id: "leaf-file-topicbox", title: "话题盒约定", subtitle: "文件库", systemImage: "lightbulb",
+                             tab: .fileLibrary, keywords: ["话题盒", "约定", "topic box"],
+                             anchor: "leaf-file-topicbox"))
+        #endif
+        #endif
         return entries
     }
 
@@ -1013,9 +1061,19 @@ extension SettingsSearchEntry {
     /// 域 → 权限页 Section 名（`PermissionsSettingsTab.swift:103/121/151` 三个 header）
     private static func permissionSectionTitle(_ domain: PermissionDomain) -> String {
         switch domain {
+        #if PERSONAL_APPS
+        case .healthApple, .healthWeight, .healthMeds, .healthCycle, .healthIntimacy,
+             .trading, .memory, .images, .fileLibrary:
+            return "AI 能看什么"
+        #if DEBUG
+        case .topicBox:
+            return "AI 能看什么"
+        #endif
+        #else
         case .healthApple, .healthWeight, .healthMeds, .healthCycle, .healthIntimacy,
              .memory, .images, .fileLibrary:
             return "AI 能看什么"
+        #endif
         #if os(macOS)
         case .codingSessions:
             return "AI 能看什么"

@@ -132,6 +132,9 @@ final class SettingsSearchTests: XCTestCase {
 
     func testKnownQueriesLandOnRightPage() {
         XCTAssertEqual(SettingsSearchEntry.filtered(for: "思考").first?.tab, .claudeCode)
+        #if PERSONAL_APPS
+        XCTAssertEqual(SettingsSearchEntry.filtered(for: "夜跑").first?.tab, .trading)
+        #endif
         XCTAssertEqual(SettingsSearchEntry.filtered(for: "正则").first?.tab, .regex)
         XCTAssertEqual(SettingsSearchEntry.filtered(for: "每日复习上限").first?.tab, .vocab)
     }
@@ -150,6 +153,9 @@ final class SettingsSearchTests: XCTestCase {
     func testFoldGroupMapping() {
         XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .terminal), "settingsFold.devTools")
         XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .mcp), "settingsFold.aiExt")
+        #if PERSONAL_APPS
+        XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .trading), "settingsFold.modules")
+        #endif
         XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .sandbox), "settingsFold.storage")
         XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .general))
         XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .worldBook))

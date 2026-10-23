@@ -321,6 +321,62 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
       required: ["quote", "comment"],
     },
+    // #if PERSONAL_APPS
+  }, {
+    name: "warroom_sessions",
+    description: "军机处普查：查询这台机器上所有 CC/Codex 会话（活的/死的/任意目录）。回答'每个窗口干了啥'。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cwd: { type: "string", description: "按工作目录模糊过滤（LIKE）" },
+        alive: { type: "string", enum: ["0", "1"], description: "只看活的(1)或死的(0)" },
+        engine: { type: "string", enum: ["claude", "codex"] },
+        zombies: { type: "boolean", description: "true = 只看僵尸（活着但不在任何 tmux 里）" },
+        limit: { type: "number", description: "默认 100" },
+      },
+    },
+  }, {
+    name: "warroom_dispatch",
+    description: "军机处派奏折：给任意 CC/Codex 会话下达任务。三通道：target_kind=repo（推荐，target_ref=目录绝对路径，新开便宜干净的 headless 会话）；resume（复活死会话——有预算防线，唤醒大会话>$2 会拒，除非 budget_ok）；tmux（注入活窗口）。危险工单自动立案不派发（需粟粟亲批）。同目标/同仓库同时只飞一张。支持 depends_on（依赖全朱批后 DAG 定时器自动放行）和 epic 分组。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "工单标题（短）" },
+        body: { type: "string", description: "工单正文——给目标会话的完整指令" },
+        target_ref: { type: "string", description: "目标：repo=目录绝对路径 / session_id（前缀可）/ tmux 会话名" },
+        engine: { type: "string", enum: ["claude", "codex"], description: "默认 claude" },
+        target_kind: { type: "string", enum: ["repo", "resume", "tmux"], description: "默认 resume；新活优先 repo" },
+        filescope: { type: "string", description: "允许触碰的文件范围说明（验收时对照）" },
+        depends_on: { type: "array", items: { type: "string" }, description: "前置工单 id 列表，全部 approved 才放行" },
+        epic: { type: "string", description: "EPIC 分组标签" },
+        budget_ok: { type: "boolean", description: "明示接受高唤醒成本（预算防线 override）" },
+      },
+      required: ["title", "body", "target_ref"],
+    },
+  }, {
+    name: "warroom_tasks",
+    description: "军机处账本：查询奏折状态（draft/dispatched/working/evidence_in/reviewing/approved/rejected/failed）、收据、成本。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "按状态过滤" },
+        target: { type: "string", description: "按目标模糊过滤" },
+        limit: { type: "number" },
+      },
+    },
+  }, {
+    name: "warroom_verdict",
+    description: "军机处御裁：对停在 reviewing/evidence_in 的奏折签字。approve=朱批通过 / reject=驳回 / fail=废案。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string" },
+        decision: { type: "string", enum: ["approve", "reject", "fail"] },
+        reason: { type: "string", description: "签字理由（进审计流水）" },
+      },
+      required: ["task_id", "decision"],
+    },
+    // #endif
   }, {
     // 跟 app 里楼层 AI 的 TwitterAITool 同一个工具（MemoryPalace/Services/Twitter/TwitterAITool.swift），改那边记得同步这里
     name: "local_twitter",
@@ -434,6 +490,31 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       ? `ok — 批注已投递（《${result.book}》第 ${result.chapter} 章${result.message ? "，附带消息" : ""}）。用户翻到那页就能看见。`
       : `失败：${result.error}`
     return { content: [{ type: "text", text }] }
+    // #if PERSONAL_APPS
+  } else if (req.params.name === "warroom_sessions" || req.params.name === "warroom_tasks") {
+    const httpBase = HUB_URL_BASE.replace(/^ws/, "http").replace(/\/mcp$/, "")
+    const ep = req.params.name === "warroom_sessions" ? "sessions" : "tasks"
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(args ?? {})) {
+      if (v === undefined || v === null) continue
+      qs.set(k, k === "zombies" ? (v ? "1" : "0") : String(v))
+    }
+    qs.set("token", getHubToken() ?? "")
+    const resp = await fetch(`${httpBase}/warroom/${ep}?${qs}`)
+    const result = await resp.text()
+    return { content: [{ type: "text", text: result.length > 60_000 ? result.slice(0, 60_000) + "…(truncated)" : result }] }
+  } else if (req.params.name === "warroom_dispatch" || req.params.name === "warroom_verdict") {
+    const httpBase = HUB_URL_BASE.replace(/^ws/, "http").replace(/\/mcp$/, "")
+    const ep = req.params.name === "warroom_dispatch" ? "dispatch" : "verdict"
+    const resp = await fetch(`${httpBase}/warroom/${ep}?token=${encodeURIComponent(getHubToken() ?? "")}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...args, actor: hostTmuxSession() ?? "unknown" }),
+    })
+    const result = await resp.json() as any
+    if (!resp.ok) throw new Error(`${ep} failed (${resp.status}): ${result?.error ?? "unknown"}`)
+    return { content: [{ type: "text", text: JSON.stringify(result) }] }
+    // #endif
   } else if (req.params.name === "local_twitter") {
     const httpBase = HUB_URL_BASE.replace(/^ws/, "http").replace(/\/mcp$/, "")
     const { chat_id, ...input } = args ?? {}

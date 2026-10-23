@@ -28,8 +28,14 @@ final class VocabArcheologistTests: XCTestCase {
         let saved = UserDefaults.standard.object(forKey: key)
         defer { UserDefaults.standard.set(saved, forKey: key) }
         UserDefaults.standard.removeObject(forKey: key)
+        #if PERSONAL_APPS
+        XCTAssertEqual(VocabArcheologyRoute.current, .mac, "私用版默认要和以前一样走 Mac")
+        UserDefaults.standard.set("app", forKey: key)
+        XCTAssertEqual(VocabArcheologyRoute.current, .app)
+        #else
         UserDefaults.standard.set("mac", forKey: key)
         XCTAssertEqual(VocabArcheologyRoute.current, .app, "开源版只有 App 路")
+        #endif
     }
 
     func testResolveModelSkipsBridgeAndLocalThenFallsBack() throws {

@@ -378,6 +378,24 @@ struct ContentView: View {
             withAnimation(.easeInOut(duration: 0.2)) { openToolFromOutside("terminal") }
         }
         #endif
+        #if PERSONAL_APPS
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: .openTopicBoxTool)) { notif in
+            // 工具被从 toolbar 移除时自动请回来（widget 还在桌面就该点得进去）
+            if rightPanelToolManager?.tool(byId: "topicBox")?.isEnabled == false {
+                rightPanelToolManager?.setEnabled("topicBox", true)
+            }
+            // 面板可能还没挂载收不到本通知——停一份，面板 onAppear 消费
+            if let path = notif.userInfo?["topicPath"] as? String {
+                TopicBoxStore.pendingOpenRelPath = path
+            }
+            withAnimation(.easeInOut(duration: 0.2)) { openToolFromOutside("topicBox") }
+        }
+        #endif
+        #endif
+        #if PERSONAL_APPS
+        .modifier(OnNotify(.deathScaleUnlock) { unlockDeathScale() })
+        #endif
         // turn 收口回填（挂 app 根，不依赖面板/阅读器存活）：
         // CR-3 vocab aiNote + CR-1 书批注 aiBubble
         .onReceive(NotificationCenter.default.publisher(for: .assistantTurnDidFinish)) { notif in
@@ -391,6 +409,10 @@ struct ContentView: View {
             VoiceMessageWriter.processChatIntents(nodeId: nodeId, context: modelContext, profiles: profileManager?.profiles ?? [])
             // 健康记录：```health-log 块 → 落库 → 结果行
             HealthLogIntentWriter.processChatIntents(nodeId: nodeId, context: modelContext)
+            #if PERSONAL_APPS
+            // 交易记录：```trade 块 → 落卡（开/平/复盘）→ 结果行 + journal.md 镜像
+            TradeLogIntentWriter.processChatIntents(nodeId: nodeId, context: modelContext)
+            #endif
             // 纪念日：```anniversary 块 → 记进日历 → 结果行（plan-calendar §八）
             AnniversaryIntentWriter.processChatIntents(nodeId: nodeId, context: modelContext)
             // 语音通话：流式已经边写边念，这里只收尾（flush + 结束本轮）；整轮没收到流式 delta 才整段念（未通话时零成本 guard）
@@ -464,12 +486,25 @@ struct ContentView: View {
             CCBridgeWebSocketClient.shared.onAgentBookNote = { payload in
                 AgentBookNoteWriter.handle(payload, context: modelContext)
             }
+            #if PERSONAL_APPS
+            CCBridgeWebSocketClient.shared.onTradingReport = { [weak profileManager] payload in
+                TradingReportLanding.handle(payload, profileId: profileManager?.currentProfile.id ?? "",
+                                            context: modelContext)
+            }
+            #endif
             // 小克用本地推特：chat_id 定楼层，缺省当前楼层
             CCBridgeWebSocketClient.shared.onTwitterCmd = { [weak profileManager] frame in
                 TwitterCCBridge.handle(frame, profiles: profileManager?.profiles ?? [],
                                        currentProfileId: profileManager?.currentProfile.id ?? "",
                                        context: modelContext)
             }
+            #if PERSONAL_APPS
+            // 夜跑自动档：启动时全量上报一次关注列表（连接未就绪则静默，下次关注变化补上）
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                TradingStore.reportWatchlist(context: modelContext,
+                                             profileId: profileManager?.currentProfile.id ?? "")
+            }
+            #endif
             #if os(macOS)
             // 思考链 hook 自检安装（幂等；没配 CC 桥时直接返回）
             DispatchQueue.global(qos: .utility).async { CCThinkingHookInstaller.ensureInstalled() }
@@ -1056,6 +1091,14 @@ struct ContentView: View {
         openToolFromOutside("cardLibrary")
     }
 
+    #if PERSONAL_APPS
+    /// 死亡天平暗号（plan-death-scale §4.2）：启用 + 给当前楼层（输暗号的那层）开读 + 上桌 / 上 Dock + 打开。
+    /// 走 OnNotify：body 链贴着类型检查预算，见上面 ⌘N 那条注释
+    private func unlockDeathScale() {
+        DeathScaleGate.unlock(profileId: profileManager?.currentProfile.id, tools: rightPanelToolManager)
+        withAnimation(.easeInOut(duration: 0.2)) { openToolFromOutside(DeathScaleGate.toolId) }
+    }
+    #endif
 
     private func openToolFromOutside(_ id: String) {
         #if os(iOS)

@@ -28,6 +28,12 @@ enum ToolRegistry {
             PermissionCenter.capabilityEnabled(.twitter)
         }))
 
+        #if PERSONAL_APPS
+        // 死亡天平（plan-death-scale §4.5）：只读；工具启用 + 本楼层被授权才下发，别的楼层连工具都看不到
+        entries.append(Entry(definition: DeathScaleAITool.definition, enabledIf: { ctx in
+            DeathScaleAITool.isAvailable(profileId: ctx.profileId)
+        }))
+        #endif
 
         // 心声（reflection mode 入口）
         entries.append(Entry(definition: InnerVoice.definition, enabledIf: { _ in InnerVoice.enabled }))

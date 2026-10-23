@@ -17,8 +17,17 @@ final class PersonalDebugAppsTests: XCTestCase {
 
     func testBuiltInsCarryPersonalSubAppsOnlyInPersonalDebug() {
         let ids = Set(RightPanelToolManager.builtInTools.map(\.id))
+        #if PERSONAL_APPS
+        #if DEBUG
+        XCTAssertTrue(ids.isSuperset(of: ["topicBox", "audiobook"]))
+        XCTAssertTrue(RightPanelToolManager.liteVisibleToolIds.isSuperset(of: ["topicBox", "audiobook"]))
+        #else
+        XCTAssertTrue(ids.isDisjoint(with: ["topicBox", "audiobook"]))
+        #endif
+        #else
         XCTAssertTrue(ids.isDisjoint(with: ["topicBox", "audiobook"]))
         XCTAssertTrue(RightPanelToolManager.liteVisibleToolIds.isDisjoint(with: ["topicBox", "audiobook"]))
+        #endif
     }
 
     func testDashboardDecodeSkipsUnknownKinds() throws {

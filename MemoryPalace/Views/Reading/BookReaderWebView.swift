@@ -233,6 +233,11 @@ final class MPReaderWebView: WKWebView {
             UIMenuItem(title: "问\(assistantName)", action: #selector(mp_askAI(_:))),
             UIMenuItem(title: "收生词", action: #selector(mp_addVocab(_:))),
         ]
+        #if PERSONAL_APPS
+        #if DEBUG
+        menuItems.append(UIMenuItem(title: "存成问题", action: #selector(mp_saveTopic(_:))))
+        #endif
+        #endif
         UIMenuController.shared.menuItems = menuItems
     }
 

@@ -33,6 +33,9 @@ struct Page2WallpaperEditor: View {
                 }
                 Section("壁纸") {
                     Picker("背景", selection: $draft.wallpaper) {
+                        #if PERSONAL_APPS
+                        Text("iOS 26 原生").tag("ios26")
+                        #endif
                         Text("花园四季").tag("garden")
                         Text("雾白花园").tag("mist")
                         Text("暮色玻璃").tag("dusk")
@@ -47,7 +50,11 @@ struct Page2WallpaperEditor: View {
                         VStack(alignment: .leading) { Text("明亮遮罩"); Slider(value: $draft.dimming, in: 0...0.85) }
                     }
                     Button("恢复默认壁纸") {
+                        #if PERSONAL_APPS
+                        draft.wallpaper = "ios26"
+                        #else
                         draft.wallpaper = "garden"
+                        #endif
                         draft.imageFile = nil; draft.dimming = 0.15; draft.offsetX = 0; draft.offsetY = 0
                     }
                 }

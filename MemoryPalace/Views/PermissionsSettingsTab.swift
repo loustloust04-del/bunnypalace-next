@@ -100,12 +100,22 @@ struct PermissionsSettingsTab: View {
                             .foregroundColor(Theme.textMuted)
                     }
                 }
+                #if PERSONAL_APPS
+                PermissionDomainRow(domain: .trading)
+                    .searchAnchor("leaf-perm-trading")
+                #endif
                 PermissionDomainRow(domain: .memory, twoLevelsOnly: true)
                     .searchAnchor("leaf-perm-memory")
                 PermissionDomainRow(domain: .images)
                     .searchAnchor("leaf-perm-images")
                 PermissionDomainRow(domain: .fileLibrary)
                     .searchAnchor("leaf-perm-fileLibrary")
+                #if PERSONAL_APPS
+                #if DEBUG
+                PermissionDomainRow(domain: .topicBox)
+                    .searchAnchor("leaf-perm-topicBox")
+                #endif
+                #endif
                 #if os(macOS)
                 PermissionDomainRow(domain: .codingSessions)
                     .searchAnchor("leaf-perm-codingSessions")
@@ -163,6 +173,14 @@ struct PermissionsSettingsTab: View {
                               key: "ccNudgeEnabled", defaultValue: false) {
                 CCBridgeWebSocketClient.shared.sendCCConfig()
             }
+            #if PERSONAL_APPS
+            AutonomyToggleRow(title: "交易夜跑", caption: "每晚自动跑关注标的的研究",
+                              key: TradingStore.nightlyEnabledKey, defaultValue: false) {
+                if let pid = profileManager?.currentProfile.id {
+                    TradingStore.reportWatchlist(context: modelContext, profileId: pid)
+                }
+            }
+            #endif
             AutonomyToggleRow(title: "群聊（中庭）", caption: "开启群聊房间，改动后重启生效",
                               key: AgoraFeatureGate.key, defaultValue: false, sideEffect: nil)
             PermissionDomainRow(domain: .notifications, twoLevelsOnly: true)

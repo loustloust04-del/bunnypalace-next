@@ -262,6 +262,15 @@ final class SearchKindSelectionTests: XCTestCase {
 
     func testNewKindAliases() {
         XCTAssertEqual(MacSearchQuery.parse("a type:聊天").filters.types, [.chat], "「聊天」和「对话」同义")
+        #if PERSONAL_APPS
+        XCTAssertEqual(MacSearchQuery.parse("a type:交易,健康,书房,推特").filters.types, [.trading, .health, .library, .twitter])
+        XCTAssertEqual(MacSearchQuery.parse("a type:trades,meds,books,tweets").filters.types, [.trading, .health, .library, .twitter])
+        XCTAssertEqual(MacSearchQuery.parse("a type:股票,有声书,推文").filters.types, [.trading, .library, .twitter])
+        XCTAssertEqual(SearchQueryMapping.parse("a type:trading,twitter").state.kinds, [.trading, .twitter])
+        var state = SearchQueryMapping.State(words: ["a"])
+        state.kinds = [.twitter, .library, .trading, .health]
+        XCTAssertEqual(SearchQueryMapping.text(for: state), "a type:trading,health,library,twitter")
+        #endif
     }
 
     func testExtNeedsFileWhenTypeWritten() {

@@ -102,7 +102,11 @@ struct AppIconView: View {
 enum LocalDefaultIcon {
     private static let images: [String: Image] = {
         var map: [String: Image] = [:]
+        #if PERSONAL_APPS
+        let resources = ["pmBoard": "pmboard-local-icon"]
+        #else
         let resources: [String: String] = [:]
+        #endif
         for (toolID, resource) in resources {
             guard let url = Bundle.main.url(forResource: resource, withExtension: "png") else { continue }
             #if os(macOS)
@@ -158,6 +162,11 @@ enum ProviderIcon {
             "moonshot": "ri-moonshotai",
             "ollama": "ri-ollama",
         ]
+        #if PERSONAL_APPS
+        #if DEBUG
+        map[APIProvider.kimiP.id] = "ri-moonshotai"
+        #endif
+        #endif
         return map
     }()
 

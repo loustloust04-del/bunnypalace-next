@@ -45,6 +45,11 @@ final class VoiceNoteRecorder: NSObject, AVAudioRecorderDelegate {
     private func yieldOtherAudio() {
         VoiceMessagePlayer.shared.stop()
         MusicCardPlayer.shared.stop()
+        #if PERSONAL_APPS
+        #if DEBUG
+        AudiobookPlayer.shared.pause()
+        #endif
+        #endif
         SpeechService.shared.stop()
     }
 

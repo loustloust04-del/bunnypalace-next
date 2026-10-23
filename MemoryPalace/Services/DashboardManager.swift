@@ -7,6 +7,11 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
     case garden
     case contacts
     case vocab
+    #if PERSONAL_APPS
+    #if DEBUG
+    case topicBox
+    #endif
+    #endif
 
     var id: String { rawValue }
 
@@ -17,6 +22,11 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .garden:   return "花园"
         case .contacts: return "通讯录"
         case .vocab:    return "单词"
+        #if PERSONAL_APPS
+        #if DEBUG
+        case .topicBox: return "话题盒"
+        #endif
+        #endif
         }
     }
 
@@ -27,6 +37,11 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .garden:   return "leaf.fill"
         case .contacts: return "person.2.fill"
         case .vocab:    return "abc"
+        #if PERSONAL_APPS
+        #if DEBUG
+        case .topicBox: return "lightbulb"
+        #endif
+        #endif
         }
     }
 }

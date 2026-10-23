@@ -26,6 +26,9 @@ struct VocabSettingsTab: View {
     }
     @AppStorage("vocabReviewDailyCap") private var reviewDailyCap: Int = 50
     @AppStorage("vocabReviewAutoFromReading") private var reviewAutoFromReading: Bool = true
+    #if PERSONAL_APPS
+    @AppStorage(VocabArcheologyRoute.storageKey) private var archeologyRoute: String = VocabArcheologyRoute.mac.rawValue
+    #endif
     @State private var showResetConfirm = false
     @Environment(\.settingsMetrics) private var m
 
@@ -44,6 +47,9 @@ struct VocabSettingsTab: View {
             SettingsSectionList(.form) {
                 orderSection
                 reviewSection
+                #if PERSONAL_APPS
+                archeologySection
+                #endif
                 placeholderSection
                 templateSection
                 previewSection
@@ -134,6 +140,25 @@ struct VocabSettingsTab: View {
 
     // MARK: - 考古（#054，私用版才有 Mac 这条路）
 
+    #if PERSONAL_APPS
+    private var archeologySection: some View {
+        Section {
+            Picker("考古用", selection: $archeologyRoute) {
+                Text("Mac 上的 Claude").tag(VocabArcheologyRoute.mac.rawValue)
+                Text("App 里的模型").tag(VocabArcheologyRoute.app.rawValue)
+            }
+            .listRowBackground(JournalTheme.cream)
+            .searchAnchor("leaf-vocab-archeology")
+        } header: {
+            Text("考古")
+                .foregroundColor(headerColor)
+        } footer: {
+            Text("Mac 上的 Claude：经桥接在 Mac 上跑 claude -p，结果也写进仓库语料库，需要 Mac 在线。\nApp 里的模型：用当前聊天模型直接写，结果存在这台设备上，按模型计费。")
+                .font(m.caption)
+                .foregroundColor(JournalTheme.faint)
+        }
+    }
+    #endif
 
     // MARK: - 占位符说明
 

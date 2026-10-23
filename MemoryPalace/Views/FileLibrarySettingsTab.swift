@@ -86,6 +86,25 @@ struct FileLibrarySettingsTab: View {
             .searchAnchor("leaf-file-editorbar")
             #endif
 
+            #if PERSONAL_APPS
+            #if DEBUG
+            SettingsCard {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("话题盒约定")
+                            .font(m.rowTitle)
+                            .foregroundColor(Theme.textPrimary)
+                        Text("开了 AI 会知道 topics/ 目录的用法，聊天中可能把问题存进话题盒、在已有问题下写回应。")
+                            .font(m.caption)
+                            .foregroundColor(Theme.textMuted)
+                    }
+                    Spacer(minLength: 8)
+                    PermissionLevelPicker(domain: .topicBox)
+                }
+            }
+            .searchAnchor("leaf-file-topicbox")
+            #endif
+            #endif
 
             ccMemorySyncCard
 

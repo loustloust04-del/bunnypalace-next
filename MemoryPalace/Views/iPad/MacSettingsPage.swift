@@ -338,7 +338,11 @@ struct MacSettingsSidebarGroup: Identifiable {
         .init(title: "其他", tabs: [.config, .manual, .debug, .about]),
     ]
 
+    #if PERSONAL_APPS
+    private static let moduleTabs: [SettingsView.SettingsTab] = [.rightPanel, .sticker, .health, .calendar, .trading, .reading, .vocab, .groupChat]
+    #else
     private static let moduleTabs: [SettingsView.SettingsTab] = [.rightPanel, .sticker, .health, .calendar, .reading, .vocab, .groupChat]
+    #endif
 }
 
 extension SettingsView.SettingsTab {
@@ -365,6 +369,9 @@ extension SettingsView.SettingsTab {
         case .sticker: "管理贴纸来源、图库与触发选项。"
         case .health: "设置健康数据访问与记录权限。"
         case .calendar: "设置月历样子、日记与纪念日给不给 AI 看。"
+        #if PERSONAL_APPS
+        case .trading: "设置交易数据访问与研究权限。"
+        #endif
         case .reading: "选择自主读书与共读使用的模型。"
         case .vocab: "设置出词顺序、复习与提问模板。"
         case .groupChat: "设置群聊开关、发言模式与节奏。"

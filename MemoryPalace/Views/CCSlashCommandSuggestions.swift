@@ -43,6 +43,9 @@ struct CCSlashCommandSuggestions: View {
     private var candidates: [CCSlashCommand] { Self.candidates(for: prefix) }
 
     /// 显示哪些候选：case-insensitive prefix 匹配；prefix 为单 / 时全部显示。
+    #if PERSONAL_APPS
+    /// `susuos` 开头的永远不进推荐（plan-death-scale：暗号不能被推荐出来）
+    #endif
     static func candidates(for prefix: String, in all: [CCSlashCommand] = CCSlashCommand.all) -> [CCSlashCommand] {
         let pool = all.filter { !isHidden($0.name) }
         let p = prefix.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -53,7 +56,12 @@ struct CCSlashCommandSuggestions: View {
     }
 
     static func isHidden(_ name: String) -> Bool {
+        #if PERSONAL_APPS
+        let bare = name.drop { $0 == "/" }
+        return bare.lowercased().hasPrefix("susuos")
+        #else
         return false
+        #endif
     }
 
     var body: some View {

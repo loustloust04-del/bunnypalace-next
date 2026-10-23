@@ -543,6 +543,11 @@ struct VoiceEffectsSettingsSection: View {
                       !Task.isCancelled, previewEpoch == epoch, profileID == id else { return }
                 VoiceMessagePlayer.shared.stop()
                 MusicCardPlayer.shared.stop()
+                #if PERSONAL_APPS
+                #if DEBUG
+                AudiobookPlayer.shared.pause()
+                #endif
+                #endif
                 SpeechService.shared.stop()
                 #if os(iOS)
                 let session = AVAudioSession.sharedInstance()

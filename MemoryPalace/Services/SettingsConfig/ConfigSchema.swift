@@ -153,6 +153,11 @@ enum ConfigSchema {
         .init("perm.healthCycle",         .int,    .permissions, aiWritable: false),
         .init("perm.healthIntimacy",      .int,    .permissions, aiWritable: false),
         ]
+        #if PERSONAL_APPS
+        keys += [
+        .init("perm.trading",             .int,    .permissions, aiWritable: false),
+        ]
+        #endif
         keys += [
         .init("perm.memory",              .int,    .permissions, aiWritable: false),
         .init("perm.images",              .int,    .permissions, aiWritable: false),

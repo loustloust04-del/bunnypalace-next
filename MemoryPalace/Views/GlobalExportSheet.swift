@@ -12,7 +12,15 @@ import UIKit
 struct GlobalExportSheet: View {
     /// 备份照样带有声书数据；只有粟粟的 Debug 包里有有声书，别的包文案不提（#096）
     private static var audiobookMention: String {
+        #if PERSONAL_APPS
+        #if DEBUG
+        return "有声书、"
+        #else
         return ""
+        #endif
+        #else
+        return ""
+        #endif
     }
     @Environment(\.dismiss) private var dismiss
     @Bindable var profileManager: ProfileManager

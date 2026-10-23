@@ -202,6 +202,12 @@ extension APIProvider {
         if LocalLLMService.isSupported {
             list.insert(.localMLX, at: list.firstIndex(where: { $0.id == APIProvider.ollama.id })! + 1)
         }
+        #if PERSONAL_APPS
+        #if DEBUG
+        // 粟粟自用：只进她的 Debug 包，Release / TestFlight 不出现
+        list.insert(.kimiP, at: list.firstIndex(where: { $0.id == APIProvider.claudeP.id })! + 1)
+        #endif
+        #endif
         return list
     }()
 
@@ -366,6 +372,21 @@ extension APIProvider {
         extraHeaders: ["anthropic-version": "2023-06-01"], models: []
     )
 
+    #if PERSONAL_APPS
+    #if DEBUG
+    /// 本机 kimi-proxy（`~/Desktop/susu-project/kimi-proxy`，Kimi Code 订阅包成 Anthropic 兼容端点）。
+    /// 地址是粟粟那台 Mac 的局域网 IP，只进 Debug 包。
+    static let kimiP = APIProvider(
+        id: "kimi-p", name: "kimi-p",
+        type: .anthropic, baseURL: "http://192.168.31.20:8793",
+        extraHeaders: ["anthropic-version": "2023-06-01"],
+        models: [
+            ProviderModel(credentialId: "kimi-p", modelId: "k3", name: "Kimi K3"),
+            ProviderModel(credentialId: "kimi-p", modelId: "k3-256k", name: "Kimi K3-256K"),
+        ]
+    )
+    #endif
+    #endif
 
     /// 本机模型：没有 key、没有网络；模型跟着 app 内置清单（AssistantLocalModel.catalog）
     static let localMLX = APIProvider(

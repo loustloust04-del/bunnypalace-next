@@ -9,8 +9,14 @@ enum FontManager {
 
     private static func directBundledFontURLs(in resourceURL: URL) -> [URL]? {
         // 与 Resources/Fonts 中的字体文件同步维护；兼容 Xcode 平铺和保留 Fonts/ 两种打包。
+        #if PERSONAL_APPS
+        let names = ["LXGWWenKai-Regular.ttf", "SourceHanSerifSC-Regular.otf", "Silkscreen-Regular.ttf",
+                     "LongCang-Regular.ttf", "ZCOOLKuaiLe-Regular.ttf",
+                     "IMFeENrm28P.ttf", "IMFeENit28P.ttf", "IMFeENsc28P.ttf", "IMFePIrm28P.ttf", "IMFePIit28P.ttf"]
+        #else
         let names = ["LXGWWenKai-Regular.ttf", "SourceHanSerifSC-Regular.otf", "Silkscreen-Regular.ttf",
                      "LongCang-Regular.ttf", "ZCOOLKuaiLe-Regular.ttf"]   // 后两个：便利贴手写 / 可爱字体
+        #endif
         let directories = [resourceURL, resourceURL.appendingPathComponent("Fonts", isDirectory: true)]
         var urls: [URL] = []
         var found: Set<String> = []

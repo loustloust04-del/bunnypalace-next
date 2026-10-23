@@ -4,6 +4,9 @@ import SwiftUI
 /// 设置 →「子应用」：Page2 各子应用自己的设置。
 struct SubAppsSettingsPage: View {
     @Environment(RightPanelToolManager.self) private var tools: RightPanelToolManager?
+    #if PERSONAL_APPS
+    @AppStorage("deathScale.unlocked") private var deathScaleUnlocked = false
+    #endif
 
     var body: some View {
         List {
@@ -26,6 +29,20 @@ struct SubAppsSettingsPage: View {
             }
             .listRowBackground(Theme.mainBg)
 
+            #if PERSONAL_APPS
+            if deathScaleUnlocked {
+                Section {
+                    Toggle("Mort sans sépulture", isOn: Binding(
+                        get: { tools?.tool(byId: DeathScaleGate.toolId)?.isEnabled ?? false },
+                        set: { DeathScaleGate.setVisible($0, tools: tools) }
+                    ))
+                    .tint(Theme.branchIndicator)
+                } footer: {
+                    Text("关掉只收起桌面图标，里面的记录都留着。")
+                }
+                .listRowBackground(Theme.mainBg)
+            }
+            #endif
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)

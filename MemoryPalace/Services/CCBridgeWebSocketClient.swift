@@ -115,8 +115,28 @@ final class CCBridgeWebSocketClient: NSObject {
     @ObservationIgnored var onTwitterCmd: (@MainActor (_ frame: [String: Any]) -> [String: Any])?
     /// R5：agent 状态快照到货（iOS 设置-Agent 页拉取/写配置后 hub 都回它）。页面 onAppear 注册。
     @ObservationIgnored var onAgentStatusResult: ((_ payload: [String: Any]) -> Void)?
+    #if PERSONAL_APPS
+    /// 交易 T0.5：研报到货（book_note 同款：返回 true 才 ack）。ContentView 注册。
+    /// 冷启动竞态：WS 先连上 → hub 立即补投 → 闭包还没注册 → 帧丢失不 ack（08-02 粟粟"没看见第一份"实锤）。
+    /// 修法：未注册期间帧进缓冲，didSet 时回放。
+    @ObservationIgnored var onTradingReport: ((_ payload: [String: Any]) -> Bool)? {
+        didSet {
+            guard onTradingReport != nil, !bufferedTradingReports.isEmpty else { return }
+            let buffered = bufferedTradingReports
+            bufferedTradingReports = []
+            DispatchQueue.main.async { [weak self] in
+                for payload in buffered { self?.processTradingReport(payload) }
+            }
+        }
+    }
+    @ObservationIgnored private var bufferedTradingReports: [[String: Any]] = []
+    #endif
     /// agent_book_note 已处理 uuid（去重：hub 补投/重复广播无害）。保 200。
     private static let seenBookNoteKey = "agentBookNoteSeenUUIDs"
+    #if PERSONAL_APPS
+    /// trading_report 已处理 uuid（同上）。保 200。
+    private static let seenTradingReportKey = "tradingReportSeenUUIDs"
+    #endif
 
     /// 推送文案偏好（per-device）：full=完整预览 / hidden=只「小克找你了」。随 register_push_token 同步给 hub。
     static let pushPreviewKey = "ccPushPreview"
@@ -730,6 +750,26 @@ final class CCBridgeWebSocketClient: NSObject {
     }
 
     /// JSON 序列化后以文本帧发出。
+    #if PERSONAL_APPS
+    /// 研报帧处理（主线程）：闭包没注册（冷启动早期 hub 抢跑补投）→ 缓冲等回放；处理成功才 ack。
+    @MainActor func processTradingReport(_ obj: [String: Any]) {
+        guard let uuid = obj["uuid"] as? String, !uuid.isEmpty else { return }
+        guard let handler = onTradingReport else {
+            bufferedTradingReports.append(obj)
+            return
+        }
+        var seen = UserDefaults.standard.stringArray(forKey: Self.seenTradingReportKey) ?? []
+        if seen.contains(uuid) {
+            send(["type": "trading_report_ack", "uuid": uuid]) { _ in }
+            return
+        }
+        guard handler(obj) else { return }
+        seen.append(uuid)
+        if seen.count > 200 { seen = Array(seen.suffix(200)) }
+        UserDefaults.standard.set(seen, forKey: Self.seenTradingReportKey)
+        send(["type": "trading_report_ack", "uuid": uuid]) { _ in }
+    }
+    #endif
 
     /// 问问题 CC 桥：答案帧（answers 按题序 [{indices:[Int]}|{text:String}]）；skip=true 整卡跳过（hub 发 Esc）。
     func sendAskUserAnswer(toolUseId: String, answers: [[String: Any]]?, skip: Bool = false) {
@@ -1484,6 +1524,28 @@ final class CCBridgeWebSocketClient: NSObject {
             DispatchQueue.main.async { [weak self] in
                 self?.onAgentStatusResult?(obj)
             }
+        #if PERSONAL_APPS
+        case "warroom_board_result":
+            // 军机处 M3：看板快照广播（面板挂载时机不定，走 NotificationCenter 不走 closure）
+            DispatchQueue.main.async {
+                if let rows = obj["tasks"] as? [[String: Any]] {
+                    Page2WarroomSnapshot.shared.update(tasks: rows.compactMap(WarroomTask.from))
+                }
+                NotificationCenter.default.post(name: .warroomBoardUpdated, object: nil, userInfo: ["payload": obj])
+            }
+        case "warroom_request_result":
+            // 军机处 M5：派单回执（递呈成功 → sheet 显示需求编号）
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .warroomRequestResult, object: nil, userInfo: ["payload": obj])
+            }
+        #if DEBUG
+        case "pm_req_result":
+            // page2 pmBoard 子应用（plan-dev-subapp-v2 P0-d）：通用帧 pm_req 的回帧，整帧原文交给 PMBoardStore 按 req_id 对回
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .pmBoardFrame, object: nil, userInfo: ["type": type, "data": data])
+            }
+        #endif
+        #endif
         case "agent_book_note":
             // CR-4：AI 读书产物。去重 → 处理 → ack（成功才 ack，失败留 pending 等补投）
             guard let uuid = obj["uuid"] as? String, !uuid.isEmpty else { return }
@@ -1501,6 +1563,26 @@ final class CCBridgeWebSocketClient: NSObject {
                 UserDefaults.standard.set(seen, forKey: Self.seenBookNoteKey)
                 self.send(["type": "agent_book_note_ack", "uuid": uuid]) { _ in }
             }
+        #if PERSONAL_APPS
+        case "trading_report_result":
+            // 交易 T0.5：研报回投。去重 → 处理 → ack（成功才 ack，失败留 pending 等补投）
+            guard let uuid = obj["uuid"] as? String, !uuid.isEmpty else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.processTradingReport(obj)
+            }
+        case "trading_report_progress":
+            // 研究进度心跳 → 档案页按钮文案（无副作用，不去重不 ack）
+            if let symbol = obj["symbol"] as? String {
+                let stage = obj["stage"] as? String ?? ""
+                let label = obj["label"] as? String ?? ""
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: .tradingResearchProgress, object: nil,
+                        userInfo: ["symbol": symbol, "stage": stage, "label": label]
+                    )
+                }
+            }
+        #endif
         case "reply":
             if let chatId = obj["chat_id"] as? String,
                let content = obj["content"] as? String {

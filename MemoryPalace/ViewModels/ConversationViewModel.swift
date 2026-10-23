@@ -386,6 +386,14 @@ final class ConversationViewModel {
                 HealthLogIntentWriter.processChatIntents(nodeId: newId, context: context)
             }
         }
+        #if PERSONAL_APPS
+        // 交易记录块同理（CC 主动消息不走 assistantTurnDidFinish——漏这挂点 CC 侧永不落地）
+        if content.contains("```trade") {
+            Task { @MainActor in
+                TradeLogIntentWriter.processChatIntents(nodeId: newId, context: context)
+            }
+        }
+        #endif
         if content.contains(AnniversaryIntentWriter.blockTag) {
             Task { @MainActor in
                 AnniversaryIntentWriter.processChatIntents(nodeId: newId, context: context)
@@ -2816,7 +2824,11 @@ final class ConversationViewModel {
 
     /// `{{trading}}` 取值；关掉私人子应用时恒为空（宏照常替换成空，不原样漏出）
     private func tradingSummaryForPrompt(context: ModelContext, profileId: String) -> String {
+        #if PERSONAL_APPS
+        TradingStore.composedTradingSummary(context: context, profileId: profileId, grants: permGrants(for: selectedConversation))
+        #else
         ""
+        #endif
     }
 
     @MainActor
@@ -2834,6 +2846,13 @@ final class ConversationViewModel {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         let airSpan = AirProbeSections.enabled ? AirProbeSections.enter("sendMessage") : nil
         defer { if let airSpan { AirProbeRuntime.shared.finishedSection(airSpan) } }
+        #endif
+        #if PERSONAL_APPS
+        // 死亡天平暗号兜底（cssChat / 语音 / 排队回放这些不经 ChatInputBar 的入口）
+        if DeathScaleUnlock.matches(text) {
+            DeathScaleUnlock.post()
+            return true
+        }
         #endif
         // 卡库 ⑧c：群聊只读归档不续聊
         guard let conversation = selectedConversation, !conversation.isReadOnlyArchive else { return false }
@@ -3101,7 +3120,14 @@ final class ConversationViewModel {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure { PerfGuardrails.suppress("askOnce"); return }   // 测量角色旁路早退（perf P0 §3.2）
         #endif
+        #if PERSONAL_APPS
+        var askable: [PermissionDomain] = [.healthApple, .healthWeight, .healthMeds, .healthCycle, .healthIntimacy, .trading, .images]
+        #if DEBUG
+        askable.append(.topicBox)
+        #endif
+        #else
         let askable: [PermissionDomain] = [.healthApple, .healthWeight, .healthMeds, .healthCycle, .healthIntimacy, .images]
+        #endif
         var grants = PermissionGrants(raw: conversation.permGrantsRaw)
         var changed = false
         for domain in askable where PermissionCenter.level(domain) == .askOnce && !grants.isResolved(domain) {
@@ -3190,7 +3216,13 @@ final class ConversationViewModel {
     // MARK: - Tool Loop
 
     /// 自带硬顶的工具不走结果外置：外置按字节头截，会截掉编程会话 get_session 页尾的 from_seq（R-WN5 #2）
+    #if PERSONAL_APPS
+    /// 死亡天平自己封顶 40KB，并且绝不能外置落进楼层文件
+    #endif
     static func skipsOffload(_ name: String) -> Bool {
+        #if PERSONAL_APPS
+        if name == DeathScaleAITool.toolName { return true }
+        #endif
         #if os(macOS)
         return CodingTools.names.contains(name)
         #else
@@ -3451,9 +3483,21 @@ final class ConversationViewModel {
             .replacingOccurrences(of: "{{fileContents}}", with: contentsSection)
         // 记忆树提示是固定文本（不列文件名）——前缀稳定，具体内容让模型 fs_list/fs_read 按需拉
         // 「正在读」挪进〔状态〕（#089 P1：章节号每读一章就变）
+        #if PERSONAL_APPS
+        #if DEBUG
+        let topicBox = topicBoxHint()
+        #else
         let topicBox = ""
+        #endif
+        #else
+        let topicBox = ""
+        #endif
         let healthLog = healthLogHint(profileId: profileId)
+        #if PERSONAL_APPS
+        let tradeLog = tradeLogHint(profileId: profileId)
+        #else
         let tradeLog = ""
+        #endif
         let anniversary = AnniversaryIntentWriter.hint(profileId: profileId)
         // #069：fs_* 对 memory/ 只读，但 self 记忆和资料卡有专用写入口——别再说整棵树「系统生成、只读」
         let memoryTreeHint = SelfMemoryTool.enabled
@@ -3462,6 +3506,16 @@ final class ConversationViewModel {
         return "<文件库>\n\(filled)\(topicBox)\(healthLog)\(tradeLog)\(anniversary)\n\(memoryTreeHint)\(CCMemorySync.promptHint(profileId: profileId))过长的工具结果会存档在 tool-results/（只读），结果里给了路径时用 fs_read(path, offset, limit) 分段取回。\n</文件库>"
     }
 
+    #if PERSONAL_APPS
+    #if DEBUG
+    /// 话题盒约定段：纯静态文本（无日期无清单——prompt 前缀逐字稳定，缓存安全），
+    /// {{user}} 走 PromptAssembler 文件库段现有 applyMacros。开关默认开。
+    private func topicBoxHint() -> String {
+        guard PermissionCenter.injectionAllowed(.topicBox, grants: permGrants(for: selectedConversation)) else { return "" }
+        return "\ntopics/ 目录是「话题盒」——你和 {{user}} 共用的问题池，存放值得琢磨的问题（哲学、理论、任何有趣的困惑）。聊天中遇到这样的问题，可以用 fs_write 存一张卡：路径 topics/<问题短句>.md，第一行写问题本身；也可以用 fs_read 翻已有的卡，用 fs_append 在某张卡的「## 回应」下追加你的想法，小节格式：### 日期 · 你的名字。不必刻意，自然遇到才存。"
+    }
+    #endif
+    #endif
 
     /// R2 聊天内看书：「她正在读的书」语境 + 批注意向协议（零新工具——书就是文件库文件，
     /// 读=fs_read 原语；写批注=回复内嵌 book-note 块，系统做锚定落地）。没书 = 空串零污染。
@@ -3484,6 +3538,35 @@ final class ConversationViewModel {
         """
     }
 
+    #if PERSONAL_APPS
+    /// 交易手账约定段（```trade 意向协议第四例，plan-trading-t1-journal）：
+    /// 闸随 {{trading}} 总闸（AI 看得见交易=才教它记）+ 域守卫（无未平卡不教 close/review）。
+    /// 拷问段是松弛版方向不是问卷——措辞集中在这，粟粟要调只改这一处。
+    private func tradeLogHint(profileId: String) -> String {
+        guard PermissionCenter.injectionAllowed(.trading, grants: permGrants(for: selectedConversation)) else { return "" }
+        guard let ctx = selectedConversation?.modelContext else { return "" }
+        let openCount = TradingStore.openTradeCount(context: ctx, profileId: profileId)
+
+        var hint = """
+
+        交易手账：{{user}} 明确说了开仓/买入某标的（含数量和价格）时，在回复里输出：
+        ```trade
+        {"type": "open", "symbol": "NVDA", "side": "long", "qty": 100, "price": 180.5, "reason": "{{user}}说的开仓理由，用{{user}}的原话概括"}
+        ```
+        reason 必填——那是这张卡的灵魂，之后复盘全靠它。做空 side 用 "short"。
+        """
+        if openCount > 0 {
+            hint += """
+
+        {{user}}说平仓/卖了 → `{"type": "close", "symbol": "NVDA", "price": 195.0}`（price 可省）。
+        复盘对话聊出结论后 → `{"type": "review", "symbol": "NVDA", "note": "{{user}}认可的结论"}`。
+        {{user}}想复盘某笔交易时：先把那张卡的开仓理由原文引用给{{user}}看（注入里有），围绕"当时的判断 vs 后来发生的"自然展开——论点验证了吗、纪律守住没、如果重来。别列问卷，像聊天一样。档案里有该标的研报的话可以对照着看（fs_read trading/ 目录）。聊透了再用 review 块把{{user}}认可的结论挂回卡。
+        """
+        }
+        hint += "\n系统会真实落卡并把块变成结果行。只在{{user}}明确说了才记，不要猜测。\n"
+        return hint
+    }
+    #endif
 
     /// 健康手账约定段（```health-log 意向协议，plan-health-chat-entry）：
     /// 闸+域双守卫——读闸关 = 不教 AI 写（语义一致零新开关）；域空 = 零污染。
@@ -4014,6 +4097,15 @@ final class ConversationViewModel {
                             segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "编程会话", iconName: "terminal"))
                             let r = await CodingSessionLibrary.shared.runCodingTool(name: call.name, argumentsJSON: call.argumentsJSON)
                             segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "编程会话"))
+                            results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
+                            continue
+                        }
+                        #endif
+                        #if PERSONAL_APPS
+                        if call.name == DeathScaleAITool.toolName {
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "Mort sans sépulture", iconName: "scalemass"))
+                            let r = DeathScaleAITool.execute(inputJSON: call.argumentsJSON, profileId: profileId)
+                            segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "Mort sans sépulture"))
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                             continue
                         }

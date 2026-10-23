@@ -27,6 +27,11 @@ struct Page2WidgetHost: View {
                 case "garden": GardenWidgetView(size: size)
                 case "contacts": ContactsWidgetView(size: size)
                 case "vocab": VocabWidgetView(size: size)
+                #if PERSONAL_APPS
+                #if DEBUG
+                case "topicBox": TopicWidgetView(size: size)
+                #endif
+                #endif
                 default: Page2SummaryWidget(item: item, onOpen: onOpen)
                 }
             }
@@ -168,7 +173,12 @@ struct Page2SummaryWidget: View {
         .onChange(of: scenePhase) { _, phase in if phase == .active { Task { await refresh() } } }
         .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in if kind == "memory" { Task { await refresh() } } }
         .onReceive(NotificationCenter.default.publisher(for: .fileLibraryDidChange)) { _ in if ["fileLibrary", "reading", "calendar"].contains(kind) { Task { await refresh() } } }
+        #if PERSONAL_APPS
+        .onChange(of: Page2WarroomSnapshot.shared.updatedAt) { _, _ in if kind == "warroom" { Task { await refresh() } } }
+        .onChange(of: bridge.isConnected) { _, _ in if ["ccTerminal", "warroom"].contains(kind) { Task { await refresh() } } }
+        #else
         .onChange(of: bridge.isConnected) { _, _ in if ["ccTerminal"].contains(kind) { Task { await refresh() } } }
+        #endif
         .onChange(of: TodoManager.shared.items) { _, _ in if kind == "plan" { Task { await refresh() } } }
         .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in if kind == "plan" { Task { await refresh() } } }
     }
@@ -220,6 +230,18 @@ struct Page2SummaryWidget: View {
                 if let book = try context.fetch(query).first {
                     headline = book.name; detail = "\(book.author)\n读到第 \(book.currentChapter) 章"; target = book.id; imageData = book.coverData; updated = book.lastReadAt
                 } else { detail = "导入一本书，开始阅读" }
+            #if PERSONAL_APPS
+            #if DEBUG
+            case "audiobook":
+                var query = FetchDescriptor<AudiobookItem>(predicate: #Predicate { $0.profileId == pid }, sortBy: [SortDescriptor(\.lastPlayedAt, order: .reverse)])
+                query.fetchLimit = 3
+                if let selected = UUID(uuidString: preferred) { query.predicate = #Predicate { $0.profileId == pid && $0.id == selected } }
+                if let book = try context.fetch(query).first {
+                    let seconds = PlaybackCheckpointStore.read(profileId: pid, bookId: book.id)?.timestamp ?? book.currentTime
+                    headline = book.title; detail = "听到 \(Int(seconds) / 60) 分 \(Int(seconds) % 60) 秒"; target = book.id.uuidString; updated = book.lastPlayedAt
+                } else { detail = "导入音频，听一段故事" }
+            #endif
+            #endif
             case "worldBook":
                 var query = FetchDescriptor<WorldBook>(predicate: #Predicate { $0.profileId == pid })
                 query.fetchLimit = 3
@@ -269,12 +291,30 @@ struct Page2SummaryWidget: View {
                     headline = item.configuration["hideValue"] == "true" ? "已记录体重" : String(format: "%.1f kg", entry.weightKg)
                     detail = "最近一次记录"; updated = entry.date; target = "weight"
                 } else { detail = "还没有体重记录" }
+            #if PERSONAL_APPS
+            case "trading":
+                var query = FetchDescriptor<TickerEntry>(predicate: #Predicate { $0.profileId == pid }, sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+                query.fetchLimit = 3
+                if !preferred.isEmpty { query.predicate = #Predicate { $0.profileId == pid && $0.symbol == preferred } }
+                let entries = try context.fetch(query)
+                if let entry = entries.first { headline = entry.symbol; detail = entry.displayName ?? "关注列表"; target = entry.symbol; updated = entry.createdAt }
+            #endif
             case "ccTerminal":
                 headline = bridge.isConnected ? "已连接" : "未连接"
                 if let window = TerminalWindowStore.shared.windows.first(where: { !$0.isClosed && (preferred.isEmpty || $0.code == preferred) }) {
                     detail = TerminalTitle.resolve(title: window.title, engine: window.engine, code: window.code)
                     target = window.code
                 } else { detail = bridge.lastError ?? "轻点打开终端" }
+            #if PERSONAL_APPS
+            case "warroom":
+                let snapshot = Page2WarroomSnapshot.shared
+                snapshot.refreshIfNeeded()
+                headline = snapshot.updatedAt == nil ? "尚未读取看板" : "\(snapshot.pendingCount) 项待处理"
+                detail = (bridge.isConnected ? "" : "离线 · ") + (snapshot.firstTitle ?? "轻点查看军机处")
+                if let selected = snapshot.tasks.first(where: { $0.id == preferred }) { headline = selected.title; target = selected.id }
+                else { target = snapshot.firstID }
+                updated = snapshot.updatedAt
+            #endif
             default: detail = "轻点打开\(Page2WidgetCatalog.name(kind))"
             }
         } catch { loadError = "暂时无法读取：\(error.localizedDescription)" }
@@ -345,6 +385,11 @@ struct Page2WidgetConfigurationView: View {
         do {
             switch kind {
             case "reading": choices = try context.fetch(FetchDescriptor<BookEntry>(predicate: #Predicate { $0.profileId == pid })).map { Choice(id: $0.id, name: $0.name) }
+            #if PERSONAL_APPS
+            #if DEBUG
+            case "audiobook": choices = try context.fetch(FetchDescriptor<AudiobookItem>(predicate: #Predicate { $0.profileId == pid })).map { Choice(id: $0.id.uuidString, name: $0.title) }
+            #endif
+            #endif
             case "memory":
                 var query = FetchDescriptor<Memory>(predicate: #Predicate { $0.profileId == pid && $0.supersededAt == nil }, sortBy: [SortDescriptor(\.updatedAt, order: .reverse)])
                 query.fetchLimit = 100
@@ -356,7 +401,13 @@ struct Page2WidgetConfigurationView: View {
             case "sticker": choices = try context.fetch(FetchDescriptor<StickerAsset>(predicate: #Predicate { $0.profileId == pid })).map { Choice(id: $0.id.uuidString, name: $0.name) }
             case "calendar": choices = DailyFileStore.existingDates(profileId: pid).sorted(by: >).prefix(60).map { Choice(id: $0, name: $0) }
             case "browser": choices = BrowsingHistoryStore.load().map { Choice(id: $0.url, name: $0.title.isEmpty ? $0.url : $0.title) }
+            #if PERSONAL_APPS
+            case "trading": choices = try context.fetch(FetchDescriptor<TickerEntry>(predicate: #Predicate { $0.profileId == pid })).map { Choice(id: $0.symbol, name: $0.symbol) }
+            #endif
             case "ccTerminal": choices = TerminalWindowStore.shared.windows.filter { !$0.isClosed }.map { Choice(id: $0.code, name: $0.title ?? $0.code) }
+            #if PERSONAL_APPS
+            case "warroom": choices = Page2WarroomSnapshot.shared.tasks.map { Choice(id: $0.id, name: $0.title) }
+            #endif
             case "fileLibrary":
                 let names = await Task.detached(priority: .utility) {
                     #if (DEBUG || PERF_BENCH) && os(iOS)

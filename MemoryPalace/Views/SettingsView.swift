@@ -44,6 +44,9 @@ struct SettingsView: View {
         case memory = "记忆"
         case health = "健康"
         case calendar = "日历"
+        #if PERSONAL_APPS
+        case trading = "交易"
+        #endif
         case sticker = "贴纸"
         case terminal = "终端"
         case claudeCode = "Claude Code"
@@ -156,6 +159,9 @@ struct SettingsView: View {
                             settingsButton(icon: "ri-emoji-sticker", title: "贴纸", color: Theme.textSecondary, tab: .sticker, guide: .middle)
                             settingsButton(icon: "heart.text.square", title: "健康", color: Theme.textSecondary, tab: .health, guide: .middle)
                             settingsButton(icon: "calendar", title: "日历", color: Theme.textSecondary, tab: .calendar, guide: .middle)
+                            #if PERSONAL_APPS
+                            settingsButton(icon: "chart.line.uptrend.xyaxis", title: "交易", color: Theme.textSecondary, tab: .trading, guide: .middle)
+                            #endif
                             settingsButton(icon: "books.vertical", title: "书房", color: Theme.textSecondary, tab: .reading, guide: .middle)
                             settingsButton(icon: "abc", title: "单词", color: Theme.textSecondary, tab: .vocab, guide: .middle)
                             settingsButton(icon: "person.2", title: "群聊", color: Theme.textSecondary, tab: .groupChat, guide: .last)
@@ -227,6 +233,9 @@ struct SettingsView: View {
                     if settingsProMode { MemoryPage() } else { LiteMemoryPage(viewModel: viewModel) }
                 case .health: HealthSettingsTab()
                 case .calendar: CalendarSettingsTab()
+                #if PERSONAL_APPS
+                case .trading: TradingSettingsTab()
+                #endif
                 case .regex: RegexPage()
                 case .worldBook: WorldBookPage()
                 case .sticker:
@@ -490,6 +499,11 @@ struct SettingsView: View {
         case .calendar:
             MacSettingsForm { CalendarSettingsSections(profileId: profileManager?.currentProfile.id ?? "") }
                 .scrollContentBackground(.hidden)
+        #if PERSONAL_APPS
+        case .trading:
+            MacSettingsForm { TradingGatesSections(profileId: profileManager?.currentProfile.id ?? "") }
+                .scrollContentBackground(.hidden)
+        #endif
         case .terminal:
             TerminalSettingsTab().scrollContentBackground(.hidden)
         case .claudeCode:

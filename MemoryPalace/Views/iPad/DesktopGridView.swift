@@ -246,6 +246,11 @@ struct DesktopGridView: View {
         case .garden:   GardenWidgetView(size: size)
         case .contacts: ContactsWidgetView(size: size)
         case .vocab:    VocabWidgetView(size: size)
+        #if PERSONAL_APPS
+        #if DEBUG
+        case .topicBox: TopicWidgetView(size: size)
+        #endif
+        #endif
         }
     }
 

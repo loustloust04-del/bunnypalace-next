@@ -42,6 +42,11 @@ struct PDFReaderSheet: View {
     @State private var showAnnotationList = false
     @State private var isBoxSelect = false
     @State private var pendingSelection: PDFSelectionResult? = nil
+    #if PERSONAL_APPS
+    #if DEBUG
+    @State private var topicRequest: TopicComposeRequest? = nil
+    #endif
+    #endif
     @State private var showActionMenu = false
     @State private var showNoteEditor = false
     @State private var noteEditorText = ""
@@ -534,6 +539,11 @@ struct PDFReaderSheet: View {
                 case "askAI": askAI(sel)
                 case "crossPage": showToast("跨页了，分两页划")
                 case "addVocab": addVocab(sel)
+                #if PERSONAL_APPS
+                #if DEBUG
+                case "saveTopic": saveTopicFromSelection(sel)
+                #endif
+                #endif
                 default: break
                 }
             }
@@ -562,6 +572,11 @@ struct PDFReaderSheet: View {
                 }
                 Button("问\(assistantName)") { if let s = pendingSelection { askAI(s) } }
                 Button("收进生词本") { if let s = pendingSelection { addVocab(s) } }
+                #if PERSONAL_APPS
+                #if DEBUG
+                Button("存成问题") { if let s = pendingSelection { saveTopicFromSelection(s) } }
+                #endif
+                #endif
                 Button("取消", role: .cancel) { pendingSelection = nil }
             }
             .alert("写笔记", isPresented: $showNoteEditor) {
@@ -569,6 +584,15 @@ struct PDFReaderSheet: View {
                 Button("存") { if let s = pendingSelection { addNote(s, content: noteEditorText) } }
                 Button("取消", role: .cancel) { pendingSelection = nil }
             }
+            #if PERSONAL_APPS
+            #if DEBUG
+            // 「存成问题」→ 投题 sheet
+            .sheet(item: $topicRequest) { req in
+                TopicComposeSheet(profileId: profileId, prefillQuote: req.quote,
+                                  source: req.source, sourceLabel: req.sourceLabel)
+            }
+            #endif
+            #endif
             .sheet(isPresented: Binding(get: { quickLookNoteIds != nil },
                                         set: { if !$0 { quickLookNoteIds = nil } })) {
                 NoteQuickLookSheet(
@@ -995,6 +1019,19 @@ struct PDFReaderSheet: View {
         ReadingSignals.logEvent(type: "vocab", book: bookSafeName, chapter: sel.page, word: word, profileId: profileId)
     }
 
+    #if PERSONAL_APPS
+    #if DEBUG
+    /// 坨坨/框选「存成问题」：选段进引文投话题盒，source 带页锚（book:<safeName>#page=N）。
+    private func saveTopicFromSelection(_ sel: PDFSelectionResult) {
+        pendingSelection = nil
+        topicRequest = TopicComposeRequest(
+            quote: sel.quote,
+            source: "book:\(bookSafeName)#page=\(sel.page)",
+            sourceLabel: "《\(index?.name ?? bookSafeName)》· 第 \(sel.page) 页"
+        )
+    }
+    #endif
+    #endif
 
     private func fidelityNote(_ sel: PDFSelectionResult, kind: String, content: String) -> BookStore.Note {
         var note = BookStore.Note(
@@ -1511,6 +1548,11 @@ final class MPPDFView: PDFView {
             UIMenuItem(title: "问\(assistantName)", action: #selector(mp_askAI(_:))),
             UIMenuItem(title: "收生词", action: #selector(mp_addVocab(_:))),
         ]
+        #if PERSONAL_APPS
+        #if DEBUG
+        menuItems.append(UIMenuItem(title: "存成问题", action: #selector(mp_saveTopic(_:))))
+        #endif
+        #endif
         UIMenuController.shared.menuItems = menuItems
     }
 
@@ -1529,6 +1571,11 @@ final class MPPDFView: PDFView {
             ("问\(assistantName)", "bubble.left.and.bubble.right", "askAI"),
             ("收生词", "character.book.closed", "addVocab"),
         ]
+        #if PERSONAL_APPS
+        #if DEBUG
+        items.append(("存成问题", "questionmark.bubble", "saveTopic"))
+        #endif
+        #endif
         let actions = items.map { title, icon, name in
             UIAction(title: title, image: UIImage(systemName: icon)) { [weak self] _ in self?.postSelectionAction(name) }
         }
@@ -1565,6 +1612,11 @@ final class MPPDFView: PDFView {
                                              ("加笔记", #selector(mp_addNote(_:))),
                                              ("问\(assistantName)", #selector(mp_askAI(_:))),
                                              ("收生词", #selector(mp_addVocab(_:)))]
+        #if PERSONAL_APPS
+        #if DEBUG
+        entries.append(("存成问题", #selector(mp_saveTopic(_:))))
+        #endif
+        #endif
         for (title, sel) in entries {
             let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
             item.target = self

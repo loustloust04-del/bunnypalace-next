@@ -94,6 +94,20 @@ struct ChatMarkdownView: View {
     @State private var managedHighlight: ManagedHighlight? = nil
     @AppStorage(HighlightPalette.lastColorKey) private var lastHighlightColor = HighlightPalette.userDefault
     @AppStorage(HighlightPalette.lastStyleKey) private var lastHighlightStyle = HighlightStyle.fill.rawValue
+    #if PERSONAL_APPS
+    #if DEBUG
+    /// 浮条「存成问题」→ 投题 sheet（选段进引文，真消息 node 带 chat# 出处；合成锚不带）。
+    @State private var topicRequest: TopicComposeRequest? = nil
+    #endif
+    #endif
+    #if PERSONAL_APPS
+    /// $NVDA 点开的标的档案（T0 词典逻辑；String 非 Identifiable 的包装先例）。
+    private struct TickerOpen: Identifiable {
+        let symbol: String
+        var id: String { symbol }
+    }
+    @State private var tickerOpen: TickerOpen? = nil
+    #endif
 
     /// 浮条注入项（fork 上游 textContextMenu 管线 → ParagraphUIView.editMenuForTextIn）：
     /// 收生词恒有；引用=onQuote 调用点；划线=有 nodeId 的调用点（一点就按上次的颜色 / 样式划，改色在时间线小窗里）。
@@ -104,6 +118,13 @@ struct ChatMarkdownView: View {
         }
         // 没有 profileId 的调用点（编程会话详情页）不出这一项：存问题要写进那个楼层的文件库，
         // profileId 为空会被 floorSlug 兜底成「楼层-profile」建出一个谁也看不见的幻影楼层（R-CD #1）
+        #if PERSONAL_APPS
+        #if DEBUG
+        if !profileId.isEmpty {
+            inline.append(TextContextMenuItem(id: "saveTopic", title: "存成问题"))
+        }
+        #endif
+        #endif
         if nodeId != nil {
             inline.insert(TextContextMenuItem(id: "highlight.add", title: "划线"), at: 0)
         }
@@ -191,7 +212,11 @@ struct ChatMarkdownView: View {
     }
 
     private var renderedText: String {
+        #if PERSONAL_APPS
+        linkifyTickers ? TickerLinkifier.linkifyCached(text, cacheKey: nodeId) : text
+        #else
         text
+        #endif
     }
 
     var body: some View {
@@ -215,6 +240,19 @@ struct ChatMarkdownView: View {
             // perf L1c：刚流完的这条首见未命中也同步解析，翻回静态不闪空
             syncOnMiss: !animated && nodeId.map { MarkdownRenderCache.shared.isFreshlyStreamed($0) } == true
         )
+        #if PERSONAL_APPS
+        // ticker:// 拦在最内层；不认识的 URL 必须 .systemAction 往外传（citation 反查在外层）
+        .environment(\.openURL, OpenURLAction { url in
+            guard url.scheme == "ticker" else { return .systemAction }
+            let sym = String(url.path.dropFirst())
+            guard !sym.isEmpty else { return .handled }
+            tickerOpen = TickerOpen(symbol: sym)
+            return .handled
+        })
+        .sheet(item: $tickerOpen) { t in
+            TickerDetailSheet(symbol: t.symbol)
+        }
+        #endif
         .task {
             if flashQuote != nil {
                 try? await Task.sleep(for: .seconds(1.8))
@@ -235,6 +273,17 @@ struct ChatMarkdownView: View {
             .frame(minWidth: 520, minHeight: 460)   // mac sheet 不给 frame 塌小（先例 CardFlowView TextSelectSheet）
             #endif
         }
+        #if PERSONAL_APPS
+        #if DEBUG
+        .sheet(item: $topicRequest) { req in
+            TopicComposeSheet(profileId: profileId, prefillQuote: req.quote,
+                              source: req.source, sourceLabel: req.sourceLabel)
+                #if os(macOS)
+                .frame(minWidth: 520, minHeight: 420)   // mac sheet 不给 frame 塌小（同上）
+                #endif
+        }
+        #endif
+        #endif
     }
 
     /// 浮条动作分发：收生词 / 引用 / 存成问题 / 划线 / 轻点划线开时间线。
@@ -248,6 +297,17 @@ struct ChatMarkdownView: View {
             onQuote?(selected)
             return
         }
+        #if PERSONAL_APPS
+        #if DEBUG
+        if id == "saveTopic" {
+            // 合成锚（vocab:/thinking:/topic:…带冒号）不是真消息 node，不写出处
+            let source = nodeId.flatMap { $0.contains(":") ? nil : "chat#\($0)" }
+            topicRequest = TopicComposeRequest(quote: selected, source: source,
+                                               sourceLabel: source != nil ? "来自对话" : nil)
+            return
+        }
+        #endif
+        #endif
         guard id.hasPrefix("highlight."), let nodeId else { return }
         if id == "highlight.tap" {
             // 查找高亮 / 闪词不是划线：点它不出小窗（同一段也划过线的除外）

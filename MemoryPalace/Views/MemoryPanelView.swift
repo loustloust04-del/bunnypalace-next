@@ -108,18 +108,44 @@ struct RightPanelToolContent: View {
             FileLibraryPanelView()
         case "browser":
             BrowserView()
+        #if PERSONAL_APPS
+        #if DEBUG
+        case "audiobook":
+            AudiobookPanelView(profileId: profileManager?.currentProfile.id ?? "")
+        #endif
+        #endif
         case "vocab":
             VocabPanelView(viewModel: viewModel)
         case "reading":
             ReadingPanelView()
+        #if PERSONAL_APPS
+        #if DEBUG
+        case "topicBox":
+            TopicBoxPanelView()
+        #endif
+        #endif
         case "health":
             HealthPanelView(profileId: profileManager?.currentProfile.id ?? "")
+        #if PERSONAL_APPS
+        case "warroom":
+            WarroomPanelView()
+        #if DEBUG
+        case "pmBoard":
+            PMBoardAppView()
+        #endif
+        case "trading":
+            TradingPanelView(profileId: profileManager?.currentProfile.id ?? "")
+        #endif
         case "regex":
             RegexPage()
         case "twitter":
             TwitterPanelView(profileId: profileManager?.currentProfile.id ?? "")
         case "study":
             StudyPanelView(viewModel: viewModel)
+        #if PERSONAL_APPS
+        case "deathScale":
+            DeathScaleView()
+        #endif
         #if os(macOS)
         case "run":
             RunPanelView()

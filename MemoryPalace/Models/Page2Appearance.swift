@@ -7,7 +7,11 @@ struct Page2IconOverride: Codable, Equatable {
 }
 
 struct Page2Appearance: Codable, Equatable {
+    #if PERSONAL_APPS
+    var wallpaper: String = "ios26"
+    #else
     var wallpaper: String = "garden"
+    #endif
     var rendering: String = "clear"
     var luminosity: String = "auto"
     var largeIcons: Bool = false
@@ -45,7 +49,11 @@ struct Page2Appearance: Codable, Equatable {
 extension Page2Appearance {
     /// 实际画出来的壁纸：公开版不带 iOS 26 那张系统图（#013），存着 ios26 的按花园四季画
     var resolvedWallpaper: String {
+        #if PERSONAL_APPS
+        wallpaper
+        #else
         wallpaper == "ios26" ? "garden" : wallpaper
+        #endif
     }
     static func isLightBackdrop(_ resolved: String, daylight: Bool) -> Bool {
         ["mist", "flora"].contains(resolved) || (resolved == "garden" && daylight)

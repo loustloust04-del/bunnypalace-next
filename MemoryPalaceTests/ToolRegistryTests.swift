@@ -19,6 +19,9 @@ final class ToolRegistryTests: XCTestCase {
         var out: [String: [String: Any]] = [:]
         for entry in ToolRegistry.all {
             let d = entry.definition
+            #if PERSONAL_APPS
+            if d.name == DeathScaleAITool.toolName { continue }   // 私有工具不进共享 fixture，定义由 DeathScaleAIToolTests 覆盖
+            #endif
             out[d.name] = family == .anthropic ? ToolSchemaRenderer.anthropic(d) : ToolSchemaRenderer.openAI(d)
         }
         return out
@@ -139,6 +142,9 @@ final class ToolRegistryTests: XCTestCase {
     @MainActor
     func testExportNeutralSchemaJSON() throws {
         var entries = ToolRegistry.all
+        #if PERSONAL_APPS
+        entries.removeAll { $0.definition.name == DeathScaleAITool.toolName }   // 私有工具不导进 cc-bridge
+        #endif
         let tools: [[String: Any]] = entries.map { entry in
             let d = entry.definition
             return ["name": d.name, "description": d.description,
@@ -147,7 +153,11 @@ final class ToolRegistryTests: XCTestCase {
         let payload: [String: Any] = ["version": 1, "tools": tools]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: URL(fileURLWithPath: "/tmp/tools-schema.json"))
+        #if PERSONAL_APPS
+        XCTAssertEqual(ToolRegistry.all.count, 40)   // + remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；+ death_scale（死亡天平，按楼层门控）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
+        #else
         XCTAssertEqual(ToolRegistry.all.count, 39)   // + remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
+        #endif
         XCTAssertEqual(tools.count, 39)   // 导出不含私有工具
     }
 }

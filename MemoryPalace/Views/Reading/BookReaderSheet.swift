@@ -104,6 +104,11 @@ struct BookReaderSheet: View {
     // M3：选段状态——JS 报上来后弹菜单/笔记/问小克
     @State private var selectedRange: SelectedRange?
     @State private var showNoteEditor = false
+    #if PERSONAL_APPS
+    #if DEBUG
+    @State private var topicRequest: TopicComposeRequest? = nil
+    #endif
+    #endif
     @State private var noteEditorContent = ""
     /// 非空 = 编辑模式（改已有 note），空 = 新增模式（从选段加 note）
 
@@ -230,6 +235,11 @@ struct BookReaderSheet: View {
             Button("加笔记") { noteEditorContent = ""; showNoteEditor = true }
             Button("问\(assistantName)") { askXiaoke(range) }
             Button("收生词") { addToVocab(range) }
+            #if PERSONAL_APPS
+            #if DEBUG
+            Button("存成问题") { saveTopicFromSelection(range) }
+            #endif
+            #endif
             Button("取消", role: .cancel) { selectedRange = nil }
         } message: { range in
             Text("「\(range.text.prefix(40))\(range.text.count > 40 ? "…" : "")」")
@@ -239,6 +249,15 @@ struct BookReaderSheet: View {
         .sheet(isPresented: $showNoteEditor) {
             noteEditorSheet
         }
+        #if PERSONAL_APPS
+        #if DEBUG
+        // 划线「存成问题」→ 投题 sheet
+        .sheet(item: $topicRequest) { req in
+            TopicComposeSheet(profileId: profileId, prefillQuote: req.quote,
+                              source: req.source, sourceLabel: req.sourceLabel)
+        }
+        #endif
+        #endif
         // M3-B-2 底部抽屉 mini 对话（学 page1 ModelPickerPopover 的 .sheet + detents 模式）
         .sheet(isPresented: $showChatDrawer, onDismiss: {
             highlightedNoteId = nil
@@ -1261,6 +1280,12 @@ struct BookReaderSheet: View {
                 askXiaoke(range)
             case "addVocab":
                 addToVocab(range)
+            #if PERSONAL_APPS
+            #if DEBUG
+            case "saveTopic":
+                saveTopicFromSelection(range)
+            #endif
+            #endif
             default:
                 break
             }
@@ -1320,6 +1345,19 @@ struct BookReaderSheet: View {
         ReadingSignals.logEvent(type: "vocab", book: bookSafeName, chapter: range.chapter, word: word, profileId: profileId)
     }
 
+    #if PERSONAL_APPS
+    #if DEBUG
+    /// 划线「存成问题」：选段进引文投话题盒，source 带书锚（book:<safeName>#chapter=N）。
+    private func saveTopicFromSelection(_ range: SelectedRange) {
+        selectedRange = nil
+        topicRequest = TopicComposeRequest(
+            quote: range.text,
+            source: "book:\(bookSafeName)#chapter=\(range.chapter)",
+            sourceLabel: "《\(index?.name ?? bookSafeName)》· 第 \(range.chapter) 章"
+        )
+    }
+    #endif
+    #endif
 
     private func scheduleToastDismiss() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {

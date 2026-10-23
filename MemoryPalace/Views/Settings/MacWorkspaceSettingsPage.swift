@@ -7,6 +7,9 @@ struct MacWorkspaceSettingsPage: View {
     @State private var legacy = Page2DesktopManager.shared
     @State private var showLocations = false
     @State private var updater = AppUpdater.shared
+    #if PERSONAL_APPS
+    @AppStorage("deathScale.unlocked") private var deathScaleUnlocked = false
+    #endif
     private var seed: [String] { legacy.dockToolIds ?? tools?.pinnedTools.map(\.id) ?? [] }
     private var items: [MacWorkspacePreferences.DockItem] { preferences.items(seed: seed) }
 
@@ -59,6 +62,18 @@ struct MacWorkspaceSettingsPage: View {
             Section("面板") {
                 PanelLayoutSettingsRows(layout: IPadPanelLayout.shared, labelFont: .body, captionFont: .caption)
             }
+            #if PERSONAL_APPS
+            if deathScaleUnlocked {
+                Section {
+                    Toggle("Mort sans sépulture", isOn: Binding(
+                        get: { tools?.tool(byId: DeathScaleGate.toolId)?.isEnabled ?? false },
+                        set: { DeathScaleGate.setVisible($0, tools: tools) }
+                    ))
+                } footer: {
+                    Text("关掉只收起 Dock 图标和已开的面板，里面的记录都留着。")
+                }
+            }
+            #endif
             softwareUpdateSection
         }
         .listStyle(.inset)

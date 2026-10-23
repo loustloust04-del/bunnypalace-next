@@ -7,7 +7,11 @@ enum VocabArcheologyRoute: String {
     static let storageKey = "vocabArcheologyRoute"
 
     static var current: VocabArcheologyRoute {
+        #if PERSONAL_APPS
+        VocabArcheologyRoute(rawValue: UserDefaults.standard.string(forKey: storageKey) ?? "") ?? .mac
+        #else
         .app
+        #endif
     }
 }
 

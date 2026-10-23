@@ -20,6 +20,11 @@ final class VoiceMessagePlayer: NSObject, AVAudioPlayerDelegate {
     /// 开播前让出：停音乐卡、暂停听书（research-chat-cards §10.2 互斥；测试可换 spy）
     @ObservationIgnored var beforePlay: @MainActor () -> Void = {
         MusicCardPlayer.shared.stop()
+        #if PERSONAL_APPS
+        #if DEBUG
+        AudiobookPlayer.shared.pause()
+        #endif
+        #endif
     }
 
     var isTicking: Bool { timer != nil }

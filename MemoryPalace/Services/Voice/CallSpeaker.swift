@@ -225,6 +225,11 @@ final class CallSpeaker: NSObject, CallAudioOutput {
 enum CallAudioSessionController {
     /// 进通话：playAndRecord + voiceChat（系统回声消除）+ 外放；先停听书（学 VoiceMessagePlayer 单向互斥）
     static func begin(systemManaged: Bool = false) {
+        #if PERSONAL_APPS
+        #if DEBUG
+        AudiobookPlayer.shared.pause()
+        #endif
+        #endif
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker])
         if !systemManaged { try? session.setActive(true) }

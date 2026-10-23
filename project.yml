@@ -69,7 +69,8 @@ settings:
     "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
     # 私人子应用开关（死亡天平 / 军机处 / 交易 / PMBoard / kimi-p，docs/plan-personal-apps-flag.md）。
     # 关：命令行 `PERSONAL_APPS_FLAG=`，或导出时改成 ""。三个 target 用 $(inherited) 拼进编译条件（写项目级会盖掉 DEBUG）。
-    PERSONAL_APPS_FLAG: ""
+    PERSONAL_APPS_FLAG: PERSONAL_APPS
+
 targets:
   MemoryPalace:
     type: application
