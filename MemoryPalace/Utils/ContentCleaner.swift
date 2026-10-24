@@ -123,10 +123,6 @@ enum ContentCleaner {
         let nsText = text as NSString
         let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
 
-        guard !matches.isEmpty else {
-            return ThinkingResult(content: text, thinking: nil)
-        }
-
         // Collect all thinking blocks
         var thinkingParts: [String] = []
         for match in matches {
@@ -141,6 +137,12 @@ enum ContentCleaner {
         for match in matches.reversed() {
             let range = Range(match.range, in: cleaned)!
             cleaned.removeSubrange(range)
+        }
+        // [Bunny patch BP-002] 流式中开了 [thinking] 还没收尾：尾巴当作进行中的思考，标签不原样露在气泡里
+        if let open = cleaned.range(of: "[thinking]", options: .caseInsensitive) {
+            let tail = cleaned[open.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !tail.isEmpty { thinkingParts.append(tail) }
+            cleaned = String(cleaned[..<open.lowerBound])
         }
         cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
 

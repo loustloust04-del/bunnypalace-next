@@ -283,6 +283,15 @@ final class MessageNode {
     /// 落盘失败保持内联不丢数据。幂等，tool loop 每轮重复调用安全。
     /// conversationTitle 只是目录名的可读糖，nil 时复用已有目录或建 untitled。
     func setSegments(_ segs: [MessageSegment], conversationTitle: String? = nil) {
+        // [Bunny patch BP-002] 正文段里的 [thinking]…[/thinking] 拆成 .thinking 段：显示走思考折叠，工具回合不把思考当正文回传
+        let segs: [MessageSegment] = segs.flatMap { seg -> [MessageSegment] in
+            guard case .text(let t) = seg, t.range(of: "[thinking]", options: .caseInsensitive) != nil else { return [seg] }
+            let ex = ContentCleaner.extractThinking(from: t)
+            var out: [MessageSegment] = []
+            if let th = ex.thinking { out.append(.thinking(text: th, signature: nil)) }
+            if !ex.content.isEmpty { out.append(.text(ex.content)) }
+            return out
+        }
         let externalized = AttachmentStore.externalize(
             segs,
             conversationId: conversationId,

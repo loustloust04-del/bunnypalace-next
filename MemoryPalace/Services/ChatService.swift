@@ -95,6 +95,31 @@ class BaseChatProvider: NSObject {
         }
     }
 
+    // MARK: - [Bunny patch BP-002] 直连 API 的思考内容
+    // 思考增量以 `[thinking]…[/thinking]` 包进正文流，沿用上游既有约定：ContentCleaner.extractThinking 负责显示，
+    // 历史组装 / 标题 / 朗读 / 通话播报（StreamSpeechGate）都已按这个标签剥除，不会回传给模型或被念出来。
+    @ObservationIgnored internal var thinkingStreamOpen = false
+
+    internal func emitThinkingDelta(_ text: String) {
+        guard !text.isEmpty else { return }
+        let chunk = thinkingStreamOpen ? text : "[thinking]" + text
+        thinkingStreamOpen = true
+        enqueueCallback { [self] in
+            streamingContent += chunk
+            onToken?(chunk)
+        }
+    }
+
+    internal func closeThinkingStreamIfNeeded() {
+        guard thinkingStreamOpen else { return }
+        thinkingStreamOpen = false
+        let chunk = "[/thinking]\n\n"
+        enqueueCallback { [self] in
+            streamingContent += chunk
+            onToken?(chunk)
+        }
+    }
+
     func sendStreaming(
         messages: [(role: String, content: String)],
         model: String,
@@ -253,6 +278,7 @@ class BaseChatProvider: NSObject {
         self.onComplete = onComplete
         self.onError = onError
         self.streamingContent = ""
+        self.thinkingStreamOpen = false   // [Bunny patch BP-002]
         self.error = nil
         self.isStreaming = true
         self.buffer = ""
@@ -987,6 +1013,7 @@ final class OpenAICompatibleProvider: BaseChatProvider {
                 let payload = String(line.dropFirst(6))
                 if payload == "[DONE]" {
                     receivedDone = true
+                    closeThinkingStreamIfNeeded()   // [Bunny patch BP-002]
                     enqueueCallback { [self] in
                         isStreaming = false
                         if !toolCallAccum.isEmpty, let cb = onToolCalls {
@@ -1057,12 +1084,18 @@ final class OpenAICompatibleProvider: BaseChatProvider {
             return
         }
 
+        // [Bunny patch BP-002] DeepSeek / 多数中转用 reasoning_content，OpenRouter 用 reasoning
+        if let reasoning = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String), !reasoning.isEmpty {
+            emitThinkingDelta(reasoning)
+        }
         if let content = delta["content"] as? String {
+            if !content.isEmpty { closeThinkingStreamIfNeeded() }   // [Bunny patch BP-002]
             enqueueCallback { [self] in
                 streamingContent += content
                 onToken?(content)
             }
         }
+        if delta["tool_calls"] != nil { closeThinkingStreamIfNeeded() }   // [Bunny patch BP-002]
 
         // 工具调用增量：按 index 累积 id/name/arguments（arguments 分片拼接）
         if let toolCalls = delta["tool_calls"] as? [[String: Any]] {
@@ -1568,6 +1601,7 @@ final class AnthropicProvider: BaseChatProvider {
             // tool_use 块开始：记 id/name，input 靠后续 input_json_delta 拼接
             if let cb = obj["content_block"] as? [String: Any] {
                 let type = cb["type"] as? String
+                if type != "thinking" { closeThinkingStreamIfNeeded() }   // [Bunny patch BP-002]
                 if type == "tool_use", let id = cb["id"] as? String, let name = cb["name"] as? String {
                     let idx = obj["index"] as? Int ?? 0
                     toolUseAccum[idx] = (id: id, name: name, json: "")
@@ -1596,10 +1630,13 @@ final class AnthropicProvider: BaseChatProvider {
         case "content_block_delta":
             if let delta = obj["delta"] as? [String: Any] {
                 if let text = delta["text"] as? String {
+                    closeThinkingStreamIfNeeded()   // [Bunny patch BP-002]
                     enqueueCallback { [self] in
                         streamingContent += text
                         onToken?(text)
                     }
+                } else if delta["type"] as? String == "thinking_delta", let thinking = delta["thinking"] as? String {
+                    emitThinkingDelta(thinking)   // [Bunny patch BP-002]
                 } else if let partial = delta["partial_json"] as? String {
                     let idx = obj["index"] as? Int ?? 0
                     if var entry = toolUseAccum[idx] { entry.json += partial; toolUseAccum[idx] = entry }
@@ -1620,6 +1657,7 @@ final class AnthropicProvider: BaseChatProvider {
 
         case "message_stop":
             receivedDone = true
+            closeThinkingStreamIfNeeded()   // [Bunny patch BP-002]
             enqueueCallback { [self] in
                 isStreaming = false
                 if stopReason == "tool_use" || stopReason == "max_tokens", !toolUseAccum.isEmpty, let cb = onToolCalls {
