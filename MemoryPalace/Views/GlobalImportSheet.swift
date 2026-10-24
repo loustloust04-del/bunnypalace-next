@@ -142,6 +142,12 @@ struct GlobalImportSheet: View {
                 .foregroundColor(Theme.textPrimary)
             }
             .buttonStyle(.plain)
+
+            // [Bunny patch BP-004] 重签证书下文件选择器不可用：从私密链接下载进沙盒后走同一条 peek 流程
+            BunnyRemoteImportRow { url in
+                pickedURL = url
+                runPeek(url: url)
+            }
         }
     }
 
