@@ -21,8 +21,31 @@ jobs:
     timeout-minutes: 150
     env:
       CI: "true"
+      BUNNY_INCREMENTAL: "1"   # 测试包用增量编译模式（仍是 -O 优化），配合 DerivedData 缓存
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Restore file mtimes (for incremental build)
+        run: python3 scripts/bunny/restore-mtime.py
+      - name: iSH deps key
+        id: ishkey
+        run: echo "sha=$(git rev-parse HEAD:deps/ish)" >> "$GITHUB_OUTPUT"
+      - name: iSH / rootfs cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            deps/resources/alpine-rootfs.zip
+            deps/libs
+            build/ish
+          key: ish-${{ steps.ishkey.outputs.sha }}-${{ hashFiles('scripts/bootstrap-sandbox.sh', 'scripts/build-ish.sh', 'scripts/prepare-rootfs.sh') }}
+      - name: DerivedData cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/bunny/dd
+          key: dd-device-${{ github.event.inputs.configuration || 'Release' }}-${{ github.sha }}
+          restore-keys: |
+            dd-device-${{ github.event.inputs.configuration || 'Release' }}-
       - name: Xcode
         run: xcodebuild -version
       - name: Tools

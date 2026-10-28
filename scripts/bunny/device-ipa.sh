@@ -6,7 +6,8 @@ set -euo pipefail
 config=${1:-Release}
 cd "$(dirname "$0")/../.."
 die() { echo "❌ $1" >&2; exit 1; }
-step() { echo "::group::$1"; }
+T0=$(date +%s)
+step() { echo "::group::[$(( $(date +%s) - T0 ))s] $1"; }
 endstep() { echo "::endgroup::"; }
 
 xcode_major=$(xcodebuild -version | sed -n 's/^Xcode \([0-9]*\).*/\1/p')
@@ -31,6 +32,7 @@ xcodebuild -project MemoryPalace.xcodeproj -scheme MemoryPalaceIOS -configuratio
   -destination 'generic/platform=iOS' -derivedDataPath build/bunny/dd \
   -skipPackagePluginValidation -skipMacroValidation \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+  ${BUNNY_INCREMENTAL:+SWIFT_COMPILATION_MODE=incremental} \
   build > "$log" 2>&1
 rc=$?
 set -e
@@ -51,4 +53,4 @@ cp -R "$app" build/bunny/Payload/
 ls "$app/PlugIns" 2>/dev/null || true
 du -sh build/bunny/BunnyPalaceNext-unsigned.ipa
 endstep
-echo "✅ build/bunny/BunnyPalaceNext-unsigned.ipa"
+echo "✅ build/bunny/BunnyPalaceNext-unsigned.ipa（总耗时 $(( $(date +%s) - T0 ))s）"
