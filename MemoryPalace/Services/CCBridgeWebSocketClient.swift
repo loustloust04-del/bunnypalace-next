@@ -888,6 +888,7 @@ final class CCBridgeWebSocketClient: NSObject {
             return ["name": att.name, "mime": att.mimeType ?? "application/octet-stream", "b64": data.base64EncodedString()]
         }
         if !filePayload.isEmpty { payload["files"] = filePayload }
+        if let audio = BunnyVoiceAudio.payload(for: attachments) { payload["audio"] = audio }   // [Bunny patch BP-005]
         return payload
     }
 

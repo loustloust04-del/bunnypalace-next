@@ -1736,6 +1736,7 @@ struct ChatInputBar: View {
                FileManager.default.fileExists(atPath: url.path) {
                 attachment.voiceProsody = prosodyStore.finish(ticket, measurement: result, transcript: transcript)
             }
+            await BunnyVoiceAudio.remember(path: path, profileId: profileId)   // [Bunny patch BP-005] 录音交给 hub
             jobs.finish(job)
             deliverVoiceNote(attachment, conversationId: conversationId)
         }
