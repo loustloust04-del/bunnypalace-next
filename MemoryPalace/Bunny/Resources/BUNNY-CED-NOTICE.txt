@@ -1,0 +1,4 @@
+bunny-ced-tiny.int8.onnx / bunny-ced-labels.csv
+来源：k2-fsa/sherpa-onnx release audio-tagging-models / sherpa-onnx-ced-tiny-audio-tagging-2024-04-19
+（tar.bz2 sha256 84baf315b57d61aa69480c4fee878dab54cbc7be3e877db334e65d8b087e23c3），由 RicherMans/CED 转换。
+CED（Consistent Ensemble Distillation for Audio Tagging）以 Apache-2.0 许可发布；标签为 AudioSet 本体（CC BY 4.0）。

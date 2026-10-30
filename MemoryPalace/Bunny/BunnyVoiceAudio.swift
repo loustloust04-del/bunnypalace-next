@@ -38,7 +38,7 @@ enum BunnyVoiceAudio {
             var item: [String: Any] = ["b64": data.base64EncodedString(), "ext": ext.isEmpty ? "m4a" : ext]
             if let ev = ears[ref] {
                 item["local_ears"] = ev.map { ["label": $0.label, "id": $0.id, "score": $0.score, "times": $0.times, "style": $0.style] as [String: Any] }
-                item["local_ears_engine"] = "apple-sound-v1"
+                item["local_ears_engine"] = BunnyLocalEars.engine
             }
             return item
         }
