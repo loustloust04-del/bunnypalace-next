@@ -778,6 +778,8 @@ struct MemoryPalaceApp: App {
         #endif
         let tFont = CFAbsoluteTimeGetCurrent()
 
+        BunnyLegacyStoreGuard.runIfNeeded()   // [Bunny patch BP-006] 换车保护：旧兔库原样挪开，绝不用新 schema 打开
+
         // 全量备份导入：two-phase crash-resumable apply（G-C.2）
         // **必须在 makeUnifiedContainer() 之前** — codex Round 3 强烈建议 #7
         // .pending-import.json flag 存在 → archive 主位 + install staging；done 后正常启动
