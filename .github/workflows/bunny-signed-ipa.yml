@@ -1,0 +1,66 @@
+# [Bunny] 正式身份签名验证包（原 Bundle ID + 粟粟团队开发证书）。只手动触发；产物不部署、不分发。
+# ⚠️ 产出的 ipa 会顶替手机上的旧兔，换车当天之前不要安装。
+name: Bunny signed ipa (verify only)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: bunny-signed-ipa
+  cancel-in-progress: true
+
+jobs:
+  signed:
+    if: github.repository == 'loustloust04-del/bunnypalace-next'
+    runs-on: macos-26
+    timeout-minutes: 150
+    env:
+      CI: "true"
+      BUNNY_INCREMENTAL: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Restore file mtimes
+        run: python3 scripts/bunny/restore-mtime.py
+      - name: iSH deps key
+        id: ishkey
+        run: echo "sha=$(git rev-parse HEAD:deps/ish)" >> "$GITHUB_OUTPUT"
+      - name: iSH / rootfs cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            deps/resources/alpine-rootfs.zip
+            deps/libs
+            build/ish
+          key: ish-${{ steps.ishkey.outputs.sha }}-${{ hashFiles('scripts/bootstrap-sandbox.sh', 'scripts/build-ish.sh', 'scripts/prepare-rootfs.sh') }}
+      - name: DerivedData cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/bunny/dd
+          key: dd-signed-${{ github.sha }}
+          restore-keys: |
+            dd-signed-
+      - name: Tools
+        run: brew install xcodegen meson ninja llvm lld libarchive
+      - name: Signing config (original Bundle ID)
+        env:
+          NEXT_TEAM_ID: ${{ secrets.NEXT_TEAM_ID }}
+        run: printf 'DEVELOPMENT_TEAM = %s\nMP_BUNDLE_ID_BASE = com.susu.MemoryPalace\n' "$NEXT_TEAM_ID" > Config/Signing.local.xcconfig
+      - name: Build unsigned app
+        run: scripts/bunny/device-ipa.sh Release
+      - name: Sign
+        env:
+          NEXT_P12_BASE64: ${{ secrets.NEXT_P12_BASE64 }}
+          NEXT_P12_PASSWORD: ${{ secrets.NEXT_P12_PASSWORD }}
+          NEXT_TEAM_ID: ${{ secrets.NEXT_TEAM_ID }}
+          NEXT_PROFILE_MAIN_B64: ${{ secrets.NEXT_PROFILE_MAIN_B64 }}
+          NEXT_PROFILE_WIDGET_B64: ${{ secrets.NEXT_PROFILE_WIDGET_B64 }}
+          NEXT_PROFILE_PUSHNSE_B64: ${{ secrets.NEXT_PROFILE_PUSHNSE_B64 }}
+        run: scripts/bunny/sign-ipa.sh
+      - name: Upload signed ipa (3 days)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: BunnyPalaceNext-SIGNED-DO-NOT-INSTALL
+          path: build/bunny/BunnyPalaceNext-SIGNED-DO-NOT-INSTALL.ipa
+          retention-days: 3
