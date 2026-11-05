@@ -25,7 +25,7 @@ struct RightPanelPage: View {
                     Text("针脚点阵").tag("stitch")
                 }
                 .pickerStyle(.segmented)
-                Text("切换 Page 2 桌面的排版样式，旧组件和图标配置会保留。")
+                Text("切换 gardenOS 桌面的排版样式，旧组件和图标配置会保留。")
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
             }
@@ -38,9 +38,16 @@ struct RightPanelPage: View {
                     Text("左上弧线").tag("arc")
                 }
                 .pickerStyle(.segmented)
-                Text("右边竖条：在 Page 2 往左划拉出应用列表。左上弧线：从左上角往里拉，进后台或回桌面。")
+                Text("右边竖条：在 gardenOS 桌面上的应用里往左划，拉出应用列表。左上弧线：从左上角往里拉，进后台或回桌面。")
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
+                // §11-1：两种回桌面的示意插图（同小芽 Tip 1），选中的那张会动
+                HStack(alignment: .top, spacing: 18) {
+                    switcherSample(.strip, title: "右边竖条", on: page2Switcher != "arc")
+                    switcherSample(.arc, title: "左上弧线", on: page2Switcher == "arc")
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
             }
             .listRowBackground(Theme.mainBg)
             .listRowSeparator(.hidden)
@@ -90,4 +97,21 @@ struct RightPanelPage: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
     }
+
+    #if os(iOS)
+    private func switcherSample(_ scene: XiaoyaTipScene, title: String, on: Bool) -> some View {
+        VStack(spacing: 6) {
+            XiaoyaTipIllustration(scene: scene, gate: on ? .appear : .still)
+                .scaleEffect(0.8)
+                .frame(width: 112 * 0.8 + 8, height: 228 * 0.8 + 8)
+            Text(title)
+                .font(m.caption)
+                .foregroundColor(on ? Theme.textPrimary : Theme.textMuted)
+        }
+        .opacity(on ? 1 : 0.5)
+        .contentShape(Rectangle())
+        .onTapGesture { page2Switcher = scene == .arc ? "arc" : "strip" }
+        .animation(.easeOut(duration: 0.2), value: on)
+    }
+    #endif
 }

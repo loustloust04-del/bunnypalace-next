@@ -22,11 +22,10 @@ struct KimiCodeAdapter: CodingSessionAdapter {
     var dataRoots: [URL] { [root] }
 
     func listSessionFiles() -> [CodingSessionFileRef] {
-        let fm = FileManager.default
-        guard let workDirs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
+        guard let workDirs = try? AppPaths.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
         var refs: [CodingSessionFileRef] = []
         for workDir in workDirs {
-            guard let sessions = try? fm.contentsOfDirectory(at: workDir, includingPropertiesForKeys: nil) else { continue }
+            guard let sessions = try? AppPaths.contentsOfDirectory(at: workDir, includingPropertiesForKeys: nil) else { continue }
             for session in sessions {
                 let wire = session.appendingPathComponent("agents/main/wire.jsonl")
                 if let ref = fileRef(wire) { refs.append(ref) }
@@ -77,7 +76,7 @@ struct KimiCodeAdapter: CodingSessionAdapter {
     private static func readState(_ wire: URL) -> State {
         var state = State()
         guard let dir = sessionDir(wire),
-              let data = try? Data(contentsOf: dir.appendingPathComponent("state.json")),
+              let data = try? Data(contentsOf: AppPaths.checked(dir.appendingPathComponent("state.json"))),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? CodingParse.JSON else { return state }
         if let title = json["title"] as? String, title != "New Session" { state.title = title }
         if let t = json["createdAt"] as? String { state.created = CodingParse.isoMs(t) }
@@ -98,12 +97,12 @@ struct KimiCodeAdapter: CodingSessionAdapter {
         private var cached: [String: String] = [:]
 
         func map(for url: URL) -> [String: String] {
-            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            let mtime = (try? AppPaths.checked(url).resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             lock.lock()
             defer { lock.unlock() }
             if let stamp, stamp == mtime { return cached }
             var out: [String: String] = [:]
-            if let data = try? Data(contentsOf: url), let raw = String(data: data, encoding: .utf8) {
+            if let data = try? Data(contentsOf: AppPaths.checked(url)), let raw = String(data: data, encoding: .utf8) {
                 for line in raw.split(separator: "\n") {
                     guard let json = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? CodingParse.JSON,
                           let id = json["sessionId"] as? String, let workDir = json["workDir"] as? String else { continue }

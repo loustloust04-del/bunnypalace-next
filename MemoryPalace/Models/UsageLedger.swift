@@ -2,16 +2,21 @@ import Foundation
 
 /// 这次调用是干什么的（主模型 / 各路副模型）。新版本加的 kind 旧版本读到按 `.other`。
 enum UsageKind: String, Codable, CaseIterable, Sendable {
-    case chat, assistant, memory, dream, timeline, summary, image, innerVoice, vocab, vocabArcheology, topic, coach, code, title, thinking, toolSummary, other
+    case chat, assistant, memory, catalog, catalogSeed, dream, timeline, summary, windowSummary, image, innerVoice, vocab, vocabArcheology, topic, coach, code, title, thinking, toolSummary, other
+    /// 审计台试写台跑测试集（plan-memory-audit-home-trial）：进写入预算合计，但不被写入预算拦
+    case memoryTrial
 
     var label: String {
         switch self {
         case .chat: "对话"
         case .assistant: "小芽助手"
-        case .memory: "记忆提取"
+        case .memory: "碎片池"
+        case .catalog: "整理编目"
+        case .catalogSeed: "wiki 种子"
         case .dream: "做梦画像"
-        case .timeline: "日记"
+        case .timeline: "时间轴"
         case .summary: "上下文压缩"
+        case .windowSummary: "窗口总结"
         case .image: "图片转述"
         case .innerVoice: "心声"
         case .vocab: "单词判分"
@@ -23,6 +28,7 @@ enum UsageKind: String, Codable, CaseIterable, Sendable {
         case .thinking: "思考总结"
         case .toolSummary: "工具总结"
         case .other: "其他"
+        case .memoryTrial: "试写"
         }
     }
 
@@ -283,12 +289,12 @@ final class UsageLedger: @unchecked Sendable {
     /// 测试宿主里写临时目录，绝不污染粟粟的真账本
     static let shared: UsageLedger = {
         if NSClassFromString("XCTestCase") != nil {
-            return UsageLedger(fileURL: FileManager.default.temporaryDirectory
+            return UsageLedger(fileURL: AppPaths.temporaryDirectory
                 .appendingPathComponent("MemoryPalaceTests-usage-\(ProcessInfo.processInfo.processIdentifier).jsonl"))
         }
-        return UsageLedger(fileURL: URL.applicationSupportDirectory
+        return UsageLedger(fileURL: AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("usage.jsonl"))
+            .appendingPathComponent("usage.jsonl")))
     }()
 
     let fileURL: URL

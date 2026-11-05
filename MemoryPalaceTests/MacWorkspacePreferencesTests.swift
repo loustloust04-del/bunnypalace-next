@@ -89,7 +89,7 @@ final class MacWorkspacePreferencesTests: XCTestCase {
         XCTAssertNil(reloaded.dockItems)
     }
 
-    /// 左栏面板组「对话 | Code」：选中的 tab 跟 dock 存在同一份档里；Code 开关关掉 → 只剩「对话」、恢复也回「对话」
+    /// 手动选择持久化；启动默认回聊天，NO保留旧恢复，Code隐藏优先。
     func testLeftPanelTabPersistsAndFollowsCodeVisibility() {
         let (defaults, prefs, name) = make()
         defer { defaults.removePersistentDomain(forName: name) }
@@ -98,11 +98,17 @@ final class MacWorkspacePreferencesTests: XCTestCase {
         prefs.leftPanelTab = .code
         var reloaded = MacWorkspacePreferences(defaults: defaults)
         XCTAssertEqual(reloaded.leftPanelTab, .code)
-        XCTAssertEqual(reloaded.restoredLeftPanelTab, .code)
+        let normal = reloaded.restoredLeftPanelTab
+        XCTAssertEqual(normal, .chats)
+        defaults.set(false, forKey: "mp.stanch.R-tab")
+        reloaded = MacWorkspacePreferences(defaults: defaults)
+        let legacy = reloaded.restoredLeftPanelTab
+        XCTAssertEqual(legacy, .code)
         reloaded.showCodingSessions = false
         reloaded = MacWorkspacePreferences(defaults: defaults)
         XCTAssertEqual(reloaded.leftPanelTabs, [.chats])
         XCTAssertEqual(reloaded.restoredLeftPanelTab, .chats)
+        print("R_TAB_SMOKE saved=\(reloaded.leftPanelTab.rawValue) default=\(normal.rawValue) rollback=\(legacy.rawValue) hidden=\(reloaded.restoredLeftPanelTab.rawValue)")
         XCTAssertEqual(MacLeftPanelTab(panelID: MacLeftPanelTab.code.panelID), .code)
         XCTAssertNil(MacLeftPanelTab(panelID: "code"))
     }

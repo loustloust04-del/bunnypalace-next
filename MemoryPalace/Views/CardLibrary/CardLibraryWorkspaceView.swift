@@ -64,7 +64,8 @@ struct CardLibraryWorkspaceView: View {
                 page(.settings)
             }
         }
-        .tabBarMinimizeBehavior(.onScrollDown)
+        // B4：tab 栏固定，不随下滑缩成胶囊（换页签不用先点开）
+        .tabBarMinimizeBehavior(.never)
         // page2 左上角手势区（76pt 见方）盖住返回钮上沿，轻点走 Page2AppBackRegistry：登记成同一个「退一层」。
         // 世界书页签由 WorldBookLibraryView 自己登记（书详情），这里不抢
         .onChange(of: selection == .worldBook ? nil : selection == .characters && navigator?.characterHome != nil, initial: true) { _, canGoBack in
@@ -108,9 +109,14 @@ struct CardLibraryWorkspaceView: View {
 
     private func revealTarget(_ target: RightPanelNavigator.Target?) {
         guard target?.tool == "cardLibrary" else { return }
-        // 设置搜索跳「设置」页签（⑥）
-        if target?.id == RightPanelNavigator.cardLibrarySettingsTargetId {
-            selection = .settings
+        // 设置搜索跳「设置」/「世界书」/「正则」页签（⑥）
+        let tabTargets: [String: CardLibraryTab] = [
+            RightPanelNavigator.cardLibrarySettingsTargetId: .settings,
+            RightPanelNavigator.cardLibraryWorldBookTabTargetId: .worldBook,
+            RightPanelNavigator.cardLibraryRegexTabTargetId: .regex,
+        ]
+        if let id = target?.id, let tab = tabTargets[id] {
+            selection = tab
             navigator?.pendingTarget = nil
             return
         }

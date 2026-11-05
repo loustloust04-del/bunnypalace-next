@@ -15,7 +15,7 @@ struct DailyNote {
 /// 人可在文件 app 翻编年史，AI 经 fs_read/grep 可查（memory/ 只读挂载）。
 enum DailyFileStore {
     private static func dailyDir(profileId: String) -> URL {
-        let dir = FileLibraryStore.memoryRoot(profileId: profileId).appendingPathComponent("daily", isDirectory: true)
+        let dir = AppPaths.checked(FileLibraryStore.memoryRoot(profileId: profileId).appendingPathComponent("daily", isDirectory: true))
         MainThreadIO.note(.mkdir, "DailyFileStore.dailyDir")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
@@ -28,7 +28,7 @@ enum DailyFileStore {
     }
 
     static func load(date: String, profileId: String) -> DailyNote? {
-        let url = dailyDir(profileId: profileId).appendingPathComponent("\(date).md")
+        let url = AppPaths.checked(dailyDir(profileId: profileId).appendingPathComponent("\(date).md"))
         MainThreadIO.note(.read, "DailyFileStore.load")
         guard let raw = try? String(contentsOf: url, encoding: .utf8),
               let (meta, body) = FrontmatterCodec.parse(raw) else { return nil }
@@ -47,7 +47,7 @@ enum DailyFileStore {
     }
 
     static func save(_ note: DailyNote, profileId: String) {
-        let url = dailyDir(profileId: profileId).appendingPathComponent("\(note.date).md")
+        let url = AppPaths.checked(dailyDir(profileId: profileId).appendingPathComponent("\(note.date).md"))
         let content = FrontmatterCodec.render(meta: [
             ("date", note.date),
             ("sourceConversations", String(note.sourceConversations)),
@@ -181,7 +181,7 @@ enum TimelineConsolidator {
     static func momentLines(of node: MessageNode) -> [String] {
         var thinkingTexts: [String] = []
         if let segs = node.segments {
-            for seg in segs { if case .thinking(let t, _) = seg { thinkingTexts.append(t) } }
+            for seg in segs { if case .thinking(let t, _, _) = seg { thinkingTexts.append(t) } }
         }
         if let cc = node.ccThinking, !cc.isEmpty { thinkingTexts.append(cc) }
         let extracted = ContentCleaner.extractThinking(from: node.content)

@@ -16,6 +16,10 @@ enum MemoryRowID: Hashable {
         if case .assistant(let s) = self { return s }
         return nil
     }
+    /// 选择 / 批量目标只留现在看得见的行（10-16 astra #2：常驻规则变了，选中的档案可能已经挪去常驻页，不能再被普通列表的批量动作碰到）
+    static func clip(_ ids: Set<MemoryRowID>, to visible: Set<MemoryRowID>) -> Set<MemoryRowID> {
+        ids.intersection(visible)
+    }
 }
 
 /// 行的数据：档案（`Memory`）和{{char}}自己记下的（`SelfMemory`）都折成这一份

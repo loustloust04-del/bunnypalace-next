@@ -49,6 +49,9 @@ struct CodingSessionDetailView: View {
                 failure(message: message, filePath: filePath)
             case .loaded(let box):
                 loaded(box.transcript)
+                    #if DEBUG || PERF_BENCH
+                    .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "codeDetail:\(box.transcript.meta.key)") } }
+                    #endif
                     .environment(\.openURL, OpenURLAction { url in openLink(url, meta: box.transcript.meta) })
             }
             }
@@ -218,7 +221,7 @@ struct CodingSessionDetailView: View {
     /// 正文链接（Wake `markdown_links`）：外链交系统；本机会话的文件路径在 Finder 里选中；远程会话的路径一律只读提示（不碰本机 HOME）
     private func openLink(_ url: URL, meta: CodingSessionMeta) -> OpenURLAction.Result {
         switch CodingLinkResolver.resolve(url.absoluteString, remote: !meta.host.isEmpty, projectPath: meta.projectPath,
-                                          home: { FileManager.default.homeDirectoryForCurrentUser }) {
+                                          home: { AppPaths.home }) {
         case .external:
             return .systemAction
         case .ignore:
@@ -504,7 +507,6 @@ struct CodingMessageRow: View {
     @AppStorage("bubblePaddingH") private var bubblePaddingH: Double = 18
     @AppStorage("bubblePaddingV") private var bubblePaddingV: Double = 15
     @AppStorage("userName") private var userName = "你"
-    @AppStorage("hideRoleName") private var hideRoleName = false
     @AppStorage("hideTimestamp") private var hideTimestamp = false
 
     private var isUser: Bool { message.role == .user }
@@ -541,16 +543,14 @@ struct CodingMessageRow: View {
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
     }
 
-    /// 角色名 + 时间（两个都关掉时整行不 render，跟聊天页同一条规则）
+    /// 角色名常显，时间戳仍独立控制；同角色连发只在首条显示。
     @ViewBuilder
     private var roleLine: some View {
-        if showsHeader, !hideRoleName || !hideTimestamp {
+        if showsHeader {
             HStack(spacing: 4) {
-                if !hideRoleName {
-                    Text(isUser ? userName : (agent?.displayName ?? "助手"))
-                        .font(.caption2.weight(.medium))
-                        .foregroundColor(Theme.textMuted)
-                }
+                Text(isUser ? userName : (agent?.displayName ?? "助手"))
+                    .font(.caption2.weight(.medium))
+                    .foregroundColor(Theme.textMuted)
                 if !hideTimestamp, let ts = message.timestamp {
                     Text(Date(timeIntervalSince1970: TimeInterval(ts) / 1000)
                         .formatted(.dateTime.month().day().hour().minute()))
@@ -558,7 +558,7 @@ struct CodingMessageRow: View {
                         .foregroundColor(Theme.textMuted.opacity(0.6))
                 }
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 10)
         }
     }
 

@@ -37,6 +37,61 @@ final class SelfMemoryInjectionTests: XCTestCase {
         XCTAssertEqual(SelfMemoryInjection.build([], recentCount: 5, budget: 1000).text, "")
     }
 
+    // MARK: - 全文候选（常驻页「为什么带」用）：抽出来前后输出逐字不变
+
+    private func day(_ d: Int) -> Date {
+        Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: d, hour: 12))!
+    }
+
+    private var fixedList: [SelfMemory] {
+        [mem("alpha", importance: 5, created: day(10), body: "五级正文"),
+         mem("beta", importance: 3, created: day(12), body: "乙"),
+         mem("gamma", importance: 2, created: day(11), body: "丙"),
+         mem("delta", importance: 3, created: day(9), body: "丁"),
+         mem("gone", importance: 5, created: day(13), superseded: day(14), body: "失效")]
+    }
+
+    /// 逐字锁住输出：重要度 5 全文 → 最近 N 条全文（新→旧）→ 其余目录 → 尾注
+    func testBuildTextVerbatim() {
+        let list = fixedList
+        let delta = list[3]
+        let expected = ["[我的记忆]",
+                        "### 关于alpha（5 级 · 10-10）\n五级正文",
+                        "### 关于beta（3 级 · 10-12）\n乙",
+                        "### 关于gamma（2 级 · 10-11）\n丙",
+                        "目录（其余 1 条）：\n- 关于delta（3 级 · 10-09 · memory/self/\(delta.fileName)）",
+                        SelfMemoryInjection.footer].joined(separator: "\n\n")
+        let b = SelfMemoryInjection.build(list, recentCount: 2, budget: 100_000)
+        XCTAssertEqual(b.text, expected)
+        XCTAssertEqual(b.fullCount, 3)
+        XCTAssertEqual(b.indexCount, 1)
+        XCTAssertEqual(b.tokens, Memory.estimateTokens(expected))
+        XCTAssertEqual(b.fullSlugs, Set([list[0].slug, list[1].slug, list[2].slug]))
+    }
+
+    func testFullCandidatesReasons() {
+        let list = fixedList
+        let c = SelfMemoryInjection.fullCandidates(list, recentCount: 2)
+        XCTAssertEqual(c.map(\.memory.slug), [list[0].slug, list[1].slug, list[2].slug], "重要度 5 在前，再最近 2 条（新→旧）；失效的不算")
+        XCTAssertEqual(c.map(\.reason), [.five, .recent, .recent])
+        XCTAssertEqual(SelfMemoryInjection.fullCandidates(list, recentCount: 3).map(\.memory.slug).last, list[3].slug, "N 改了跟着变")
+        XCTAssertEqual(SelfMemoryInjection.fullCandidates(list, recentCount: 0).map(\.reason), [.five])
+    }
+
+    /// fullSlugs 和全文块一一对应：预算装不下降成目录行的不在里面
+    func testFullSlugsMatchFullBlocks() {
+        let list = (0..<5).map { mem("m\($0)", created: day(10 + $0), body: String(repeating: "长", count: 60)) }
+        let b = SelfMemoryInjection.build(list, recentCount: 5, budget: 300)
+        XCTAssertGreaterThan(b.fullCount, 0)
+        XCTAssertLessThan(b.fullCount, 5, "预算只够装几条全文")
+        XCTAssertEqual(b.fullSlugs.count, b.fullCount)
+        for m in list {
+            let full = b.text.contains("### \(m.description)（")
+            XCTAssertEqual(b.fullSlugs.contains(m.slug), full, m.slug)
+        }
+        XCTAssertTrue(SelfMemoryInjection.build([], recentCount: 5, budget: 1000).fullSlugs.isEmpty)
+    }
+
     // MARK: - 插槽：我的记忆在档案前面，档案吃剩下的预算
 
     private func assemble(cacheFriendly: Bool, memories: [Memory], selfText: String?, budget: Int?) -> String {

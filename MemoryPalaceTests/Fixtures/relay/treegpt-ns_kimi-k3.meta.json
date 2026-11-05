@@ -1,0 +1,17 @@
+{
+ "source": "2026-10-16 中转实测原文（treegpt，new-api dev-3968b9c），id 已固定化",
+ "path": "/v1/chat/completions",
+ "status": 403,
+ "content_type": "application/json; charset=utf-8",
+ "request_body": {
+  "model": "kimi-k3",
+  "messages": [
+   {
+    "role": "user",
+    "content": "1+1=?"
+   }
+  ],
+  "max_tokens": 256,
+  "stream": false
+ }
+}

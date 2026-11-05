@@ -35,9 +35,9 @@ final class AssistantLedger {
     }
 
     nonisolated static var defaultURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("AssistantChat", isDirectory: true)
-            .appendingPathComponent("ledger.json")
+            .appendingPathComponent("ledger.json"))
     }
 
     func entry(id: UUID) -> AssistantLedgerEntry? { entries.first { $0.id == id } }
@@ -96,7 +96,7 @@ enum XiaoyaPack: String, CaseIterable {
         switch self {
         case .read: "查记忆、读预设 / 角色卡 / 世界书，不改任何东西"
         case .creation: "提议新建或修改角色卡、预设插槽和采样参数、世界书条目；每一笔都要你盖章"
-        case .appearance: "提议换主屏壁纸、图标样式、明暗、单个图标、她的舞台；卡片上先给你看换完的样子，盖章才换"
+        case .appearance: "提议换桌面壁纸、图标样式、明暗、单个图标、她的舞台；卡片上先给你看换完的样子，盖章才换"
         }
     }
 

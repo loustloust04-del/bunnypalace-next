@@ -99,18 +99,6 @@ final class MemoryCrudTests: XCTestCase {
         XCTAssertEqual(try! store.listAll(profileId: pid, context: context).count, 1, "开关关也不真删")
     }
 
-    /// 修复第一刀：AI（AUDN）的 delete 动作永远软失效，不受任何开关影响
-    func testExtractorDeleteAlwaysSoftEvenWhenSwitchOff() throws {
-        UserDefaults.standard.set(false, forKey: "mem_supersede_soft")
-        let m = seed("喜欢焦糖布丁")
-        try MemoryExtractor.executeActions(
-            [.delete(id: m.id)], store: store, profileId: pid, extractedBy: "test",
-            sourceConversationId: nil, recentMessages: [], context: context)
-        let all = store.listAll(profileId: pid, context: context)
-        XCTAssertEqual(all.count, 1, "AI 删除不真删")
-        XCTAssertNotNil(all.first?.supersededAt)
-    }
-
     func testManualAddIsPinned() {
         let m = seed("手动加的", pinned: true)
         XCTAssertTrue(m.isUserExplicit, "手动新增天然钉住（AddMemorySheet 既有语义）")

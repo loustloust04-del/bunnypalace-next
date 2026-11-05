@@ -483,7 +483,7 @@ struct VoiceEffectsSettingsSection: View {
                     await importOne(url, kind: nil, label: url.lastPathComponent)
                     continue
                 }
-                let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("voice-effects-zip-\(UUID().uuidString)", isDirectory: true)
+                let tmp = AppPaths.temporaryDirectory.appendingPathComponent("voice-effects-zip-\(UUID().uuidString)", isDirectory: true)
                 defer { try? FileManager.default.removeItem(at: tmp) }
                 do {
                     let entries = try await Task.detached(priority: .utility) { try VoiceEffectZip.extractAudioEntries(url, to: tmp) }.value

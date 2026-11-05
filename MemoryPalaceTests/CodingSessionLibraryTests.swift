@@ -1,6 +1,8 @@
 #if os(macOS)
 import XCTest
 import SwiftData
+import Observation
+import os
 @testable import 记忆花园
 
 /// W-N N1-a：注入实例的 Library（刷新 / 选中 / 墓碑）、keyset 分页、用户状态、续跑脚本、删除路径。
@@ -30,16 +32,38 @@ final class CodingSessionLibraryTests: XCTestCase {
         ]
     }
 
-    private func makeLibrary() -> (CodingSessionLibrary, CodingSessionState) {
+    private func makeLibrary(_ adapter: CodingSessionAdapter? = nil) -> (CodingSessionLibrary, CodingSessionState) {
         let state = CodingSessionState(url: dir.appendingPathComponent("state.json"))
-        let library = CodingSessionLibrary(indexURL: dir.appendingPathComponent("index.sqlite"), adapters: adapters(), state: state)
+        let library = CodingSessionLibrary(indexURL: dir.appendingPathComponent("index.sqlite"), adapters: adapter.map { [$0] } ?? adapters(), state: state)
         return (library, state)
+    }
+
+    func testInactiveIncrementalDefersListButKeepsMenuLiveUntilActivation() async throws {
+        let (library, _) = makeLibrary()
+        await library.refresh()?.value
+        let index = try CodingSessionIndex(url: dir.appendingPathComponent("index.sqlite"))
+        let key = "claude-code:11111111-aaaa-bbbb-cccc-000000000001"
+        let removed = try XCTUnwrap(index.session(key: key))
+        try FileManager.default.removeItem(atPath: removed.filePath)
+        try index.removeSessions([key])
+        library._testApplyIncremental(changedPaths: [])
+        try await Task.sleep(for: .milliseconds(100))
+        let hiddenCount = library.totalSessions
+        XCTAssertEqual(hiddenCount, 9, "Hidden Code must keep its cached list")
+        XCTAssertFalse(library.recentlyActive(now: Date(timeIntervalSince1970: 4_000_000_000),
+            within: 4_000_000_000, limit: 50).contains { $0.key == key })
+        library.activate()
+        XCTAssertEqual(library.totalSessions, 8)
+        await library.refresh()?.value
+        XCTAssertEqual(library.totalSessions, 8)
+        print("K1_DIRTY_SMOKE hidden=\(hiddenCount) activated=\(library.totalSessions)")
     }
 
     /// plan-mac-hang-probe §2：监听一批一批送来，窗口内只刷一次（正在跑的 CC 会话每几秒写一次，逐批刷会占满主线程）
     func testIncrementalRefreshIsCoalesced() async throws {
         let (library, _) = makeLibrary()
         await library.refresh()?.value
+        library.isActive = true
         let before = library.incrementalFlushCount
         for i in 0..<5 { library._testApplyIncremental(changedPaths: ["/tmp/\(i).jsonl"]) }
         try await Task.sleep(nanoseconds: UInt64((CodingSessionLibrary.incrementalInterval + 0.6) * 1_000_000_000))
@@ -83,9 +107,13 @@ final class CodingSessionLibraryTests: XCTestCase {
         XCTAssertFalse(library.openSession(key: "claude-code:no-such-session"))
     }
 
-    private func loadedLibrary() async throws -> CodingSessionLibrary {
-        let (library, _) = makeLibrary()
-        await library.refresh()?.value
+    private func loadedLibrary(_ adapter: CodingSessionAdapter? = nil) async throws -> CodingSessionLibrary {
+        let (library, _) = makeLibrary(adapter)
+        if let adapter {
+            _ = try CodingSessionScanner(index: CodingSessionIndex(url: dir.appendingPathComponent("index.sqlite")), adapters: [adapter]).run()
+            library.reload()
+        } else { await library.refresh()?.value }
+        library.isActive = true
         library.select("claude-code:11111111-aaaa-bbbb-cccc-000000000001")
         for _ in 0..<100 {
             if case .loaded = library.detail { return library }
@@ -95,22 +123,83 @@ final class CodingSessionLibraryTests: XCTestCase {
         return library
     }
 
-    func testSameSessionRefreshKeepsLoadedBranchUntilReplacementArrives() async throws {
+    func testContinuousWritesCoalesceDetailAtMeasuredParseCost() async throws {
+        let snapshot = expectation(description: "refresh read snapshot")
+        let finalSnapshot = expectation(description: "pending refresh read snapshot")
+        let adapter = TimedClaudeDetailAdapter(home.appendingPathComponent("claude/projects"), snapshots: [nil, snapshot, finalSnapshot])
+        defer { adapter.checkpoints.forEach { $0.release.signal() } }
+        let library = try await loadedLibrary(adapter)
+        guard case .loaded(let before) = library.detail else { return XCTFail("not loaded") }
+        let flushes = library.incrementalFlushCount
+        let renderedAt = OSAllocatedUnfairLock(initialState: TimeInterval?.none)
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: before.transcript.meta.filePath))
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        var parent = "s-0001"
+        for i in 0..<3 {
+            let row = """
+            {"type":"assistant","uuid":"burst-\(i)","parentUuid":"\(parent)","sessionId":"\(before.transcript.meta.nativeId)","timestamp":"2026-08-01T10:03:00.000Z","message":{"id":"msg-burst-\(i)","role":"assistant","content":[{"type":"text","text":"burst-\(i)"}]}}
+            """
+            try handle.write(contentsOf: Data("\n\(row)\n".utf8))
+            parent = "burst-\(i)"
+            if i == 0 {
+                library._testApplyIncremental(changedPaths: [before.transcript.meta.filePath])
+                try await Task.sleep(for: .milliseconds(100))
+            } else if i == 1 {
+                library.reloadDetail()
+                await fulfillment(of: [snapshot], timeout: 10)
+                let idle = expectation(description: "idle while parser holds snapshot")
+                let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue,
+                                                                 false, Int.max - 2) { _, _ in idle.fulfill() }
+                CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+                await fulfillment(of: [idle], timeout: 3)
+                XCTAssertFalse(library.isRefreshingDetail)
+                guard case .loaded(let during) = library.detail else { return XCTFail("Parsing removed reading content") }
+                XCTAssertEqual(during.transcript.mainline, before.transcript.mainline)
+                withObservationTracking { _ = library.detailRevision } onChange: {
+                    let layout = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue,
+                                                                   false, Int.max - 1) { _, _ in
+                        Thread.sleep(forTimeInterval: 3)
+                        renderedAt.withLock { $0 = ProcessInfo.processInfo.systemUptime }
+                    }
+                    CFRunLoopAddObserver(CFRunLoopGetMain(), layout, .commonModes)
+                }
+            } else {
+                library.reloadDetail()
+                library._testApplyIncremental(changedPaths: [])
+                adapter.checkpoints[1].release.signal()
+            }
+        }
+        await fulfillment(of: [finalSnapshot], timeout: 15)
+        XCTAssertFalse(library.isRefreshingDetail)
+        XCTAssertEqual(library.incrementalFlushCount, flushes + 1, "Detail render must hold the incremental gate")
+        guard case .loaded = library.detail else { return XCTFail("Pending parse removed reading content") }
+        adapter.checkpoints[2].release.signal()
+        await library.detailReloadTask?.value
+        let runs = adapter.parses.withLock { $0 }
+        guard runs.count == 3 else { return XCTFail("Expected initial, cooldown, then snapshot-late parse; got \(runs.count)") }
+        for (a, b) in zip(runs, runs.dropFirst()) { XCTAssertGreaterThanOrEqual(b.start, a.end, "Parses overlapped") }
+        let gap = runs[2].start - (try XCTUnwrap(renderedAt.withLock { $0 }))
+        let required = max(2, (runs[1].end - runs[1].start) * 10)
+        XCTAssertGreaterThanOrEqual(gap + 0.001, required)
+        guard case .loaded(let after) = library.detail else { return XCTFail("not loaded") }
+        XCTAssertTrue(after.transcript.mainline.contains { $0.text == "burst-2" })
+        try await Task.sleep(for: .seconds(CodingSessionLibrary.incrementalInterval + 0.6))
+        let flushGap = ProcessInfo.processInfo.systemUptime - runs[2].end
+        XCTAssertEqual(library.incrementalFlushCount, flushes + 2)
+        XCTAssertGreaterThanOrEqual(flushGap, CodingSessionLibrary.incrementalInterval)
+        print("S7_RENDER_PENDING_SMOKE parses=\(runs.count) afterLayout=\(gap) required=\(required) flushAfterParse=\(flushGap) final=burst-2")
+    }
+
+
+    func testUnchangedSilentRefreshKeepsReadingContentAndRevision() async throws {
         let library = try await loadedLibrary()
         let revision = library.detailRevision
-        guard case .loaded(let before) = library.detail else { return XCTFail("not loaded") }
         library.reloadDetail()
-        XCTAssertTrue(library.isRefreshingDetail)
-        guard case .loaded(let during) = library.detail else { return XCTFail("Refresh removed the scroll host") }
-        XCTAssertEqual(during, before)
-        for _ in 0..<100 {
-            if !library.isRefreshingDetail { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        XCTAssertFalse(library.isRefreshingDetail)
-        XCTAssertGreaterThan(library.detailRevision, revision)
+        await library.detailReloadTask?.value
+        XCTAssertEqual(library.detailRevision, revision)
         XCTAssertNil(library.detailRefreshError)
-        guard case .loaded = library.detail else { return XCTFail("Refresh did not replace in place") }
+        print("K0_UNCHANGED_SMOKE revision=\(revision)->\(library.detailRevision) refreshing=\(library.isRefreshingDetail)")
     }
 
     func testNewReplyReplacesDataWithoutEnteringLoading() async throws {
@@ -126,14 +215,21 @@ final class CodingSessionLibraryTests: XCTestCase {
         try handle.seekToEnd()
         try handle.write(contentsOf: Data("\n".utf8) + JSONSerialization.data(withJSONObject: row) + Data("\n".utf8))
         library.reloadDetail()
-        guard case .loaded = library.detail else { return XCTFail("Append unmounted reading content") }
-        for _ in 0..<100 {
-            if !library.isRefreshingDetail { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
+        await library.detailReloadTask?.value
         guard case .loaded(let after) = library.detail else { return XCTFail("not loaded") }
         XCTAssertTrue(after.transcript.mainline.contains { $0.text == "new reply after refresh" })
         XCTAssertGreaterThan(after.transcript.mainline.count, before.transcript.mainline.count)
+        let revision = library.detailRevision
+        let path = URL(fileURLWithPath: before.transcript.meta.filePath)
+        let edited = try String(contentsOf: path, encoding: .utf8)
+            .replacingOccurrences(of: "new reply after refresh", with: "new reply after changed")
+        try edited.write(to: path, atomically: false, encoding: .utf8)
+        library.reloadDetail()
+        await library.detailReloadTask?.value
+        guard case .loaded(let changed) = library.detail else { return XCTFail("edit removed content") }
+        XCTAssertEqual(changed.transcript.mainline.count, after.transcript.mainline.count)
+        XCTAssertTrue(changed.transcript.mainline.contains { $0.text == "new reply after changed" })
+        XCTAssertGreaterThan(library.detailRevision, revision)
     }
 
     func testFileAppendAutomaticallyReachesVisibleTranscript() async throws {
@@ -158,31 +254,50 @@ final class CodingSessionLibraryTests: XCTestCase {
         guard case .loaded(let after) = library.detail else { return XCTFail("not loaded") }
         XCTAssertTrue(after.transcript.mainline.contains { $0.text == "new reply after refresh" })
         XCTAssertGreaterThan(after.transcript.mainline.count, before.transcript.mainline.count)
+        await library.detailReloadTask?.value
     }
 
-    func testRefreshFailureRetainsReadingContentAndSurfacesError() async throws {
-        let library = try await loadedLibrary()
-        guard case .loaded(let before) = library.detail else { return XCTFail("not loaded") }
-        try FileManager.default.removeItem(atPath: before.transcript.meta.filePath)
-        library.reloadDetail()
-        for _ in 0..<100 {
-            if !library.isRefreshingDetail { break }
-            try await Task.sleep(for: .milliseconds(20))
+
+    func testInFlightParseKeepsContentAndRejectsLateSelections() async throws {
+        for (returnToA, fail) in [(false, false), (true, false), (false, true)] {
+            let snapshot = expectation(description: "A already parsed, result held")
+            let adapter = TimedClaudeDetailAdapter(home.appendingPathComponent("claude/projects"), snapshots: [nil, snapshot])
+            defer { adapter.checkpoints.forEach { $0.release.signal() } }
+            let library = try await loadedLibrary(adapter)
+            guard case .loaded(let a) = library.detail else { return XCTFail("A not loaded") }
+            let b = try adapter.parseSession(XCTUnwrap(adapter.listSessionFiles().first { $0.filePath != a.transcript.meta.filePath })).meta.key
+            if fail { try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: a.transcript.meta.filePath) }
+            library.reloadDetail()
+            let old = try XCTUnwrap(library.detailReloadTask)
+            await fulfillment(of: [snapshot], timeout: 10)
+            XCTAssertFalse(library.isRefreshingDetail)
+            guard case .loaded = library.detail else { return XCTFail("In-flight parser removed reading content") }
+            for key in fail ? [] : (returnToA ? [b, a.transcript.meta.key] : [b]) {
+                if key == a.transcript.meta.key {
+                    let row = """
+                    {"type":"assistant","uuid":"fresh-aba","parentUuid":"s-0001","message":{"id":"fresh-aba","role":"assistant","content":[{"type":"text","text":"fresh A generation"}]}}
+                    """
+                    try Data("\(row)\n".utf8).write(to: URL(fileURLWithPath: a.transcript.meta.filePath))
+                }
+                library.select(key)
+                for _ in 0..<100 {
+                    if case .loaded(let box) = library.detail, box.transcript.meta.key == key { break }
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+            }
+            guard case .loaded(let current) = library.detail else { return XCTFail("New selection not loaded") }
+            XCTAssertEqual(current.transcript.meta.key, returnToA || fail ? a.transcript.meta.key : b)
+            if returnToA { XCTAssertTrue(current.transcript.mainline.contains { $0.text == "fresh A generation" }) }
+            let revision = library.detailRevision
+            adapter.checkpoints[1].release.signal()
+            await old.value
+            guard case .loaded(let after) = library.detail else { return XCTFail("Late A removed selection") }
+            XCTAssertEqual(after.transcript.meta, current.transcript.meta)
+            XCTAssertEqual(after.transcript.mainline, current.transcript.mainline)
+            XCTAssertEqual(library.detailRevision, revision)
+            XCTAssertEqual(library.detailRefreshError != nil, fail)
+            print("S7_LATE_FAILURE_SMOKE ABA=\(returnToA) revision=\(revision)->\(library.detailRevision) error=\(library.detailRefreshError ?? "nil")")
         }
-        guard case .loaded(let after) = library.detail else { return XCTFail("Failure removed the scroll host") }
-        XCTAssertEqual(after, before)
-        XCTAssertNotNil(library.detailRefreshError)
-    }
-
-    func testSelectionChangeDoesNotKeepPreviousTranscriptOrAcceptLateRefresh() async throws {
-        let library = try await loadedLibrary()
-        library.reloadDetail()
-        library.select("missing-session")
-        try await Task.sleep(for: .milliseconds(150))
-        guard case .failed(let key, _, _) = library.detail else { return XCTFail("Old result replaced new selection") }
-        XCTAssertEqual(key, "missing-session")
-        XCTAssertFalse(library.isRefreshingDetail)
-        XCTAssertNil(library.detailRefreshError)
     }
 
     func testMacCCBridgeFinalEditDoesNotNavigateAwayFromHistory() throws {
@@ -345,6 +460,33 @@ final class CodingSessionLibraryTests: XCTestCase {
         cm.filePath = "/codex/rollout.jsonl"
         let codex = CodexAdapter(sessionsDir: home, archivedDir: home, stateDB: home)
         XCTAssertEqual(codex.sessionPaths(cm), ["/codex/rollout.jsonl"])
+    }
+}
+
+private final class TimedClaudeDetailAdapter: CodingSessionAdapter {
+    private let base: ClaudeCodeAdapter
+    let parses = OSAllocatedUnfairLock(initialState: [(start: TimeInterval, end: TimeInterval)]())
+    let checkpoints: [(snapshot: XCTestExpectation?, release: DispatchSemaphore)]
+    init(_ root: URL, snapshots: [XCTestExpectation?] = []) {
+        base = ClaudeCodeAdapter(root: root)
+        checkpoints = snapshots.map { ($0, DispatchSemaphore(value: 0)) }
+    }
+    var agent: CodingAgent { base.agent }
+    var dataRoots: [URL] { base.dataRoots }
+    func listSessionFiles() -> [CodingSessionFileRef] { base.listSessionFiles() }
+    func parseSession(_ ref: CodingSessionFileRef) throws -> CodingParsedSession { try base.parseSession(ref) }
+    func withCustomRoot(_ dir: URL) -> CodingSessionAdapter { base.withCustomRoot(dir) }
+    func parseTranscript(_ ref: CodingSessionFileRef) throws -> CodingParsedTranscript {
+        let start = ProcessInfo.processInfo.systemUptime
+        let run = parses.withLock { $0.append((start, 0)); return $0.count - 1 }
+        defer { parses.withLock { $0[run].end = ProcessInfo.processInfo.systemUptime } }
+        Thread.sleep(forTimeInterval: 0.22)
+        let result = Result { try base.parseTranscript(ref) }
+        if checkpoints.indices.contains(run), let snapshot = checkpoints[run].snapshot {
+            snapshot.fulfill()
+            XCTAssertEqual(checkpoints[run].release.wait(timeout: .now() + 20), .success, "Snapshot gate timed out")
+        }
+        return try result.get()
     }
 }
 #endif

@@ -37,6 +37,8 @@ struct Page2ChatWebView: View {
     @AppStorage("userName") private var userName = "你"
     @AppStorage("assistantName") private var assistantName = "助手"
     @AppStorage("ccShowThinking") private var showThinking = true
+    /// 原生思考摘要跟「设置 → 思考过程」（thinking 回传；隐藏 = 不显示）
+    @AppStorage(DisclosureKind.thinking.key) private var thinkingModeRaw = DisclosureKind.thinking.migratedDefault.rawValue
     @AppStorage(CardLibraryPreferences.allowWebScriptsKey) private var allowWebScripts = false
     @AppStorage(LocalMode.key) private var localMode = true
 
@@ -183,6 +185,7 @@ struct Page2ChatWebView: View {
             userName: viewModel.personaDisplayName(profile: profileManager?.currentProfile) ?? userName,
             assistantName: assistantName,
             showThinking: showThinking,
+            showNativeThinking: (DisclosureMode(rawValue: thinkingModeRaw) ?? .inline) != .hidden,
             htmlRunDenial: htmlRunDenial,
             htmlNetwork: htmlNetwork,
             htmlAutoRun: htmlAutoRun,
@@ -236,6 +239,7 @@ private struct ChatWebViewRepresentable: UIViewRepresentable {
     let userName: String
     let assistantName: String
     let showThinking: Bool
+    let showNativeThinking: Bool
     let htmlRunDenial: String?
     let htmlNetwork: HTMLEmbedNetwork
     let htmlAutoRun: Bool
@@ -246,7 +250,7 @@ private struct ChatWebViewRepresentable: UIViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(viewModel: viewModel, regexScripts: regexScripts,
                     userName: userName, assistantName: assistantName,
-                    showThinking: showThinking, deps: deps,
+                    showThinking: showThinking, showNativeThinking: showNativeThinking, deps: deps,
                     onPickAttachment: onPickAttachment)
     }
 
@@ -298,7 +302,12 @@ private struct ChatWebViewRepresentable: UIViewRepresentable {
         context.coordinator.regexScripts = regexScripts
         context.coordinator.userName = userName
         context.coordinator.assistantName = assistantName
+        // 思考显示开关改了 → 已渲染的消息按新开关重推（patch 按内容指纹，只推变了的）
+        let thinkingChanged = context.coordinator.showThinking != showThinking
+            || context.coordinator.showNativeThinking != showNativeThinking
         context.coordinator.showThinking = showThinking
+        context.coordinator.showNativeThinking = showNativeThinking
+        if thinkingChanged { context.coordinator.pushUpdate() }
         context.coordinator.deps = deps
         context.coordinator.onPickAttachment = onPickAttachment
         // 关总开关 / 撤卡许可 → 正在跑的交互实例当场销毁（HTMLEmbedHost.runDenial didSet）
@@ -327,6 +336,7 @@ private struct ChatWebViewRepresentable: UIViewRepresentable {
         var userName: String
         var assistantName: String
         var showThinking: Bool
+        var showNativeThinking: Bool
         var deps: ChatSendDeps
         var onPickAttachment: () -> Void
         private var skinObserver: NSObjectProtocol?
@@ -348,13 +358,14 @@ private struct ChatWebViewRepresentable: UIViewRepresentable {
         private var webReady = false
 
         init(viewModel: ConversationViewModel, regexScripts: [RegexScript],
-             userName: String, assistantName: String, showThinking: Bool, deps: ChatSendDeps,
+             userName: String, assistantName: String, showThinking: Bool, showNativeThinking: Bool, deps: ChatSendDeps,
              onPickAttachment: @escaping () -> Void) {
             self.viewModel = viewModel
             self.regexScripts = regexScripts
             self.userName = userName
             self.assistantName = assistantName
             self.showThinking = showThinking
+            self.showNativeThinking = showNativeThinking
             self.deps = deps
             self.onPickAttachment = onPickAttachment
             super.init()
@@ -667,7 +678,7 @@ private struct ChatWebViewRepresentable: UIViewRepresentable {
             }?.id
             return ChatRenderContext(
                 regexScripts: regexScripts, userName: userName, assistantName: assistantName,
-                showThinking: showThinking, branchInfo: viewModel.branchInfoMap,
+                showThinking: showThinking, showNativeThinking: showNativeThinking, branchInfo: viewModel.branchInfoMap,
                 streamingNodeId: streamingId, cardName: boundCard()?.name)
         }
 

@@ -13,20 +13,21 @@ struct HermesAdapter: CodingSessionAdapter {
     private let caches: [String: CodingStampCache<[Row]>]
 
     init(dbs: [URL]) {
+        if BenchIsolation.requested { for db in dbs { _ = AppPaths.checked(db) } }
         self.dbs = dbs
         caches = Dictionary(dbs.map { ($0.path, CodingStampCache<[Row]>()) }, uniquingKeysWith: { first, _ in first })
     }
 
     private static func isFile(_ url: URL) -> Bool {
         var isDir: ObjCBool = false
-        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && !isDir.boolValue
+        return FileManager.default.fileExists(atPath: AppPaths.checkedPath(url.path), isDirectory: &isDir) && !isDir.boolValue
     }
 
     /// 一个 Hermes home 下的全部库：主库 + `profiles/<name>/state.db`（构造时刻快照，档案不会静默缺失）。档案路径按根的原写法拼——
     /// 枚举给的是 /private/var 形态，直接用会和主库、数据根前缀对不上
     static func dbs(under root: URL) -> [URL] {
         let profiles = root.appendingPathComponent("profiles", isDirectory: true)
-        let extra = ((try? FileManager.default.contentsOfDirectory(atPath: profiles.path)) ?? [])
+        let extra = ((try? AppPaths.contentsOfDirectory(atPath: profiles.path)) ?? [])
             .map { profiles.appendingPathComponent($0).appendingPathComponent("state.db") }
             .filter(isFile)
             .sorted { $0.path < $1.path }
@@ -37,7 +38,7 @@ struct HermesAdapter: CodingSessionAdapter {
     static func make(home: URL, environment: [String: String]) -> HermesAdapter {
         var root = home.appendingPathComponent(".hermes", isDirectory: true)
         if let custom = environment["HERMES_HOME"], !custom.isEmpty {
-            let dir = URL(fileURLWithPath: custom, isDirectory: true)
+            let dir = AppPaths.checked(URL(fileURLWithPath: custom, isDirectory: true))
             if isFile(dir.appendingPathComponent("state.db")) { root = dir }
         }
         return HermesAdapter(dbs: dbs(under: root))

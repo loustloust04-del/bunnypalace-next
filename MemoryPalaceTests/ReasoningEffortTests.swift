@@ -129,8 +129,12 @@ final class ReasoningEffortTests: XCTestCase {
     }
 
     func testOpenAIKeepsTemperatureWhenEffortNone() {
-        XCTAssertFalse(OpenAICompatibleProvider.dropsSamplingTemperature(baseURL: "https://api.openai.com/v1", model: "gpt-4o", reasoningEffort: "none"))
-        XCTAssertTrue(OpenAICompatibleProvider.dropsSamplingTemperature(baseURL: "https://api.openai.com/v1", model: "gpt-4o", reasoningEffort: "high"))
+        func sends(_ effort: String) -> Bool {
+            ParamCompat.resolve(providerType: .openaiCompatible, baseURL: "https://api.openai.com/v1", modelId: "gpt-4o",
+                                reasoningEffort: effort).sendsSampling
+        }
+        XCTAssertTrue(sends("none"))
+        XCTAssertFalse(sends("high"))
     }
 
     func testCCSendFrameCarriesEffort() {

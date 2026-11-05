@@ -1,0 +1,7 @@
+{
+  "source": "未实测：按官方文档 / 公开 issue 里的报错形状还原，T9 拿到原文后替换",
+  "status": 400,
+  "headers": {},
+  "stream": false,
+  "body": "{\"error\":{\"message\":\"输入内容过长，超出模型上下文长度限制\"}}"
+}

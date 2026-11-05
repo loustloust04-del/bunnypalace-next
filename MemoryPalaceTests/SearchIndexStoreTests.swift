@@ -48,6 +48,77 @@ final class SearchIndexStoreTests: XCTestCase {
         XCTAssertNil(try store.hits(word: "😀", profileId: "p1", roles: ["user"]))
     }
 
+    func testCatalogORRelevanceDoesNotChangeSearchBoxChronology() throws {
+        try store.apply(upserts: [
+            doc("strong", created: Date(timeIntervalSince1970: 1), "cloudbridge cloudbridge cloudbridge"),
+            doc("recent", created: Date(timeIntervalSince1970: 999), "cloudbridge " + String(repeating: "filler ", count: 100)),
+            doc("other-term", "lighthouse"),
+            doc("excluded", pid: "elsewhere", "cloudbridge"),
+            doc("trashed", trashed: true, "cloudbridge"),
+            doc("tool", role: "tool", "cloudbridge")
+        ], epoch: store.epoch)
+        let ranked = try XCTUnwrap(store.catalogHits(terms: ["cloudbridge", "lighthouse"], profileId: "p1"))
+        XCTAssertEqual(Set(ranked.map(\.nodeId)), ["strong", "recent", "other-term"])
+        XCTAssertLessThan(try XCTUnwrap(ranked.firstIndex { $0.nodeId == "strong" }),
+                          try XCTUnwrap(ranked.firstIndex { $0.nodeId == "recent" }))
+        XCTAssertEqual(try store.hits(word: "cloudbridge", profileId: "p1", roles: ["user"])?.map(\.nodeId),
+                       ["recent", "strong"])
+        XCTAssertEqual(try store.bodies(nodeIds: ranked.map(\.nodeId))["strong"],
+                       "cloudbridge cloudbridge cloudbridge")
+        XCTAssertNil(try store.catalogHits(terms: ["cloudbridge", "🍎"], profileId: "p1"))
+        XCTAssertEqual(try store.catalogHits(terms: [], profileId: "p1"), [])
+        XCTAssertEqual(try store.catalogHits(terms: ["cloudbridge"], profileId: "p1", scope: []), [])
+    }
+
+    func testCatalogKeepsWholeHanPhraseAndMixedBoundaries() throws {
+        try store.apply(upserts: [
+            doc("city", "云桥城"), doc("partial-city", "桥城"), doc("prefix-city", "云桥"),
+            doc("name", "张小明"), doc("partial-name", "小明"),
+            doc("version", "v2"), doc("use", "用"), doc("swift", "Swift"), doc("write", "写")
+        ], epoch: store.epoch)
+        func catalogIDs(_ term: String) throws -> Set<String> {
+            Set(try XCTUnwrap(store.catalogHits(terms: [term], profileId: "p1")).map(\.nodeId))
+        }
+        XCTAssertEqual(try catalogIDs("云桥城"), ["city"])
+        XCTAssertEqual(try catalogIDs("张小明"), ["name"])
+        XCTAssertEqual(try catalogIDs("云"), ["city", "prefix-city"])
+        XCTAssertEqual(try catalogIDs("云桥城v2"), ["city", "version"])
+        XCTAssertEqual(try catalogIDs("用Swift写"), ["use", "swift", "write"])
+    }
+
+    func testCatalogCapsRelevanceAfterScopeAndDateFiltersWithoutCappingSearchBox() throws {
+        let selected = "selected'bound"
+        var docs = (0..<320).map {
+            doc("outside-\($0)", conv: "outside", String(repeating: "cloudbridge ", count: 12))
+        }
+        docs.append(doc("strong", conv: selected, created: Date(timeIntervalSince1970: 100),
+                        String(repeating: "cloudbridge ", count: 8)))
+        for i in 0..<305 {
+            docs.append(doc("weak-\(i)", conv: selected, created: Date(timeIntervalSince1970: Double(200 + i)),
+                            "cloudbridge " + String(repeating: "filler ", count: 100)))
+        }
+        docs.append(contentsOf: [
+            doc("outside-date", conv: selected, created: Date(timeIntervalSince1970: 0),
+                String(repeating: "cloudbridge ", count: 20)),
+            doc("nil-date", conv: selected, created: nil, "cloudbridge"),
+            doc("other-profile", conv: selected, pid: "p2", "cloudbridge"),
+            doc("deleted", conv: selected, trashed: true, "cloudbridge"),
+            doc("tool", conv: selected, role: "tool", "cloudbridge")
+        ])
+        try store.apply(upserts: docs, epoch: store.epoch)
+        let interval = DateInterval(start: Date(timeIntervalSince1970: 50), end: Date(timeIntervalSince1970: 1000))
+        let ranked = try XCTUnwrap(store.catalogHits(terms: ["cloudbridge"], profileId: "p1",
+                                                    interval: interval, scope: [selected]))
+        XCTAssertEqual(ranked.count, 300)
+        XCTAssertEqual(ranked.map(\.nodeId), ["strong"] + (0..<299).map { "weak-\($0)" },
+                       "相关度先于时间，同分按稳定 id；scope 和日期必须在 300 条上限前过滤")
+        XCTAssertEqual(try XCTUnwrap(store.catalogHits(terms: ["cloudbridge"], profileId: "p1")).count, 300)
+        let searchBox = try XCTUnwrap(store.hits(word: "cloudbridge", profileId: "p1", roles: ["user"],
+                                                interval: (interval.start, interval.end), scope: [selected]))
+        XCTAssertEqual(searchBox.count, 306)
+        XCTAssertEqual(searchBox.map(\.nodeId), (0..<305).reversed().map { "weak-\($0)" } + ["strong"])
+    }
+
     func testCrossPunctuationHits() throws {
         try store.apply(upserts: [doc("n1", "我爱，你"), doc("n2", "我爱\n你"), doc("n3", "我不爱你")], epoch: store.epoch)
         XCTAssertEqual(try ids("我爱你"), ["n1", "n2"])

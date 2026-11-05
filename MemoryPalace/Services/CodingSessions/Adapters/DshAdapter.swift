@@ -54,6 +54,7 @@ struct DshAdapter: CodingSessionAdapter {
 
     /// 整份日志的明文字节；.zstd 透明解压（torn = 末帧半写 / 坏数据，已解出的部分照常给）
     static func load(_ url: URL, firstLineOnly: Bool = false) throws -> (data: Data, torn: Bool) {
+        let url = AppPaths.checked(url)
         if url.pathExtension == "zstd" {
             guard let compressed = try? Data(contentsOf: url, options: .alwaysMapped) else {
                 throw CodingSessionError.unreadable(url.lastPathComponent)
@@ -92,13 +93,13 @@ struct DshAdapter: CodingSessionAdapter {
     // MARK: - 枚举
 
     private static func fileInfo(_ url: URL) -> (isFile: Bool, size: Int64, mtimeMs: Int64)? {
-        let resolved = url.resolvingSymlinksInPath()
+        let resolved = AppPaths.checked(url).resolvingSymlinksInPath()
         guard let values = try? resolved.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]) else { return nil }
         return (values.isRegularFile == true, Int64(values.fileSize ?? 0), CodingParse.mtimeMs(values.contentModificationDate))
     }
 
     private static func directories(_ url: URL) -> [URL] {
-        ((try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])) ?? [])
+        ((try? AppPaths.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])) ?? [])
             .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
     }
 

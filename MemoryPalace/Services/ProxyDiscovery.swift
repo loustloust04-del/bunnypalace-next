@@ -188,6 +188,12 @@ final class ProxyDiscovery {
     @ObservationIgnored private var deadlineTimer: DispatchSourceTimer?
 
     func start() {
+        #if os(macOS)
+        if BenchIsolation.active {
+            apply(.browserBlocked(denied: false, reason: "性能测量包不可发现局域网服务"))
+            return
+        }
+        #endif
         guard browser == nil else { return }
         apply(.started)
 

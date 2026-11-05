@@ -14,14 +14,36 @@ import Observation
 ///       imports/pending-batch.json       PendingImportBatch：未完成批次的完整目标清单，提交后删除
 enum CardLibraryStorage {
     static var defaultRoot: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        #if os(iOS)
+        if TestHostIsolation.active {
+            // ContentView 的身份菜单会访问 shared；测试不能读取产品身份库。
+            guard let home = TestHostIsolation.home else {
+                preconditionFailure("测试宿主没有隔离目录")
+            }
+            return home.appendingPathComponent("Library/Application Support/MemoryPalace/cardlibrary", isDirectory: true)
+        }
+        #endif
+        #if os(macOS)
+        return AppPaths.checked(AppPaths.applicationSupport
+            .appendingPathComponent("MemoryPalace", isDirectory: true)
+            .appendingPathComponent("cardlibrary", isDirectory: true))
+        #else
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MemoryPalace", isDirectory: true)
             .appendingPathComponent("cardlibrary", isDirectory: true)
+        #endif
     }
 
     static func writeAtomically(_ data: Data, to url: URL) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: url, options: .atomic)
+        let destination = AppPaths.checked(url)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if let configuration = BenchIsolation.configuration {
+            try configuration.writeAtomically(data, to: destination)
+            return
+        }
+        #endif
+        try data.write(to: destination, options: .atomic)
     }
 
     static let encoder: JSONEncoder = {
@@ -69,9 +91,9 @@ final class UserPersonaStore {
     @ObservationIgnored private var loadError: Error?
 
     init(root: URL? = nil) {
-        directory = (root ?? CardLibraryStorage.defaultRoot).appendingPathComponent("personas", isDirectory: true)
+        directory = AppPaths.checked((root ?? CardLibraryStorage.defaultRoot).appendingPathComponent("personas", isDirectory: true))
         do {
-            let url = directory.appendingPathComponent("personas.json")
+            let url = AppPaths.checked(directory.appendingPathComponent("personas.json"))
             personas = FileManager.default.fileExists(atPath: url.path)
                 ? try JSONDecoder().decode([UserPersona].self, from: Data(contentsOf: url)) : []
         } catch {
@@ -82,7 +104,7 @@ final class UserPersonaStore {
     }
 
     func avatarURL(_ persona: UserPersona) -> URL? {
-        persona.avatarAssetRef.map { directory.appendingPathComponent($0) }
+        persona.avatarAssetRef.map { AppPaths.checked(directory.appendingPathComponent($0)) }
     }
 
     /// 头像先落盘，列表最后写；失败时清掉本次新写的头像
@@ -92,7 +114,7 @@ final class UserPersonaStore {
         do {
             for persona in values {
                 guard let ref = persona.avatarAssetRef, let data = avatars[persona.id] else { continue }
-                let url = directory.appendingPathComponent(ref)
+                let url = AppPaths.checked(directory.appendingPathComponent(ref))
                 try CardLibraryStorage.writeAtomically(data, to: url)
                 written.append(url)
             }
@@ -110,9 +132,9 @@ final class UserPersonaStore {
         for persona in removed { if let url = avatarURL(persona) { try? FileManager.default.removeItem(at: url) } }
         // 列表里已不在、但头像文件残留的（列表写入前中断）
         for id in ids {
-            let avatars = directory.appendingPathComponent("avatars", isDirectory: true)
+            let avatars = AppPaths.checked(directory.appendingPathComponent("avatars", isDirectory: true))
             for name in (try? FileManager.default.contentsOfDirectory(atPath: avatars.path)) ?? [] where name.hasPrefix(id + ".") {
-                try? FileManager.default.removeItem(at: avatars.appendingPathComponent(name))
+                try? FileManager.default.removeItem(at: AppPaths.checked(avatars.appendingPathComponent(name)))
             }
         }
     }
@@ -219,9 +241,9 @@ final class ImportSourceStore {
     private var loadError: Error?
 
     init(root: URL? = nil) {
-        directory = (root ?? CardLibraryStorage.defaultRoot).appendingPathComponent("imports", isDirectory: true)
+        directory = AppPaths.checked((root ?? CardLibraryStorage.defaultRoot).appendingPathComponent("imports", isDirectory: true))
         do {
-            let url = directory.appendingPathComponent("sources.json")
+            let url = AppPaths.checked(directory.appendingPathComponent("sources.json"))
             sources = FileManager.default.fileExists(atPath: url.path)
                 ? try JSONDecoder().decode([ImportSource].self, from: Data(contentsOf: url)) : []
         } catch {
@@ -252,13 +274,13 @@ final class ImportSourceStore {
 
     // MARK: 原件归档（PackageArchive）
 
-    var archiveDirectory: URL { directory.appendingPathComponent("archive", isDirectory: true) }
+    var archiveDirectory: URL { AppPaths.checked(directory.appendingPathComponent("archive", isDirectory: true)) }
 
     /// 归档内相对 cardlibrary/ 的位置（报告里的「原件位置」）
     static func archivePath(_ sha256: String) -> String { "imports/archive/\(sha256.prefix(2))/\(sha256)" }
 
     func archiveURL(_ sha256: String) -> URL {
-        archiveDirectory.appendingPathComponent(String(sha256.prefix(2)), isDirectory: true).appendingPathComponent(sha256)
+        AppPaths.checked(archiveDirectory.appendingPathComponent(String(sha256.prefix(2)), isDirectory: true).appendingPathComponent(sha256))
     }
 
     func hasArchived(_ sha256: String) -> Bool { FileManager.default.fileExists(atPath: archiveURL(sha256).path) }
@@ -268,7 +290,7 @@ final class ImportSourceStore {
         let target = archiveURL(sha256)
         guard !FileManager.default.fileExists(atPath: target.path) else { return }
         try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let temp = target.deletingLastPathComponent().appendingPathComponent(".\(sha256).\(UUID().uuidString).part")
+        let temp = AppPaths.checked(target.deletingLastPathComponent().appendingPathComponent(".\(sha256).\(UUID().uuidString).part"))
         try FileManager.default.copyItem(at: file, to: temp)
         do { try FileManager.default.moveItem(at: temp, to: target) } catch {
             try? FileManager.default.removeItem(at: temp)
@@ -282,21 +304,21 @@ final class ImportSourceStore {
 
     // MARK: 报告
 
-    var reportsDirectory: URL { directory.appendingPathComponent("reports", isDirectory: true) }
+    var reportsDirectory: URL { AppPaths.checked(directory.appendingPathComponent("reports", isDirectory: true)) }
 
     func writeReport<T: Encodable>(_ report: T, file: String) throws {
         try CardLibraryStorage.writeAtomically(try CardLibraryStorage.encoder.encode(report), to: reportsDirectory.appendingPathComponent(file))
     }
 
     func readReport<T: Decodable>(_ type: T.Type, file: String) throws -> T {
-        try JSONDecoder().decode(type, from: Data(contentsOf: reportsDirectory.appendingPathComponent(file)))
+        try JSONDecoder().decode(type, from: Data(contentsOf: AppPaths.checked(reportsDirectory.appendingPathComponent(file))))
     }
 
-    func removeReport(file: String) { try? FileManager.default.removeItem(at: reportsDirectory.appendingPathComponent(file)) }
+    func removeReport(file: String) { try? FileManager.default.removeItem(at: AppPaths.checked(reportsDirectory.appendingPathComponent(file))) }
 
     // MARK: 未完成批次
 
-    var pendingBatchURL: URL { directory.appendingPathComponent("pending-batch.json") }
+    var pendingBatchURL: URL { AppPaths.checked(directory.appendingPathComponent("pending-batch.json")) }
 
     func pendingBatch() throws -> PendingImportBatch? {
         guard FileManager.default.fileExists(atPath: pendingBatchURL.path) else { return nil }

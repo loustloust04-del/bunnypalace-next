@@ -18,10 +18,11 @@ final class MainThreadIOBudgetTests: XCTestCase {
         "enumerate AnniversaryStore.loadAll": 1, "read AnniversaryStore.load": 3,
         // 10-10 #066：时间轴注入从按天日记（DailyFileStore 4 次）换成跨窗口时间轴（本月 + 上月两个文件，读 2 次，不建目录）；
         // 窗口摘要先找 sessions/ 的新文件（枚举 1 次，文件不存在不读），没有再落回 summaries/ 老累计摘要
-        "read TimelineStore.entries": 2, "enumerate SessionSummaryStore.existingFile": 1,
+        // 10-22 c2c3-v2 第 7 段：一天一条和老条目同一份月文件，往回 7 天最多跨两个月（读 ≤2 次，不建目录）
+        "read TimelineStore.month": 2, "enumerate SessionSummaryStore.existingFile": 1,
         "enumerate SelfMemoryStore.list": 1, "read SelfMemoryStore.list": 5,
         "enumerate SummaryFileStore.existingFile": 1, "mkdir SummaryFileStore.summariesDir": 1, "read SummaryFileStore.load": 1,
-        "mkdir ProfileFileStore.fileURL": 1, "read ProfileFileStore.load": 1,
+        // 10-15 v5 Q4：画像下线，组 prompt 不再读 profile.md（ProfileFileStore 两项删掉）
         "mkdir FileLibraryStore.libraryRoot": 2, "mkdir FileLibraryStore.memoryRoot": 5,
         // 历史里那张图按需读盘（附件已知债，AttachmentStore.read）
         "read FileLibraryStore.readData": 1, "stat FileLibraryStore.resolve": 1,
@@ -103,7 +104,7 @@ final class MainThreadIOBudgetTests: XCTestCase {
         try await seed(size)
         let h = try await PromptRealPathHarness.make(PromptScenario(name: "budget-\(size.name)", profileId: pid, memoryFixtures: false))
         harness = h
-        h.overrideDefault("mem_inject_profile", true)
+        h.overrideDefault("mem_inject_profile", true)   // v5 画像下线：开着也不读 profile.md（预算表里已删那两项）
         h.overrideDefault("mem_content_timeline", true)
         h.overrideDefault("fileLibraryFullContent", false)
         h.overrideDefault(CalendarPrivacy.journalVisibleKey(pid), false)

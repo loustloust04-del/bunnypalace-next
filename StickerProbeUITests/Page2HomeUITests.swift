@@ -498,8 +498,6 @@ final class Page2HomeUITests: XCTestCase {
         sleep(1)
         save(app.screenshot(), name: "page2-strip-open")
         // 无障碍树里 ⌂ 的框是整条竖条（点中心会落到别的格子）；一个后台应用时 ⌂ 在竖条 y≈376
-        let frames = app.buttons.matching(NSPredicate(format: "label == %@", "回桌面")).allElementsBoundByIndex.map(\.frame)
-        print("[PROBE] home frames=\(frames)")
         origin.withOffset(CGVector(dx: width - 46, dy: 376)).tap()
         save(app.screenshot(), name: "page2-after-home-tap")
         let calendar = try homeApp(app, id: "page2.app.calendar")
@@ -509,6 +507,28 @@ final class Page2HomeUITests: XCTestCase {
         let menu = app.buttons["编辑主屏幕"].firstMatch.waitForExistence(timeout: 3)
         save(app.screenshot(), name: "page2-after-long-press")
         XCTAssertTrue(menu, "回桌面后长按图标没出菜单")
+    }
+
+    /// 切后台再回来：长按照样出菜单（Air 上长按开关整个关着，疑 scenePhase 卡在非 active）
+    @MainActor
+    func testLongPressMenuAfterBackgroundRoundTrip() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-onboardingCompletedV1", "YES", "-page2HomePresentation_v1", "free", "-settings.proMode", "YES", "page2-ui-test"]
+        app.launchEnvironment["PAGE2_UI_TOUCH_TRACE"] = "1"
+        app.launchPage2()
+        let home = app.otherElements["page2.free-home"]
+        if !home.waitForExistence(timeout: 5) { app.swipeLeft() }
+        XCTAssertTrue(home.waitForExistence(timeout: 30))
+        XCUIDevice.shared.press(.home)
+        sleep(2)
+        app.activate()
+        XCTAssertTrue(home.waitForExistence(timeout: 10))
+        sleep(1)
+        let calendar = try homeApp(app, id: "page2.app.calendar")
+        calendar.press(forDuration: 0.65)
+        let menu = app.buttons["编辑主屏幕"].firstMatch.waitForExistence(timeout: 3)
+        save(app.screenshot(), name: "page2-after-background-long-press")
+        XCTAssertTrue(menu, "切后台回来后长按图标没出菜单")
     }
 
     @MainActor

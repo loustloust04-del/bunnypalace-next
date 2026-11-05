@@ -13,7 +13,8 @@ struct MemoryInjectionRecord: Codable, Equatable {
     /// 第二刀 B3：「我的记忆」那一段（nil = 旧记录 = 0）
     var selfTokens: Int? = nil
     var selfCount: Int? = nil
-    /// v4-1 §六：这一轮注进去的时间轴条目（「日期|窗口编号」）和上下文摘要段（「窗口前 8 位|最后一条消息 id」）；nil = 旧记录
+    /// v4-1 §六：这一轮注进去的时间轴（一天「日期」、一项「日期|窗口编号|末条消息 id」、老条目「日期|窗口编号」）
+    /// 和上下文摘要段（「窗口前 8 位|最后一条消息 id」）；nil = 旧记录
     var timelineKeys: [String]? = nil
     var contextKeys: [String]? = nil
 }
@@ -57,16 +58,13 @@ enum MemoryInjectionMeter {
         }
     }
 
-    /// 纯函数（astra #11）：组装后真留下来的时间轴条目——插槽关了 / 预设里没有插槽时组装不出时间轴段，一条都不算；
+    /// 纯函数（astra #11）：组装后真留下来的时间轴单位的键——插槽关了 / 预设里没有插槽时组装不出时间轴段，一个都不算；
     /// 有时间轴段时只算段里真出现的那几行
-    static func keptTimelineEntries(_ entries: [TimelineEntry], in segments: [TaggedSegment]) -> [TimelineEntry] {
+    static func keptTimelineKeys(_ units: [TimelineStore.Unit], in segments: [TaggedSegment]) -> [String] {
         let text = segments.filter { $0.source == .timeline }.map(\.content).joined(separator: "\n")
         guard !text.isEmpty else { return [] }
-        return entries.filter { text.contains(TimelineStore.line($0, withPending: false)) }
+        return units.filter { text.contains($0.line) }.map(\.key)
     }
-
-    /// 记账的键：时间轴条目 =「日期|窗口编号」
-    static func key(_ e: TimelineEntry) -> String { "\(e.dayKey)|\(e.conversationId)" }
 
     /// 记账的键：上下文摘要段 =「窗口前 8 位|最后一条消息 id」（改造前的累计摘要没有 id，记 legacy）
     static func key(conversationId: String, segment: SessionSegment) -> String {

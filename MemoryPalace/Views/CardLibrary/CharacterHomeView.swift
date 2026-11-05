@@ -26,6 +26,10 @@ struct CharacterHomeView: View {
     /// 第二批 B1：静态扫描出的不支持功能（读原 JSON，进页 / 卡变了算一次）；右侧 ⓘ 展开的是哪一行
     @State private var staticUnsupported: [CardUnsupportedFeature] = []
     @State private var openInfo: String?
+    /// B1：存卡后问「同步到楼层？」——编辑器收起后再弹（onDismiss），sheet 收起和 alert 同帧弹会丢
+    @State private var savedEdit: (previous: CharacterCard, updated: CharacterCard)?
+    @State private var askingSync: (previous: CharacterCard, updated: CharacterCard)?
+    @State private var syncNotice: String?
 
     init(profileId: String, cardId: String?) {
         self.profileId = profileId
@@ -97,8 +101,11 @@ struct CharacterHomeView: View {
                     // 第二批 B7：导出小票（PNG / JSON）
                     IOSCalendarRow(icon: "square.and.arrow.up", title: "导出", meta: "PNG / JSON") { exporting = true }
                         .disabled(card == nil && profile == nil)
-                    if card != nil {
-                        IOSCalendarRow(icon: "arrow.down.doc", title: "应用到这个楼层", meta: "下一版") {}.disabled(true)
+                    if let card, let profile {
+                        IOSCalendarRow(icon: "arrow.down.doc", title: "应用到这个楼层",
+                                       meta: TavernSync.needsSync(card: card, profile: profile) ? "卡已改，未同步" : "已同步") {
+                            sync(card, previous: nil, onlyProfileId: profile.id)
+                        }
                     }
                     Color.clear.frame(height: 12)
                 }
@@ -114,11 +121,18 @@ struct CharacterHomeView: View {
                 CardExportTicketView(card: exported, isLibraryCard: card != nil, profile: profile)
             }
         }
-        .sheet(item: $editingCard) { original in
+        .sheet(item: $editingCard, onDismiss: {
+            guard let edit = savedEdit else { return }
+            savedEdit = nil
+            askingSync = edit
+        }) { original in
             CharacterCardEditor(card: original) { updated in
                 guard isCurrent, let cardManager else { throw CharacterFloorService.Failure.notCurrent }
                 try cardManager.update(updated)
-                editingCard = nil
+                // 长字段全屏保存也走这里（表单不关）：同步问到关表单时（onDismiss）再问，比的是打开时的卡
+                if TavernSync.touchesFloor(old: original, new: updated), floorService(cardManager)?.boundFloors(card: updated).isEmpty == false {
+                    savedEdit = (original, updated)
+                }
             } onCancel: { editingCard = nil }
         }
         .sheet(item: $editingProfile) { profile in
@@ -133,6 +147,19 @@ struct CharacterHomeView: View {
                 profileManager.updateProfile(updated)
             }
         }
+        .alert("同步到 \(askingSync.map { floorService(cardManager)?.boundFloors(card: $0.updated).count ?? 0 } ?? 0) 个楼层？",
+               isPresented: Binding(get: { askingSync != nil }, set: { if !$0 { askingSync = nil } })) {
+            Button("同步") {
+                if let edit = askingSync { sync(edit.updated, previous: edit.previous, onlyProfileId: nil, afterSave: true) }
+                askingSync = nil
+            }.keyboardShortcut(.defaultAction)
+            Button("先不", role: .cancel) { askingSync = nil }
+        } message: {
+            Text("楼层还在用改之前的设定。同步会写入描述、性格、场景和示例对话；系统提示词和后置提醒只换你没改过的。")
+        }
+        .alert("已同步", isPresented: Binding(get: { syncNotice != nil }, set: { if !$0 { syncNotice = nil } })) {
+            Button("好的") { syncNotice = nil }
+        } message: { Text(syncNotice ?? "") }
         .alert("操作失败", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
             Button("好的") { errorMessage = nil }
         } message: { Text(errorMessage ?? "") }
@@ -167,8 +194,12 @@ struct CharacterHomeView: View {
                         .padding(5).background(Theme.accent, in: Capsule()).fixedSize()
                 }
             }
-            Text(String(names.expand(card?.description ?? profile?.characterDescription ?? "").prefix(60)))
+            // B1：有楼层就显示楼层实际在用的描述，卡改了没同步要说出来，别让卡库版冒充已生效
+            Text(String(names.expand(profile?.characterDescription ?? card?.description ?? "").prefix(60)))
                 .font(.system(size: 14)).foregroundColor(Theme.textSecondary).lineLimit(2)
+            if let card, let profile, TavernSync.needsSync(card: card, profile: profile) {
+                Text("卡已改，未同步到楼层").font(.system(size: 11)).foregroundColor(Theme.textMuted)
+            }
             Button(action: newChat) {
                 Text("＋ 新聊天").font(.system(size: 16, weight: .semibold)).foregroundColor(Theme.mainBg)
                     .frame(maxWidth: .infinity, minHeight: 46)
@@ -314,6 +345,23 @@ struct CharacterHomeView: View {
         guard var card, let cardManager else { return }
         card.extensionConsent = value
         do { try cardManager.update(card); updateBanner() } catch { errorMessage = error.localizedDescription }
+    }
+
+    private func floorService(_ cardManager: CharacterCardManager?) -> CharacterFloorService? {
+        guard let cardManager, let profileManager, let presetManager else { return nil }
+        return cardManager.floors(profileManager: profileManager, presetManager: presetManager)
+    }
+
+    private func sync(_ card: CharacterCard, previous: CharacterCard?, onlyProfileId: String?, afterSave: Bool = false) {
+        guard let service = floorService(cardManager) else { return }
+        do {
+            let result = try service.syncFloors(card: card, previous: previous, onlyProfileId: onlyProfileId)
+            if result.skipped.isEmpty {
+                ToastCenter.shared.show(afterSave ? "已保存，已同步到 \(result.floors) 个楼层" : "已同步到 \(result.floors) 个楼层")
+            } else {
+                syncNotice = "\(result.skipped.count) 个槽你改过，没覆盖：\(result.skipped.joined(separator: "、"))"
+            }
+        } catch { errorMessage = error.localizedDescription }
     }
 
     private func newChat() {

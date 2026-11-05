@@ -388,7 +388,18 @@ extension FullMemoryDocument {
             embeddingData: model.embeddingData,
             embeddingRevision: model.embeddingRevision,
             relatedIds: model.relatedIds,
-            parentId: model.parentId
+            parentId: model.parentId,
+            occurredDay: model.occurredDay,
+            importance: model.importance,
+            emotion: model.emotion,
+            resolved: model.resolved,
+            reviewedAt: model.reviewedAt,
+            userEditedAt: model.userEditedAt,
+            organizedAt: model.organizedAt,
+            organizedPage: model.organizedPage,
+            organizeRejectedAt: model.organizeRejectedAt,
+            subject: model.subject,
+            speaker: model.speaker
         )
     }
 
@@ -413,6 +424,17 @@ extension FullMemoryDocument {
         mem.embeddingRevision = embeddingRevision
         mem.relatedIds = relatedIds
         mem.parentId = parentId
+        mem.occurredDay = occurredDay
+        mem.importance = importance.map { Memory.effectiveImportance($0) }   // 备份里越界的夹到 1–5，没定的仍是 nil（10-17 astra #5）
+        mem.emotion = emotion
+        mem.resolved = resolved
+        mem.reviewedAt = reviewedAt
+        mem.userEditedAt = userEditedAt
+        mem.organizedAt = organizedAt
+        mem.organizedPage = organizedPage
+        mem.organizeRejectedAt = organizeRejectedAt
+        mem.subject = subject
+        mem.speaker = speaker
         return mem
     }
 }

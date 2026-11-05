@@ -27,7 +27,7 @@ enum SelfMemoryStore {
     static let types = ["user", "feedback", "project", "reference"]
 
     static func directory(profileId: String) -> URL {
-        FileLibraryStore.memoryRoot(profileId: profileId).appendingPathComponent(folder, isDirectory: true)
+        AppPaths.checked(FileLibraryStore.memoryRoot(profileId: profileId).appendingPathComponent(folder, isDirectory: true))
     }
 
     // MARK: - 格式
@@ -109,7 +109,7 @@ enum SelfMemoryStore {
             .filter { $0.hasSuffix(".md") && $0 != indexFileName && !$0.hasPrefix(".") }
             .compactMap { name -> SelfMemory? in
                 MainThreadIO.note(.read, "SelfMemoryStore.list")
-                guard let text = try? String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8) else { return nil }
+                guard let text = try? String(contentsOf: AppPaths.checked(dir.appendingPathComponent(name)), encoding: .utf8) else { return nil }
                 return parse(text, slug: String(name.dropLast(3)))
             }
             .sorted { $0.created > $1.created }
@@ -149,14 +149,14 @@ enum SelfMemoryStore {
     static func save(_ m: SelfMemory, profileId: String) throws {
         let dir = directory(profileId: profileId)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try Data(render(m).utf8).write(to: dir.appendingPathComponent(m.fileName), options: .atomic)
+        try Data(render(m).utf8).write(to: AppPaths.checked(dir.appendingPathComponent(m.fileName)), options: .atomic)
         rebuildIndex(profileId: profileId)
         NotificationCenter.default.post(name: .memoryDidChange, object: nil)
     }
 
     /// 彻底删除（只给「已删除」里确认过的那一步用）：删文件 + 重建索引
     static func delete(slug: String, profileId: String) throws {
-        let url = directory(profileId: profileId).appendingPathComponent(slug + ".md")
+        let url = AppPaths.checked(directory(profileId: profileId).appendingPathComponent(slug + ".md"))
         try FileManager.default.removeItem(at: url)
         rebuildIndex(profileId: profileId)
         NotificationCenter.default.post(name: .memoryDidChange, object: nil)
@@ -172,7 +172,7 @@ enum SelfMemoryStore {
     }
 
     static func rebuildIndex(profileId: String) {
-        let url = directory(profileId: profileId).appendingPathComponent(indexFileName)
+        let url = AppPaths.checked(directory(profileId: profileId).appendingPathComponent(indexFileName))
         try? Data(indexText(list(profileId: profileId)).utf8).write(to: url, options: .atomic)
     }
 }

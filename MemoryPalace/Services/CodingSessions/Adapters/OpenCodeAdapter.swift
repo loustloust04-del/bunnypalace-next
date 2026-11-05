@@ -24,7 +24,7 @@ struct OpenCodeAdapter: CodingSessionAdapter {
         let fm = FileManager.default
         func isFile(_ url: URL) -> Bool {
             var isDir: ObjCBool = false
-            return fm.fileExists(atPath: url.path, isDirectory: &isDir) && !isDir.boolValue
+            return fm.fileExists(atPath: AppPaths.checkedPath(url.path), isDirectory: &isDir) && !isDir.boolValue
         }
         let defaultDir = home.appendingPathComponent(".local/share/opencode", isDirectory: true)
         var activeDir = defaultDir

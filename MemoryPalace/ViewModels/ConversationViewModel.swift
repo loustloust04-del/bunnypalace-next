@@ -15,7 +15,18 @@ struct TransientNotice: Equatable {
 
 @Observable
 final class ConversationViewModel {
-    var selectedConversation: Conversation?
+    var selectedConversation: Conversation? {
+        didSet {
+            if oldValue?.id != selectedConversation?.id, let oldId = oldValue?.id {
+                MainActor.assumeIsolated {
+                    cancelPromptPreparations(conversationId: oldId, drainQueued: false)
+                    let abandoned = pendingSends.filter { $0.conversationId == oldId }
+                    pendingSends.removeAll { $0.conversationId == oldId }
+                    abandoned.forEach { restoreToDraft($0) }
+                }
+            }
+        }
+    }
     var currentPath: [MessageNode] = []   // The currently displayed path of cards
     #if (DEBUG || PERF_BENCH) && os(iOS)
     /// 测量用路径版本号（perf P0 §4.1）：只在列出的写点显式自增、不加 didSet、不参与观察；严格测量角色外恒 0
@@ -27,6 +38,7 @@ final class ConversationViewModel {
     @ObservationIgnored var cardIndexCache = ChatCardIndexCache()
     /// 时间分割线缓存（#027）；不参与观察
     @ObservationIgnored var timeDividerCache = ChatTimeDividerCache()
+    @ObservationIgnored var bubbleRunCache = ChatBubbleRunCache()
     /// 待发卡片的底稿消息（卡片 id → 点的是哪条消息里的卡）
     var cardStagingBase: [String: String] = [:]
     /// 当前显示用的分支选择（父 id → 孩子 id）：平时 = 持久选择表；搜索临时浏览时叠了一层去目标的路径，不落库
@@ -42,7 +54,12 @@ final class ConversationViewModel {
     #if DEBUG
     /// 单测钩子：下一次 loadConversation 的后台建树多睡这么久（秒），用完清零
     @ObservationIgnored var testNextLoadBuildDelay: Double = 0
+    @ObservationIgnored var testNextLoadBuildGate: DispatchSemaphore?
+    @ObservationIgnored var testNextLoadBuildFailure = false
+    @ObservationIgnored var testNextLoadApplyFailure = false
     #endif
+    @ObservationIgnored private var failedTreeConversationId: String?
+    @ObservationIgnored private var displayedTreeConversationId: String?
 
     /// CC 入场弹泡（research-cc-bubble-entrance）：待弹 node id（内存态不落库）。
     /// 场景 A=insertProactive isCurrent 时加；场景 B=loadConversation 按未读快照标尾部。
@@ -67,6 +84,7 @@ final class ConversationViewModel {
     /// 标记待弹 + 动画跑完后自动销账——LazyVStack 行滚出屏回收再滚回=子树重新插入，
     /// 不销账会在某个动画事务里意外重弹（pop-tuner v7）
     func markPop(_ id: String) {
+        guard BubblePopTuning.enabled else { return }
         popNodeIds.insert(id)
         DispatchQueue.main.asyncAfter(deadline: .now() + BubblePopTuning.duration + 0.6) { [weak self] in
             self?.popNodeIds.remove(id)
@@ -156,6 +174,12 @@ final class ConversationViewModel {
                 RunCommandTool.cancel(conversationId: cid)
                 MainActor.assumeIsolated { PermissionPromptCenter.shared.cancel(conversationId: cid) }   // 挂着的审批卡算拒绝这一次（switchTo 在主线程 post）
             }
+            MainActor.assumeIsolated { self.cancelPromptPreparations(drainQueued: false) }
+            MainActor.assumeIsolated {
+                let abandoned = self.pendingSends
+                self.pendingSends = []
+                abandoned.forEach { self.restoreToDraft($0) }
+            }
             self.turnGeneration += 1   // 旧楼层的工具 handler 回来后作废
             self.clearAllSwiftDataRefs()
             // turn 状态随楼层清：旧 stream 的回调即使再来也只是 no-op，
@@ -166,7 +190,6 @@ final class ConversationViewModel {
             self.activeConversationId = nil
             self.pendingUserQuestion = nil   // 持有旧楼层 conversation/node/context ref，必须随楼层丢
             self.pendingCCQuestion = nil     // 旧楼层对话的题面，一并丢（hub pending 还在，重连会再来）
-            self.pendingSends = []
             self.ccWaitingSince = [:]
             self.endInConvSearch()
             self.pendingRefreshTask?.cancel()
@@ -184,8 +207,11 @@ final class ConversationViewModel {
     /// 跟旧楼层 container reset / cleanup 后节点失效是同类 race，必须把持有的 @Model 实例 ref 全清。
     private func clearAllSwiftDataRefs() {
         selectedConversation = nil
+        displayedTreeConversationId = nil
+        failedTreeConversationId = nil
         currentPath = []
         timeDividerCache.reset()
+        bubbleRunCache.reset()
         nodeMap.removeAll()
         mainPathIds.removeAll()
         cachedRootId = nil
@@ -233,6 +259,9 @@ final class ConversationViewModel {
             sortBy: [SortDescriptor(\MessageNode.createTime)]
         )
         desc.fetchLimit = 1
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+        #endif
         return (try? context.fetch(desc).first?.content) ?? ""
     }
 
@@ -240,6 +269,9 @@ final class ConversationViewModel {
     /// chatId == conversation.id。当前选中会话走 in-memory 路径即时刷新；非选中只持久化，下次打开加载。
     func insertProactiveAssistantMessage(chatId: String, content: String, fileData: Data? = nil, fileName: String? = nil, mime: String? = nil, isImage: Bool = false, ccMessageId: String? = nil, replyToId: String? = nil, callReply: CCCallReply? = nil, context: ModelContext) {
         let convDesc = FetchDescriptor<Conversation>(predicate: #Predicate { $0.id == chatId })
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+        #endif
         guard let conversation = try? context.fetch(convDesc).first else { return }  // 没对应会话 → 丢弃
         let pid = conversation.profileId
 
@@ -305,6 +337,9 @@ final class ConversationViewModel {
                 let parentDesc = FetchDescriptor<MessageNode>(
                     predicate: #Predicate<MessageNode> { $0.id == parentId && $0.profileId == pid }
                 )
+                #if (DEBUG || PERF_BENCH) && os(macOS)
+                if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+                #endif
                 if let parent = try? context.fetch(parentDesc).first {
                     if !parent.childrenIds.contains(newId) { parent.childrenIds.append(newId) }
                     parentChildCount = parent.childrenIds.count
@@ -354,7 +389,7 @@ final class ConversationViewModel {
             #endif
             // CC 入场弹泡（场景 A）：正看着对话时到达 → 待弹。
             // replay 灌入天然不进这里（重启后 isCurrent=false 走上面分支）
-            pendingEntranceNodeIds.insert(newId)
+            if BubblePopTuning.enabled { pendingEntranceNodeIds.insert(newId) }
         }
 
         // 插入后同步 cache（hot path：hub replay 连续插入时下一条立即命中）
@@ -399,10 +434,9 @@ final class ConversationViewModel {
                 AnniversaryIntentWriter.processChatIntents(nodeId: newId, context: context)
             }
         }
-        // v4-1 §四：CC 楼层的上下文摘要（满 60 条 / 跨过 05:00），和 API 那条压缩分开挂（回复从哪条路落地分）；同一个对话 60 秒内只喊一次
-        if MemoryFlags.contextSummaryEnabled && conversation.memoryEnabled {
-            SessionCloseoutTrigger.shared.requestCC(conversationId: chatId, profileId: pid)
-        }
+        // v4-1 §四：CC 楼层的上下文摘要（满 60 条 / 跨过 05:00），和 API 那条压缩分开挂（回复从哪条路落地分）；同一个对话 60 秒内只喊一次。
+        // A3 / A4 巡检带这个窗口（「每 N 回合」，astra #8）；v5 C2：每满 N 条新消息（`mem_c2_every`）记一次碎片池
+        SessionCloseoutTrigger.shared.ccReplyLanded(conversationId: chatId, profileId: pid, memoryEnabled: conversation.memoryEnabled)
     }
 
     // MARK: - 问问题 CC 桥（plan-问问题-cc桥）
@@ -415,6 +449,9 @@ final class ConversationViewModel {
         guard pendingCCQuestion?.toolUseId != toolUseId else { return }
         guard pendingUserQuestion == nil, pendingCCQuestion == nil else { return }
         let convDesc = FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> { $0.id == chatId })
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+        #endif
         guard let conversation = try? context.fetch(convDesc).first else { return }   // 别的设备的 chat → 丢
         guard let questions = AskUserTool.parseCCQuestions(raw) else { return }
         if ccDedupContains(chatId: chatId, ccMessageId: "askuser:\(toolUseId)", pid: conversation.profileId, context: context) { return }
@@ -449,6 +486,9 @@ final class ConversationViewModel {
     @MainActor
     private func insertCCUserMessage(chatId: String, content: String, ccMessageId: String, context: ModelContext) {
         let convDesc = FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> { $0.id == chatId })
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+        #endif
         guard let conversation = try? context.fetch(convDesc).first else { return }
         let pid = conversation.profileId
         let isCurrentAndLoaded = (selectedConversation?.id == chatId && !isLoading)
@@ -477,6 +517,9 @@ final class ConversationViewModel {
                 let parentDesc = FetchDescriptor<MessageNode>(
                     predicate: #Predicate<MessageNode> { $0.id == parentId && $0.profileId == pid }
                 )
+                #if (DEBUG || PERF_BENCH) && os(macOS)
+                if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+                #endif
                 if let parent = try? context.fetch(parentDesc).first {
                     if !parent.childrenIds.contains(newId) { parent.childrenIds.append(newId) }
                     parentChildCount = parent.childrenIds.count
@@ -519,6 +562,9 @@ final class ConversationViewModel {
         let desc = FetchDescriptor<MessageNode>(
             predicate: #Predicate<MessageNode> { $0.conversationId == chatId && $0.profileId == pid }
         )
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+        #endif
         let nodes = (try? context.fetch(desc)) ?? []
         let set = Set(nodes.compactMap(\.ccMessageId))
         ccDedupCache[chatId] = set
@@ -603,6 +649,9 @@ final class ConversationViewModel {
         // 非当前会话：限会话内 fetch（conversationId==chatId 是非 optional 比较，稳）再内存找 ccMessageId
         // —— 避开 SwiftData #Predicate 对 optional 字段 `==` 匹配不到的坑。
         let desc = FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> { $0.conversationId == chatId })
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+        #endif
         if let node = (try? context.fetch(desc))?.first(where: { $0.ccMessageId == ccMessageId }) {
             node.content = content
             if !streaming { node.ccEdited = true }
@@ -624,6 +673,9 @@ final class ConversationViewModel {
             return
         }
         let desc = FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> { $0.conversationId == chatId })
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+        #endif
         guard let nodes = try? context.fetch(desc) else { return }
         let node = nodes.first(where: { $0.ccMessageId == ccMessageId })
             ?? nodes.filter({ $0.role == "assistant" })
@@ -682,6 +734,7 @@ final class ConversationViewModel {
     /// 然后 rebuildPath() 主线程同步重算 currentPath 并持久选择（③b：地图上点选 = 切支）。流畅秒切。
     func navigateToNodeFast(nodeId: String) {
         guard nodeMap[nodeId] != nil else { return }
+        MainActor.assumeIsolated { cancelPromptPreparations(conversationId: selectedConversation?.id, drainQueued: false) }
 
         branchSelection = BranchSelection.selecting(
             nodeId, in: branchSelection,
@@ -692,10 +745,12 @@ final class ConversationViewModel {
         persistBranchSelection()
         highlightedNodeId = nodeId
         pendingScrollNodeId = nodeId
+        drainPending()
     }
 
     /// 旧入口保留：搜索结果 / 外部跳转 用全量 reload（含 fetch）。
     func navigateToNode(nodeId: String, conversation: Conversation, context: ModelContext) {
+        MainActor.assumeIsolated { cancelPromptPreparations(conversationId: selectedConversation?.id, drainQueued: false) }
         pendingScrollNodeId = nodeId
         loadConversation(conversation, context: context, scrollTargetNodeId: nodeId)
         NotificationCenter.default.post(name: .conversationNavigationRequested, object: nil)
@@ -715,6 +770,7 @@ final class ConversationViewModel {
         }
         lastNavigateNodeId = nodeId
         lastNavigateAt = now
+        MainActor.assumeIsolated { cancelPromptPreparations(conversationId: selectedConversation?.id, drainQueued: false) }
 
         // 判断是否在主线
         let cid = conversation.id
@@ -722,6 +778,9 @@ final class ConversationViewModel {
         let nodesDesc = FetchDescriptor<MessageNode>(
             predicate: #Predicate<MessageNode> { $0.conversationId == cid && $0.profileId == pid }
         )
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+        #endif
         let allNodes = (try? context.fetch(nodesDesc)) ?? []
         let mainPathSet = Self.computeMainPathSet(nodes: allNodes, currentNodeId: conversation.currentNodeId, selectionData: conversation.branchSelectionData)
         let isOnMainPath = mainPathSet.contains(nodeId)
@@ -743,12 +802,16 @@ final class ConversationViewModel {
 
     /// 选中了对话、列表空、且没有在途加载 = 从没走过加载流程（冷启动直进 Page2 的 css 聊天）。
     /// 有在途加载时补发会把那一单（可能带搜索 / 收藏 / 推送跳转）按代号顶掉，见 docs/bug-branch-late-apply-overwrite.md R11-01
-    var needsInitialLoad: Bool { selectedConversation != nil && currentPath.isEmpty && !isLoading }
+    var needsInitialLoad: Bool {
+        selectedConversation != nil && currentPath.isEmpty && !isLoading &&
+            (failedTreeConversationId == nil || failedTreeConversationId != selectedConversation?.id)
+    }
 
     /// Build path for selected conversation (fetch + tree computation on background thread)
     /// - scrollTargetNodeId: 搜索跳转的临时浏览——显示路径改走这条，持久选择表不动
     func loadConversation(_ conversation: Conversation, context: ModelContext, scrollTargetNodeId: String? = nil) {
         if conversation.id != selectedConversation?.id { SessionCloseoutTrigger.shared.request() }   // 第三刀：切窗口时巡检（巡检在后台）
+        wikiInjectionCache.prefetch(profileId: conversation.profileId)
         #if (DEBUG || PERF_BENCH) && os(iOS)
         PerfCount.hit("loadConversation")
         let airSpan = AirProbeSections.enabled ? AirProbeSections.enter("ConversationViewModel.loadConversation") : nil
@@ -779,6 +842,8 @@ final class ConversationViewModel {
         //（"暂存有时丢/不同步"的间歇性 = 是否发过一条消息）
         isDraftConversation = false
         draftRootNode = nil
+        draftGreetingNodes = []
+        let changingConversation = displayedTreeConversationId != conversation.id
         selectedConversation = conversation
         #if os(macOS)
         // 点对话 = 回聊天。不能只靠 `onChange(selectedConversation)`——点回同一条 id 没变就不触发，
@@ -786,7 +851,7 @@ final class ConversationViewModel {
         Task { @MainActor in CodingSessionLibrary.shared.deactivate() }
         #endif
         // CC 入场弹泡：清零前抓未读快照（场景 B），入口重置集合防跨对话残留
-        entranceUnreadSnapshot = conversation.unreadCount
+        entranceUnreadSnapshot = BubblePopTuning.enabled ? conversation.unreadCount : 0
         pendingEntranceNodeIds = []
         popNodeIds = []
         conversation.unreadCount = 0
@@ -800,18 +865,12 @@ final class ConversationViewModel {
         // 会让对话立刻跳到列表顶部，粟粟的新语义是"纯浏览不打乱列表"）。
         // 真正的内容改动（发消息/rename/贴纸）走 markConversationDirty() 的 3s debounce。
         isLoading = true
-        currentPath = []
+        if changingConversation { clearDisplayedTree() }
         timeDividerCache.reset()   // 重开同一对话也重算（导入 / 恢复可能改过节点时间）
+        bubbleRunCache.reset()
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure { perfPathRevision += 1 }
         #endif
-        branchSelection.removeAll()
-        displayLeafId = nil
-        bubbledBranches.removeAll()
-        nodeMap.removeAll()
-        cachedRootId = nil
-        effectiveChildrenMap.removeAll()
-        branchInfoMap.removeAll()
 
         let convId = conversation.id
         let convProfileId = conversation.profileId
@@ -826,6 +885,12 @@ final class ConversationViewModel {
         #if DEBUG
         let testDelay = testNextLoadBuildDelay
         testNextLoadBuildDelay = 0
+        let testGate = testNextLoadBuildGate
+        testNextLoadBuildGate = nil
+        let testBuildFailure = testNextLoadBuildFailure
+        testNextLoadBuildFailure = false
+        #else
+        let testBuildFailure = false
         #endif
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -834,13 +899,15 @@ final class ConversationViewModel {
             #endif
             #if DEBUG
             if testDelay > 0 { Thread.sleep(forTimeInterval: testDelay) }
+            testGate?.wait()
             let bgT0 = CFAbsoluteTimeGetCurrent()
             #endif
-            let treeData = Self.buildTreeInBackground(convId: convId, profileId: convProfileId, currentNodeId: currentNodeId,
-                                                      selection: selection, browseTargetId: scrollTargetNodeId, container: container)
+            let treeData = testBuildFailure ? nil :
+                (try? Self.buildTreeInBackground(convId: convId, profileId: convProfileId, currentNodeId: currentNodeId,
+                                                selection: selection, browseTargetId: scrollTargetNodeId, container: container))
             #if DEBUG
             let bgT1 = CFAbsoluteTimeGetCurrent()
-            print(String(format: "[PERF] buildTreeInBackground=%.0fms nodes=%d", (bgT1 - bgT0) * 1000, treeData.allNodeIds.count))
+            print(String(format: "[PERF] buildTreeInBackground=%.0fms nodes=%d", (bgT1 - bgT0) * 1000, treeData?.allNodeIds.count ?? 0))
             #endif
 
             DispatchQueue.main.async { [self] in
@@ -850,6 +917,10 @@ final class ConversationViewModel {
                 guard selectedConversation?.id == convId, generation == loadGeneration else {
                     // 在途时当前对话被删 / 切楼层（selection 置空）：再没有哪一单能落地清它
                     if selectedConversation == nil { isLoading = false }
+                    return
+                }
+                guard let treeData else {
+                    treeReadFailed(conversationId: convId)
                     return
                 }
                 #if DEBUG
@@ -910,14 +981,14 @@ final class ConversationViewModel {
     /// Heavy lifting on background thread: fetch nodes, build tree, compute path (all with pure IDs)
     private static func buildTreeInBackground(convId: String, profileId: String, currentNodeId: String,
                                               selection: [String: String], browseTargetId: String?,
-                                              container: ModelContainer) -> TreeData {
+                                              container: ModelContainer) throws -> TreeData {
         let bgContext = ModelContext(container)
 
         // Fetch all nodes for this conversation
         let descriptor = FetchDescriptor<MessageNode>(
             predicate: #Predicate<MessageNode> { node in node.conversationId == convId && node.profileId == profileId }
         )
-        let nodes = (try? bgContext.fetch(descriptor)) ?? []
+        let nodes = try bgContext.fetch(descriptor)
 
         // Lightweight node data for pure computation
         struct NodeInfo {
@@ -951,7 +1022,7 @@ final class ConversationViewModel {
                 let desc = FetchDescriptor<MessageNode>(
                     predicate: #Predicate<MessageNode> { node in node.id == targetId && node.profileId == targetProfileId }
                 )
-                if let found = try? bgContext.fetch(desc).first {
+                if let found = try bgContext.fetch(desc).first {
                     infoMap[found.id] = NodeInfo(id: found.id, role: found.role, hasContent: found.hasDisplayableContent, isTrashed: found.isTrashed, parentId: found.parentId, childrenIds: found.childrenIds)
                     if let pid = found.parentId, !pid.isEmpty, infoMap[pid] == nil {
                         nextChase.insert(pid)
@@ -1030,24 +1101,44 @@ final class ConversationViewModel {
         let descriptor = FetchDescriptor<MessageNode>(
             predicate: #Predicate<MessageNode> { node in node.conversationId == convId && node.profileId == convProfileId }
         )
-        if let nodes = try? context.fetch(descriptor) {
-            nodeMap.reserveCapacity(nodes.count)
-            for node in nodes { nodeMap[node.id] = node }
-        }
-
-        // Fetch ancestor nodes not in this conversation
-        for nodeId in data.allNodeIds where nodeMap[nodeId] == nil {
-            let nid = nodeId
-            let nidProfileId = convProfileId
-            let desc = FetchDescriptor<MessageNode>(
-                predicate: #Predicate<MessageNode> { node in node.id == nid && node.profileId == nidProfileId }
-            )
-            if let node = try? context.fetch(desc).first {
-                nodeMap[node.id] = node
+        var fetchedNodeMap: [String: MessageNode] = [:]
+        do {
+            #if DEBUG
+            if testNextLoadApplyFailure {
+                testNextLoadApplyFailure = false
+                throw CocoaError(.fileReadUnknown)
             }
+            #endif
+            #if (DEBUG || PERF_BENCH) && os(macOS)
+            if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+            #endif
+            let nodes = try context.fetch(descriptor)
+            fetchedNodeMap.reserveCapacity(nodes.count)
+            for node in nodes { fetchedNodeMap[node.id] = node }
+            for nodeId in data.allNodeIds where fetchedNodeMap[nodeId] == nil {
+                let nid = nodeId
+                let nidProfileId = convProfileId
+                let desc = FetchDescriptor<MessageNode>(
+                    predicate: #Predicate<MessageNode> { node in node.id == nid && node.profileId == nidProfileId }
+                )
+                #if (DEBUG || PERF_BENCH) && os(macOS)
+                if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+                #endif
+                guard let node = try context.fetch(desc).first else {
+                    treeReadFailed(conversationId: convId)
+                    return
+                }
+                fetchedNodeMap[node.id] = node
+            }
+        } catch {
+            treeReadFailed(conversationId: convId)
+            return
         }
 
         // Apply pre-computed structures
+        nodeMap = fetchedNodeMap
+        displayedTreeConversationId = convId
+        failedTreeConversationId = nil
         effectiveChildrenMap = data.effectiveChildrenMap
         cachedRootId = data.rootId
         mainPathIds = data.mainPathIds
@@ -1074,14 +1165,14 @@ final class ConversationViewModel {
         isLoading = false
 
         // CC 入场弹泡（场景 B）：打开带未读的对话 → 尾部连续 assistant 段最近 ≤3 条待弹
-        if entranceUnreadSnapshot > 0 {
+        if BubblePopTuning.enabled, entranceUnreadSnapshot > 0 {
             pendingEntranceNodeIds = Self.entranceNodeIds(
                 path: currentPath.map { (role: $0.role, id: $0.id) },
                 unread: entranceUnreadSnapshot,
                 cap: 3
             )
-            entranceUnreadSnapshot = 0
         }
+        entranceUnreadSnapshot = 0
 
         // 反转列表：offset=0 自然在最新消息，不需要回底兜底。只处理搜索/收藏跳转目标。
         if let pending = pendingJump {
@@ -1094,6 +1185,26 @@ final class ConversationViewModel {
                 }
             }
         }
+        drainPending()
+    }
+
+    private func treeReadFailed(conversationId: String) {
+        failedTreeConversationId = conversationId
+        isLoading = false
+        transientNotice = TransientNotice("对话读取失败，请重新打开后发送")
+    }
+
+    private func clearDisplayedTree() {
+        currentPath = []
+        displayedTreeConversationId = nil
+        mainPathIds.removeAll()
+        branchSelection.removeAll()
+        displayLeafId = nil
+        bubbledBranches.removeAll()
+        nodeMap.removeAll()
+        cachedRootId = nil
+        effectiveChildrenMap.removeAll()
+        branchInfoMap.removeAll()
     }
 
     /// Build effective children map from actual parent→child relationships
@@ -1180,9 +1291,11 @@ final class ConversationViewModel {
     func switchBranch(at nodeId: String, to childIndex: Int) {
         let children = childrenIds(for: nodeId)
         guard children.indices.contains(childIndex) else { return }
+        MainActor.assumeIsolated { cancelPromptPreparations(conversationId: selectedConversation?.id, drainQueued: false) }
         branchSelection[nodeId] = children[childIndex]
         rebuildPath()
         persistBranchSelection()
+        drainPending()
     }
 
     func branchNodeId(for displayedNodeId: String) -> String? {
@@ -1680,6 +1793,7 @@ final class ConversationViewModel {
             selectedConversation = nil
             currentPath = []
             timeDividerCache.reset()
+            bubbleRunCache.reset()
         }
     }
 
@@ -1736,6 +1850,7 @@ final class ConversationViewModel {
             selectedConversation = nil
             currentPath = []
             timeDividerCache.reset()
+            bubbleRunCache.reset()
         }
 
         // 附件一份存储：彻底删除时连同文件库附件目录一起清（软删/回收站不走这里）
@@ -1927,6 +2042,12 @@ final class ConversationViewModel {
         let round: Int
         let calls: [ToolCallBlock]
         let otherResults: [ToolResultBlock]
+        /// thinking 回传：暂停那一次回复的原样块，恢复时拼进 ToolTurn
+        let assistantContent: [[String: Any]]?
+        /// 那一次回复的 thinking_tokens（保险闸按输入估回传的思考）
+        let thinkingTokens: Int?
+        /// OpenAI 兼容路那一次回复的思考（恢复时拼进 ToolTurn，续轮回传）
+        let reasoning: ReasoningCapture?
 
         var allQuestions: [AskUserTool.ParsedQuestion] { askItems.flatMap(\.questions) }
     }
@@ -2062,7 +2183,8 @@ final class ConversationViewModel {
             conversation: conversation, assistantNode: newAssistant, assistantNodeId: newAssistantId,
             profile: pending.profile, preset: pending.preset, context: pending.context,
             tools: pending.tools,
-            toolTurns: pending.toolTurns + [ToolTurn(calls: pending.calls, results: results)],
+            toolTurns: pending.toolTurns + [ToolTurn(calls: pending.calls, results: results, assistantContent: pending.assistantContent,
+                                                     thinkingTokens: pending.thinkingTokens, reasoning: pending.reasoning)],
             round: pending.round + 1
         )
     }
@@ -2103,6 +2225,9 @@ final class ConversationViewModel {
     var composerInsert: ComposerInsert?
     /// 表单卡提交即发（粟粟 10-03）：ChatInputBar 接手，只发这张卡
     var cardSendRequest: CardSendRequest?
+    /// 报错「去改」（推理档不收）：待输入条打开模型 / 思考强度选择器。输入条不在树上（贴纸面板 / 查找 / 多选）时一直挂着，
+    /// 输入条重新出现时接手并清掉
+    var modelPickerRequested = false
     /// CC 收口即发（plan-跨对话排队）：发出后等回复中的对话 → 弹跳点等待泡。
     /// 纯 UI 状态不阻塞任何发送；insertProactiveAssistantMessage 落地时清，10 分钟兜底静默清。
     var ccWaitingSince: [String: Date] = [:]
@@ -2112,6 +2237,44 @@ final class ConversationViewModel {
     private var activeAssistantNodeId: String?
     /// 正在回复的对话（计时器投递跨窗口判忙要读，故非 private）
     var activeConversationId: String?
+    @ObservationIgnored var wikiInjectionCache = WikiInjectionCache.shared
+    private struct PromptPreparation {
+        let id: UUID
+        let conversation: Conversation
+        let target: MessageNode
+        let context: ModelContext
+        let ownsTurn: Bool
+        let abortLeafId: String?
+        let abortPath: [MessageNode]?
+        let markCCUnsentOnAbort: Bool
+        var task: Task<Void, Never>?
+    }
+    private struct QueuedCCSend {
+        let enqueueOrder: UInt64
+        let isCC: Bool
+        let recovery: PendingSend?
+        let run: @MainActor () -> Void
+    }
+    @ObservationIgnored private var promptPreparations: [UUID: PromptPreparation] = [:]
+    @ObservationIgnored private var activePromptPreparationId: UUID?
+    @ObservationIgnored private var ccPreparationTails: [String: (id: UUID, task: Task<Void, Never>)] = [:]
+    @ObservationIgnored private var queuedCCSends: [String: [QueuedCCSend]] = [:]
+    @ObservationIgnored private var nextSendOrder: UInt64 = 0
+
+    private func allocateSendOrder() -> UInt64 {
+        nextSendOrder += 1
+        return nextSendOrder
+    }
+    @ObservationIgnored var ccBridgeClient = CCBridgeWebSocketClient.shared
+    @ObservationIgnored private var injectionPermissionCenterOverride: PermissionPromptCenter?
+    @MainActor var injectionPermissionCenter: PermissionPromptCenter {
+        get { injectionPermissionCenterOverride ?? .shared }
+        set { injectionPermissionCenterOverride = newValue }
+    }
+    #if DEBUG
+    var promptPreparationTasksForTesting: [Task<Void, Never>] { promptPreparations.values.compactMap(\.task) }
+    var displayLeafIdForTesting: String? { displayLeafId }
+    #endif
 
     struct PendingSend: Identifiable {
         let id = UUID()
@@ -2125,6 +2288,7 @@ final class ConversationViewModel {
         let providerManager: ProviderManager
         let context: ModelContext
         let conversationId: String
+        var enqueueOrder: UInt64 = 0
     }
 
     @MainActor
@@ -2138,7 +2302,7 @@ final class ConversationViewModel {
             quotePreview: quotingPreview, quoteReplyTo: quotingReplyTo,
             model: model, profile: profile, preset: preset,
             providerManager: providerManager, context: context,
-            conversationId: conversationId
+            conversationId: conversationId, enqueueOrder: allocateSendOrder()
         ))
         clearQuoting()   // 引用已捕获进 pending，输入栏引用条清掉
     }
@@ -2148,6 +2312,13 @@ final class ConversationViewModel {
     func cancelPendingSend(id: UUID) -> PendingSend? {
         guard let idx = pendingSends.firstIndex(where: { $0.id == id }) else { return nil }
         return pendingSends.remove(at: idx)
+    }
+
+    /// #094：这一请求 400 自愈学到了「这个模型不收 xx」→ 聊天页临时提示胶囊（Q5），之后同地址 + 模型不再出
+    private func showParamAdaptationNotice() {
+        if let notice = providerRouter.consumeParamAdaptation() {
+            transientNotice = TransientNotice("✂️ " + notice)
+        }
     }
 
     /// turn 结束统一出口：清状态 + drain 队列。四个调用点：
@@ -2182,17 +2353,37 @@ final class ConversationViewModel {
         if drainQueued { drainPending() }
     }
 
-    /// 每次只发一条；发出去的那条又会设 in-flight，剩下的排到下一次 turn 结束。
-    /// 对话已切走的 pending 不发（防发错对话），写回原对话草稿字段。
+    private func isConversationSendBusy(_ conversationId: String) -> Bool {
+        isLoading || failedTreeConversationId == conversationId || ccPreparationTails[conversationId] != nil ||
+            (assistantTurnInFlight && activeConversationId == conversationId)
+    }
+
+    /// CC 只占准备期；API 占完整 turn。每次发送后按实际占用继续排水。
     private func drainPending() {
         Task { @MainActor in
-            while !self.pendingSends.isEmpty {
-                let pending = self.pendingSends.removeFirst()
-                guard let conversation = self.selectedConversation,
-                      conversation.id == pending.conversationId else {
+            guard !self.isLoading else { return }
+            while true {
+                if let pending = self.pendingSends.first,
+                   self.selectedConversation?.id != pending.conversationId {
+                    self.pendingSends.removeFirst()
                     self.restoreToDraft(pending)
-                    continue   // 这条写回草稿，继续看下一条
+                    continue
                 }
+                guard let conversationId = self.selectedConversation?.id,
+                      !self.isConversationSendBusy(conversationId) else { return }
+                let queued = self.queuedCCSends[conversationId]?.first
+                let pending = self.pendingSends.first
+                if let queued, pending == nil || queued.enqueueOrder < pending!.enqueueOrder {
+                    guard queued.isCC || !self.assistantTurnInFlight else { return }
+                    self.queuedCCSends[conversationId]!.removeFirst()
+                    if self.queuedCCSends[conversationId]?.isEmpty == true { self.queuedCCSends[conversationId] = nil }
+                    queued.run()
+                    continue
+                }
+                guard let pending else { return }
+                let isCC = pending.providerManager.provider(for: pending.model)?.type == .ccBridge
+                guard isCC || !self.assistantTurnInFlight else { return }
+                self.pendingSends.removeFirst()
                 self.quotingPreview = pending.quotePreview
                 self.quotingReplyTo = pending.quoteReplyTo
                 let started = self.sendMessage(
@@ -2200,8 +2391,7 @@ final class ConversationViewModel {
                     preset: pending.preset, providerManager: pending.providerManager,
                     context: pending.context, attachments: pending.attachments
                 )
-                if started { return }   // 一条上路，后面的等下次
-                // 被拦（如预算）→ 写回草稿，停止 drain，不静默丢
+                if started { continue }
                 self.clearQuoting()
                 self.restoreToDraft(pending)
                 return
@@ -2218,9 +2408,13 @@ final class ConversationViewModel {
         )
         guard let conv = convs?.first else { return }
         conv.draftText = conv.draftText.isEmpty ? pending.text : conv.draftText + "\n" + pending.text
-        if !pending.attachments.isEmpty,
-           let data = try? JSONEncoder().encode(pending.attachments) {
-            conv.draftAttachmentsData = data
+        if !pending.attachments.isEmpty {
+            let existing = conv.draftAttachmentsData.flatMap {
+                try? JSONDecoder().decode([PendingChatAttachment].self, from: $0)
+            } ?? []
+            if let data = try? JSONEncoder().encode(existing + pending.attachments) {
+                conv.draftAttachmentsData = data
+            }
         }
         try? pending.context.save()
     }
@@ -2231,6 +2425,11 @@ final class ConversationViewModel {
     /// 已执行的工具副作用（磁盘写入）不回滚。
     @MainActor
     func cancelAssistantTurn(context: ModelContext, drainQueued: Bool = true) {
+        let wasPreparing = activePromptPreparationId != nil
+        cancelPromptPreparations(conversationId: activeConversationId ?? selectedConversation?.id, drainQueued: drainQueued)
+        if wasPreparing { return }
+        // 停在请求中途才有这一次回复的块（工具执行间隙停下时，上一次回复的思考已在 onToolCalls 存过）
+        let thinking = providerRouter.isStreaming ? providerRouter.lastThinkingSegments : []
         providerRouter.cancel()
         turnGeneration += 1   // 让正在 await 的工具 handler 作废：回来后不存结果、不递归下一轮
         pendingUserQuestion = nil   // 选择卡挂起中按 stop：丢弃问题，孤儿 toolUse 走渲染/历史降级
@@ -2241,6 +2440,7 @@ final class ConversationViewModel {
         if let cid = activeConversationId { RunCommandTool.cancel(conversationId: cid) }
         if let id = activeAssistantNodeId, let node = nodeMap[id] {
             if let record = providerRouter.lastUsageRecord { UsageCostSettlement.shared.attach(record: record, node: node) }
+            let thinkingBase = node.segments.flatMap { $0.isEmpty ? nil : $0.count }
             if var segs = node.segments, !segs.isEmpty {
                 if !streamingText.isEmpty { segs.append(.text(streamingText)) }
                 segs.append(.text("（已停止）"))
@@ -2249,18 +2449,12 @@ final class ConversationViewModel {
             if node.content.isEmpty {
                 node.content = streamingText.isEmpty ? "（已停止）" : streamingText
             }
+            Self.attachThinking(thinking, to: node, base: thinkingBase)
             try? context.save()
         }
         streamingText = ""
         finishAssistantTurn(drainQueued: drainQueued)
     }
-    /// Recent messages to send for memory extraction
-    /// MV2: N=3 间隔下窗口扩到 7 = 覆盖 3 轮 + 4 条衔接（粟粟批"按推荐")
-    private let memoryExtractWindow = 7
-    /// MV2 提取间隔化：counter 跨对话共享（全局，粟粟批"按推荐"）
-    private var extractRoundCounter: Int = 0
-    private var hasExtractedEverInSession: Bool = false
-
     // MARK: - Budget (保险闸)
     /// 被拦截时 UI 层通过这个显示 alert；UI 消掉后置 nil
     var budgetBlockedMessage: String? = nil
@@ -2286,11 +2480,13 @@ final class ConversationViewModel {
         context: ModelContext,
         globalEntries: [WorldBookEntry] = [],
         fileLibraryHint: String? = nil,
-        cardGuideCompact: Bool = false
+        cardGuide: (mode: ChatCardPromptGuide.Mode, tools: Set<String>?) = (.full, nil),
+        conversation: Conversation? = nil,
+        warmedWiki: WikiInjectionCache.WarmedSnapshot? = nil
     ) -> (systemPrompt: String?, messages: [(role: String, content: String)], sampling: SamplingParams, imageMap: [String: [PendingChatAttachment]], recallHits: [InjectionHit], ordered: [PromptMessage]) {
         let composed = composePrompt(profile: profile, preset: preset, excludingNodeId: excludingNodeId, context: context,
                                      globalEntries: globalEntries, fileLibraryHint: fileLibraryHint, mode: .send,
-                                     cardGuideCompact: cardGuideCompact)
+                                     cardGuide: cardGuide, conversation: conversation, warmedWiki: warmedWiki)
         let legacy = PromptMessage.legacyShape(composed.ordered)
         // 卡片只关心 volatile 命中（"这轮想起来了"）；常驻层是"一直记得"，不进卡（S1 走实时组装另有全量）
         let volatileHits = composed.memoryHits.filter { $0.retrieverId != "persistent" }
@@ -2320,16 +2516,20 @@ final class ConversationViewModel {
         globalEntries: [WorldBookEntry],
         fileLibraryHint: String?,
         mode: ComposeMode,
-        cardGuideCompact: Bool = false
+        cardGuide: (mode: ChatCardPromptGuide.Mode, tools: Set<String>?) = (.full, nil),
+        conversation: Conversation? = nil,
+        warmedWiki: WikiInjectionCache.WarmedSnapshot? = nil
     ) -> ComposedPrompt {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         let airSpan = AirProbeSections.enabled ? AirProbeSections.enter("ConversationViewModel.composePrompt") : nil
         defer { if let airSpan { AirProbeRuntime.shared.finishedSection(airSpan) } }
         #endif
+        let conversation = conversation ?? selectedConversation
         // 取数 + 预算与记忆面板「下一轮会想起什么」预览同一个函数（预览 = 实发）
         let memoryInputs = MemoryInjector.roundInputs(profileId: profile.id,
-                                                      conversationMemoryEnabled: selectedConversation?.memoryEnabled ?? true,
-                                                      store: memoryStore, context: context)
+                                                      conversationMemoryEnabled: conversation?.memoryEnabled ?? true,
+                                                      store: memoryStore, context: context, warmedWiki: warmedWiki,
+                                                      useCachedWiki: mode == .preview)
         let memories = memoryInputs.memories
         let selfMemory = memoryInputs.selfMemory
         let archiveBudget = memoryInputs.archiveBudget
@@ -2344,6 +2544,7 @@ final class ConversationViewModel {
         let apiMessages = history.messages
         var chatHistory = apiMessages.map { (role: $0.role, content: $0.content) }
         var historyNodeIds = apiMessages.map(\.id)
+        let wikiScan = wikiScanWindow(excluding: excludingNodeId).map(\.content)
         // #089 P0-a：最后一条必须是 user。历史以 assistant 结尾 = 网页卡 /trigger 让 AI 接着说，或检查器预览时还没打字
         if chatHistory.last?.role == "assistant" {
             chatHistory.append((role: "user", content: mode == .preview ? Self.previewNextUserPlaceholder : Self.triggerNudge))
@@ -2355,24 +2556,23 @@ final class ConversationViewModel {
         // 查询当前楼层的世界书（过滤 conversation scope）
         // 卡库 ③-4：有效身份 + 有效书集合（楼层 / 对话 / 身份的书）和检查器同一次解析；profile 换成身份套上后的副本
         let sendContext = AirTimedSection.run("composePrompt.context") {
-            SendContextResolver.resolve(profile: profile, conversation: selectedConversation, context: context, globalEntries: globalEntries)
+            SendContextResolver.resolve(profile: profile, conversation: conversation, context: context, globalEntries: globalEntries)
         }
         let profile = sendContext.profile
-        let currentConvId = selectedConversation?.id ?? ""
+        let currentConvId = conversation?.id ?? ""
         let worldBooks = sendContext.worldBooks
 
-        // 上下文总结开关（mem_content_summary，受 mem_master 连坐）：关 = 不注入。
+        // 【开窗口】A2（mem_open_a2，没写过跟 mem_content_summary；受 mem_master 连坐）：关 = 不注入。
         // v4-1：只注压缩段和第 0 段，收尾段不注；最后一条还在历史窗口里的段不注（纯函数，读盘和以前一样一次）
         var contextSegments: [SessionSegment] = []
         var contextSummary: String?
-        if MemoryFlags.contextSummaryEnabled {
+        if MemoryFlags.contextSummaryInjected {
             var s = SessionSummaryStore.loadOrSeed(conversationId: currentConvId, profileId: profile.id, title: "")
             s.segments = SessionSummaryStore.injectableSegments(s.segments, windowIds: windowIds, windowStart: history.start)
             contextSegments = s.segments
             contextSummary = SessionSummaryStore.injectionText(s, fullCount: SessionCloseout.fullSegmentCount)
         }
-        // M5 用户画像：开关开才注（天级更新，进缓存前缀）
-        let userProfile = MemoryFlags.profileInjectionEnabled ? ProfileFileStore.load(profileId: profile.id)?.text : nil
+        // M5 用户画像：v5 Q4 下线，不再注入（画像文件留着不动）
         // M6 时间轴：开关开才注（最新一篇楼层日记，天级稳定）+ 快到的纪念日（plan-calendar §八，同样按天稳定）
         let timelineSlot = CalendarInjection.timelineSlot(profileId: profile.id, currentConversationId: currentConvId, windowIds: windowIds)
         let timeline = timelineSlot.text
@@ -2381,7 +2581,7 @@ final class ConversationViewModel {
         // 历史轮不复读(因为只在出口拼一次,user node 存的 content 干净)。
         // ccBridge 路径稍后会 strip 掉 <style> 后缀(CC 是 exec relay 不需要写作风格)。
         let styleContent: String? = {
-            guard let conv = selectedConversation, !conv.currentStyleId.isEmpty,
+            guard let conv = conversation, !conv.currentStyleId.isEmpty,
                   let s = StyleManager.shared.find(conv.currentStyleId), !s.content.isEmpty else { return nil }
             return s.content
         }()
@@ -2396,7 +2596,7 @@ final class ConversationViewModel {
 
         // assembleOrdered 展开（= assembleTagged + orderedMessages）：检查器要带 template 的 tagged 段
         let healthSummary = AirTimedSection.run("composePrompt.health") {
-            HealthLogStore.composedHealthSummary(context: context, profileId: profile.id, grants: permGrants(for: selectedConversation))
+            HealthLogStore.composedHealthSummary(context: context, profileId: profile.id, grants: permGrants(for: conversation))
         }
         let tradingSummary = AirTimedSection.run("composePrompt.trading") {
             tradingSummaryForPrompt(context: context, profileId: profile.id)
@@ -2409,21 +2609,23 @@ final class ConversationViewModel {
             worldBooks: worldBooks,
             globalEntries: sendContext.globalEntries,
             contextSummary: contextSummary,
-            userProfile: userProfile,
             timelineSummary: timeline,
             healthSummary: healthSummary,
             tradingSummary: tradingSummary,
             fileLibrary: capabilityHint,
             styleContent: styleContent,
-            folderInstructions: folderInstructions(for: selectedConversation, context: context),
+            folderInstructions: folderInstructions(for: conversation, context: context),
             volatileNote: CalendarInjection.todayJournalText(profileId: profile.id),
             statusNote: turnStatusNote(profileId: profile.id,
-                                       library: fileLibraryHint != nil && PermissionCenter.capabilityEnabled(.fileLibrary)),
+                                       library: fileLibraryHint?.hasPrefix("<文件库>") == true),
             historyNodeIds: historyNodeIds,
             regexScripts: regexScripts(profile: profile, preset: preset),
             selfMemory: (selfMemory?.text).flatMap { $0.isEmpty ? nil : $0 },
             memoryBudget: archiveBudget,
-            cardGuideCompact: cardGuideCompact
+            cardGuide: cardGuide.mode,
+            availableTools: cardGuide.tools,
+            wiki: memoryInputs.wiki,
+            wikiScanMessages: wikiScan
         ) }
 
         // ④b：历史图片 / 文件按节点 id 挂回真实用户消息（不按正文匹配——注入段、重复正文、宏展开、
@@ -2446,8 +2648,7 @@ final class ConversationViewModel {
             MemoryInjectionMeter.record(profileId: profile.id, hits: assembled.memoryHits, memories: memories,
                                         selfTokens: selfMemory?.tokens ?? 0,
                                         selfCount: (selfMemory?.fullCount ?? 0) + (selfMemory?.indexCount ?? 0),
-                                        timelineKeys: MemoryInjectionMeter.keptTimelineEntries(timelineSlot.entries, in: assembled.segments)
-                                            .map(MemoryInjectionMeter.key),
+                                        timelineKeys: MemoryInjectionMeter.keptTimelineKeys(timelineSlot.units, in: assembled.segments),
                                         contextKeys: assembled.segments.contains { $0.source == .contextSummary }
                                             ? contextSegments.map { MemoryInjectionMeter.key(conversationId: currentConvId, segment: $0) } : [])
         }
@@ -2463,16 +2664,17 @@ final class ConversationViewModel {
         guard let conversation = selectedConversation else { return nil }
         let model = providerManager.resolveModel(conversationModelId: conversation.selectedModelId, globalFallbackId: globalModelId)
         // CC 实发不调 toolInjection、fileLibraryHint 传 nil（sendMessage / regenerate 的 CC 分支）
-        let injection: (tools: [[String: Any]]?, systemHint: String, absentReason: ToolsAbsentReason?, tucked: [String]) =
+        let injection: (tools: [[String: Any]]?, systemHint: String, absentReason: ToolsAbsentReason?, tucked: [String], offered: Set<String>?) =
             providerManager.provider(for: model)?.type == .ccBridge
-            ? (nil, "", .ccBridge, [])
+            ? (nil, "", .ccBridge, [], nil)
             : toolInjectionDetailed(for: model, providerManager: providerManager, conversation: conversation,
                                     profileId: conversation.profileId, silent: true)
         let composed = composePrompt(profile: profile, preset: preset, excludingNodeId: excludingNodeId, context: context,
                                      globalEntries: globalWorldBookEntries,
                                      fileLibraryHint: injection.systemHint.isEmpty ? nil : injection.systemHint, mode: .preview,
-                                     cardGuideCompact: CardGuideTool.isOffered(in: injection.tools))
+                                     cardGuide: Self.cardGuideChoice(tools: injection.tools, offered: injection.offered, profileId: conversation.profileId))
         return TurnPreview(model: model, tools: injection.tools, toolsAbsentReason: injection.absentReason, tuckedTools: injection.tucked,
+                           offeredTools: injection.offered,
                            segments: composed.segments, memoryHits: composed.memoryHits, ordered: composed.ordered,
                            sampling: StreamingPreference.apply(Self.withEffectiveEffort(preset.sampling, model: model, providerManager: providerManager)),
                            identity: composed.identity)
@@ -2525,7 +2727,8 @@ final class ConversationViewModel {
         conversation: Conversation,
         profile: Profile,
         providerManager: ProviderManager,
-        messageNodeId: String
+        messageNodeId: String,
+        offered: Set<String>? = nil
     ) -> (
         messages: [(role: String, content: String)],
         systemPrompt: String?,
@@ -2553,7 +2756,9 @@ final class ConversationViewModel {
                 let legacy = PromptMessage.legacyShape(ordered)
                 return (legacy.messages, legacy.systemPrompt, assembled.sampling, headers, legacy.imageMap, ordered)
             }
-            return (assembled.messages, assembled.systemPrompt, assembled.sampling, headers, assembled.imageMap, assembled.ordered)
+            // #093：调过这一轮调不到的工具（抽屉 / 权限关了）那条退纯文字，不让 ChatService 包成 tool_invoke（检查器 requestBody 同一步）
+            let replay = offered.map { ToolReplay.offeredOnly(assembled.ordered, offered: $0) } ?? assembled.ordered
+            return (assembled.messages, assembled.systemPrompt, assembled.sampling, headers, assembled.imageMap, replay)
         }
         // CC 不发花园的记忆 / 完整 system；语音能力会单独附在本轮传输文字。
         MemoryInjectionMeter.recordCCBridge(profileId: profile.id)
@@ -2591,7 +2796,7 @@ final class ConversationViewModel {
             "X-MP-User": userLabel,
         ]
         // A4：用户引用了某条 → 告诉 CC（channel 带 reply_to）
-        if let rt = quotingReplyTo, !rt.isEmpty {
+        if let rt = currentPath.first(where: { $0.id == messageNodeId })?.replyToId, !rt.isEmpty {
             headers["X-MP-ReplyTo"] = rt
         }
         // L2：绑定的 tmux session 名字传给 hub 做 per-session 路由
@@ -2701,6 +2906,17 @@ final class ConversationViewModel {
         }
     }
 
+    struct WikiScanMessage: Equatable {
+        let id: String
+        let content: String
+    }
+
+    func wikiScanWindow(excluding excludeId: String? = nil) -> [WikiScanMessage] {
+        MemoryResident.wikiNodes(in: currentPath, excluding: excludeId).map {
+            WikiScanMessage(id: $0.id, content: MemoryResident.wikiScanBody($0))
+        }
+    }
+
     /// 贵的一遍（只对留下的那些）：引用头、卡片事件、附件（从磁盘读图 / 文件）。
     /// 从后往前一条对一条，图片配额和「3 条之前的旧图换描述」都从末尾数——只喂窗口（全量的后缀）结果逐字节不变
     private func materializeAPIMessages(_ relevant: [(node: MessageNode, content: String)]) -> [APIMessage] {
@@ -2774,8 +2990,8 @@ final class ConversationViewModel {
     func windowedHistory(excluding excludeId: String? = nil, depth: Int) -> (messages: [APIMessage], start: Int) {
         let full = historyCandidates(excluding: excludeId)
         guard full.count > depth else { return (materializeAPIMessages(full), 0) }
-        // 开关关时摘要不注入 → 锚定必须退滑动窗，否则窗外消息既无摘要又不在窗（信息丢失）
-        let covered = MemoryFlags.contextSummaryEnabled ? selectedConversation.flatMap {
+        // 【开窗口】A2 不带时摘要不注入 → 锚定必须退滑动窗，否则窗外消息既无摘要又不在窗（信息丢失）
+        let covered = MemoryFlags.contextSummaryInjected ? selectedConversation.flatMap {
             ContextSummarizer.load(conversationId: $0.id, profileId: $0.profileId)?.coveredCount
         } : nil
         guard let start = Self.anchoredWindowStart(fullCount: full.count, covered: covered, depth: depth) else {
@@ -2856,18 +3072,13 @@ final class ConversationViewModel {
         #endif
         // 卡库 ⑧c：群聊只读归档不续聊
         guard let conversation = selectedConversation, !conversation.isReadOnlyArchive else { return false }
-
-        // 草稿对话：首次发送时落库（此后才出现在 page0 列表）。放最前，覆盖斜杠/正常所有路径。
         commitDraftConversationIfNeeded(context: context)
 
         // CC 收口即发（plan-跨对话排队）：ccBridge 对话不进流式管线、不占全局 turn。
         let isCC = providerManager.provider(for: model)?.type == .ccBridge
 
-        // Turn guard：上一轮 assistant/tool loop 未结束 → 排队，turn 结束自动补发。
-        // 放在斜杠分支之前：斜杠命令也不许在 turn 中途插队建 user node（user+user 连排）。
-        // ccBridge 只防**同对话**中途插队（并发改 currentPath）；别的对话在跑不拦——
-        // CC 是异步信使不碰流式管线共享状态，跨对话串行没必要（research-跨对话排队）。
-        if assistantTurnInFlight && (!isCC || activeConversationId == conversation.id) {
+        // API 与 CC 共用对话级门控；跨对话 CC 不占 API 的全局流。
+        if isConversationSendBusy(conversation.id) || (!isCC && assistantTurnInFlight) {
             queuePendingSend(
                 text, attachments: attachments, model: model, profile: profile,
                 preset: preset, providerManager: providerManager, context: context,
@@ -2879,6 +3090,7 @@ final class ConversationViewModel {
         // L3 斜杠命令路径：text 是 / 开头 + 当前 model 是 ccBridge → raw 直发不走 LLM 流式
         if isCC, text.hasPrefix("/"), !attachments.contains(where: { $0.kind == .card }) {   // 带卡片的斜杠文字按普通消息发
             sendCCSlashCommand(text, conversation: conversation, context: context)
+            drainPending()
             return true
         }
 
@@ -2894,14 +3106,30 @@ final class ConversationViewModel {
         guard AirTimedSection.run("sendMessage.preCheckBudget", {
             preCheckBudget(text: modelText, model: model, profile: profile, preset: preset, providerManager: providerManager)
         }) else { return false }
-
-        // 所有 precheck 已过，本轮 turn 正式开始（user node 创建前设置，
-        // 之后没有早退路径，不会卡死 true）。
-        // ccBridge 不占 turn：发出即结束，回复走 proactive 异步落地。
-        if !isCC {
-            assistantTurnInFlight = true
-            activeConversationId = conversation.id
+        if isCC {
+            let user = appendUserNode(content: modelText, contentType: parts.contentType, segments: parts.segments,
+                                      replyToId: quotingReplyTo, replyQuote: quotingPreview, conversation: conversation, context: context)
+            commitSelection(to: user.id, conversation: conversation)
+            conversation.updateTime = Date()
+            markConversationDirty()
+            preparePromptSend(conversation: conversation, profileId: profile.id, targetNodeId: user.id,
+                              context: context, isCC: true, markCCUnsentOnAbort: true) { warmedWiki in
+                let assembled = self.assemblePrompt(profile: profile, preset: preset, excludingNodeId: "",
+                                                    context: context, globalEntries: self.globalWorldBookEntries,
+                                                    fileLibraryHint: nil, conversation: conversation, warmedWiki: warmedWiki)
+                let payload = self.prepareRouterPayload(assembled: assembled, model: model, conversation: conversation,
+                                                        profile: profile, providerManager: providerManager, messageNodeId: user.id)
+                self.sendCCFireAndForget(payload: payload, model: model, conversation: conversation,
+                                         profile: profile, providerManager: providerManager)
+            }
+            try? context.save()
+            scrollToNodeId = user.id
+            clearQuoting()
+            return true
         }
+
+        assistantTurnInFlight = true
+        activeConversationId = conversation.id
         BreadcrumbLog.shared.add("📤", "发送@「\(conversation.title)」（\(modelText.count)字）")
 
         // 1–2. 路径末尾建 user 节点（卡库第二批 B5 的 /send 共用 appendUserNode）
@@ -2910,34 +3138,9 @@ final class ConversationViewModel {
                            replyToId: quotingReplyTo, replyQuote: quotingPreview,
                            conversation: conversation, context: context)
         }
-        let userNodeId = userNode.id
-
-        // —— ccBridge 收口即发：到此为止，不建占位节点、不进流式管线（plan-跨对话排队）——
-        // 组装照旧走 assemblePrompt + prepareRouterPayload（style 后缀/附件砍文/引用头全保留），
-        // 终点从 runStreamingTurn 换成 WS 直发一帧。回复由 proactive 路径落地，
-        // 按 conversation.currentNodeId 链 parent——所以 currentNodeId 必须指到这条 user。
-        if isCC {
-            commitSelection(to: userNodeId, conversation: conversation)
-            conversation.updateTime = Date()
-            markConversationDirty()
-            // excludingNodeId 传 ""：没有占位节点要排除，刚建的 user 必须进组装（它就是要发的消息）
-            let assembled = AirTimedSection.run("sendMessage.cc.assemble") {
-                assemblePrompt(profile: profile, preset: preset, excludingNodeId: "", context: context, globalEntries: globalWorldBookEntries, fileLibraryHint: nil)
-            }
-            let payload = AirTimedSection.run("sendMessage.cc.payload") {
-                prepareRouterPayload(assembled: assembled, model: model, conversation: conversation, profile: profile, providerManager: providerManager, messageNodeId: userNodeId)
-            }
-            AirTimedSection.run("sendMessage.cc.wsSend") {
-                sendCCFireAndForget(payload: payload, model: model, conversation: conversation, profile: profile, providerManager: providerManager)
-            }
-            AirTimedSection.run("sendMessage.cc.save") { try? context.save() }
-            clearQuoting()
-            scrollToNodeId = userNodeId
-            return true
-        }
 
         // 3–6. 占位 assistant + 组装 / 发送 / 流式（卡库第二批 B5 的 /trigger 共用 startAssistantTurn，同一条管线）
-        startAssistantTurn(after: userNode, scrollTo: userNodeId, clearsQuoting: true, model: model, profile: profile,
+        startAssistantTurn(after: userNode, scrollTo: userNode.id, clearsQuoting: true, model: model, profile: profile,
                            preset: preset, providerManager: providerManager, conversation: conversation, context: context)
         return true
     }
@@ -2997,6 +3200,169 @@ final class ConversationViewModel {
         return userNode
     }
 
+    @MainActor
+    private func preparePromptSend(conversation: Conversation, profileId: String, targetNodeId: String,
+                                   context: ModelContext, resolveAsks: Bool = false, isCC: Bool = false,
+                                   abortLeafId: String? = nil, abortPath: [MessageNode]? = nil,
+                                   markCCUnsentOnAbort: Bool = false,
+                                   send: @escaping @MainActor (WikiInjectionCache.WarmedSnapshot?) -> Void) {
+        guard let target = nodeMap[targetNodeId] else { return }
+        let id = UUID()
+        let conversationId = conversation.id
+        let frozenPath = currentPath
+        let predecessor = isCC ? ccPreparationTails[conversationId]?.task : nil
+        promptPreparations[id] = PromptPreparation(
+            id: id, conversation: conversation, target: target, context: context, ownsTurn: !isCC,
+            abortLeafId: abortLeafId, abortPath: abortPath, markCCUnsentOnAbort: markCCUnsentOnAbort
+        )
+        if !isCC { activePromptPreparationId = id }
+        func isCurrent() -> Bool {
+            guard !Task.isCancelled, self.promptPreparations[id] != nil,
+                  self.selectedConversation?.id == conversationId,
+                  self.selectedConversation?.profileId == profileId else { return false }
+            if isCC { return true }
+            return self.activePromptPreparationId == id &&
+                self.activeAssistantNodeId == targetNodeId &&
+                self.currentPath.last?.id == targetNodeId &&
+                conversation.currentNodeId == targetNodeId
+        }
+        let task = Task { @MainActor in
+            defer {
+                if isCC, self.ccPreparationTails[conversationId]?.id == id {
+                    self.ccPreparationTails[conversationId] = nil
+                    self.drainPending()
+                }
+            }
+            if let predecessor { await predecessor.value }
+            guard isCurrent() else { self.abortPromptPreparation(id); return }
+            if resolveAsks {
+                await self.resolveInjectionAsks(conversation: conversation, context: context)
+                guard isCurrent() else { self.abortPromptPreparation(id); return }
+            }
+            do {
+                let warmed: WikiInjectionCache.WarmedSnapshot?
+                if MemoryFlags.masterEnabled && conversation.memoryEnabled && MemoryOpenWindow.isChecked(.c) {
+                    warmed = try await self.wikiInjectionCache.warm(profileId, WikiInjectionCache.source(profileId: profileId))
+                } else {
+                    warmed = nil
+                }
+                guard isCurrent() else { self.abortPromptPreparation(id); return }
+                self.promptPreparations[id] = nil
+                if self.activePromptPreparationId == id { self.activePromptPreparationId = nil }
+                // 组装无 suspension：CC 每条只看到自己的冻结路径，不借用后来的消息。
+                let displayedPath = self.currentPath
+                if isCC { self.currentPath = frozenPath }
+                send(warmed)
+                if isCC { self.currentPath = displayedPath }
+            } catch is CancellationError {
+                self.abortPromptPreparation(id)
+            } catch {
+                self.abortPromptPreparation(id, failure: error.localizedDescription)
+            }
+        }
+        promptPreparations[id]?.task = task
+        if isCC { ccPreparationTails[conversationId] = (id, task) }
+    }
+
+    @MainActor
+    private func cancelPromptPreparations(conversationId: String? = nil, drainQueued: Bool = true) {
+        let cancelled: [QueuedCCSend]
+        if let conversationId {
+            cancelled = queuedCCSends.removeValue(forKey: conversationId) ?? []
+            ccPreparationTails[conversationId] = nil
+        } else {
+            cancelled = queuedCCSends.values.flatMap { $0 }
+            queuedCCSends.removeAll()
+            ccPreparationTails.removeAll()
+        }
+        for item in cancelled {
+            if let recovery = item.recovery { restoreToDraft(recovery) }
+        }
+        let ids = promptPreparations.values.filter { conversationId == nil || $0.conversation.id == conversationId }.map(\.id)
+        for id in ids { abortPromptPreparation(id, drainQueued: false) }
+        if drainQueued { drainPending() }
+    }
+
+    @MainActor
+    private func abortPromptPreparation(_ id: UUID, failure: String? = nil, drainQueued: Bool = true) {
+        guard let preparation = promptPreparations.removeValue(forKey: id) else { return }
+        preparation.task?.cancel()
+        let target = preparation.target
+        let targetId = target.id
+        let conversationId = preparation.conversation.id
+        let profileId = preparation.conversation.profileId
+        let storedNodes: [MessageNode]?
+        if preparation.ownsTurn {
+            storedNodes = try? preparation.context.fetch(FetchDescriptor<MessageNode>(
+                predicate: #Predicate { $0.conversationId == conversationId && $0.profileId == profileId }))
+        } else {
+            storedNodes = []
+        }
+        let hasChildren = preparation.ownsTurn && (storedNodes == nil || !target.childrenIds.isEmpty ||
+            storedNodes!.contains { $0.parentId == targetId })
+        let failureReason = failure ?? (preparation.ownsTurn && hasChildren ? "准备已取消" :
+            (!preparation.ownsTurn && preparation.markCCUnsentOnAbort ? "未发送" : nil))
+        if let failureReason {
+            if preparation.ownsTurn {
+                target.content = "⚠️ 发送失败：\(failureReason)"
+            } else {
+                ccBridgeClient.sendTracker.store.set(target.id, state: .failed, reason: failureReason,
+                                                     retryable: false, hasFrame: false)
+            }
+        } else if preparation.ownsTurn && target.content.isEmpty && target.segments?.isEmpty != false {
+            let wasDisplayed = displayLeafId == target.id
+            let restoreLeafId = preparation.abortLeafId ?? target.parentId
+            if let parentId = target.parentId {
+                let nodeParent = nodeMap[parentId] ?? (try? preparation.context.fetch(FetchDescriptor<MessageNode>(
+                    predicate: #Predicate { $0.id == parentId })))?.first
+                nodeParent?.childrenIds.removeAll { $0 == target.id }
+                effectiveChildrenMap[parentId]?.removeAll { $0 == target.id }
+                if preparation.conversation.currentNodeId == target.id, let restoreLeafId {
+                    preparation.conversation.currentNodeId = restoreLeafId
+                }
+            }
+            currentPath.removeAll { $0.id == target.id }
+            nodeMap[target.id] = nil
+            effectiveChildrenMap[target.id] = nil
+            preparation.context.delete(target)
+            if wasDisplayed {
+                if let restoreLeafId, nodeMap[restoreLeafId] != nil {
+                    commitSelection(to: restoreLeafId, conversation: preparation.conversation)
+                    if let abortPath = preparation.abortPath {
+                        currentPath = abortPath
+                        displayLeafId = restoreLeafId
+                    }
+                } else {
+                    displayLeafId = target.parentId
+                }
+            }
+            rebuildBranchInfoMap()
+        }
+        if preparation.ownsTurn, hasChildren, selectedConversation?.id == conversationId {
+            if let storedNodes {
+                for node in storedNodes { nodeMap[node.id] = node }
+                buildEffectiveChildrenMap()
+                rebuildPath()
+                if let leaf = displayLeafId, currentPath.last?.id == leaf,
+                   ancestorChain(of: leaf).contains(targetId), childrenIds(for: leaf).isEmpty {
+                    persistBranchSelection()
+                } else {
+                    treeReadFailed(conversationId: conversationId)
+                }
+            } else {
+                treeReadFailed(conversationId: conversationId)
+            }
+        }
+        try? preparation.context.save()
+        guard preparation.ownsTurn, activePromptPreparationId == id else { return }
+        activePromptPreparationId = nil
+        assistantTurnInFlight = false
+        activeAssistantNodeId = nil
+        activeConversationId = nil
+        streamingText = ""
+        if drainQueued { drainPending() }
+    }
+
     /// 在 parent 下建占位 assistant，组装 → 发送 → 流式。调用方已占好 turn（assistantTurnInFlight / activeConversationId）
     @MainActor
     private func startAssistantTurn(after parent: MessageNode, scrollTo: String, clearsQuoting: Bool,
@@ -3039,20 +3405,21 @@ final class ConversationViewModel {
         // 组装以下步骤挪进 Task：ask 需要 await；无待问域时零弹卡直落。turn 防重入由前面的 inFlight 保证。
         if clearsQuoting { clearQuoting() }   // A4：引用值已烤进 payload header，清掉输入栏引用条
         scrollToNodeId = scrollTo
-        Task { @MainActor in
-            await self.resolveInjectionAsks(conversation: conversation, context: context)
+        preparePromptSend(conversation: conversation, profileId: profile.id, targetNodeId: assistantNodeId,
+                          context: context, resolveAsks: true) { warmedWiki in
 
             // 4. 工具注入（文件库 fs_* + MCP 远程工具，进组装链 + preview 共用）
             let injection = self.toolInjection(for: model, providerManager: providerManager, conversation: conversation, profileId: conversation.profileId)
+            ToolDrawerStore.shared.recordSent(conversationId: conversation.id, signature: ToolSignature(tools: injection.tools, offered: injection.offered))
             let fileHint = injection.systemHint.isEmpty ? nil : injection.systemHint
 
             // 5. Assemble prompt（注入段已进组装链，payload.systemPrompt 含「文件库」段）
-            let assembled = self.assemblePrompt(profile: profile, preset: preset, excludingNodeId: assistantNodeId, context: context, globalEntries: self.globalWorldBookEntries, fileLibraryHint: fileHint, cardGuideCompact: CardGuideTool.isOffered(in: injection.tools))
+            let assembled = self.assemblePrompt(profile: profile, preset: preset, excludingNodeId: assistantNodeId, context: context, globalEntries: self.globalWorldBookEntries, fileLibraryHint: fileHint, cardGuide: Self.cardGuideChoice(tools: injection.tools, offered: injection.offered, profileId: profile.id), conversation: conversation, warmedWiki: warmedWiki)
             // 召回卡片：cc-bridge 发送会丢弃组装结果（只发 raw 文字），不写卡片数据免得撒谎
             if providerManager.provider(for: model)?.type != .ccBridge {
                 assistantNode.setRecallHits(assembled.recallHits)
             }
-            let payload = self.prepareRouterPayload(assembled: assembled, model: model, conversation: conversation, profile: profile, providerManager: providerManager, messageNodeId: assistantNodeId)
+            let payload = self.prepareRouterPayload(assembled: assembled, model: model, conversation: conversation, profile: profile, providerManager: providerManager, messageNodeId: assistantNodeId, offered: injection.offered)
 
             // 6. Stream（工具循环：模型不调工具时退化纯文本）
             self.runStreamingTurn(
@@ -3072,7 +3439,7 @@ final class ConversationViewModel {
     @discardableResult
     func appendUserMessage(_ text: String, profile: Profile, preset: Preset, context: ModelContext) -> Bool {
         guard let conversation = selectedConversation, !conversation.isReadOnlyArchive else { return false }
-        guard !assistantTurnInFlight else { return false }      // 生成中不插 user（user+user 连排）
+        guard !assistantTurnInFlight, !isConversationSendBusy(conversation.id) else { return false }
         let base = applyInputRegex(expandUserMacros(text.trimmingCharacters(in: .whitespacesAndNewlines), profile: profile, context: context),
                                    role: "user", profile: profile, preset: preset)
         let parts = ChatAttachmentPromptBuilder.userMessage(displayBase: base, attachments: [])
@@ -3094,7 +3461,7 @@ final class ConversationViewModel {
     @discardableResult
     func triggerReply(model: ProviderModel, profile: Profile, preset: Preset, providerManager: ProviderManager, context: ModelContext) -> Bool {
         guard let conversation = selectedConversation, !conversation.isReadOnlyArchive else { return false }
-        guard !assistantTurnInFlight, let parent = currentPath.last else { return false }
+        guard !assistantTurnInFlight, !isConversationSendBusy(conversation.id), let parent = currentPath.last else { return false }
         guard providerManager.provider(for: model)?.type != .ccBridge else { return false }
         SpeechService.shared.stop()
         guard preCheckBudget(text: "", model: model, profile: profile, preset: preset, providerManager: providerManager) else { return false }
@@ -3131,7 +3498,9 @@ final class ConversationViewModel {
         var grants = PermissionGrants(raw: conversation.permGrantsRaw)
         var changed = false
         for domain in askable where PermissionCenter.level(domain) == .askOnce && !grants.isResolved(domain) {
-            let decision = await PermissionPromptCenter.shared.decide(domain)
+            guard !Task.isCancelled else { return }
+            let decision = await injectionPermissionCenter.decide(domain)
+            guard !Task.isCancelled else { return }
             guard decision != .timedOut else { continue }   // 超时不落档：这轮不注入，下轮再问
             grants.record(domain, allow: decision == .allowed)
             changed = true
@@ -3239,17 +3608,33 @@ final class ConversationViewModel {
     }
     enum TuckedInvoke { case notWrapped, invalid(String), unwrapped(ToolCallBlock) }
 
-    /// tool_invoke 包的是「更多工具」里的内建工具（名字一字不差）→ 拆成真调用（同 id、保留截断标记）；
-    /// 包的是别的（MCP、拼错的名字）→ notWrapped，照旧交给 handleMetaTool
-    static func unwrapTuckedInvoke(_ call: ToolCallBlock) -> TuckedInvoke {
+    /// tool_invoke 包的是 tucked 里的内建工具（名字一字不差）→ 拆成真调用（同 id、保留截断标记）；
+    /// 包的是别的（MCP、拼错的名字、清单里本来就有的）→ notWrapped，照旧交给 handleMetaTool。tucked 见 invokableBuiltins
+    static func unwrapTuckedInvoke(_ call: ToolCallBlock, tucked: Set<String>) -> TuckedInvoke {
         guard call.name == MetaTools.invokeName,
               let outer = (try? JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8))) as? [String: Any],
-              let name = outer["name"] as? String, ToolRegistry.tuckedNames.contains(name) else { return .notWrapped }
+              let name = outer["name"] as? String, tucked.contains(name) else { return .notWrapped }
         guard let args = outer["arguments"] as? [String: Any] else {
             return .invalid("tool_invoke 的 arguments 要是一个对象（没有参数就填 {}），没有执行。")
         }
         let json = (try? JSONSerialization.data(withJSONObject: args)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         return .unwrapped(ToolCallBlock(id: call.id, name: name, argumentsJSON: json, truncated: call.truncated))
+    }
+
+    /// #093：工具循环里能拆包的内建工具 = 这一轮发出去的清单里没有的（收起的；抽屉 / 开关关着的拆了也会被执行前复查拒）。
+    /// 按发出去的清单算、不按现读的抽屉：循环中途改档位，模型手上还是第一轮那份清单和〔更多工具〕
+    @MainActor
+    static func invokableBuiltins(sentTools: [[String: Any]]?) -> Set<String> {
+        Set(ToolRegistry.all.map(\.definition.name)).subtracting(MetaTools.names).subtracting(ToolReplay.clientToolNames(sentTools))
+    }
+
+    /// 执行前复查（#069 / #093）：现读抽屉和开关，不用这一批开头的快照。nil gate = 这张卡不发工具，内建一律不执行
+    @MainActor
+    private func toolUnavailableNow(_ name: String, model: ProviderModel, providerManager: ProviderManager, profileId: String) -> Bool {
+        guard let gate = toolGate(for: model, providerManager: providerManager, profileId: profileId) else {
+            return ToolRegistry.all.contains { $0.definition.name == name }
+        }
+        return ToolRegistry.availability(of: name, gate) == false
     }
 
     /// 授权卡改过内层参数后，重新包回 tool_invoke 的参数形状
@@ -3259,14 +3644,31 @@ final class ConversationViewModel {
         return (try? JSONSerialization.data(withJSONObject: outer, options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? argumentsJSON
     }
 
+    /// R8：执行 / 解析入口一律拿过滤后的参数（`.toolUse` 历史记录才用原样 replayArgs）；DEBUG 下测试经 executionArgsTap 看执行器收到什么
+    static func executionArgs(_ call: ToolCallBlock) -> String {
+        #if DEBUG
+        executionArgsTap?(call.name, call.argumentsJSON)
+        #endif
+        return call.argumentsJSON
+    }
+    #if DEBUG
+    static var executionArgsTap: ((_ name: String, _ argumentsJSON: String) -> Void)?
+    #endif
+
+    /// tool_invoke 拆出的内层参数：按真实工具的 schema 去掉中转塞的未声明顶层键（R8）；回给模型的仍是原样外层调用
+    static func invokeInnerJSON(_ inner: [String: Any], schema: [String: Any]?) -> String {
+        let json = (try? JSONSerialization.data(withJSONObject: inner)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return ToolCallPreflight.droppingUndeclared(json, schema: schema)
+    }
+
     static func toolUnavailableMessage(name: String) -> String {
-        "\(name) 这个工具现在没开（设置里关着，这一轮没给你），这次做不了。如实告诉对方，不要再试。"
+        "\(name) 这个工具现在没开（设置或工具抽屉里关着，这一轮没给你），这次做不了。如实告诉对方，不要再试。"
     }
     private static let budgetToolStopText = "（预算不足，已停止继续调用工具；已有工具结果已保留。）"
     private static let budgetSummaryInstruction = "预算已不足以继续调用工具。不要再调用任何工具，请基于已有工具结果直接给出简短总结。"
     /// MCP 工具数超过此值就 defer：不全量内联 schema，改用 3 个元工具（tool_search/inspect/invoke）让模型搜目录。
     /// fs_ 核心工具不受影响，始终内联。以后可换成 Cherry 的「占 context 比例」更精细的阈值。
-    private static let mcpDeferThreshold = 16
+    static let mcpDeferThreshold = 16
 
     /// 执行前复查用的门控语境（#069），同 toolInjectionDetailed 的算法：家族看卡类型、元工具看 MCP 数量。
     /// nil = 这张卡这一轮根本不发工具（找不到卡 / 卡关了工具调用）——内建工具一律不执行
@@ -3275,13 +3677,26 @@ final class ConversationViewModel {
         guard let provider = providerManager.provider(for: model), provider.toolsSupported != false else { return nil }
         let mcpCount = MCPProvider.shared.enabledTools(for: MCPProvider.shared.activeServerIds).count
         return ToolGateContext(family: provider.type == .anthropic ? .anthropic : .openAI,
-                               deferMCP: mcpCount > Self.mcpDeferThreshold, profileId: profileId)
+                               deferMCP: mcpCount > Self.mcpDeferThreshold, profileId: profileId,
+                               drawer: ToolDrawerStore.shared.state)
     }
 
     /// 兼容旧调用：只下发文件库工具。真实发送路径使用 toolInjection。
     @MainActor
     func fileLibraryInjection(for model: ProviderModel, providerManager: ProviderManager, profileId: String) -> (tools: [[String: Any]]?, systemHint: String) {
-        toolInjection(for: model, providerManager: providerManager, conversation: nil, profileId: profileId)
+        let injection = toolInjection(for: model, providerManager: providerManager, conversation: nil, profileId: profileId)
+        return (injection.tools, injection.systemHint)
+    }
+
+    @MainActor
+    /// 卡片说明放哪一版 + 这一轮能调到的工具名（实发 / 预览同一口径）：card_guide 下发或收在〔更多工具〕→ 目录；
+    /// 对方关了 card_guide 或工具总开关 → 不放（粟粟 10-15 选 A）；其余（卡发不了工具）→ 全文
+    static func cardGuideChoice(tools: [[String: Any]]?, offered: Set<String>?, profileId: String) -> (mode: ChatCardPromptGuide.Mode, tools: Set<String>?) {
+        let available = offered ?? []
+        if available.contains(CardGuideTool.toolName) || CardGuideTool.isOffered(in: tools) { return (.index, available) }
+        let turnedOff = !PermissionCenter.capabilityEnabled(.toolsMaster)
+            || ToolDrawerStore.shared.state.override(CardGuideTool.toolName, profileId: profileId) == .off
+        return (turnedOff ? .none : .full, available)
     }
 
     /// 工具注入：该 model 下要下发的工具 + 要追加到 system 的提示。
@@ -3290,35 +3705,48 @@ final class ConversationViewModel {
     /// silent=true：预览路径用（cacheDashboard / previewTurn），不写 breadcrumb 和 probe 文件。
     /// 否则 UI 渲染每次都会调 toolInjection → add breadcrumb → @Observable 触发 view 重渲 → 又调 → 死循环。
     /// 实发路径（sendStreaming / regenerate / editAndResend）默认 silent=false 保持诊断日志。
-    func toolInjection(for model: ProviderModel, providerManager: ProviderManager, conversation: Conversation?, profileId: String, silent: Bool = false) -> (tools: [[String: Any]]?, systemHint: String) {
+    func toolInjection(for model: ProviderModel, providerManager: ProviderManager, conversation: Conversation?, profileId: String, silent: Bool = false) -> (tools: [[String: Any]]?, systemHint: String, tucked: [String], offered: Set<String>?) {
         let result = toolInjectionDetailed(for: model, providerManager: providerManager, conversation: conversation, profileId: profileId, silent: silent)
-        return (result.tools, result.systemHint)
+        return (result.tools, result.systemHint, result.tucked, result.offered)
+    }
+
+    /// 工具抽屉顶部的数字（#093 §2.4）：取模型 / 取工具和 previewTurn、实发同一套（silent，不写 breadcrumb），不跑 composePrompt。
+    /// nil = 没有对话（设置页入口）
+    @MainActor
+    func previewTools(providerManager: ProviderManager, globalModelId: String?) -> ToolDrawerPreview? {
+        guard let conversation = selectedConversation else { return nil }
+        let model = providerManager.resolveModel(conversationModelId: conversation.selectedModelId, globalFallbackId: globalModelId)
+        let injection: (tools: [[String: Any]]?, systemHint: String, absentReason: ToolsAbsentReason?, tucked: [String], offered: Set<String>?) =
+            providerManager.provider(for: model)?.type == .ccBridge
+            ? (nil, "", .ccBridge, [], nil)
+            : toolInjectionDetailed(for: model, providerManager: providerManager, conversation: conversation,
+                                    profileId: conversation.profileId, silent: true)
+        return ToolDrawerPreview(tools: injection.tools, systemHint: injection.systemHint, tucked: injection.tucked,
+                                 offered: injection.offered, absentReason: injection.absentReason, modelName: model.name.isEmpty ? model.modelId : model.name)
     }
 
     /// toolInjection 本体；absentReason 只给检查器说清「为什么一个工具都不发」
     @MainActor
-    private func toolInjectionDetailed(for model: ProviderModel, providerManager: ProviderManager, conversation: Conversation?, profileId: String, silent: Bool) -> (tools: [[String: Any]]?, systemHint: String, absentReason: ToolsAbsentReason?, tucked: [String]) {
-        guard let provider = providerManager.provider(for: model) else { return (nil, "", .cardNotFound, []) }
+    private func toolInjectionDetailed(for model: ProviderModel, providerManager: ProviderManager, conversation: Conversation?, profileId: String, silent: Bool) -> (tools: [[String: Any]]?, systemHint: String, absentReason: ToolsAbsentReason?, tucked: [String], offered: Set<String>?) {
+        guard let provider = providerManager.provider(for: model) else { return (nil, "", .cardNotFound, [], nil) }
         // 卡级「工具调用」开关（B 止血）：后端不带 function calling 的卡 = 不发 tools、不提工具（同 ccBridge 待遇）
-        if provider.toolsSupported == false { return (nil, "", .cardToolsOff, []) }
+        if provider.toolsSupported == false { return (nil, "", .cardToolsOff, [], nil) }
         // F4 工具总开关（设置-MCP）：关闭 = 请求不带 tools 字段，模型纯对话。
         // 场景：切到不受信任的中转站时，防模型按上下文惯性调工具把命令/结果明文暴露。
-        guard PermissionCenter.capabilityEnabled(.toolsMaster) else { return (nil, "", .masterOff, []) }
+        guard PermissionCenter.capabilityEnabled(.toolsMaster) else { return (nil, "", .masterOff, [], nil) }
         // MCP 全局生效：enabled 的 server 对所有对话可用，不再按对话隔离（conversation 参数已不参与 MCP 选取）。
         let mcpServerIds = MCPProvider.shared.activeServerIds
-        // 文件库总开关：关掉后不下发 fs_* 工具、不注入文件库说明（设置→文件库）。
-        let fileLibraryOn = PermissionCenter.capabilityEnabled(.fileLibrary)
         // MCP 工具太多就 defer：换成 3 个元工具让模型搜目录，省得工具海淹没模型。fs_ 不受影响。
         let mcpCatalog = MCPProvider.shared.enabledTools(for: mcpServerIds)
         let deferMCP = mcpCatalog.count > Self.mcpDeferThreshold
         // ccBridge 上游自带工具，这里不下发
         // 本机模型也不下发：工具 schema 太大，小模型扛不住（plan-小芽-v3 §1）
-        if provider.type == .ccBridge { return (nil, "", .ccBridge, []) }
-        if provider.type == .localMLX { return (nil, "", .localModel, []) }
+        if provider.type == .ccBridge { return (nil, "", .ccBridge, [], nil) }
+        if provider.type == .localMLX { return (nil, "", .localModel, [], nil) }
         // chatgptOAuth 也用 OpenAI Chat Completions 风格的 tools；
         // ChatGPTOAuthProvider.buildRequestBody 内部会 map 成 Responses API 平铺格式
         let family: ToolGateContext.Family = provider.type == .anthropic ? .anthropic : .openAI
-        let gate = ToolGateContext(family: family, deferMCP: deferMCP, profileId: profileId)
+        let gate = ToolGateContext(family: family, deferMCP: deferMCP, profileId: profileId, drawer: ToolDrawerStore.shared.state)
 
         // 内建工具（fs_*9/心声/recall/搜索/browse/元工具）统一走注册表：定义+门控单一来源。
         // 注册表外的两个注入侧特例：MCP 动态工具（MCPProvider 自渲染）+ anthropic server 搜索（形状特殊）。
@@ -3334,7 +3762,7 @@ final class ConversationViewModel {
         // anthropic 直连联网搜索走 server tool（Claude 后端执行，不依赖 client backend）；
         // browse_url 不发 anthropic——server tool 已一站式（搜+读+引用）
         var serverTools: [[String: Any]] = []
-        if family == .anthropic, PermissionCenter.capabilityEnabled(.webSearch) {
+        if family == .anthropic, PermissionCenter.capabilityEnabled(.webSearch), ToolRegistry.serverWebSearchOn(gate) {
             serverTools = [WebSearchToolService.anthropicServerTool()]
         }
 
@@ -3356,8 +3784,9 @@ final class ConversationViewModel {
         }
         // 工具按 name 字典序固定排序：顺序抖动 = prompt cache 整段 miss（无论哪家 provider）
         let tools = (builtinTools + mcpTools + serverTools).sorted { toolName($0) < toolName($1) }
-        guard !tools.isEmpty else { return (nil, "", .noneEnabled, []) }
-        var hint = fileLibraryOn ? fileLibrarySystemHint(profileId: profileId) : ""
+        guard !tools.isEmpty else { return (nil, "", .noneEnabled, [], nil) }
+        // 文件库说明跟着 fs_* 走（权限关了 / 抽屉里全关了都不发；收在〔更多工具〕里的也算能用）
+        var hint = builtinNames.contains(where: { FileLibraryTools.Name(rawValue: $0) != nil }) ? fileLibrarySystemHint(profileId: profileId, available: builtinNames, tucked: Set(tuckedDefs.map(\.name))) : ""
         if !mcpCatalog.isEmpty {
             if !hint.isEmpty { hint += "\n\n" }
             if deferMCP {
@@ -3370,12 +3799,12 @@ final class ConversationViewModel {
         if !tuckedDefs.isEmpty {
             if !hint.isEmpty { hint += "\n\n" }
             hint += "〔更多工具〕下面这些工具没放进工具清单，要用时直接 tool_invoke(name, arguments) 调；参数不清楚先 tool_inspect(names) 看：\n"
-                + tuckedDefs.map { "- \($0.name) — \(ToolRegistry.tuckedBlurbs[$0.name] ?? "")" }.joined(separator: "\n")
+                + tuckedDefs.map { "- \($0.name) — \(ToolRegistry.blurb(for: $0))" }.joined(separator: "\n")
         }
-        // 设备工具说明段（有任一设备工具可用才加，前缀稳定）
+        // 设备工具说明段（只提这一轮能调到的，前缀稳定）
         if builtinNames.contains(where: { DeviceToolDispatcher.handles($0) }) {
             if !hint.isEmpty { hint += "\n\n" }
-            hint += DeviceToolDispatcher.systemHint
+            hint += DeviceToolDispatcher.systemHint(available: builtinNames)
             if let routing = DeviceToolDispatcher.timingHint(available: builtinNames) { hint += "\n" + routing }
         }
         // 固定一句（前缀稳定），职责边界与 fs_search 对仗
@@ -3389,15 +3818,19 @@ final class ConversationViewModel {
             hint += SelfMemoryTool.systemHint(available: builtinNames)
         }
         // 联网搜索 system 提示——client-side 才需要（教引用语法）；server tool 由 Anthropic 后端管
-        if !searchTools.isEmpty, family == .openAI {
+        // 10-15：按能调到的算（收进〔更多工具〕的也算）；browse_url 关了就给不提它的版本
+        if builtinNames.contains(WebSearchToolService.toolName), family == .openAI {
             if !hint.isEmpty { hint += "\n\n" }
             let assistantName = (UserDefaults.standard.string(forKey: "assistantName") ?? "").trimmingCharacters(in: .whitespaces)
-            hint += WebSearchToolService.systemPrompt(assistantName: assistantName)
+            hint += WebSearchToolService.systemPrompt(assistantName: assistantName, browse: builtinNames.contains(BrowseURLTool.toolName))
         }
         // #089 P1-c：能力说明按这一轮真实下发的工具生成（人设 / 预设里写的「某某暂时关闭」和这里冲突时以这里为准）。工具不变这段字就不变
         if !hint.isEmpty { hint += "\n\n" }
-        hint += Self.capabilitySection(tools)
-        return (tools, hint, nil, tuckedDefs.map(\.name))
+        hint += Self.capabilitySection(tools, hasTucked: !tuckedDefs.isEmpty)
+        // #093：这一轮能调到的名字（历史回放判断「包回 tool_invoke 还是退纯文字」用）：清单里的 + 收起的 + defer 的 MCP 目录
+        let offered = ToolReplay.clientToolNames(tools).union(tuckedDefs.map(\.name))
+            .union(deferMCP ? mcpCatalog.map(\.tool.name) : [])
+        return (tools, hint, nil, tuckedDefs.map(\.name), offered)
     }
 
     /// 元工具执行：tool_search/tool_inspect 查 MCP catalog + 收起来的内建（builtins）；tool_invoke 路由到真实 MCP 工具
@@ -3425,9 +3858,8 @@ final class ConversationViewModel {
                 let valid = (builtins.map(\.name) + catalog.map { $0.tool.name }).joined(separator: ", ")
                 return ("找不到工具「\(rawName)」。name 只填名字本身、别带来源。可用：\(valid)。先用 tool_search 确认。", true, "工具检索")
             }
-            let inner = args["arguments"] as? [String: Any] ?? [:]
-            let innerJSON = (try? JSONSerialization.data(withJSONObject: inner))
-                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            let innerJSON = Self.invokeInnerJSON(args["arguments"] as? [String: Any] ?? [:],
+                                                 schema: catalog.first { $0.tool.name == toolName }?.tool.schemaAny())
             var serverName: String?
             let r = await runWithSecrets(toolName: toolName, argumentsJSON: innerJSON, conversationId: conversationId) { json in
                 let m = await MCPProvider.shared.callToolText(serverIds: mcpServerIds, toolName: toolName, argumentsJSON: json)
@@ -3442,7 +3874,8 @@ final class ConversationViewModel {
 
     /// 注入 system prompt 的文件库说明 + 文件名清单（不含正文，上限 50）
     /// R2：books/ 从清单排除（章节文件会淹没 50 条坑），换成紧凑的「正在读」语境段
-    func fileLibrarySystemHint(profileId: String) -> String {
+    /// available / tucked：这一轮能调到的 / 收起的工具名，默认模板里的工具清单只提能调到的；nil = 原样（测试 / 不关心工具的调用方）
+    func fileLibrarySystemHint(profileId: String, available: Set<String>? = nil, tucked: Set<String> = []) -> String {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         let airSpan = AirProbeSections.enabled ? AirProbeSections.enter("ConversationViewModel.fileLibrarySystemHint") : nil
         defer { if let airSpan { AirProbeSections.leave(airSpan) } }
@@ -3477,7 +3910,10 @@ final class ConversationViewModel {
 
         // 模板可在设置页改（留空=默认）。占位符 {{files}} / {{fileContents}}
         let custom = UserDefaults.standard.string(forKey: "fileLibraryInjectionTemplate")
-        let template = (custom?.isEmpty == false) ? custom! : FileLibraryTools.defaultInjectionTemplate
+        let template = (custom?.isEmpty == false) ? custom!
+            : available.map { FileLibraryTools.defaultInjectionTemplate.replacingOccurrences(
+                of: FileLibraryTools.defaultToolSentence, with: FileLibraryTools.toolSentence(available: $0, tucked: tucked)) }
+            ?? FileLibraryTools.defaultInjectionTemplate
         let filled = template
             .replacingOccurrences(of: "{{files}}", with: listing)
             .replacingOccurrences(of: "{{fileContents}}", with: contentsSection)
@@ -3500,9 +3936,14 @@ final class ConversationViewModel {
         #endif
         let anniversary = AnniversaryIntentWriter.hint(profileId: profileId)
         // #069：fs_* 对 memory/ 只读，但 self 记忆和资料卡有专用写入口——别再说整棵树「系统生成、只读」
-        let memoryTreeHint = SelfMemoryTool.enabled
-            ? "记忆树：memory/ 下是楼层记忆（上下文摘要、窗口总结、时间轴、心声等），fs_* 工具对它只读，可用 fs_read / fs_search 查阅；其中 memory/self/ 是你自己的记忆，改它用 remember / edit_memory / forget_memory，资料卡用 update_profile_card 改。"
-            : "记忆树：memory/ 下是楼层记忆（上下文摘要、窗口总结、时间轴、心声等），fs_* 工具对它只读，可用 fs_read / fs_search 查阅；资料卡用 update_profile_card 改。"
+        // 10-15：只提这一轮能调到的写入口（available 为 nil = 按记忆开关，老口径）
+        let selfTools = available.map { avail in [SelfMemoryTool.rememberName, SelfMemoryTool.editName, SelfMemoryTool.forgetName].filter(avail.contains) }
+            ?? (SelfMemoryTool.enabled ? [SelfMemoryTool.rememberName, SelfMemoryTool.editName, SelfMemoryTool.forgetName] : [])
+        let profileCardOn = available?.contains(ProfileCardTool.toolName) ?? true
+        var memoryTreeHint = "记忆树：memory/ 下是楼层记忆（上下文摘要、窗口总结、时间轴、心声等），fs_* 工具对它只读，可用 fs_read / fs_search 查阅"
+        if !selfTools.isEmpty { memoryTreeHint += "；其中 memory/self/ 是你自己的记忆，改它用 \(selfTools.joined(separator: " / "))" }
+        if profileCardOn { memoryTreeHint += (selfTools.isEmpty ? "；" : "，") + "资料卡用 \(ProfileCardTool.toolName) 改" }
+        memoryTreeHint += "。"
         return "<文件库>\n\(filled)\(topicBox)\(healthLog)\(tradeLog)\(anniversary)\n\(memoryTreeHint)\(CCMemorySync.promptHint(profileId: profileId))过长的工具结果会存档在 tool-results/（只读），结果里给了路径时用 fs_read(path, offset, limit) 分段取回。\n</文件库>"
     }
 
@@ -3611,16 +4052,16 @@ final class ConversationViewModel {
     }
 
     /// #089 P1-c：「这一轮工具清单里实际有的」，一行一个名字 + 描述的第一句。顺序同工具清单（已按名字排好）
-    static func capabilitySection(_ tools: [[String: Any]]) -> String {
+    static func capabilitySection(_ tools: [[String: Any]], hasTucked: Bool = true) -> String {
         let lines = tools.compactMap { tool -> String? in
             let fn = tool["function"] as? [String: Any]
             guard let name = (tool["name"] as? String) ?? (fn?["name"] as? String), !name.isEmpty else { return nil }
             let desc = (tool["description"] as? String) ?? (fn?["description"] as? String) ?? ""
             if desc.isEmpty { return tool["type"] != nil ? "- \(name)（服务端执行）" : "- \(name)" }
-            let first = desc.split(whereSeparator: { "。\n".contains($0) }).first.map(String.init) ?? desc
-            return "- \(name) — \(first.count > 60 ? String(first.prefix(60)) + "…" : first)"
+            return "- \(name) — \(ToolRegistry.firstSentence(desc))"
         }
-        return "〔当前能用的工具〕这一轮工具清单里实际有这些（人设或预设里关于哪些工具开着、关着的说法和这里冲突时，以这里为准；〔更多工具〕里列的也能用）：\n"
+        // 没有收起的工具就不提〔更多工具〕（粟粟 10-15：关了的不带说明）
+        return "〔当前能用的工具〕这一轮工具清单里实际有这些（人设或预设里关于哪些工具开着、关着的说法和这里冲突时，以这里为准\(hasTucked ? "；〔更多工具〕里列的也能用" : "")）：\n"
             + lines.joined(separator: "\n")
     }
 
@@ -3716,10 +4157,44 @@ final class ConversationViewModel {
         return ordered
     }
 
+    /// thinking 回传 §3.2：原逻辑跑完后挂这一次回复的思考段。base = 原逻辑追加前的段数（工具节点：插在这次追加的段前面）；
+    /// nil = 普通回复，存成 `[.text(content), 思考…]`（astra #4：老版本按分段渲染也看得到正文；新版本认 `isAttachedThinkingReply` 照旧按 content 渲染），contentType 不变。
+    /// 正文为空 / 只剩「⚠️ 出错」「（已停止）」也照挂（只想了没说完的思考不丢）；没正文时不画空正文泡由显示层管（CardFlowView.hasMessageBody）
+    static func attachThinking(_ thinking: [MessageSegment], to node: MessageNode, base: Int?) {
+        guard !thinking.isEmpty else { return }
+        if let base, var segs = node.segments, base <= segs.count {
+            segs.insert(contentsOf: thinking, at: base)
+            node.setSegments(segs)
+        } else if base == nil, (node.segments ?? []).isEmpty {
+            node.setSegments([.text(node.content)] + thinking)
+        }
+    }
+
+    /// 调工具那一次回复里工具段之前的段：思考 → 正文 → 进度更新思考（按回复顺序；工具调用之间的进度更新思考也放这里，只影响显示）。
+    /// 没有块（OpenAI 兼容）= 有思考时 [思考, 正文]（思考总在正文前），没有就只有正文，和以前一样
+    static func replySegments(_ blocks: [ReplyBlock], text: String, reasoning: ReasoningCapture? = nil) -> [MessageSegment] {
+        if blocks.isEmpty, let thinking = reasoning?.segment {
+            return text.isEmpty ? [thinking] : [thinking, .text(text)]
+        }
+        var out: [MessageSegment] = []
+        var textPlaced = text.isEmpty
+        for block in blocks {
+            if let seg = block.thinkingSegment {
+                out.append(seg)
+            } else if block.type == "text", !textPlaced {
+                out.append(.text(text))
+                textPlaced = true
+            }
+        }
+        if !textPlaced { out.append(.text(text)) }
+        return out
+    }
+
     private static func toolTurnsEstimateText(_ toolTurns: [ToolTurn]) -> String {
         toolTurns.flatMap { turn in
             turn.calls.map { "tool_call \($0.id) \($0.name) \($0.argumentsJSON)" }
                 + turn.results.map { "tool_result \($0.toolUseId) \($0.text)" }
+                + [turn.reasoning?.text].compactMap { $0 }.filter { !$0.isEmpty }.map { "reasoning \($0)" }
         }.joined(separator: "\n")
     }
 
@@ -3761,16 +4236,15 @@ final class ConversationViewModel {
     }
 
     private static func addingBudgetSummaryInstruction(to toolTurns: [ToolTurn]) -> [ToolTurn] {
-        guard let lastTurn = toolTurns.last, !lastTurn.results.isEmpty else { return toolTurns }
+        guard var lastTurn = toolTurns.last, !lastTurn.results.isEmpty else { return toolTurns }
         var turns = toolTurns
-        var results = lastTurn.results
-        let lastResult = results.removeLast()
-        results.append(ToolResultBlock(
+        let lastResult = lastTurn.results.removeLast()
+        lastTurn.results.append(ToolResultBlock(
             toolUseId: lastResult.toolUseId,
             text: lastResult.text + "\n\n" + budgetSummaryInstruction,
             isError: lastResult.isError
         ))
-        turns[turns.count - 1] = ToolTurn(calls: lastTurn.calls, results: results)
+        turns[turns.count - 1] = lastTurn
         return turns
     }
 
@@ -3815,7 +4289,10 @@ final class ConversationViewModel {
         if assistantNode.content.isEmpty { assistantNode.content = Self.budgetToolStopText }
         try? context.save()
 
-        let summaryTurns = Self.addingBudgetSummaryInstruction(to: toolTurns)
+        // 收尾这次 tools: nil = tools 变了，当轮思考块的前缀跟着变（plan-thinking §3.3 / R8）→ 这一次不带思考块
+        let summaryTurns = Self.addingBudgetSummaryInstruction(to: toolTurns).map { $0.droppingThinking() }
+        let droppedThinking = toolTurns.reduce(0) { $0 + $1.thinkingBlockCount }
+        if droppedThinking > 0 { CacheDiagLog.shared.log("🧠 预算收尾不带 tools：当轮 \(droppedThinking) 个思考块这一次没带") }
         var summarySampling = payload.sampling
         summarySampling.maxTokens = min(OutputTokenCap.resolved(payload.sampling, modelId: model.modelId).maxTokens, Self.budgetSummaryMaxTokens)
         summarySampling.maxTokensAuto = false
@@ -3889,13 +4366,22 @@ final class ConversationViewModel {
             onComplete: { [weak self] streamedText, usage in
                 guard let self else { return }
                 // ⑤a 输入阶段：完整回复入库前跑一次普通规则（流式中不逐 token 改存储）
-                let fullText = self.applyInputRegex(streamedText, role: "assistant", profile: profile, preset: preset)
+                var fullText = self.applyInputRegex(streamedText, role: "assistant", profile: profile, preset: preset)
+                // thinking 回传 §3.6 / Q8：模型拒绝在正文里写内部推理 → 气泡尾巴说人话 + 诊断日志
+                let refusal = MainActor.assumeIsolated { self.providerRouter.lastRefusalCategory }
+                if let notice = ParamErrorClassifier.refusalNotice(category: refusal) {
+                    fullText += (fullText.isEmpty ? "" : "\n\n") + "⚠️ " + notice
+                    CacheDiagLog.shared.log("🧠 回复被拒 stop_details.category=\(refusal ?? "")（\(model.modelId)）")
+                }
+                let thinking = MainActor.assumeIsolated { self.providerRouter.lastThinkingSegments }
+                let thinkingBase = assistantNode.segments.flatMap { $0.isEmpty ? nil : $0.count }
                 if let existing = assistantNode.segments, !existing.isEmpty {
                     var segs = existing
                     if !fullText.isEmpty { segs.append(.text(fullText)) }
                     assistantNode.setSegments(segs)
                 }
                 assistantNode.content = fullText
+                Self.attachThinking(thinking, to: assistantNode, base: thinkingBase)
                 RequestBodyDiag.checkReply(ChatCardIndex.visibleText(content: fullText, segments: assistantNode.segments),
                                            segments: assistantNode.segments)
                 // Anthropic server-side web search 收尾——把流式累积的 sources 落到 message
@@ -3906,6 +4392,7 @@ final class ConversationViewModel {
                     self.outputLimitHitNodeIds.insert(assistantNodeId)
                     BreadcrumbLog.shared.add("✂️", "已达输出上限 \(self.providerRouter.lastRequestedMaxTokens ?? 0)")
                 }
+                self.showParamAdaptationNotice()
                 streamingText = ""
                 conversation.nodeCount = currentPath.filter {
                     ($0.role == "user" || $0.role == "assistant") && $0.hasDisplayableContent
@@ -3927,15 +4414,10 @@ final class ConversationViewModel {
                 BreadcrumbLog.shared.add("✅", "回复完成 in \(usage?.inputTokens ?? 0) / out \(usage?.outputTokens ?? 0) tok")
                 self.commitBudgetSpend(providerManager: providerManager, model: model, usage: usage)
                 if MemoryFlags.masterEnabled && conversation.memoryEnabled {
-                    // 第二刀 A2：人设 = systemPrompt + 角色描述，作为提取时的「你是谁」；称呼用楼层真名
-                    let persona = [profile.systemPrompt, profile.characterDescription]
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }
-                        .joined(separator: "\n\n")
-                    self.extractMemoriesIfNeeded(profileId: profile.id, conversationId: conversation.id, systemPrompt: persona,
+                    // v5 C2：只看称呼 + 这一截，不带主提示词；画像（做梦）v5 Q4 下线，不再自动写
+                    self.extractMemoriesIfNeeded(profileId: profile.id, conversationId: conversation.id,
                                                  names: MemoryExtractor.Names(userName: profile.userName, assistantName: profile.assistantName),
                                                  model: model, providerManager: providerManager, context: context)
-                    self.dreamIfNeeded(profileId: profile.id, model: model, providerManager: providerManager, context: context)
                 }
                 self.transcribeImagesIfNeeded(model: model, providerManager: providerManager, context: context)
                 self.triggerContextSummaryIfNeeded(
@@ -3945,7 +4427,7 @@ final class ConversationViewModel {
                     contextDepth: preset.sampling.contextDepth,
                     model: model, providerManager: providerManager
                 )
-                SessionCloseoutTrigger.shared.request()   // 第三刀：别的窗口静默够了就收尾
+                SessionCloseoutTrigger.shared.request(activeConversationId: conversation.id)   // 第三刀：别的窗口静默够了就收尾；v5 A8「每 N 回合」看刚回完的这个
                 self.finishAssistantTurn()   // onComplete 只在最终无工具轮触发（与 onToolCalls 互斥）
             },
             onError: { [weak self] error in
@@ -3953,9 +4435,12 @@ final class ConversationViewModel {
                 if let record = self.providerRouter.lastUsageRecord {
                     MainActor.assumeIsolated { UsageCostSettlement.shared.attach(record: record, node: assistantNode) }
                 }
+                self.showParamAdaptationNotice()
                 BreadcrumbLog.shared.add("⚠️", "出错：\(error.prefix(120))")
                 // Phase 4 流式重写 Contract 5：保 partial post-tool 文本（不丢已生成内容）
                 // 跟 cancelAssistantTurn (line 1363-1380) 行为对齐
+                let thinking = MainActor.assumeIsolated { self.providerRouter.lastThinkingSegments }
+                let thinkingBase = assistantNode.segments.flatMap { $0.isEmpty ? nil : $0.count }
                 if var segs = assistantNode.segments, !segs.isEmpty {
                     if !streamingText.isEmpty { segs.append(.text(streamingText)) }
                     segs.append(.text("⚠️ \(error)"))
@@ -3966,11 +4451,19 @@ final class ConversationViewModel {
                     // 非 segmented 且有 partial → 保 partial 不覆盖
                     assistantNode.content = streamingText + "\n\n⚠️ \(error)"
                 }
+                Self.attachThinking(thinking, to: assistantNode, base: thinkingBase)
                 streamingText = ""
                 self.finishAssistantTurn()
             },
             onToolCalls: { [weak self] calls, usage in
                 guard let self else { return }
+                self.showParamAdaptationNotice()
+                // thinking 回传：这一次回复的原样块（存段 + 下一次请求原样回传），趁下一次请求开始前读
+                let replyBlocks = MainActor.assumeIsolated { self.providerRouter.lastAssistantBlocks }
+                let reasoning = MainActor.assumeIsolated { self.providerRouter.lastReasoning }
+                // astra #1：这一次是「思考块被拒、去块重发」成功的 → 前面几轮之后也一直不带思考块（别把被拒的块再带回来）
+                let turnsSoFar = MainActor.assumeIsolated { self.providerRouter.lastRequestDroppedThinking }
+                    ? toolTurns.map { $0.droppingThinking() } : toolTurns
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.recordUsage(usage, on: assistantNode, model: model, providerManager: providerManager)
@@ -3986,7 +4479,7 @@ final class ConversationViewModel {
                         didSet { if let last = segs.last { self.noteTurnSegment(last, conversationId: activityConvId) } }
                     }
                     if CallSession.activeSnapshot { self.callStreamHook?(.segmentBreak, assistantNodeId, conversation.id) }
-                    if !streamingText.isEmpty { segs.append(.text(streamingText)) }
+                    for seg in Self.replySegments(replyBlocks, text: streamingText, reasoning: reasoning) { segs.append(seg) }
                     streamingText = ""
                     if isBudgetSummary {
                         segs.append(.text("（预算收尾请求仍返回了工具调用，已结束。）"))
@@ -4031,6 +4524,8 @@ final class ConversationViewModel {
                     var invokeWrapped: [String: String] = [:]
                     var fileLibraryDidChange = false
                     let gate = self.toolGate(for: model, providerManager: providerManager, profileId: profileId)
+                    // 拆包按这一轮实际发出去的 tools 数组算（astra #3：循环中途把收起改成直接给，模型手上还是第一轮那份清单）
+                    let invokable = Self.invokableBuiltins(sentTools: tools)
 
                     for call in calls {
                         var call = call   // 审批卡上改过命令时换参数
@@ -4045,7 +4540,7 @@ final class ConversationViewModel {
                         }
                         // #069 包着「更多工具」里内建工具的 tool_invoke：拆回真名，后面的预检 / 复查 / 权限 / 执行 / 卡片 / 存档都按真工具走；
                         // 回给模型的调用记录仍是原样的 tool_invoke（invokeWrapped 记内层名字，授权卡改过参数时重新包回）
-                        switch Self.unwrapTuckedInvoke(call) {
+                        switch Self.unwrapTuckedInvoke(call, tucked: invokable) {
                         case .notWrapped:
                             break
                         case .invalid(let msg):
@@ -4069,10 +4564,9 @@ final class ConversationViewModel {
                             results.append(ToolResultBlock(toolUseId: call.id, text: bad.message, isError: true))
                             continue
                         }
-                        // 执行前复查（#069）：这一轮没下发的内建工具（开关关着），照着历史直接叫也不执行
-                        let unavailable = gate.map { ToolRegistry.availability(of: call.name, $0) == false }
-                            ?? ToolRegistry.all.contains { $0.definition.name == call.name }
-                        if unavailable {
+                        // 执行前复查（#069）：这一轮没下发的内建工具（开关关着），照着历史直接叫也不执行。
+                        // #093 astra #1：每个调用现读抽屉 / 开关（同一批前面的调用可能 await 很久），审批卡回来后再查一次
+                        if self.toolUnavailableNow(call.name, model: model, providerManager: providerManager, profileId: profileId) {
                             let msg = Self.toolUnavailableMessage(name: call.name)
                             segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "未开启", iconName: "nosign"))
                             segs.append(.toolResult(toolUseId: call.id, text: msg, isError: true, integrationName: "未开启"))
@@ -4091,10 +4585,21 @@ final class ConversationViewModel {
                             call.argumentsJSON = args   // 卡上改过命令：照改过的执行，模型从工具记录里看得到
                         }
                         guard gen == self.turnGeneration else { return }   // 等审批时被停止 / 切楼层
+                        if self.toolUnavailableNow(call.name, model: model, providerManager: providerManager, profileId: profileId) {
+                            let msg = Self.toolUnavailableMessage(name: call.name)
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "未开启", iconName: "nosign"))
+                            segs.append(.toolResult(toolUseId: call.id, text: msg, isError: true, integrationName: "未开启"))
+                            results.append(ToolResultBlock(toolUseId: call.id, text: msg, isError: true))
+                            continue
+                        }
+                        // 中转塞进参数的未声明顶层键（R8）只在执行时去掉；存进历史 / 回给模型的调用记录照原样
+                        let replayArgs = call.argumentsJSON
+                        call.argumentsJSON = ToolCallPreflight.droppingUndeclared(
+                            call.argumentsJSON, schema: ToolCallPreflight.schema(for: call.name, mcpServerIds: mcpServerIds))
                         #if os(macOS)
                         // 编程会话 AI 工具（W-N N5）：精确四名（不按前缀）；只读，后台新开只读连接执行
                         if CodingTools.names.contains(call.name) {
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "编程会话", iconName: "terminal"))
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "编程会话", iconName: "terminal"))
                             let r = await CodingSessionLibrary.shared.runCodingTool(name: call.name, argumentsJSON: call.argumentsJSON)
                             segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "编程会话"))
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
@@ -4103,8 +4608,8 @@ final class ConversationViewModel {
                         #endif
                         #if PERSONAL_APPS
                         if call.name == DeathScaleAITool.toolName {
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "Mort sans sépulture", iconName: "scalemass"))
-                            let r = DeathScaleAITool.execute(inputJSON: call.argumentsJSON, profileId: profileId)
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "Mort sans sépulture", iconName: "scalemass"))
+                            let r = DeathScaleAITool.execute(inputJSON: Self.executionArgs(call), profileId: profileId)
                             segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "Mort sans sépulture"))
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                             continue
@@ -4113,14 +4618,14 @@ final class ConversationViewModel {
                         if MetaTools.names.contains(call.name) {
                             let m = await handleMetaTool(call, mcpServerIds: mcpServerIds, conversationId: conversation.id,
                                                          builtins: gate.map { ToolRegistry.tuckedDefinitions($0) } ?? [])
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: m.integrationName, iconName: "magnifyingglass"))
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: m.integrationName, iconName: "magnifyingglass"))
                             #if DEBUG
                             print("[Meta] \(call.name) → isError=\(m.isError): \(m.text.prefix(120))")
                             #endif
                             segs.append(.toolResult(toolUseId: call.id, text: m.text, isError: m.isError, integrationName: m.integrationName))
                             results.append(ToolResultBlock(toolUseId: call.id, text: m.text, isError: m.isError))
                         } else if call.name.hasPrefix("fs_") {
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: nil, iconName: nil))
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: nil, iconName: nil))
                             // 修全局卡顿：fs_list / fs_search 要枚举整库（search 还要读每个文件），挪到后台跑；写类工具照旧
                             let r: FileLibraryTools.Result
                             if ["fs_list", "fs_search"].contains(call.name) {
@@ -4130,7 +4635,7 @@ final class ConversationViewModel {
                                 }.value
                             } else {
                                 r = MainThreadIO.tolerated("#033 AI 文件工具主线程执行") {
-                                    FileLibraryTools.execute(name: call.name, inputJSON: call.argumentsJSON, profileId: profileId)
+                                    FileLibraryTools.execute(name: call.name, inputJSON: Self.executionArgs(call), profileId: profileId)
                                 }
                             }
                             if ["fs_write", "fs_append", "fs_edit", "fs_rename", "fs_delete"].contains(call.name) {
@@ -4143,9 +4648,9 @@ final class ConversationViewModel {
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                         } else if call.name == DiceTool.toolName {
                             // 模型自己掷骰子（粟粟 09-26）：真随机；本回合已发的 id 一并避开
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "骰子", iconName: "dice"))
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "骰子", iconName: "dice"))
                             var rng = SystemRandomNumberGenerator()
-                            let r = DiceTool.execute(inputJSON: call.argumentsJSON, using: &rng,
+                            let r = DiceTool.execute(inputJSON: Self.executionArgs(call), using: &rng,
                                                      takenIds: Set(cardIndex.keys).union(diceToolIssuedIds))
                             if !r.isError, let id = ChatCardExtractor.cards(in: r.text).first?.id {
                                 diceToolIssuedIds.insert(id)
@@ -4154,19 +4659,20 @@ final class ConversationViewModel {
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                         } else if call.name == CardGuideTool.toolName {
                             // 卡片写法用到再查（粟粟 10-03）：系统提示里只有目录
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "卡片说明", iconName: "rectangle.stack"))
-                            let r = CardGuideTool.execute(inputJSON: call.argumentsJSON)
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "卡片说明", iconName: "rectangle.stack"))
+                            let r = CardGuideTool.execute(inputJSON: Self.executionArgs(call),
+                                                          available: gate.map { Set(ToolRegistry.enabledDefinitions($0).map(\.name)) })
                             segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "卡片说明"))
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                         } else if call.name == ProfileCardTool.toolName {
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "资料卡", iconName: "person.crop.circle"))
-                            let r = ProfileCardTool.execute(inputJSON: call.argumentsJSON, profileId: profileId)
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "资料卡", iconName: "person.crop.circle"))
+                            let r = ProfileCardTool.execute(inputJSON: Self.executionArgs(call), profileId: profileId)
                             segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "资料卡"))
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                         } else if call.name == TwitterAITool.toolName {
                             // 本地推特：AI 的主号名字头像跟楼层 AI 资料同步（头像同其它地方：assistantAvatar ?? cover）
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "推特", iconName: "bird"))
-                            let r = TwitterAITool.execute(inputJSON: call.argumentsJSON, profileId: profileId,
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "推特", iconName: "bird"))
+                            let r = TwitterAITool.execute(inputJSON: Self.executionArgs(call), profileId: profileId,
                                                           aiName: profile.assistantName,
                                                           aiAvatar: profile.assistantAvatarData ?? profile.coverImageData,
                                                           context: context)
@@ -4174,7 +4680,7 @@ final class ConversationViewModel {
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                         } else if call.name == InnerVoice.toolName {
                             // v2c 心声：当轮立即回执让对话继续；第二跳后台生成+落盘
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "心声", iconName: "heart"))
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "心声", iconName: "heart"))
                             let resultText: String
                             if !InnerVoice.enabled {
                                 resultText = "（心声功能未开启）"
@@ -4207,14 +4713,33 @@ final class ConversationViewModel {
                             results.append(ToolResultBlock(toolUseId: call.id, text: resultText, isError: false))
                         } else if SelfMemoryTool.names.contains(call.name) {
                             // 第二刀 B2：写自己的记忆（memory/self/）；这场对话关了「记忆参与」就不写
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "记忆", iconName: "bookmark"))
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "记忆", iconName: "bookmark"))
                             let r = conversation.memoryEnabled
-                                ? SelfMemoryTool.execute(name: call.name, inputJSON: call.argumentsJSON, profileId: profileId, conversationId: conversation.id)
+                                ? SelfMemoryTool.execute(name: call.name, inputJSON: Self.executionArgs(call), profileId: profileId, conversationId: conversation.id)
                                 : SelfMemoryTool.Result(text: "这场对话关了记忆参与，不能写记忆", isError: true)
                             segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "记忆"))
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
+                        } else if call.name == PendingNotesTool.toolName {
+                            // v5 §3-2：标待续（读写 memory/pending/，放后台）；这场对话关了「记忆参与」就不动
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "待续", iconName: "pin"))
+                            let input = call.argumentsJSON, convId = conversation.id
+                            let r = conversation.memoryEnabled
+                                ? await Task.detached { PendingNotesTool.execute(inputJSON: input, profileId: profileId, conversationId: convId) }.value
+                                : PendingNotesTool.Result(text: "这场对话关了记忆参与，不能改待续", isError: true)
+                            segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "待续"))
+                            results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
+                        } else if call.name == WikiSuggestTool.toolName {
+                            // C2/C3 v2 第 4 段：提整理方向，只进待批（批了才查、写）；这场对话关了「记忆参与」就不提
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "整理方向", iconName: "books.vertical"))
+                            let input = Self.executionArgs(call)
+                            let r = conversation.memoryEnabled
+                                ? await Task.detached { WikiSuggestTool.execute(inputJSON: input, wiki: WikiStore(profileId: profileId), profileId: profileId) }.value
+                                : WikiSuggestTool.Result(text: "这场对话关了记忆参与，不能提整理方向", isError: true)
+                            if !r.isError { NotificationCenter.default.post(name: .memoryDidChange, object: nil) }
+                            segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "整理方向"))
+                            results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                         } else if call.name == RecallTool.toolName {
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "回忆", iconName: "clock.arrow.circlepath"))
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "回忆", iconName: "clock.arrow.circlepath"))
                             // 连环 recall 熔断（粟粟实测：宽查询翻页式 5+ 连调爆上下文）
                             recallCallsThisTurn += 1
                             guard recallCallsThisTurn <= RecallTool.maxCallsPerTurn else {
@@ -4224,7 +4749,7 @@ final class ConversationViewModel {
                                 continue
                             }
                             let r = await RecallTool.execute(
-                                inputJSON: call.argumentsJSON,
+                                inputJSON: Self.executionArgs(call),
                                 profileId: profileId,
                                 currentConversationId: conversation.id,
                                 userName: profile.userName.isEmpty ? "用户" : profile.userName,
@@ -4240,8 +4765,8 @@ final class ConversationViewModel {
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                         } else if call.name == WebSearchToolService.toolName {
                             // client-side 联网搜索：当前选中的 backend 跑一遍 + 给 items 加 id/index 后回灌
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "联网搜索", iconName: "globe"))
-                            let r = await WebSearchToolService.execute(inputJSON: call.argumentsJSON)
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "联网搜索", iconName: "globe"))
+                            let r = await WebSearchToolService.execute(inputJSON: Self.executionArgs(call))
                             #if DEBUG
                             print("[WebSearch] → isError=\(r.isError): \(r.text.prefix(120))")
                             #endif
@@ -4249,8 +4774,8 @@ final class ConversationViewModel {
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                         } else if call.name == AskUserTool.toolName {
                             // 问问题：不立即执行——循环收尾存 pending 暂停，等用户点选（resumeUserQuestion 恢复）
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "问问题", iconName: "questionmark.circle"))
-                            if let questions = AskUserTool.parse(inputJSON: call.argumentsJSON) {
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "问问题", iconName: "questionmark.circle"))
+                            if let questions = AskUserTool.parse(inputJSON: Self.executionArgs(call)) {
                                 askItems.append(.init(call: call, questions: questions))
                             } else {
                                 segs.append(.toolResult(toolUseId: call.id, text: AskUserTool.invalidArgsMessage, isError: true, integrationName: "问问题"))
@@ -4258,8 +4783,8 @@ final class ConversationViewModel {
                             }
                         } else if call.name == BrowseURLTool.toolName {
                             // 内置浏览器读 URL → Markdown 全文（v2 Phase 1）
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "网页阅读", iconName: "doc.text.magnifyingglass"))
-                            let r = await BrowseURLTool.execute(inputJSON: call.argumentsJSON)
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "网页阅读", iconName: "doc.text.magnifyingglass"))
+                            let r = await BrowseURLTool.execute(inputJSON: Self.executionArgs(call))
                             #if DEBUG
                             print("[BrowseURL] → isError=\(r.isError): \(r.text.prefix(120))")
                             #endif
@@ -4267,7 +4792,7 @@ final class ConversationViewModel {
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                         } else if DeviceToolDispatcher.handles(call.name) {
                             // 设备工具（plan-设备工具）：权限闸已在循环头判过；dispatcher 自带 required 预检
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: "设备", iconName: "iphone"))
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "设备", iconName: "iphone"))
                             let r: (text: String, isError: Bool)
                             if call.name == RunCommandTool.toolName {
                                 // 加密值只换 run_command；「运行」面板登记占位版命令
@@ -4277,7 +4802,7 @@ final class ConversationViewModel {
                                     return (e.text, e.isError)
                                 }
                             } else {
-                                let e = await DeviceToolDispatcher.execute(name: call.name, inputJSON: call.argumentsJSON, profileId: profileId, conversationId: conversation.id)
+                                let e = await DeviceToolDispatcher.execute(name: call.name, inputJSON: Self.executionArgs(call), profileId: profileId, conversationId: conversation.id)
                                 r = (e.text, e.isError)
                             }
                             segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "设备"))
@@ -4289,7 +4814,7 @@ final class ConversationViewModel {
                                 serverName = m.serverName
                                 return (m.text, m.isError)
                             }
-                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: call.argumentsJSON, integrationName: serverName ?? "MCP", iconName: "network"))
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: serverName ?? "MCP", iconName: "network"))
                             #if DEBUG
                             print("[MCP] \(call.name) → isError=\(r.isError): \(r.text.prefix(120))")
                             #endif
@@ -4355,8 +4880,9 @@ final class ConversationViewModel {
                             payload: payload, systemPrompt: systemPrompt, model: model, providerManager: providerManager,
                             conversation: conversation, assistantNode: assistantNode, assistantNodeId: assistantNodeId,
                             profile: profile, preset: preset, context: context,
-                            tools: tools, toolTurns: toolTurns, round: round,
-                            calls: sentCalls, otherResults: results
+                            tools: tools, toolTurns: turnsSoFar, round: round,
+                            calls: sentCalls, otherResults: results, assistantContent: replyBlocks.wireContent,
+                            thinkingTokens: usage?.reasoningTokens, reasoning: reasoning
                         )
                         return
                     }
@@ -4366,9 +4892,15 @@ final class ConversationViewModel {
                         model: model, providerManager: providerManager,
                         conversation: conversation, assistantNode: assistantNode, assistantNodeId: assistantNodeId,
                         profile: profile, preset: preset, context: context,
-                        tools: tools, toolTurns: toolTurns + [ToolTurn(calls: sentCalls, results: results)], round: round + 1
+                        tools: tools,
+                        toolTurns: turnsSoFar + [ToolTurn(calls: sentCalls, results: results, assistantContent: replyBlocks.wireContent,
+                                                         thinkingTokens: usage?.reasoningTokens, reasoning: reasoning)],
+                        round: round + 1
                     )
                 }
+            },
+            onRetry: { [weak self] notice in
+                self?.transientNotice = TransientNotice(notice)
             }
         )
     }
@@ -4388,7 +4920,7 @@ final class ConversationViewModel {
         // R4 C-05：CC 发送不经 Router，严格测量角色在读钥匙串 / 连 WS 之前记外发并停轮（§3.1）
         if PerfHarness.strictMeasure { PerfGuardrails.tripOutbound("cc.send", model.credentialId); return }
         #endif
-        let ws = CCBridgeWebSocketClient.shared
+        let ws = ccBridgeClient
         // 冷启动兜底：ContentView 启动时已 connect，这里补一手（沿旧 CCBridgeProvider 语义）。
         // 已经有候选地址（内嵌 hub 的端口 / 扫码的 LAN+Tailscale）就只催它现在重连：provider.baseURL 默认还是 7890，
         // 拿它覆盖会把断线中的 App 连去错的 hub（astra 实现审 #4）。从没连过才走 provider 地址。
@@ -4468,7 +5000,7 @@ final class ConversationViewModel {
 
         // hub raw 直发；session_name 跟随当前对话绑定（nil → hub fallback 默认 mp-cc）
         let sessionName = conversation.ccBridgeSessionName
-        CCBridgeWebSocketClient.shared.sendCommand(text, session: sessionName) { result in
+        ccBridgeClient.sendCommand(text, session: sessionName) { result in
             switch result {
             case .success:
                 #if DEBUG
@@ -4511,8 +5043,11 @@ final class ConversationViewModel {
         }
     }
 
-    /// AUDN 记忆提取：每轮对话后异步调用便宜模型提取/更新/删除记忆
-    private func extractMemoriesIfNeeded(profileId: String, conversationId: String, systemPrompt: String, names: MemoryExtractor.Names, model: ProviderModel, providerManager: ProviderManager, context: ModelContext) {
+    /// C2 碎片池（v5 §3-1、plan §七）：每满 N 条新消息（`mem_c2_every` 默认 20，两边加起来；和 CC 那条路同一份水位 `FragmentWatch`）
+    /// 把这一截交给小小模型填严格 JSON，只加不改不删。消息和 A2 同口径（`sessionMessages`，工具调用写成中性的 [调用了 …]）。
+    /// 不带主提示词；模型默认跟提取模型，选了本机但没装 / 在后台这一轮用提取模型（第一次碰到没装弹一次提示）
+    private func extractMemoriesIfNeeded(profileId: String, conversationId: String, names: MemoryExtractor.Names,
+                                         model: ProviderModel, providerManager: ProviderManager, context: ModelContext) {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure { PerfGuardrails.suppress("memoryExtract"); return }   // 测量角色旁路早退（perf P0 §3.2）
         #endif
@@ -4520,145 +5055,58 @@ final class ConversationViewModel {
 
         // CR-4：agent 消息（自主读书的读后感等）不进提取窗口——AI 的话不该变成"关于粟粟的记忆"
         let agentNodeIds = Set(currentPath.filter { $0.agentOrigin != nil }.map(\.id))
-        let recentMessages = Array(buildSideModelMessages().suffix(memoryExtractWindow))
-            .filter { !agentNodeIds.contains($0.id) }
-            .map { (id: $0.id, role: $0.role, content: $0.content) }
-        guard !recentMessages.isEmpty else { return }
+        let path = sessionMessages().filter { !agentNodeIds.contains($0.id) }
+        guard !path.isEmpty else { return }
 
-        // MV2 间隔化：counter 计自上次实际提取以来累积的轮次；首轮必跑（hasEverRun=false）；
-        // counter 更新永远生效，guard 决定是否实际跑后续工作
-        let decision = ExtractScheduler.tick(
-            counter: extractRoundCounter,
-            interval: MemoryFlags.extractInterval,
-            hasEverRun: hasExtractedEverInSession
-        )
-        extractRoundCounter = decision.newCounter
-        guard decision.shouldRun else {
-            #if DEBUG
-            print("🧠 记忆提取: 间隔守卫跳过（counter=\(decision.newCounter)/N=\(MemoryFlags.extractInterval)）")
-            #endif
-            return
-        }
-        hasExtractedEverInSession = true
-
-        let existingMemories = memoryStore.listHotAndWarm(profileId: profileId, context: context)
-        let extractModel = cheapModel(providerManager: providerManager, fallback: model)
-        #if DEBUG
-        print("🧠 记忆提取: 使用模型 \(extractModel.name) (\(extractModel.id)), 最近 \(recentMessages.count) 条消息, 已有 \(existingMemories.count) 条记忆")
-        #endif
-
-        // MV1: 加载短期画像喂给提取器（已涵盖的事实不再 add，封僵尸回路）
-        // 紧急修：把楼层 systemPrompt 也喂——AUDN 看不见语境就分不清剧情/本人/AI 互动
-        let profile = ProfileFileStore.load(profileId: profileId)
-        let request = MemoryExtractor.buildRequest(
-            recentMessages: recentMessages,
-            existingMemories: existingMemories,
-            profile: profile,
-            systemPrompt: systemPrompt,
-            names: names
-        )
-
-        // 预算保险闸：共用主对话 provider 一个预算（粟粟批注：分词器也是粗算，保险即可）
-        if backendAgentBlockedByBudget(model: model, messages: request.messages, systemPrompt: request.systemPrompt, providerManager: providerManager) {
-            #if DEBUG
-            print("🧠 记忆提取: 跳过（主 provider \(model.credentialId) 预算已用完 / 未拨款）")
-            #endif
-            return
-        }
-
-        // Fire-and-forget: 异步调用，不阻塞对话
-        let router = ProviderRouter(usageContext: UsageContext(kind: .memory, conversationId: conversationId, profileId: profileId))
+        let route = MainActor.assumeIsolated { FragmentModelRoute.resolve(providerManager: providerManager, chatFallback: model) }
+        let caller = FragmentModelRoute.caller(for: route.route, providerManager: providerManager,
+                                               conversationId: conversationId, profileId: profileId)
+        let store = memoryStore
+        let every = FragmentWatch.every()
         Task.detached { [weak self] in
-            do {
-                let (response, usage) = try await router.sendNonStreaming(
-                    model: extractModel,
-                    messages: request.messages,
-                    systemPrompt: request.systemPrompt,
-                    providerManager: providerManager
-                )
-                #if DEBUG
-                print("🧠 记忆提取: 模型返回 \(response.prefix(200))...")
-                #endif
-
-                // Spent 累加到全局预算池（GlobalBudgetStore 不分 providerId，共用一个预算）。
-                // 但 actualCost 必须用 extractModel（实际跑的廉价模型）查 PricingCatalog，
-                // 否则 Haiku token 数 × Opus 单价会超收 ~18×（ultrareview B17 / bug_004）。
-                if let usage {
-                    await MainActor.run {
-                        self?.commitBudgetSpend(providerManager: providerManager, model: extractModel, usage: usage, recordTurn: false)
-                    }
-                }
-
-                let actions = MemoryExtractor.parseActions(response)
-                #if DEBUG
-                if actions.isEmpty {
-                    print("🧠 记忆提取: 解析结果为空（模型返回了无法解析的格式或 NOOP）")
-                } else {
-                    print("🧠 记忆提取: 解析到 \(actions.count) 个操作")
-                }
-                #endif
-                // 刀1：模型调用+解析走通 = 供水在流（NOOP 也算成功）；写入失败在下面单独记
-                MemoryHealthStore.recordOK(.extract, profileId: profileId, modelName: extractModel.name)
-                guard !actions.isEmpty else {
-                    return
-                }
-
+            // 没满 N 条 / 第一次见这个窗口 / 这个窗口正在跑：不动（水位成功处理后才提交，astra #3）
+            guard let claim = await FragmentWatch.shared.due(conversationId: conversationId, pathIds: path.map(\.id),
+                                                             dates: path.map(\.date), threshold: every) else { return }
+            let recent = path[claim.range].map { FragmentPool.Message(id: $0.id, role: $0.role, content: $0.content, date: $0.date) }
+            if route.localMissing {
                 await MainActor.run {
-                    var adds = 0, updates = 0, deletes = 0
-                    for action in actions {
-                        switch action {
-                        case .add(let content, let category, _, _):
-                            adds += 1
-                            #if DEBUG
-                            print("🧠 记忆: ✅ ADD [\(category)] \(content.prefix(60))...")
-                            #endif
-                        case .update(let id, let content, _, _):
-                            updates += 1
-                            #if DEBUG
-                            print("🧠 记忆: ✏️ UPDATE \(id.uuidString.prefix(8)) → \(content.prefix(60))...")
-                            #endif
-                        case .delete(let id):
-                            deletes += 1
-                            #if DEBUG
-                            print("🧠 记忆: 🗑️ DELETE \(id.uuidString.prefix(8))")
-                            #endif
-                        }
+                    guard !UserDefaults.standard.bool(forKey: Self.fragmentLocalHintKey) else { return }
+                    UserDefaults.standard.set(true, forKey: Self.fragmentLocalHintKey)
+                    self?.transientNotice = TransientNotice("🧠 C2 碎片池选的本机模型还没下载——去「设置 › 记忆 › C2 碎片池」下载；这一轮先用 \(route.displayName)")
+                }
+            }
+            // 进后台被停下 / 断网 / 开关关了：不算失败，下一轮重来；整包拒收按失败记（连续 3 包状态卡变红）
+            let outcome = await MemoryWriteLog.metered {
+                await FragmentPool.process(recent, names: names, caller: caller, local: route.isLocal, profileId: profileId,
+                                           modelName: route.displayName, fallbackNote: route.fallbackNote) { fragments in
+                    // 认领超时作废了（另一轮已经接手）就不落库（10-16 astra #3）
+                    guard await FragmentWatch.shared.holds(conversationId: conversationId, token: claim.token) else {
+                        throw FragmentPoolError.staleClaim
                     }
-                    // 胶囊在 executeActions 成功后才弹——失败弹"记住 N 条"是假成功（R-B4/P1-19）
-                    do {
-                        try MemoryExtractor.executeActions(
-                            actions,
-                            store: self?.memoryStore ?? SwiftDataMemoryStore(),
-                            profileId: profileId,
-                            extractedBy: extractModel.name,
-                            sourceConversationId: conversationId,
-                            recentMessages: recentMessages,
-                            context: context
-                        )
-                        if let self {
-                            var parts: [String] = []
-                            if adds > 0 { parts.append("记住 \(adds) 条") }
-                            if updates > 0 { parts.append("更新 \(updates) 条") }
-                            if deletes > 0 { parts.append("失效 \(deletes) 条") }
-                            self.transientNotice = TransientNotice("🧠 " + (parts.isEmpty ? "记忆已更新" : parts.joined(separator: " · ")))
-                            NotificationCenter.default.post(name: .memoryDidChange, object: nil)
-                        }
-                    } catch {
-                        MemoryHealthStore.recordError(.extract, profileId: profileId,
-                                                      message: "写入失败：\(error.localizedDescription)", modelName: extractModel.name)
-                        self?.transientNotice = TransientNotice("🧠 记忆写入失败：\(error.localizedDescription)")
+                    return try await MainActor.run {
+                        try FragmentPool.write(fragments, messages: recent, profileId: profileId, conversationId: conversationId,
+                                               extractedBy: route.displayName, store: store, context: context)
                     }
                 }
-            } catch {
-                MemoryHealthStore.recordError(.extract, profileId: profileId,
-                                              message: error.localizedDescription, modelName: extractModel.name)
+            }
+            // 写成（含合法空包）/ 整包拒收才挪水位；预算跳过 / 断网 / 请求或落库失败留着下次再来（同 CC 那条路，10-16 astra #2）
+            await FragmentWatch.shared.finish(conversationId: conversationId, claim: claim, outcome: outcome)
+            switch outcome {
+            case .done(let added) where added > 0:
+                await MainActor.run {
+                    self?.transientNotice = TransientNotice("🧠 记住 \(added) 条")
+                    NotificationCenter.default.post(name: .memoryDidChange, object: nil)
+                }
+            case .failed, .rejected:
                 await MainActor.run { self?.transientNotice = TransientNotice("🧠 记忆提取失败") }
-                #if DEBUG
-                print("🧠 记忆提取: ⚠️ 失败 — \(error)")
-                #endif
+            default:
+                break
             }
         }
     }
+
+    /// 「C2 选的本机模型还没下载」只弹一次
+    static let fragmentLocalHintKey = "mem_c2_local_hint_shown"
 
     /// 窗口摘要用的消息：和历史窗口同一个口径（同一批候选、同一个计数），带 id 和时间（第三刀）
     private func sessionMessages() -> [SessionSegmentWriter.Message] {
@@ -4671,15 +5119,27 @@ final class ConversationViewModel {
         }
     }
 
-    /// 窗口摘要压缩触发（fire-and-forget）：超窗并攒够 N 轮就追加一段压缩段
+    /// 窗口摘要压缩触发（fire-and-forget）：超窗并攒够 N 轮就追加一段压缩段。
+    /// v5 A8：A2 选「停 N 分钟」= 只记下这一轮的样子、静默够了巡检时压；「只手动」= 不自动压
     private func triggerContextSummaryIfNeeded(conversationId: String, conversationTitle: String, profile: Profile, contextDepth: Int, model: ProviderModel, providerManager: ProviderManager) {
         guard MemoryFlags.contextSummaryEnabled else { return }
+        let mode = MemoryTriggers.mode(.a2)
+        guard mode != .manual else { return }
         let messages = sessionMessages()
-        let ctx = SessionCloseout.Context(profile: profile, model: cheapModel(providerManager: providerManager, fallback: model))
+        let ctx = SessionCloseoutTrigger.context(profile: profile, providers: providerManager, chat: model)
         let coveredBefore = ContextSummarizer.load(conversationId: conversationId, profileId: profile.id)?.coveredCount ?? 0
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure { PerfGuardrails.suppress("contextSummary"); return }   // 测量角色旁路早退（perf P0 §3.2；R7-09 同步前处理照跑、只拦后台外发）
         #endif
+        if mode == .idle {
+            guard messages.count > contextDepth else { return }
+            let oldCount = messages.count - contextDepth
+            Task.detached {
+                await SessionCloseout.shared.noteIdleCompress(conversationId: conversationId, messages: messages, oldCount: oldCount,
+                                                              title: conversationTitle, ctx: ctx)
+            }
+            return
+        }
         Task.detached { [weak self] in
             try? await ContextSummarizer.summarize(
                 messages: messages, contextDepth: contextDepth, conversationId: conversationId,
@@ -4712,19 +5172,75 @@ final class ConversationViewModel {
             return
         }
         transientNotice = TransientNotice("📝 压缩中…")
-        let ctx = SessionCloseout.Context(profile: profile, model: cheapModel(providerManager: providerManager, fallback: model))
+        // 手动：不看写入预算、不看冷却（v5 Q10）
+        var ctx = SessionCloseoutTrigger.context(profile: profile, providers: providerManager, chat: model)
+        ctx.manual = true
+        let manualCtx = ctx
         Task.detached { [weak self] in
             try? await ContextSummarizer.summarize(
                 messages: all, contextDepth: contextDepth, conversationId: convId,
-                conversationTitle: convTitle, ctx: ctx, providerManager: providerManager, force: true)
+                conversationTitle: convTitle, ctx: manualCtx, providerManager: providerManager, force: true)
             await MainActor.run {
-                if let s = ContextSummarizer.load(conversationId: convId, profileId: ctx.profileId), s.coveredCount == all.count - contextDepth {
+                if let s = ContextSummarizer.load(conversationId: convId, profileId: manualCtx.profileId), s.coveredCount == all.count - contextDepth {
                     self?.transientNotice = TransientNotice("📝 上下文摘要记了一段（压到第 \(s.coveredCount) 条）")
                 } else {
                     self?.transientNotice = TransientNotice("📝 压缩失败，看调试日志")
                 }
             }
         }
+    }
+
+    /// 对话 ⋯「现在写」（plan §九）：这个窗口开着的 A2 / A3 / A4 立刻写一遍——A2 = 手动压缩（CC 窗口的 A2 在 `closeoutNow` 里写，astra #6），
+    /// A3 = 跑一次收尾，不等静默、不看冷却；A4 = 拼最近几天 + 今天（今天的主调重写）；都不看写入预算（Q10）。写完提示「写好了：A2 1 段 · A4 1 天」；后台占着 / 没写成如实说（astra #10）
+    func writeMemoryNow(contextDepth: Int, profile: Profile, model: ProviderModel, providerManager: ProviderManager) {
+        guard MemoryFlags.masterEnabled, let conv = selectedConversation else { return }
+        let convId = conv.id, convTitle = conv.title
+        let all = sessionMessages()
+        let compressA2 = MemoryFlags.contextSummaryEnabled && all.count > contextDepth && !SessionCloseout.isCCPath(currentPath)
+        var ctx = SessionCloseoutTrigger.context(profile: profile, providers: providerManager, chat: model)
+        ctx.manual = true
+        let manualCtx = ctx
+        transientNotice = TransientNotice("📝 正在写…")
+        Task.detached { [weak self] in
+            func formalCount() -> Int {
+                SessionSummaryStore.load(conversationId: convId, profileId: manualCtx.profileId)?.segments.filter { !$0.isTail }.count ?? 0
+            }
+            var a2 = 0
+            var a2Failed = false
+            if compressA2 {
+                let before = formalCount()
+                do {
+                    try await ContextSummarizer.summarize(messages: all, contextDepth: contextDepth, conversationId: convId,
+                                                          conversationTitle: convTitle, ctx: manualCtx, providerManager: providerManager, force: true)
+                } catch {
+                    a2Failed = true
+                }
+                a2 = max(0, formalCount() - before)
+            }
+            let r = await SessionCloseoutTrigger.shared.writeNow(conversationId: convId, profile: profile)
+            let text = Self.writeNowSummary(a2Segments: a2, a2Failed: a2Failed, result: r)
+            await MainActor.run {
+                self?.transientNotice = TransientNotice(text)
+                NotificationCenter.default.post(name: .memoryDidChange, object: nil)
+            }
+        }
+    }
+
+    /// 纯函数（可测）：「写好了：A2 1 段 · A4 1 天」；后台占着 / 出错 / 预算闸拦下各说各的，确实没新的才说「都写到最新了」（astra #10）
+    static func writeNowSummary(a2Segments: Int, a2Failed: Bool = false, result: SessionCloseout.CloseoutResult) -> String {
+        if result.busy { return "📝 后台正在写这个窗口，稍后再点" }
+        var parts: [String] = []
+        let a2 = a2Segments + result.context + (result.tail ? 1 : 0)
+        if a2 > 0 { parts.append("A2 \(a2) 段") }
+        if result.window { parts.append("A3 1 段") }
+        if result.timeline > 0 { parts.append("A4 \(result.timeline) 天") }
+        let failed = a2Failed || result.failed
+        if !parts.isEmpty {
+            return "📝 写好了：" + parts.joined(separator: " · ") + (failed || result.skipped ? "（有一项没写成）" : "")
+        }
+        if failed { return "📝 没写成，看记忆日志" }
+        if result.skipped { return "📝 没写成：被预算闸拦下，或模型没回内容（手动不看写入预算）" }
+        return "📝 没有要写的（都写到最新了）"
     }
 
     /// M7 图片转述：3 条之前的旧图后台生成 80 字描述（每轮最多 2 张），存 node.imageDescsData。
@@ -4795,41 +5311,19 @@ final class ConversationViewModel {
         try? context.save()
     }
 
-    /// M5 自动做梦：24h 一次且记忆有新增。fire-and-forget，成功弹胶囊。
-    /// MV1: 做梦成功后毕业消费的碎片（钉住免疫）——同一事实不再画像+碎片双份注入，封僵尸回路
-    private func dreamIfNeeded(profileId: String, model: ProviderModel, providerManager: ProviderManager, context: ModelContext) {
-        #if (DEBUG || PERF_BENCH) && os(iOS)
-        if PerfHarness.strictMeasure { PerfGuardrails.suppress("dream"); return }   // 测量角色旁路早退（perf P0 §3.2）
-        #endif
-        let memories = memoryStore.listHotAndWarm(profileId: profileId, context: context)
-        guard DreamConsolidator.shouldDream(
-            profileId: profileId,
-            newestMemoryUpdate: memories.map(\.updatedAt).max(),
-            memoryCount: memories.count
-        ) else { return }
-        let facts = memories.map { (content: $0.content, category: $0.category) }
-        // 修复第一刀·刀2：做梦不再把喂进去的碎片标失效（此前一次做梦 = 全体非钉住下岗）
-        let dreamModel = cheapModel(providerManager: providerManager, fallback: model)
-        Task.detached { [weak self] in
-            do {
-                guard let result = try await DreamConsolidator.dream(
-                    profileId: profileId, facts: facts, model: dreamModel, providerManager: providerManager
-                ) else { return }
-                MemoryHealthStore.recordOK(.dream, profileId: profileId, modelName: dreamModel.name)
-                await MainActor.run {
-                    self?.transientNotice = TransientNotice("🌙 画像已更新（\(result.sourceCount) 条记忆 → \(result.text.count) 字）")
-                }
-            } catch {
-                // 刀1：做梦此前 try? 全吞——失败连胶囊都没有，现在至少落健康状态
-                MemoryHealthStore.recordError(.dream, profileId: profileId,
-                                              message: error.localizedDescription, modelName: dreamModel.name)
-            }
-        }
-    }
-
     /// Regenerate: create a new assistant response as a sibling branch of the existing one
     func regenerate(assistantNodeId: String, model: ProviderModel, profile: Profile, preset: Preset, providerManager: ProviderManager, context: ModelContext) {
-        guard !assistantTurnInFlight else { return }   // 历史操作不排队，turn 中直接拒，防并发破坏 currentPath
+        let isCC = providerManager.provider(for: model)?.type == .ccBridge
+        guard !isLoading, failedTreeConversationId == nil || failedTreeConversationId != selectedConversation?.id,
+              !assistantTurnInFlight || (isCC && activeConversationId != selectedConversation?.id) else { return }
+        if let conversationId = selectedConversation?.id, ccPreparationTails[conversationId] != nil {
+            queuedCCSends[conversationId, default: []].append(QueuedCCSend(enqueueOrder: allocateSendOrder(), isCC: isCC, recovery: nil) {
+                guard self.selectedConversation?.id == conversationId else { return }
+                self.regenerate(assistantNodeId: assistantNodeId, model: model, profile: profile, preset: preset,
+                                providerManager: providerManager, context: context)
+            })
+            return
+        }
         guard preCheckBudget(text: "", model: model, profile: profile, preset: preset, providerManager: providerManager) else { return }
         guard let conversation = selectedConversation, !conversation.isReadOnlyArchive,
               let oldNode = nodeMap[assistantNodeId],
@@ -4851,17 +5345,20 @@ final class ConversationViewModel {
             displayLeafId = userParentId   // 显示路径也截到 user：回复落地时按「接在眼前」上屏
             conversation.updateTime = Date()
             markConversationDirty()
-            let assembled = assemblePrompt(profile: profile, preset: preset, excludingNodeId: "", context: context, globalEntries: globalWorldBookEntries, fileLibraryHint: nil)
-            let payload = prepareRouterPayload(assembled: assembled, model: model, conversation: conversation, profile: profile, providerManager: providerManager, messageNodeId: userParentId)
-            // UI 按钮触发必然 main thread（同上 toolInjection 的 assumeIsolated 先例）
             MainActor.assumeIsolated {
-                sendCCFireAndForget(payload: payload, model: model, conversation: conversation, profile: profile, providerManager: providerManager)
+                preparePromptSend(conversation: conversation, profileId: profile.id, targetNodeId: userParentId, context: context, isCC: true) { warmedWiki in
+                    let assembled = self.assemblePrompt(profile: profile, preset: preset, excludingNodeId: "", context: context, globalEntries: self.globalWorldBookEntries, fileLibraryHint: nil, conversation: conversation, warmedWiki: warmedWiki)
+                    let payload = self.prepareRouterPayload(assembled: assembled, model: model, conversation: conversation, profile: profile, providerManager: providerManager, messageNodeId: userParentId)
+                    self.sendCCFireAndForget(payload: payload, model: model, conversation: conversation, profile: profile, providerManager: providerManager)
+                }
             }
             try? context.save()
             scrollToNodeId = userParentId
             return
         }
 
+        let abortPath = currentPath
+        let abortLeafId = displayLeafId ?? currentPath.last?.id
         // Create new assistant node as sibling
         let newAssistantId = UUID().uuidString
         let newNode = MessageNode(
@@ -4899,29 +5396,24 @@ final class ConversationViewModel {
         activeConversationId = conversation.id
         streamingText = ""
 
-        // 工具注入（与 sendMessage 同款，包含 fs_*/MCP/recall/联网搜索）
-        // regenerate/editAndResend 都是 UI 按钮触发，必然 main thread；assumeIsolated 跨 actor 边界
-        let injection = MainActor.assumeIsolated {
-            toolInjection(for: model, providerManager: providerManager, conversation: conversation, profileId: conversation.profileId)
+        MainActor.assumeIsolated {
+            preparePromptSend(conversation: conversation, profileId: profile.id, targetNodeId: newAssistantId,
+                              context: context, resolveAsks: true, abortLeafId: abortLeafId, abortPath: abortPath) { warmedWiki in
+                let injection = self.toolInjection(for: model, providerManager: providerManager, conversation: conversation, profileId: conversation.profileId)
+                ToolDrawerStore.shared.recordSent(conversationId: conversation.id, signature: ToolSignature(tools: injection.tools, offered: injection.offered))
+                let fileHint = injection.systemHint.isEmpty ? nil : injection.systemHint
+                let assembled = self.assemblePrompt(profile: profile, preset: preset, excludingNodeId: newAssistantId, context: context, globalEntries: self.globalWorldBookEntries, fileLibraryHint: fileHint, cardGuide: Self.cardGuideChoice(tools: injection.tools, offered: injection.offered, profileId: profile.id), conversation: conversation, warmedWiki: warmedWiki)
+                newNode.setRecallHits(assembled.recallHits)
+                let payload = self.prepareRouterPayload(assembled: assembled, model: model, conversation: conversation, profile: profile, providerManager: providerManager, messageNodeId: newAssistantId, offered: injection.offered)
+                self.runStreamingTurn(
+                    payload: payload, systemPrompt: payload.systemPrompt,
+                    model: model, providerManager: providerManager,
+                    conversation: conversation, assistantNode: newNode, assistantNodeId: newAssistantId,
+                    profile: profile, preset: preset, context: context,
+                    tools: injection.tools, toolTurns: [], round: 0
+                )
+            }
         }
-        let fileHint = injection.systemHint.isEmpty ? nil : injection.systemHint
-
-        // Assemble prompt（hint 进 system，否则模型不知道有 fs_*/搜索这些工具的用法规范）
-        let assembled = assemblePrompt(profile: profile, preset: preset, excludingNodeId: newAssistantId, context: context, globalEntries: globalWorldBookEntries, fileLibraryHint: fileHint, cardGuideCompact: CardGuideTool.isOffered(in: injection.tools))
-        // 召回卡片：cc-bridge 发送会丢弃组装结果（只发 raw 文字），不写卡片数据免得撒谎
-        if providerManager.provider(for: model)?.type != .ccBridge {
-            newNode.setRecallHits(assembled.recallHits)
-        }
-        let payload = prepareRouterPayload(assembled: assembled, model: model, conversation: conversation, profile: profile, providerManager: providerManager, messageNodeId: newAssistantId)
-
-        // 复用 runStreamingTurn 走 sendMessage 同款工具循环——regenerate 也能用工具（含联网搜索）
-        runStreamingTurn(
-            payload: payload, systemPrompt: payload.systemPrompt,
-            model: model, providerManager: providerManager,
-            conversation: conversation, assistantNode: newNode, assistantNodeId: newAssistantId,
-            profile: profile, preset: preset, context: context,
-            tools: injection.tools, toolTurns: [], round: 0
-        )
 
         scrollToNodeId = newAssistantId
     }
@@ -4933,7 +5425,26 @@ final class ConversationViewModel {
     func editAndResend(_ originalNodeId: String, newText: String, attachments: [PendingChatAttachment] = [],
                        replyToId: String? = nil, replyQuote: String? = nil, isEdit: Bool = false,
                        model: ProviderModel, profile: Profile, preset: Preset, providerManager: ProviderManager, context: ModelContext) -> Bool {
-        guard !assistantTurnInFlight else { return false }   // 同 regenerate：turn 中直接拒
+        let isCC = providerManager.provider(for: model)?.type == .ccBridge
+        guard !isLoading, failedTreeConversationId == nil || failedTreeConversationId != selectedConversation?.id,
+              !assistantTurnInFlight || (isCC && activeConversationId != selectedConversation?.id) else { return false }
+        if let conversationId = selectedConversation?.id, ccPreparationTails[conversationId] != nil {
+            let recovery = PendingSend(
+                text: newText, attachments: attachments,
+                quotePreview: replyQuote, quoteReplyTo: replyToId,
+                model: model, profile: profile, preset: preset,
+                providerManager: providerManager, context: context,
+                conversationId: conversationId
+            )
+            queuedCCSends[conversationId, default: []].append(QueuedCCSend(enqueueOrder: allocateSendOrder(), isCC: isCC, recovery: recovery) {
+                guard self.selectedConversation?.id == conversationId else { return }
+                _ = self.editAndResend(originalNodeId, newText: newText, attachments: attachments,
+                                       replyToId: replyToId, replyQuote: replyQuote, isEdit: isEdit,
+                                       model: model, profile: profile, preset: preset,
+                                       providerManager: providerManager, context: context)
+            })
+            return true
+        }
         // ⑤a：真编辑（isEdit）才跑 runOnEdit 输入规则；「重新生成」原文重发不再跑一遍
         let editedBase = expandUserMacros(newText, profile: profile, context: context).trimmingCharacters(in: .whitespacesAndNewlines)
         let parts = ChatAttachmentPromptBuilder.userMessage(
@@ -4950,6 +5461,8 @@ final class ConversationViewModel {
         SpeechService.shared.stop()
         BreadcrumbLog.shared.add("✏️", "编辑重发@「\(conversation.title)」（\(parts.modelText.count)字）")
 
+        let abortPath = currentPath
+        let abortLeafId = displayLeafId ?? currentPath.last?.id
         currentPath = keptPath
         let grandparentId = originalNode.parentId ?? adoptUnderInvisibleRoot(originalNode, conversation: conversation, context: context)
 
@@ -4992,11 +5505,13 @@ final class ConversationViewModel {
             commitSelection(to: newUserId, conversation: conversation)
             conversation.updateTime = Date()
             markConversationDirty()
-            let assembled = assemblePrompt(profile: profile, preset: preset, excludingNodeId: "", context: context, globalEntries: globalWorldBookEntries, fileLibraryHint: nil)
-            let payload = prepareRouterPayload(assembled: assembled, model: model, conversation: conversation, profile: profile, providerManager: providerManager, messageNodeId: newUserId)
-            // UI 按钮触发必然 main thread（同上 toolInjection 的 assumeIsolated 先例）
             MainActor.assumeIsolated {
-                sendCCFireAndForget(payload: payload, model: model, conversation: conversation, profile: profile, providerManager: providerManager)
+                preparePromptSend(conversation: conversation, profileId: profile.id, targetNodeId: newUserId,
+                                  context: context, isCC: true, markCCUnsentOnAbort: true) { warmedWiki in
+                    let assembled = self.assemblePrompt(profile: profile, preset: preset, excludingNodeId: "", context: context, globalEntries: self.globalWorldBookEntries, fileLibraryHint: nil, conversation: conversation, warmedWiki: warmedWiki)
+                    let payload = self.prepareRouterPayload(assembled: assembled, model: model, conversation: conversation, profile: profile, providerManager: providerManager, messageNodeId: newUserId)
+                    self.sendCCFireAndForget(payload: payload, model: model, conversation: conversation, profile: profile, providerManager: providerManager)
+                }
             }
             try? context.save()
             scrollToNodeId = newUserId
@@ -5033,25 +5548,24 @@ final class ConversationViewModel {
         activeConversationId = conversation.id
         streamingText = ""
 
-        // 工具注入（同 sendMessage / regenerate）
-        let injection = MainActor.assumeIsolated {
-            toolInjection(for: model, providerManager: providerManager, conversation: conversation, profileId: conversation.profileId)
+        MainActor.assumeIsolated {
+            preparePromptSend(conversation: conversation, profileId: profile.id, targetNodeId: newAssistantId,
+                              context: context, resolveAsks: true, abortLeafId: abortLeafId, abortPath: abortPath) { warmedWiki in
+                let injection = self.toolInjection(for: model, providerManager: providerManager, conversation: conversation, profileId: conversation.profileId)
+                ToolDrawerStore.shared.recordSent(conversationId: conversation.id, signature: ToolSignature(tools: injection.tools, offered: injection.offered))
+                let fileHint = injection.systemHint.isEmpty ? nil : injection.systemHint
+                let assembled = self.assemblePrompt(profile: profile, preset: preset, excludingNodeId: newAssistantId, context: context, globalEntries: self.globalWorldBookEntries, fileLibraryHint: fileHint, cardGuide: Self.cardGuideChoice(tools: injection.tools, offered: injection.offered, profileId: profile.id), conversation: conversation, warmedWiki: warmedWiki)
+                newAssistantNode.setRecallHits(assembled.recallHits)
+                let payload = self.prepareRouterPayload(assembled: assembled, model: model, conversation: conversation, profile: profile, providerManager: providerManager, messageNodeId: newAssistantId, offered: injection.offered)
+                self.runStreamingTurn(
+                    payload: payload, systemPrompt: payload.systemPrompt,
+                    model: model, providerManager: providerManager,
+                    conversation: conversation, assistantNode: newAssistantNode, assistantNodeId: newAssistantId,
+                    profile: profile, preset: preset, context: context,
+                    tools: injection.tools, toolTurns: [], round: 0
+                )
+            }
         }
-        let fileHint = injection.systemHint.isEmpty ? nil : injection.systemHint
-        let assembled = assemblePrompt(profile: profile, preset: preset, excludingNodeId: newAssistantId, context: context, globalEntries: globalWorldBookEntries, fileLibraryHint: fileHint, cardGuideCompact: CardGuideTool.isOffered(in: injection.tools))
-        // 召回卡片：cc-bridge 发送会丢弃组装结果（只发 raw 文字），不写卡片数据免得撒谎
-        if providerManager.provider(for: model)?.type != .ccBridge {
-            newAssistantNode.setRecallHits(assembled.recallHits)
-        }
-        let payload = prepareRouterPayload(assembled: assembled, model: model, conversation: conversation, profile: profile, providerManager: providerManager, messageNodeId: newAssistantId)
-
-        runStreamingTurn(
-            payload: payload, systemPrompt: payload.systemPrompt,
-            model: model, providerManager: providerManager,
-            conversation: conversation, assistantNode: newAssistantNode, assistantNodeId: newAssistantId,
-            profile: profile, preset: preset, context: context,
-            tools: injection.tools, toolTurns: [], round: 0
-        )
 
         scrollToNodeId = newUserId
         return true
@@ -5063,14 +5577,25 @@ final class ConversationViewModel {
     private(set) var isDraftConversation = false
     /// 草稿的 invisible root，转正时一并 insert
     private var draftRootNode: MessageNode?
+    /// B5：卡楼层草稿的开场白（隐形根下的兄弟候选），和根一样只在内存，转正时一并 insert
+    private var draftGreetingNodes: [MessageNode] = []
+
+    /// B5：开新对话的公共口（page0 新建 / ⌘N / 启动和切楼层后的自动草稿）——从卡建的楼层带开场白，其余照旧空草稿。
+    /// 读书、单词、学习、Codex 这些专用草稿不走这里
+    @MainActor
+    func startNewConversation(profileId: String, fresh: Bool = false, cards: CharacterCardManager?) {
+        startDraftConversation(profileId: profileId, fresh: fresh,
+                               greetings: CharacterFloorService.greetings(profileId: profileId, cards: cards?.cards ?? []))
+    }
 
     /// 起一个草稿对话：建对象但不 insert，UI 直接进聊天界面（空消息 + 输入框）。
     /// 发首条消息时 commitDraftConversationIfNeeded 落库；没发就切走 = 丢弃，不污染列表。
     @MainActor
-    func startDraftConversation(profileId: String, fresh: Bool = false) {
+    func startDraftConversation(profileId: String, fresh: Bool = false, greetings: [String] = []) {
         // 已是同楼层草稿就不重建（避免覆盖用户正在输入的上下文）；楼层变了则重建。
         // fresh：page0 ＋ 菜单明确点了「新建」（可能从 Codex 草稿换成普通草稿）→ 总是重建
         if !fresh, isDraftConversation, let c = selectedConversation, c.profileId == profileId { return }
+        wikiInjectionCache.prefetch(profileId: profileId)
         // 第三刀：新开窗口 → 刚才在聊的对话立刻收尾（草稿是新窗口最常见的入口）
         defer { SessionCloseoutTrigger.shared.request(newConversationId: selectedConversation?.id) }
 
@@ -5091,13 +5616,17 @@ final class ConversationViewModel {
         )
         // 不 insert —— 纯内存对象
         draftRootNode = rootNode
+        draftGreetingNodes = []
         isDraftConversation = true
 
         // 模拟空对话 load 后的状态（invisible root 不进 pathNodeIds，故 currentPath 为空）
         selectedConversation = conversation
+        displayedTreeConversationId = conversation.id
+        failedTreeConversationId = nil
         isLoading = false
         currentPath = []
         timeDividerCache.reset()
+        bubbleRunCache.reset()
         nodeMap = [rootId: rootNode]
         effectiveChildrenMap = [rootId: []]
         cachedRootId = rootId
@@ -5106,6 +5635,25 @@ final class ConversationViewModel {
         displayLeafId = nil
         bubbledBranches.removeAll()
         branchInfoMap.removeAll()
+
+        // B5：开场白挂在隐形根下（同 CharacterFloorService.makeChat 的形状），默认停在第一条
+        let (shaped, nodes) = CharacterFloorService.makeChat(title: conversation.title, greetings: greetings, profileId: profileId)
+        guard nodes.count > 1 else { return }
+        let children = Array(nodes.dropFirst())
+        for child in children { child.parentId = rootId; child.conversationId = conversation.id }
+        rootNode.isSyntheticRoot = true
+        rootNode.childrenIds = children.map(\.id)
+        conversation.provider = shaped.provider
+        conversation.currentNodeId = children[0].id
+        conversation.nodeCount = 1
+        draftGreetingNodes = children
+        for child in children { nodeMap[child.id] = child }
+        effectiveChildrenMap = [rootId: rootNode.childrenIds]
+        mainPathIds = [rootId, children[0].id]
+        branchSelection = [rootId: children[0].id]
+        displayLeafId = children[0].id
+        currentPath = [children[0]]
+        rebuildBranchInfoMap()
     }
 
     /// 草稿转正：发首条消息前调用，把 conversation + root 落库（此后才进 page0 列表）。
@@ -5114,9 +5662,11 @@ final class ConversationViewModel {
         guard isDraftConversation, let conversation = selectedConversation else { return }
         context.insert(conversation)
         if let root = draftRootNode { context.insert(root) }
+        draftGreetingNodes.forEach { context.insert($0) }
         try? context.save()
         isDraftConversation = false
         draftRootNode = nil
+        draftGreetingNodes = []
     }
 
     /// Create a new empty conversation for chatting
@@ -5395,9 +5945,9 @@ final class ConversationViewModel {
         )
     }
 
-    /// 和设置页实际叫法对齐：简洁版设置里这一行叫「模型（API）」，完整版叫「API」，节名「预算（全局总闸）」
+    /// 和设置页实际叫法对齐：简洁版 / 完整版都叫「模型和API」，节名「预算（全局总闸）」
     private static var budgetSettingsPath: String {
-        "设置 → API（简洁版叫「模型（API）」）→ 预算（全局总闸）"
+        "设置 → 模型和API → 预算（全局总闸）"
     }
 }
 
@@ -5413,6 +5963,8 @@ struct TurnPreview {
     let toolsAbsentReason: ToolsAbsentReason?
     /// 收在「更多工具」里、这一轮可用的内建工具（#069；不在 tools 里）
     let tuckedTools: [String]
+    /// 这一轮能调到的工具名（#093；nil = 不发工具），历史回放和实发同一步 offeredOnly
+    let offeredTools: Set<String>?
     let segments: [TaggedSegment]
     let memoryHits: [InjectionHit]
     let ordered: [PromptMessage]
@@ -5422,15 +5974,24 @@ struct TurnPreview {
 
     /// 实发同一个 provider 构造函数建的 body；nil = CC / 本机 / 不支持的卡。懒算：带图对话每次要 base64
     func requestBody(providerManager: ProviderManager) -> [String: Any]? {
-        // 和实发 prepareRouterPayload 同一步：不发真工具块的 provider 退纯文字（#089 P0-b）
-        let ordered = ToolReplay.orderedForProvider(providerManager.provider(for: model)?.type, self.ordered)
-        let legacy = PromptMessage.legacyShape(ordered)
-        return ProviderRouter.previewRequestBody(model: model, messages: legacy.messages, systemPrompt: legacy.systemPrompt,
-                                                 providerManager: providerManager, samplingParams: sampling,
-                                                 tools: tools, ordered: ordered)
+        preview(providerManager).body
     }
 
-    func placementNote(providerManager: ProviderManager) -> String? {
-        ProviderRouter.previewSystemPlacementNote(model: model, ordered: ordered, providerManager: providerManager)
+    /// 检查器请求 tab：body 和「实发」说明共用这一次预览 resolve 的 compat
+    func requestBodyAndPlacementNote(providerManager: ProviderManager) -> (body: [String: Any]?, placementNote: String?) {
+        let p = preview(providerManager)
+        guard let body = p.body else { return (nil, nil) }
+        return (body, ProviderRouter.previewSystemPlacementNote(model: model, ordered: ordered,
+                                                                providerManager: providerManager, compat: p.compat))
+    }
+
+    private func preview(_ providerManager: ProviderManager) -> (body: [String: Any]?, compat: ResolvedCompat?) {
+        // 和实发 prepareRouterPayload 同一步：不发真工具块的 provider 退纯文字（#089 P0-b）
+        var ordered = ToolReplay.orderedForProvider(providerManager.provider(for: model)?.type, self.ordered)
+        if let offeredTools { ordered = ToolReplay.offeredOnly(ordered, offered: offeredTools) }
+        let legacy = PromptMessage.legacyShape(ordered)
+        return ProviderRouter.previewRequest(model: model, messages: legacy.messages, systemPrompt: legacy.systemPrompt,
+                                             providerManager: providerManager, samplingParams: sampling,
+                                             tools: tools, ordered: ordered)
     }
 }

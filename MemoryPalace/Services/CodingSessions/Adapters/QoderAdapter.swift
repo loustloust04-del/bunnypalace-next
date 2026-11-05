@@ -8,7 +8,7 @@ struct QoderAdapter: CodingSessionAdapter {
     let root: URL
 
     init(root: URL) {
-        self.root = root
+        self.root = AppPaths.checked(root)
     }
 
     /// `QODER_CONFIG_DIR/projects` 里真有会话才用——空候选不能遮掉默认根（Dock 启动与 shell 启动看到的环境常不同）
@@ -30,13 +30,12 @@ struct QoderAdapter: CodingSessionAdapter {
 
     /// 根直属与下一层 project-key 目录直属两种形态都探（自定义位置可以直接选中某个 project-key 目录）
     func listSessionFiles() -> [CodingSessionFileRef] {
-        let fm = FileManager.default
         func direct(_ dir: URL) -> [CodingSessionFileRef] {
-            ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: CodingParse.refKeys)) ?? [])
+            ((try? AppPaths.contentsOfDirectory(at: dir, includingPropertiesForKeys: CodingParse.refKeys)) ?? [])
                 .compactMap { CodingParse.defaultFileRef(.qoder, $0) }
         }
         var refs = direct(root)
-        for entry in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        for entry in (try? AppPaths.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
         where (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
             refs += direct(entry)
         }
@@ -55,7 +54,7 @@ struct QoderAdapter: CodingSessionAdapter {
         var paths = [meta.filePath]
         let sidecar = URL(fileURLWithPath: meta.filePath).deletingLastPathComponent().appendingPathComponent(meta.nativeId)
         var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: sidecar.path, isDirectory: &isDir), isDir.boolValue {
+        if FileManager.default.fileExists(atPath: AppPaths.checkedPath(sidecar.path), isDirectory: &isDir), isDir.boolValue {
             paths.append(sidecar.path)
         }
         return paths

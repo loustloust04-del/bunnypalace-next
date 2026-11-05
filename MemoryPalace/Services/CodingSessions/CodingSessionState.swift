@@ -41,9 +41,9 @@ final class CodingSessionState {
     }
 
     nonisolated static var defaultURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("coding-sessions.json")
+            .appendingPathComponent("coding-sessions.json"))
     }
 
     private(set) var snapshot: Snapshot

@@ -4,9 +4,8 @@ import SwiftData
 
 // MARK: - Lite 模式「记忆」页
 
-/// Lite 模式的记忆简化页：总开关 + 简要说明 + 只读画像卡 +「管理记忆条目」二级页。
-/// 总开关与 pro 走同一路径（PermissionCenter.level(.memory) + mem_master），
-/// 画像读同一个 ProfileFileStore——只是一层简化壳，不动 pro 的任何 UI。
+/// Lite 模式的记忆简化页：总开关 + 简要说明 +「管理记忆条目」二级页（画像卡 v5 Q4 下线）。
+/// 总开关与 pro 走同一路径（PermissionCenter.level(.memory) + mem_master）——只是一层简化壳，不动 pro 的任何 UI。
 struct LiteMemoryPage: View {
     var viewModel: ConversationViewModel?
 
@@ -15,7 +14,6 @@ struct LiteMemoryPage: View {
 
     @AppStorage("mem_master") private var memMaster = true
 
-    @State private var profileDream: UserProfileDream? = nil
     @State private var memoryCount = 0
 
     var body: some View {
@@ -35,30 +33,6 @@ struct LiteMemoryPage: View {
                 Text("开着，聊天时 AI 会慢慢记住你；关掉就不再记了，已经记住的也不会丢。")
                     .font(.system(size: Theme.SettingsFont.caption))
                     .foregroundColor(Theme.textMuted)
-            }
-            .listRowBackground(Theme.mainBg)
-
-            // ── 只读画像卡：让 lite 用户感知到"它在记"，不放任何按钮 ──
-            Section {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("AI 眼中的你")
-                        .font(.system(size: Theme.SettingsFont.label, weight: .medium))
-                        .foregroundColor(Theme.textSecondary)
-                    if let d = profileDream, !d.text.isEmpty {
-                        Text(d.text)
-                            .font(.system(size: Theme.SettingsFont.body))
-                            .foregroundColor(Theme.textPrimary)
-                            .lineLimit(6)
-                        Text("\(d.updatedAt.formatted(.dateTime.month().day())) 更新 · \(d.text.count) 字")
-                            .font(.system(size: Theme.SettingsFont.badge))
-                            .foregroundColor(Theme.textMuted)
-                    } else {
-                        Text("还没有画像——多聊几轮就有啦")
-                            .font(.system(size: Theme.SettingsFont.body))
-                            .foregroundColor(Theme.textMuted)
-                    }
-                }
-                .padding(.vertical, 4)
             }
             .listRowBackground(Theme.mainBg)
 
@@ -87,7 +61,6 @@ struct LiteMemoryPage: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { refresh() }
         .onReceive(NotificationCenter.default.publisher(for: .profileWillSwitch)) { _ in
-            profileDream = nil
             memoryCount = 0
         }
         .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in
@@ -97,7 +70,6 @@ struct LiteMemoryPage: View {
 
     private func refresh() {
         let profileId = profileManager?.currentProfile.id ?? ""
-        profileDream = ProfileFileStore.load(profileId: profileId)
         memoryCount = SwiftDataMemoryStore().listAll(profileId: profileId, context: modelContext).count
     }
 }

@@ -162,6 +162,140 @@ struct SearchBuckets {
 
 enum SearchService {
 
+    struct CatalogNode: Sendable, Equatable {
+        let profileId: String
+        let conversationId: String
+        let nodeId: String
+        let title: String
+        let created: Date?
+        let role: String
+        let onMain: Bool
+        let body: String
+    }
+
+    static func catalogContent(terms: [String], profileId: String, container: ModelContainer,
+                               interval: DateInterval? = nil, scope: Set<String>? = nil,
+                               index: SearchIndexStore? = SearchIndexer.shared.readyStore,
+                               cancel: CatalogCancel = CatalogCancel()) async -> [CatalogNode] {
+        let words = SearchTextSegmenter.catalogTerms(terms)
+        guard !words.isEmpty, scope?.isEmpty != true, !cancel.isCancelled else { return [] }
+        return await cancel.withTaskCancellation {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    guard !cancel.isCancelled else { continuation.resume(returning: []); return }
+                    if let index {
+                        do {
+                            let result = try catalogContentSync(terms: words, profileId: profileId, container: container,
+                                                                interval: interval, scope: scope, index: index, cancel: cancel)
+                            continuation.resume(returning: result)
+                            return
+                        } catch {
+                            guard !cancel.isCancelled, !(error is CancellationError) else {
+                                continuation.resume(returning: [])
+                                return
+                            }
+                            KBProbe.log("[SEARCH] catalog index fallback: \(error)")
+                        }
+                    }
+                    guard !cancel.isCancelled else { continuation.resume(returning: []); return }
+                    continuation.resume(returning: (try? catalogContentSync(
+                        terms: words, profileId: profileId, container: container,
+                        interval: interval, scope: scope, index: nil, cancel: cancel
+                    )) ?? [])
+                }
+            }
+        }
+    }
+
+    private static func catalogContentSync(terms: [String], profileId: String, container: ModelContainer,
+                                           interval: DateInterval?, scope: Set<String>?,
+                                           index: SearchIndexStore?, cancel: CatalogCancel) throws -> [CatalogNode] {
+        try cancel.check()
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        let pid = profileId
+        let candidates: [ContentCandidate]
+        if let index {
+            guard let hits = try index.catalogHits(terms: terms, profileId: pid, interval: interval, scope: scope, cancel: cancel)
+            else { throw IndexUnusable() }
+            try cancel.check()
+            candidates = hits.map {
+                ContentCandidate(id: $0.nodeId, conversationId: $0.conversationId, role: $0.role, createTime: $0.created)
+            }
+            try cancel.check()
+        } else {
+            // 复用搜索框的正文候选读取；逐词合并为 OR，不建立第二套扫表路径。
+            var seen = Set<String>()
+            var nodes: [MessageNode] = []
+            for term in terms {
+                try cancel.check()
+                let fetched = fetchContentWithKeyword(context: context, search: term, profileId: pid, hasUser: true, hasAssistant: true)
+                try cancel.check()
+                for node in fetched where seen.insert(node.id).inserted {
+                    try cancel.check()
+                    nodes.append(node)
+                }
+            }
+            candidates = nodes.map {
+                ContentCandidate(id: $0.id, conversationId: $0.conversationId, role: $0.role, createTime: $0.createTime)
+            }
+        }
+        let byConv = Dictionary(grouping: candidates.filter { node in
+            if let scope, !scope.contains(node.conversationId) { return false }
+            if let interval {
+                guard let date = node.createTime, date >= interval.start, date <= interval.end else { return false }
+            }
+            return true
+        }, by: \.conversationId)
+        let convIds = byConv.keys.sorted()
+        var resolved: [String: CatalogNode] = [:]
+        for start in stride(from: 0, to: convIds.count, by: mainPathBatchSize) {
+            try cancel.check()
+            let chunk = Array(convIds[start..<min(start + mainPathBatchSize, convIds.count)])
+            let convs = try context.fetch(FetchDescriptor<Conversation>(
+                predicate: #Predicate { chunk.contains($0.id) && $0.profileId == pid }
+            ))
+            try cancel.check()
+            let nodes = try context.fetch(FetchDescriptor<MessageNode>(
+                predicate: #Predicate { chunk.contains($0.conversationId) && $0.profileId == pid }
+            ))
+            let allByConv = Dictionary(grouping: nodes, by: \.conversationId)
+            for conv in convs where !conv.isTrashed {
+                try cancel.check()
+                let allNodes = allByConv[conv.id] ?? []
+                let liveNodes = Dictionary(allNodes.filter {
+                    !$0.isTrashed && !$0.isSyntheticRoot && !$0.isSourceHidden &&
+                    ($0.role == "user" || $0.role == "assistant")
+                }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+                let main = ConversationViewModel.computeMainPathSet(
+                    nodes: allNodes, currentNodeId: conv.currentNodeId, selectionData: conv.branchSelectionData
+                )
+                for candidate in byConv[conv.id] ?? [] {
+                    try cancel.check()
+                    guard let node = liveNodes[candidate.id] else { continue }
+                    let body = CatalogOriginalText.body(of: node)
+                    try cancel.check()
+                    guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                    // 索引旧正文和扫描原 content 都可能只在思考链命中，清洗后重新核对可见词面。
+                    guard terms.contains(where: { body.localizedStandardContains($0) }) else { continue }
+                    resolved[candidate.id] = CatalogNode(
+                        profileId: pid, conversationId: conv.id, nodeId: candidate.id, title: conv.title,
+                        created: node.createTime, role: node.role, onMain: main.contains(candidate.id), body: body
+                    )
+                }
+            }
+        }
+        let ordered = candidates.compactMap { resolved.removeValue(forKey: $0.id) }
+        try cancel.check()
+        guard index == nil else { return ordered }
+        let scores = MemoryBM25.scores(documents: ordered.map { MemoryBM25.tokens($0.body) },
+                                       query: terms.joined(separator: " "), cancel: cancel)
+        try cancel.check()
+        return ordered.indices.sorted {
+            scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1
+        }.map { ordered[$0] }
+    }
+
     /// index：S5 全文索引（nil = 旧扫描）。默认取 Indexer 的就绪库，测试 / 对账可显式传
     static func performSearch(filter: SearchFilter, profileId: String, container: ModelContainer,
                               index: SearchIndexStore? = SearchIndexer.shared.readyStore) async -> [SearchResult] {

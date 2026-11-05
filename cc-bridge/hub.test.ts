@@ -5,7 +5,10 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { buildChannelTag, setTmuxRunner, isLoopback, pasteAwareSendAndEnter, planStreamReconcile, writeReadingStatus, writeVocabStatus, writeReadingContext, appendVoiceNote, markReplySeen, seenMpMsgIds, cursorRestoreSeq, PASTE_MODE_LENGTH_THRESHOLD, PASTE_RETRY_MAX, type PasteIO } from "./hub.ts"
 import { deliverBookNote, pendingBookNotes, ackBookNote } from "./book-notes.ts"
-import { agentStatusSnapshot, applyAgentConfigPatch, writeVoiceInstructions, MP_VOICE_BEGIN, MP_VOICE_END } from "./hub.ts"
+import { agentStatusSnapshot, applyAgentConfigPatch, writeVoiceInstructions, MP_VOICE_BEGIN, MP_VOICE_END, sendAckFrame, sendErrorFrame, uncertainSendFrame, admitAppSend, ensureSessionAndSendAsync, sendStatusBook, type AdmittedSend } from "./hub.ts"
+import { SendTracker, type TrackDeps } from "./send-track.ts"
+import { TmuxUncertainError } from "./tmux-control.ts"
+import type { SendCtx } from "./send-verify.ts"
 // 仅对 in-process tmux 调用生效（目前没有 in-process 测试用到 tmux）。
 // 集成测试由 spawn 子进程跑，子进程通过 MP_CC_TMUX_DRY_RUN=1 跳过真实 tmux。
 setTmuxRunner({
@@ -2194,4 +2197,140 @@ test("#068 畸形请求目标（new URL 会抛）只断这一条，hub 不退出
   expect(hubProcess?.exitCode).toBeNull()
   const health = await fetch(`http://127.0.0.1:${TEST_PORT}/health`)
   expect(health.status).toBe(200)
+})
+
+test("A1 R4：send 帧带 attempt → ack 原样带回；不带 → ack 跟原来逐字相同（没有 attempt 键）", async () => {
+  const ws = await openMP()
+  const frames: any[] = []
+  ws.on("message", (data) => frames.push(JSON.parse(data.toString())))
+  ws.send(JSON.stringify({ type: "send", chat_id: "conv-r4", message_id: "m-r4-a", content: "一", user: "susu", attempt: "tok.1" }))
+  ws.send(JSON.stringify({ type: "send", chat_id: "conv-r4", message_id: "m-r4-b", content: "二", user: "susu" }))
+  const deadline = Date.now() + 3_000
+  while (frames.filter((f) => f.type === "ack").length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+  const acks = frames.filter((f) => f.type === "ack")
+  expect(acks.find((f) => f.message_id === "m-r4-a")).toEqual({ type: "ack", message_id: "m-r4-a", attempt: "tok.1" })
+  expect(acks.find((f) => f.message_id === "m-r4-b")).toEqual({ type: "ack", message_id: "m-r4-b" })
+  ws.close()
+})
+
+test("A1 R4：被拒的重发回的 send_status 带重发自己的 attempt", async () => {
+  const ws = await openMP()
+  const frames: any[] = []
+  ws.on("message", (data) => frames.push(JSON.parse(data.toString())))
+  ws.send(JSON.stringify({ type: "send", chat_id: "conv-r4", message_id: "m-r4-retry", content: "再来", user: "susu", session_name: "mp-cc-r4", retry: true, attempt: "tok.9" }))
+  const deadline = Date.now() + 3_000
+  while (!frames.some((f) => f.message_id === "m-r4-retry") && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+  expect(frames.find((f) => f.message_id === "m-r4-retry")).toMatchObject({ type: "send_status", status: "failed", retryable: false, attempt: "tok.9" })
+  ws.close()
+})
+
+test("A1 R4：直接 error / 结果不明 error 的帧——带 attempt；结果不明带 uncertain 标记，跟 legacyError 区分开", () => {
+  expect(sendAckFrame("m", undefined)).toEqual({ type: "ack", message_id: "m" })
+  expect(sendErrorFrame("m", "tmux: x", "t.2")).toEqual({ type: "error", message_id: "m", reason: "tmux: x", attempt: "t.2" })
+  expect(sendErrorFrame("m", "tmux: x", undefined)).toEqual({ type: "error", message_id: "m", reason: "tmux: x" })
+  const tag = `<channel source="memorypalace" chat_id="c" message_id="m-u" user="susu" ts="2026-10-15T00:00:00.000Z">hi</channel>`
+  expect(uncertainSendFrame("mp-cc", tag, "t.3")).toMatchObject({ type: "error", message_id: "m-u", session_name: "mp-cc", uncertain: true, attempt: "t.3" })
+  // A1 R5 P3：旧 app 请求（不带 attempt）收到的帧跟改动前逐字相同——比完整对象和序列化后的字节
+  expect(uncertainSendFrame("mp-cc", tag)).toEqual({ type: "error", message_id: "m-u", session_name: "mp-cc", reason: "tmux 卡住了，这条消息不确定有没有送进 mp-cc（没有自动重发，看一眼终端再决定要不要重发）" })
+  expect(JSON.stringify(uncertainSendFrame("mp-cc", tag))).toBe(`{"type":"error","message_id":"m-u","session_name":"mp-cc","reason":"tmux 卡住了，这条消息不确定有没有送进 mp-cc（没有自动重发，看一眼终端再决定要不要重发）"}`)
+})
+
+// ── A1 R5：app send 的准入 / 身份（admitAppSend 在进程内跑：只到组帧登记为止，不注入、不碰 LA；secrets 由 test-preload 指到临时目录）──
+
+/// 送达核对的假 IO：每次注入都「结果不明」，落定后认不出输入框 → 窗口完了判 failed（时间缩到几十 ms）
+function uncertainTrackDeps(): TrackDeps {
+  return {
+    inject: async () => { throw new TmuxUncertainError("tmux control timeout 10000ms") },
+    submit: async () => true,
+    settle: async () => ({ kind: "settled" }),
+    bufferExists: async () => undefined,
+    deleteBuffer: async () => {},
+    cursor: async () => undefined,
+    editArea: async () => ({ kind: "unlocated" }),
+    generation: () => 1,
+    sessionGone: () => {},
+    requeue: () => {},
+    legacyError: () => {},
+    sleep: (ms) => Bun.sleep(ms),
+    now: Date.now,
+  }
+}
+const FAST_TRACK = { settleMs: 1_000, confirmMs: 40, consumeMs: 10, holdMs: 40, pollMs: 5, retryMaxMs: 60_000 }
+
+test("A1 R5 P1-d：同一毫秒的两次发送（标签逐字相同）——hub 给各自不重复的身份，app attempt 随身份走：旧那次进核对不进账、不广播，新那次的结果带它自己的 attempt", async () => {
+  const id = "m-r5-same-ms"
+  const realISO = Date.prototype.toISOString
+  Date.prototype.toISOString = function () { return "2026-10-15T00:00:00.000Z" }
+  const replies: object[] = []
+  let first: AdmittedSend | undefined
+  let second: AdmittedSend | undefined
+  try {
+    first = admitAppSend({ type: "send", chat_id: "c-r5", message_id: id, content: "一样", user: "susu", attempt: "app.1" }, (f) => replies.push(f))
+    second = admitAppSend({ type: "send", chat_id: "c-r5", message_id: id, content: "一样", user: "susu", attempt: "app.2" }, (f) => replies.push(f))
+  } finally { Date.prototype.toISOString = realISO }
+  expect(replies).toEqual([])
+  expect(first!.tag).toBe(second!.tag)   // 墙钟 ts 一样、整段文字一样
+  expect(first!.sc.key).not.toBe(second!.sc.key)
+  expect([first!.sc.appAttempt, second!.sc.appAttempt]).toEqual(["app.1", "app.2"])
+  const seen: string[] = []
+  const unwatch = sendStatusBook.watch((f) => { if (f.message_id === id) seen.push(`${f.status}:${f.attempt}`) })
+  try {
+    const tracker = new SendTracker(sendStatusBook, uncertainTrackDeps(), FAST_TRACK)
+    await tracker.send(first!.tag, first!.session, first!.sc)
+    expect(seen).toEqual([])
+    await tracker.send(second!.tag, second!.session, second!.sc)
+    expect(seen).toEqual(["uncertain:app.2", "failed:app.2", "failed:app.2"])   // 第三帧是堵满后补原因的 amend
+  } finally { unwatch() }
+})
+
+test("A1 R5 P2：被接受的重发在组帧时抛错（真实预处理出口，没手调 attemptStarted）——abortRetry 的终态、历史、直接 error 都带这次重发的 attempt", () => {
+  const id = "m-r5-abort"
+  sendStatusBook.attemptStarted(id, "pre-1", false)
+  sendStatusBook.finish(sendStatusBook.begin(id, "c-r5", "mp-cc-r5", undefined, "pre-1", "app.0")!, { status: "failed", retryable: true, reason: "x" })
+  const seen: Record<string, unknown>[] = []
+  const replies: Record<string, unknown>[] = []
+  const unwatch = sendStatusBook.watch((f) => { if (f.message_id === id) seen.push({ ...f }) })
+  try {
+    // content 不是字符串：buildChannelTag 抛错（组帧类异常），落在 attemptStarted 之前
+    const r = admitAppSend({ type: "send", chat_id: "c-r5", message_id: id, content: null, user: "susu", session_name: "mp-cc-r5", retry: true, attempt: "app.r1" }, (f) => replies.push({ ...(f as Record<string, unknown>) }))
+    expect(r).toBeUndefined()
+  } finally { unwatch() }
+  expect(seen).toHaveLength(1)
+  expect(seen[0]).toMatchObject({ type: "send_status", message_id: id, status: "failed", retryable: true, attempt: "app.r1" })
+  expect(String(seen[0].reason)).toStartWith("重发没发出去：")
+  expect(replies).toHaveLength(1)
+  expect(replies[0]).toMatchObject({ type: "error", message_id: id, attempt: "app.r1" })
+  expect(sendStatusBook.snapshot().find((i) => i.message_id === id)).toMatchObject({ status: "failed", retryable: true, attempt: "app.r1" })
+})
+
+test("A1 R5 P1-b：重发因「上一次还在跑」被拒——回帧带被拒请求自己的 attempt 和正在跑的那次的 active_attempt；不带 attempt 的旧 app 请求回帧不变", () => {
+  const id = "m-r5-active"
+  sendStatusBook.attemptStarted(id, "pre-2", false)
+  sendStatusBook.finish(sendStatusBook.begin(id, "c-r5", "mp-cc-r5", undefined, "pre-2", "app.0")!, { status: "failed", retryable: true, reason: "x" })
+  expect(sendStatusBook.acceptRetry(id, "c-r5", "mp-cc-r5", false, "app.r1").accepted).toBe(true)   // r1 被接受、还在跑
+  const replies: Record<string, unknown>[] = []
+  expect(admitAppSend({ type: "send", chat_id: "c-r5", message_id: id, content: "再来", user: "susu", session_name: "mp-cc-r5", retry: true, attempt: "app.r2" }, (f) => replies.push({ ...(f as Record<string, unknown>) }))).toBeUndefined()
+  expect(admitAppSend({ type: "send", chat_id: "c-r5", message_id: id, content: "再来", user: "susu", session_name: "mp-cc-r5", retry: true }, (f) => replies.push({ ...(f as Record<string, unknown>) }))).toBeUndefined()
+  expect(replies).toEqual([
+    { type: "send_status", chat_id: "c-r5", message_id: id, session_name: "mp-cc-r5", status: "uncertain", retryable: false, reason: "这条还在核对 / 重发中", active_attempt: "app.r1", attempt: "app.r2" },
+    { type: "send_status", chat_id: "c-r5", message_id: id, session_name: "mp-cc-r5", status: "uncertain", retryable: false, reason: "这条还在核对 / 重发中" },
+  ])
+  const op = sendStatusBook.active.get(id)!
+  sendStatusBook.finish(op, { status: "delivered", retryable: false, reason: "重发了" })   // 收尾，别让看门狗留在共享账上
+})
+
+test("A1 R5 P1-d：app 消息的发送上下文一路带到会话链（ensureSessionAndSendAsync → runner.send）", async () => {
+  const got: { text: string; session: string; sc?: SendCtx }[] = []
+  setTmuxRunner({
+    send: async (text: string, session: string, sc?: SendCtx) => { got.push({ text, session, sc }) },
+    sendRaw: async () => {}, key: async () => {}, capture: async () => "", hasSession: () => true, list: () => [],
+    paneTitles: () => new Map(), spawn: async () => {}, kill: async () => {}, paste: async () => ({ ok: true }),
+  })
+  try {
+    const sc: SendCtx = { key: "send-x", appAttempt: "app.x" }
+    await ensureSessionAndSendAsync("mp-cc-r5-chain", "<channel source=\"memorypalace\" chat_id=\"c\" message_id=\"m-x\" user=\"susu\" ts=\"t\">hi</channel>", "c", sc)
+    expect(got.map((g) => g.sc)).toEqual([sc])
+  } finally {
+    setTmuxRunner({ send: () => {}, sendRaw: () => {}, key: async () => {}, capture: async () => "", hasSession: () => true, list: () => [], paneTitles: () => new Map(), spawn: async () => {}, kill: async () => {}, paste: async () => ({ ok: true }) } as any)
+  }
 })

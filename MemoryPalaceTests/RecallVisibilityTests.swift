@@ -40,19 +40,19 @@ final class RecallVisibilityTests: XCTestCase {
         XCTAssertEqual(Set(r.hits.map(\.memoryId)).count, r.hits.count, "hits 无重复")
     }
 
-    func testHitsCarryRetrieverAndScore() {
+    func testHitsCarryRetrieverAndScore() throws {
         UserDefaults.standard.set(true, forKey: "mem_inject_keyword")
         let mems = [
             makeMemory("用户喜欢暖奶白配色", keywords: ["配色"]),
             makeMemory("钉住的记忆", pinned: true),
         ]
-        let r = MemoryInjector.buildInjectionSplit(memories: mems, recentMessages: ["聊聊配色"])
+        let r = MemoryInjector.buildInjectionSplit(memories: mems, recentMessages: ["配色"])
         let persistent = r.hits.filter { $0.retrieverId == "persistent" }
         let keyword = r.hits.filter { $0.retrieverId == "keyword" }
         XCTAssertFalse(persistent.isEmpty, "常驻层 hit 带 persistent 标（S1 用）")
         XCTAssertEqual(keyword.count, 1, "关键词命中一条")
-        XCTAssertNotNil(keyword.first?.score, "BM25 命中带分数")
-        XCTAssertGreaterThan(keyword.first!.score!, 0)
+        let score = try XCTUnwrap(keyword.first?.score, "BM25 命中带分数")
+        XCTAssertGreaterThan(score, 0)
     }
 
     func testHitsRespectBudgetTruncation() {

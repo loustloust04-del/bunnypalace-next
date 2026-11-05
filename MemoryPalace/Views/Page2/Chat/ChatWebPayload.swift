@@ -83,6 +83,8 @@ struct ChatRenderContext {
     let userName: String
     let assistantName: String
     let showThinking: Bool
+    /// 「设置 → 思考过程」不是「隐藏」：原生思考摘要显示（和 CC 思考开关分开）
+    var showNativeThinking = true
     let branchInfo: [String: BranchInfo]
     let streamingNodeId: String?
     /// 当前楼层绑定的卡名（「edited」浮层用）；nil = 非卡聊天 / 卡没了
@@ -108,11 +110,11 @@ extension ChatMessageDTO {
         // ② thinking 从正文里剥出来（user 消息不剥）
         let extracted = isUser ? nil : ContentCleaner.extractThinking(from: raw)
         let body = extracted?.content ?? raw
-        let think: String? = {
-            guard !isUser, ctx.showThinking else { return nil }
-            let t = extracted?.thinking ?? node.ccThinking
-            return (t?.isEmpty == false) ? t : nil
-        }()
+        // [thinking] 标签 / CC 思考链跟「显示 CC 思考」开关；原生思考摘要（thinking 回传 §3.8）跟「思考过程」设置，回复完成后才出现
+        let think: String? = isUser ? nil : DisclosureKind.thinkingLine(
+            tagOrCC: extracted?.thinking ?? node.ccThinking, showCC: ctx.showThinking,
+            native: node.segments?.attachedThinkingText, showNative: ctx.showNativeThinking,
+            streaming: ctx.streamingNodeId == node.id)
 
         // ③ 附件（口径抄 CardFlowView:3272）。P2 只给名字和类型，
         //    图片字节要等 P3 的 mp-asset:// 才喂得过去。

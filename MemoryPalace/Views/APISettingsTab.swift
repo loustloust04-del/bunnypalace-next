@@ -46,7 +46,7 @@ struct APISettingsTab: View {
             .background(Theme.sidebarBg)
             #endif
             .scrollDismissesKeyboard(.immediately)
-            .navigationTitle("API")
+            .navigationTitle("模型和API")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
@@ -80,19 +80,65 @@ struct APISettingsTab: View {
     }
 
     private var listContent: some View {
-        SettingsSectionList(.list) {
-            if let pm = providerManager {
-                credentialsSection(pm: pm)
-                modelPoolSection
-                webSearchSection
-                streamingSection
-                budgetSectionBlock
-                cloudSyncSectionBlock
+        ScrollViewReader { proxy in
+            SettingsSectionList(.list) {
+                if let pm = providerManager {
+                    credentialsSection(pm: pm)
+                    modelPoolSection
+                    webSearchSection
+                    streamingSection
+                    budgetSectionBlock
+                    cloudSyncSectionBlock
+                }
             }
+            #if os(iOS)
+            .listStyle(.insetGrouped)
+            #endif
+            .settingsAnchorScroll(proxy)
         }
+        .settingsJumpTarget(accepts: { $0.tab == .api }, perform: handleJump)
         #if os(iOS)
-        .listStyle(.insetGrouped)
+        .navigationDestination(isPresented: $showPoolFromJump) {
+            ModelPoolPage(initialFilterCredentialId: poolFilter)
+        }
         #endif
+    }
+
+    // MARK: - 从设置外面直达（SettingsJump：报错「去改」/ 冷启动回到没存完的卡）
+
+    /// 全部模型页的初始筛卡（「去看」学到的参数）
+    @State private var poolFilter: String? = nil
+    #if os(iOS)
+    @State private var showPoolFromJump = false
+    #endif
+
+    private func handleJump(_ target: SettingsJumpTarget) {
+        switch target {
+        case .apiPage, .persona:
+            break
+        case .budget:
+            SettingsSearchRouter.shared.request(anchor: SettingsJump.budgetAnchor)
+        case .newCredential:
+            afterPush { editing = EditingCredential(credentialId: nil) }
+        case .editCredential(let id):
+            if providerManager?.credentials.contains(where: { $0.id == id }) == true {
+                afterPush { editing = EditingCredential(credentialId: id) }
+            } else {
+                APIDraftStore.clear(slot: id)   // 草稿那张卡已经被删了 → 丢弃
+            }
+        case .modelPool(let id):
+            poolFilter = id
+            #if os(iOS)
+            afterPush { showPoolFromJump = true }
+            #else
+            showModelPool = true
+            #endif
+        }
+    }
+
+    /// push 动画还在飞时再 present / push 会被吞（plan 风险 3）：等这一页站稳
+    private func afterPush(_ action: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: action)
     }
 
     // MARK: - Sections
@@ -139,6 +185,7 @@ struct APISettingsTab: View {
             #else
             // macOS 没 NavigationStack 包裹 → 用 sheet 弹模型池
             Button {
+                poolFilter = nil
                 showModelPool = true
             } label: {
                 modelPoolRowLabel
@@ -146,7 +193,7 @@ struct APISettingsTab: View {
             .buttonStyle(.plain)
             .sheet(isPresented: $showModelPool) {
                 NavigationStack {
-                    ModelPoolPage()
+                    ModelPoolPage(initialFilterCredentialId: poolFilter)
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
                                 Button("关闭") { showModelPool = false }
@@ -367,7 +414,8 @@ struct APISettingsTab: View {
 
     private var budgetSectionBlock: some View {
         Section {
-            BudgetSection()
+            GlobalBudgetSection()
+                .searchAnchor(SettingsJump.budgetAnchor)
         } header: {
             Text("预算（全局总闸）")
         } footer: {
@@ -549,47 +597,182 @@ struct APISettingsTab: View {
 
 // MARK: - BudgetSection (全局保险闸 — 粟粟决策 2026-04-23)
 // 水库总闸门：所有 API 调用（无论 provider 无论主/副模型）汇总到 GlobalBudgetStore。
+// v5 · A12：控件能接不同的账（`BudgetAccount`）——全局一份（顶上是开关），记忆写入预算一份（顶上是周期），其余一模一样
 
-private struct BudgetSection: View {
+struct BudgetSection<Header: View>: View {
     @Environment(\.settingsMetrics) private var m
-    private let store = GlobalBudgetStore.shared
+    private let account: any BudgetAccount
+    private let spentLabel: String
+    private let footnote: String
+    private let dimmed: Bool
+    /// 到八成变不变色（全局照旧；写入预算不用黄）
+    private let warnAt80: Bool
+    private let header: Header
     @State private var budgetText: String
     @State private var showResetConfirm = false
     @State private var justSaved = false
 
-    init() {
-        _budgetText = State(initialValue: Self.text(for: GlobalBudgetStore.shared))
+    init(account: any BudgetAccount, spentLabel: String = "已使用", footnote: String, dimmed: Bool = false,
+         warnAt80: Bool = true, @ViewBuilder header: () -> Header) {
+        self.account = account
+        self.spentLabel = spentLabel
+        self.footnote = footnote
+        self.dimmed = dimmed
+        self.warnAt80 = warnAt80
+        self.header = header()
+        _budgetText = State(initialValue: Self.text(for: account))
     }
 
     /// 从未拨款时显示**默认额度本身**（10），别显示 "0.00"——闸门真的按 10 在计，
     /// 显示 0.00 会让人以为额度是 0（BUG-1 的观感一半来自这里）
-    private static func text(for store: GlobalBudgetStore) -> String {
-        String(format: "%.2f", store.isBudgetSet ? store.budgetUSD : GlobalBudgetStore.defaultBudgetUSD)
+    private static func text(for account: any BudgetAccount) -> String {
+        String(format: "%.2f", account.isBudgetSet ? account.budgetUSD : account.defaultBudgetUSD)
     }
 
     private var hasUnsavedChanges: Bool {
-        budgetText != Self.text(for: store)
+        budgetText != Self.text(for: account)
     }
 
     /// 进度条按**有效额度**算：没拨款时有效额度是默认 10，不是 0（不然条永远空着，
     /// 跟「其实在按 10 计闸」对不上）
     private var effectiveBudget: Double {
-        store.isBudgetSet ? store.budgetUSD : GlobalBudgetStore.defaultBudgetUSD
+        account.isBudgetSet ? account.budgetUSD : account.defaultBudgetUSD
     }
 
     private var percent: Double {
         guard effectiveBudget > 0 else { return 0 }
-        return min(store.spentUSD / effectiveBudget, 1.0)
+        return min(account.spentUSD / effectiveBudget, 1.0)
     }
 
     private var progressTint: Color {
         if percent >= 1.0 { return .red }
-        if percent >= 0.8 { return Color(red: 0.9, green: 0.7, blue: 0.35) }
+        if warnAt80, percent >= 0.8 { return Color(red: 0.9, green: 0.7, blue: 0.35) }
         return Theme.branchIndicator
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            header
+
+            Group {
+                HStack {
+                    Text("预算（USD）")
+                        .font(m.label)
+                        .foregroundColor(Theme.textSecondary)
+                    if !account.isBudgetSet {
+                        Text("默认")
+                            .font(m.caption)
+                            .foregroundColor(Theme.textMuted)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Theme.accent))
+                    }
+                    Spacer()
+                    TextField(String(format: "%.2f", account.defaultBudgetUSD), text: $budgetText)
+                        .textFieldStyle(.plain)
+                        .font(m.body.monospaced())
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 90)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Theme.mainBg))
+                        #if os(iOS)
+                        .keyboardType(.decimalPad)
+                        #endif
+                }
+
+                HStack {
+                    Text(spentLabel)
+                        .font(m.label)
+                        .foregroundColor(Theme.textSecondary)
+                    Spacer()
+                    Text(String(format: "$ %.4f", account.spentUSD))
+                        .font(m.body.monospaced())
+                        .foregroundColor(Theme.textPrimary)
+                }
+
+                ProgressView(value: percent)
+                    .tint(progressTint)
+
+                HStack {
+                    Text(String(format: "%.0f%%", percent * 100))
+                        .font(m.caption)
+                        .foregroundColor(Theme.textMuted)
+                    Spacer()
+                    Button(action: { showResetConfirm = true }) {
+                        Text("重置已用")
+                            .font(m.secondary)
+                            .foregroundColor(Theme.branchIndicator)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Text(footnote)
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Spacer()
+                    Button(action: commitBudget) {
+                        Text(justSaved ? "已保存" : "保存")
+                            .font(m.secondary.weight(.medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(
+                                justSaved ? Theme.textMuted
+                                    : (hasUnsavedChanges ? Theme.branchIndicator : Theme.textMuted.opacity(0.4))
+                            ))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!hasUnsavedChanges || justSaved)
+                }
+            }
+            .opacity(dimmed ? 0.55 : 1.0)
+        }
+        .confirmationDialog(
+            "清空已用花费？",
+            isPresented: $showResetConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("重置", role: .destructive) {
+                account.resetSpent()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(String(format: "当前已用 $%.4f，预算上限保留。", account.spentUSD))
+        }
+    }
+
+    private func commitBudget() {
+        let raw = budgetText.trimmingCharacters(in: .whitespaces)
+        if raw.isEmpty {
+            // 清空 = 回到**默认额度**，不是「额度 0」也不是「不限」
+            account.clearBudget()
+            budgetText = String(format: "%.2f", account.defaultBudgetUSD)
+        } else if let v = Double(raw) {
+            account.setBudgetUSD(v)
+            budgetText = String(format: "%.2f", max(0, v))
+        }
+        justSaved = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            justSaved = false
+        }
+    }
+}
+
+/// 全局总闸那一份：顶上「启用预算限额」开关，关着整块淡一点（界面同改造前）
+private struct GlobalBudgetSection: View {
+    @Environment(\.settingsMetrics) private var m
+    private let store = GlobalBudgetStore.shared
+
+    var body: some View {
+        BudgetSection(account: store,
+                      footnote: store.isBudgetSet
+                          ? "含主对话、记忆提取、上下文总结、Dream/Timeline/InnerVoice 等所有后台 agent 的调用。"
+                          : "未设置时按 10 美元计。填一个数字保存后按你填的算；清空再保存回到默认 10。",
+                      dimmed: !store.enabled) {
             Toggle(isOn: Binding(
                 get: { store.enabled },
                 set: { store.setEnabled($0) }
@@ -599,111 +782,7 @@ private struct BudgetSection: View {
                     .foregroundColor(Theme.textPrimary)
             }
             .tint(Theme.branchIndicator)
-
-            HStack {
-                Text("预算（USD）")
-                    .font(m.label)
-                    .foregroundColor(Theme.textSecondary)
-                if !store.isBudgetSet {
-                    Text("默认")
-                        .font(m.caption)
-                        .foregroundColor(Theme.textMuted)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Theme.accent))
-                }
-                Spacer()
-                TextField(String(format: "%.2f", GlobalBudgetStore.defaultBudgetUSD), text: $budgetText)
-                    .textFieldStyle(.plain)
-                    .font(m.body.monospaced())
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 90)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.mainBg))
-                    #if os(iOS)
-                    .keyboardType(.decimalPad)
-                    #endif
-            }
-
-            HStack {
-                Text("已使用")
-                    .font(m.label)
-                    .foregroundColor(Theme.textSecondary)
-                Spacer()
-                Text(String(format: "$ %.4f", store.spentUSD))
-                    .font(m.body.monospaced())
-                    .foregroundColor(Theme.textPrimary)
-            }
-
-            ProgressView(value: percent)
-                .tint(progressTint)
-
-            HStack {
-                Text(String(format: "%.0f%%", percent * 100))
-                    .font(m.caption)
-                    .foregroundColor(Theme.textMuted)
-                Spacer()
-                Button(action: { showResetConfirm = true }) {
-                    Text("重置已用")
-                        .font(m.secondary)
-                        .foregroundColor(Theme.branchIndicator)
-                }
-                .buttonStyle(.plain)
-            }
-
-            Text(store.isBudgetSet
-                 ? "含主对话、记忆提取、上下文总结、Dream/Timeline/InnerVoice 等所有后台 agent 的调用。"
-                 : "未设置时按 10 美元计。填一个数字保存后按你填的算；清空再保存回到默认 10。")
-                .font(m.caption)
-                .foregroundColor(Theme.textMuted)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack {
-                Spacer()
-                Button(action: commitBudget) {
-                    Text(justSaved ? "已保存" : "保存")
-                        .font(m.secondary.weight(.medium))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(
-                            justSaved ? Theme.textMuted
-                                : (hasUnsavedChanges ? Theme.branchIndicator : Theme.textMuted.opacity(0.4))
-                        ))
-                }
-                .buttonStyle(.plain)
-                .disabled(!hasUnsavedChanges || justSaved)
-            }
-        }
-        .opacity(store.enabled ? 1.0 : 0.55)
-        .confirmationDialog(
-            "清空已用花费？",
-            isPresented: $showResetConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("重置", role: .destructive) {
-                store.resetSpent()
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text(String(format: "当前已用 $%.4f，预算上限保留。", store.spentUSD))
-        }
-    }
-
-    private func commitBudget() {
-        let raw = budgetText.trimmingCharacters(in: .whitespaces)
-        if raw.isEmpty {
-            // 清空 = 回到**默认 10**，不是「额度 0」也不是「不限」
-            store.clearBudget()
-            budgetText = String(format: "%.2f", GlobalBudgetStore.defaultBudgetUSD)
-        } else if let v = Double(raw) {
-            store.setBudgetUSD(v)
-            budgetText = String(format: "%.2f", max(0, v))
-        }
-        justSaved = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            justSaved = false
+            .opacity(store.enabled ? 1.0 : 0.55)
         }
     }
 }

@@ -752,6 +752,31 @@
       },
       "name" : "open_url"
     },
+    "pending_notes" : {
+      "description" : "看、标时间轴上的待续（做到一半的事、答应了的事）。list 列出还没做完的；做完了用 done，过去了、不用再惦记的用 faded，都要给 id。",
+      "input_schema" : {
+        "properties" : {
+          "action" : {
+            "description" : "list = 看没做完的；done = 标做完了；faded = 标淡了",
+            "enum" : [
+              "list",
+              "done",
+              "faded"
+            ],
+            "type" : "string"
+          },
+          "id" : {
+            "description" : "待续的编号（list 里看到的，如 p0003）；done \/ faded 必填",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "action"
+        ],
+        "type" : "object"
+      },
+      "name" : "pending_notes"
+    },
     "recall" : {
       "description" : "回忆对话历史（我们说过的话）。三种用法：①给 query：逐字搜索原话片段并返回上下文；②想翻某天聊了什么：只给 date（或 after\/before），不给 query，会列出那段时间的每个对话（标题 + 开头几句）；③只给 conversation_id：看那个窗口的窗口总结（从头到尾的经过、原话，加上时间轴里这个窗口还没做完的事）——时间轴里的 conv 编号就是它。日期规则：date = 只看这一天；after = 从这天开始（含这天）；before = 到这天之前（不含这天）。默认不搜当前这场对话；要搜它就用 conversation_id 指定。找文件库笔记请用 fs_search。一次查清：不要翻页式反复调用（每轮最多 3 次）。结果带 conv id，可用 conversation_id 在单场对话里继续深挖。引用回忆要带出处（日期\/原话），别凭印象转述；【相关记忆】段是先前的笔记不是最终事实，关键处以对话原文为准。查到值得长期记住的结论时，先问用户要不要记下来，同意了再记。",
       "input_schema" : {
@@ -979,6 +1004,31 @@
         "type" : "object"
       },
       "name" : "search_web"
+    },
+    "suggest_wiki_direction" : {
+      "description" : "给记忆 wiki 提一个整理方向：动哪一页（已有页或新开一页）、为什么。只是提议，用户在审计台批了才会去查原料、写页，写好的正文还要用户再批一次才进 wiki。",
+      "input_schema" : {
+        "properties" : {
+          "path" : {
+            "description" : "目标页路径，以「工程\/」或「楼层\/」开头，最后一段是页名，比如 楼层\/地点\/云桥城",
+            "type" : "string"
+          },
+          "reason" : {
+            "description" : "为什么要动这页：聊到了什么新事实、什么变了",
+            "type" : "string"
+          },
+          "title" : {
+            "description" : "页标题（不写 = 路径最后一段）",
+            "type" : "string"
+          }
+        },
+        "required" : [
+          "path",
+          "reason"
+        ],
+        "type" : "object"
+      },
+      "name" : "suggest_wiki_direction"
     },
     "tool_inspect" : {
       "description" : "查看一个或多个没直接展开的工具的完整参数 schema，调用前用它确认参数。",
@@ -1897,6 +1947,34 @@
       },
       "type" : "function"
     },
+    "pending_notes" : {
+      "function" : {
+        "description" : "看、标时间轴上的待续（做到一半的事、答应了的事）。list 列出还没做完的；做完了用 done，过去了、不用再惦记的用 faded，都要给 id。",
+        "name" : "pending_notes",
+        "parameters" : {
+          "properties" : {
+            "action" : {
+              "description" : "list = 看没做完的；done = 标做完了；faded = 标淡了",
+              "enum" : [
+                "list",
+                "done",
+                "faded"
+              ],
+              "type" : "string"
+            },
+            "id" : {
+              "description" : "待续的编号（list 里看到的，如 p0003）；done \/ faded 必填",
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "action"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
     "recall" : {
       "function" : {
         "description" : "回忆对话历史（我们说过的话）。三种用法：①给 query：逐字搜索原话片段并返回上下文；②想翻某天聊了什么：只给 date（或 after\/before），不给 query，会列出那段时间的每个对话（标题 + 开头几句）；③只给 conversation_id：看那个窗口的窗口总结（从头到尾的经过、原话，加上时间轴里这个窗口还没做完的事）——时间轴里的 conv 编号就是它。日期规则：date = 只看这一天；after = 从这天开始（含这天）；before = 到这天之前（不含这天）。默认不搜当前这场对话；要搜它就用 conversation_id 指定。找文件库笔记请用 fs_search。一次查清：不要翻页式反复调用（每轮最多 3 次）。结果带 conv id，可用 conversation_id 在单场对话里继续深挖。引用回忆要带出处（日期\/原话），别凭印象转述；【相关记忆】段是先前的笔记不是最终事实，关键处以对话原文为准。查到值得长期记住的结论时，先问用户要不要记下来，同意了再记。",
@@ -2143,6 +2221,34 @@
           },
           "required" : [
             "query"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "suggest_wiki_direction" : {
+      "function" : {
+        "description" : "给记忆 wiki 提一个整理方向：动哪一页（已有页或新开一页）、为什么。只是提议，用户在审计台批了才会去查原料、写页，写好的正文还要用户再批一次才进 wiki。",
+        "name" : "suggest_wiki_direction",
+        "parameters" : {
+          "properties" : {
+            "path" : {
+              "description" : "目标页路径，以「工程\/」或「楼层\/」开头，最后一段是页名，比如 楼层\/地点\/云桥城",
+              "type" : "string"
+            },
+            "reason" : {
+              "description" : "为什么要动这页：聊到了什么新事实、什么变了",
+              "type" : "string"
+            },
+            "title" : {
+              "description" : "页标题（不写 = 路径最后一段）",
+              "type" : "string"
+            }
+          },
+          "required" : [
+            "path",
+            "reason"
           ],
           "type" : "object"
         }

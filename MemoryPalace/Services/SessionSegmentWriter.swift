@@ -1,7 +1,7 @@
 import Foundation
 
 /// 写一段上下文摘要（W2，压缩段）/ 窗口总结最后那段（W3①，收尾）：人设本人第一人称、双方用楼层称呼，
-/// 标题 /【经过】/【原话】，不写待续（待续只在时间轴，plan-memory-v4-1 §四 §五①）。
+/// 标题 /【经过】/【原话】/【待续】（c2c3-v2 第 7 段起 A2 恢复写待续，A4 拼日时由代码搬进待续本子）。
 /// 动笔前先读上一段全文，接着写，不重新介绍窗口。格式不对带提醒重写一次，还不对就不存（抛 `MemoryWriterError.format`）
 enum SessionSegmentWriter {
 
@@ -28,6 +28,8 @@ enum SessionSegmentWriter {
         var title: String
         var story: String
         var quotes: String
+        /// 【待续】一条一行；「无」/ 没写 = 空
+        var pending = ""
     }
 
     /// 调一次模型：(system, user) → 原文；nil = 预算闸 / 空输出（不算失败）
@@ -46,7 +48,7 @@ enum SessionSegmentWriter {
         }
         if kind == .closeout {
             p += """
-            下面不是聊天，是你在给自己写「窗口总结」的最后一段：这个窗口前面的部分已经一段一段记在上下文摘要里了，现在把上下文摘要最后一段之后、到眼下为止的这一截记下来。以后想起这个窗口，要靠窗口总结从头看到尾。
+            下面不是聊天，是你在给自己写「上下文摘要」最后那截（尾段）：这个窗口前面的部分已经一段一段记在上下文摘要里了，现在把最后一段之后、到眼下为止的这一截记下来。这截以后接着聊还会整段重写。
             """
         } else {
             p += """
@@ -60,12 +62,13 @@ enum SessionSegmentWriter {
 
         用你自己的口吻，第一人称「我」；对方就叫「\(u)」或「你」。不要出现「用户」「AI」「助手」这类称呼。
 
-        按这个格式输出，第一行就是标题，三块都要有：
+        按这个格式输出，第一行就是标题，四块都要有：
         标题：一行，这一段讲了什么（15 字以内）
-        【经过】300 字以内：发生了什么、我当时怎么想。只写这一段里的事。
+        【经过】300 字以内：只写发生了什么——谁做了什么、说了什么、定了什么；不写我当时怎么想、什么感受。只写这一段里的事。
         【原话】两边的关键原句逐字抄，一句一行，写成 \(u)：「……」 或 我：「……」。\(u)的原话占三到五成。挑能让以后的我想起当时情形的句子，不抄大段。
+        【待续】这一段里做到一半的事、答应了的事、还没哄完的情绪，一条一行；真的没有就写「无」。
 
-        不写待续（没做完的事记在时间轴里，不在这里）。不写技术报错、重试这些噪音。直接输出，不加别的。
+        不写技术报错、重试这些噪音。直接输出，不加别的。
         """
         return p
     }
@@ -97,11 +100,14 @@ enum SessionSegmentWriter {
 
     // MARK: - 解析 / 格式检查
 
-    /// 模型多写的【待续】【时间轴】直接丢掉
+    /// 【待续】单独收（「无」= 空），模型多写的【时间轴】直接丢掉
     static func parse(_ raw: String) -> Output {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        for mark in ["【待续】", "【时间轴】"] {
-            if let r = text.range(of: mark) { text = String(text[..<r.lowerBound]) }
+        if let r = text.range(of: "【时间轴】") { text = String(text[..<r.lowerBound]) }
+        var pending = ""
+        if let r = text.range(of: "【待续】") {
+            pending = TimelineStore.pendingItems(String(text[r.upperBound...])).joined(separator: "\n")
+            text = String(text[..<r.lowerBound])
         }
         var title = ""
         var lines = text.components(separatedBy: "\n")
@@ -111,10 +117,13 @@ enum SessionSegmentWriter {
         }
         let layers = SessionSummaryStore.splitLayers(lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines))
         if title.isEmpty {
-            title = String(layers.story.prefix(15))
+            // 10-16：兜底只取经过的第一行（以前整截 prefix(15)，换行带进标题，文件里标题行断开 → 严格读判坏）
+            let firstLine = layers.story.components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? ""
+            title = String(firstLine.prefix(15))
         }
         title = title.replacingOccurrences(of: " · ", with: "·")
-        return Output(title: title, story: layers.story, quotes: layers.quotes)
+        return Output(title: title, story: layers.story, quotes: layers.quotes, pending: pending)
     }
 
     /// 格式检查（纯函数）：nil = 合格；否则是带进重写提醒里的那句话
@@ -132,11 +141,35 @@ enum SessionSegmentWriter {
         return nil
     }
 
-    /// 不该出现的称呼（引号里的原话不算——她自己说「用户」也照抄）
+    /// 不该出现的称呼：把她叫成「用户」（引号里的原话不算——她自己说「用户」也照抄）
     static func hasForbiddenAddress(_ o: Output) -> Bool {
-        let outsideQuotes = (o.title + "\n" + o.story)
-            .replacingOccurrences(of: "「[^」]*」", with: "", options: .regularExpression)
-        return outsideQuotes.contains("用户")
+        addressesAsUser(o.title + "\n" + o.story + "\n" + o.quotes)
+    }
+
+    /// 「用户」后面接这些是名词组合（用户说明 / 用户问题 / 用户名…），不是拿它称呼人（10-16 astra #5）；「说明天」是「说 + 明天」不算
+    private static let userNounTail = "(?!说明(?![天早晚日])|问题|想法|请求|需求|体验|名|画像|数据|界面|协议|反馈|信息|头像|列表|量|群|端|侧|们)"
+
+    /// 「用户」当主语称呼对方：后面直接接动词，或隔几个时间词 / 副词再接（用户今天说… / 用户又想…，10-16 astra #4）
+    private static let userAsSubject = try! NSRegularExpression(
+        pattern: "(?<![的个位些名类新老他各每有多分批真普])用户" + userNounTail
+            + "(?:今天|昨天|前天|刚才|刚刚|早上|晚上|后来|最近|突然|一直|总是|已经|曾经|又|也|还|就|再|先|很|特别|非常|不|没有|没)*"
+            + "(?:说|问|要|让|请|表示|希望|觉得|认为|告诉|叫|喊|撒娇|想要|追问|回复|回答|提到|喜欢|讨厌|想|答应|决定|同意|拒绝)")
+
+    /// 「用户」当宾语称呼对方：提醒用户 / 告诉用户 / 给用户 / 陪用户 / 跟用户 / 和用户（10-16 astra #4）
+    private static let userAsObject = try! NSRegularExpression(pattern: "(?:提醒|告诉|给|陪|跟|和)用户" + userNounTail)
+
+    /// 纯函数（10-16 放窄）：只拦把「用户」当成称呼她本人的写法——说话人写成「用户：」，「用户说 / 问 / 要…」当主语，
+    /// 「提醒用户 / 陪用户…」当宾语。「别的用户」「用户画像」「用户说明」这类普通名词放行（整天聊 app 的窗口以前一律被拦，A2 / A4 都误伤）。
+    /// 引号里的原话不算：先把完整的「…」（可以跨行）整段剥掉再查，引文里的「用户：」也不当说话人
+    static func addressesAsUser(_ text: String) -> Bool {
+        let outside = text.replacingOccurrences(of: "「[^」]*」", with: "", options: .regularExpression)
+        for line in outside.components(separatedBy: .newlines) {
+            let t = line.trimmingCharacters(in: .whitespaces)
+                .replacingOccurrences(of: "^(【[^】]*】|- )+", with: "", options: .regularExpression)
+            if t.hasPrefix("用户：") || t.hasPrefix("用户:") { return true }
+        }
+        let range = NSRange(outside.startIndex..., in: outside)
+        return userAsSubject.firstMatch(in: outside, range: range) != nil || userAsObject.firstMatch(in: outside, range: range) != nil
     }
 
     // MARK: - 执行
@@ -172,29 +205,56 @@ enum SessionSegmentWriter {
             kind: req.kind, title: o.title,
             start: first.date ?? Date(), end: last.date ?? Date(),
             from: req.from, to: req.from + req.messages.count, lastNodeId: last.id,
-            story: o.story, quotes: o.quotes, pending: "")
+            story: o.story, quotes: o.quotes, pending: o.pending, format: SessionSegment.currentFormat)
     }
 
-    /// 真的调模型：预算闸 → 副模型非流式 → 记花费；空输出 = nil
-    static func modelCaller(model: ProviderModel, providerManager: ProviderManager, conversationId: String, profileId: String) -> Caller {
+    /// 每次调模型前后都复查开关（astra #1）：关着 = nil（跳过，不算失败）。等模型时她关了开关，回来的结果也不落盘——
+    /// 调用方拿到结果到落盘之间不隔 await，后查这一下就是落盘前那一查
+    static func gated(_ isOn: @escaping () -> Bool, _ caller: @escaping Caller) -> Caller {
         { system, user in
-            if let provider = providerManager.provider(for: model) {
-                let est = BudgetCalculator.actualCost(
-                    provider: provider, modelId: model.modelId,
-                    usage: TokenUsage(inputTokens: HeuristicEstimator().estimate(system + user), outputTokens: 1500))
-                if case .blocked = providerManager.budgetGate(providerId: provider.id, estimatedCost: est),
-                   !BudgetPreflight.mayDeferEarlyGate(provider: provider, estimated: est) {
-                    CacheDiagLog.shared.log("📝 记忆写手: 跳过（预算闸）")
-                    return nil
-                }
+            guard isOn() else {
+                CacheDiagLog.shared.log("📝 记忆写手: 跳过（开关关了）")
+                return nil
             }
-            let router = ProviderRouter(usageContext: UsageContext(kind: .summary, conversationId: conversationId, profileId: profileId))
+            let raw = try await caller(system, user)
+            guard isOn() else {
+                CacheDiagLog.shared.log("📝 记忆写手: 开关关了，这次写的不存")
+                return nil
+            }
+            return raw
+        }
+    }
+
+    /// 真的调模型：写入预算（后台写手才查；手动「现在写」不查，v5 Q10）→ 全局预算闸 → 副模型非流式 → 记花费；空输出 = nil。
+    /// kind = 账本里算谁的（A2 .summary / A3 .windowSummary / A4 .timeline / C2 .memory，v5 · A11）
+    /// preflight = 调用方自己的那一查（C3 在主线程读卡片和全局闸），给了就不走 budgetBlock
+    /// onUsage = 这次调用用了多少 token、花了多少钱（试写台要显示；没报用量就是 nil, nil）
+    static func modelCaller(model: ProviderModel, providerManager: ProviderManager, conversationId: String, profileId: String,
+                            kind: UsageKind = .summary, checkWriteBudget: Bool = true,
+                            preflight: ((String) async -> String?)? = nil,
+                            onUsage: ((TokenUsage?, Double?) -> Void)? = nil) -> Caller {
+        { system, user in
+            let blocked: String?
+            if let preflight {
+                blocked = await preflight(system + user)
+            } else {
+                blocked = budgetBlock(model: model, providerManager: providerManager, text: system + user, checkWriteBudget: checkWriteBudget)
+            }
+            if let why = blocked {
+                CacheDiagLog.shared.log("📝 记忆写手: 跳过（\(why)）")
+                return nil
+            }
+            let router = ProviderRouter(usageContext: UsageContext(kind: kind, conversationId: conversationId, profileId: profileId))
             let (response, usage) = try await router.sendNonStreaming(
                 model: model, messages: [(role: "user", content: user)], systemPrompt: system, providerManager: providerManager)
+            var spent: Double?
             if let usage, let provider = providerManager.provider(for: model) {
                 let cost = BudgetCalculator.actualCost(provider: provider, modelId: model.modelId, usage: usage)
+                spent = cost
+                MemoryWriteLog.addCost(cost)
                 await MainActor.run { providerManager.commitSpend(providerId: provider.id, amount: cost, usage: usage) }
             }
+            onUsage?(usage, spent)
             let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 CacheDiagLog.shared.log("📝 记忆写手: ⚠️ 模型返回空内容")
@@ -202,6 +262,21 @@ enum SessionSegmentWriter {
             }
             return trimmed
         }
+    }
+
+    /// 后台写手发请求前那一查（modelCaller 和 C3 手动 agent 每一轮共用）：写入预算 → 全局预算闸（按这次要送的字估）。
+    /// 拦下 = 原因；model = nil（本机）只查写入预算。读账本，后台调
+    static func budgetBlock(model: ProviderModel?, providerManager: ProviderManager, text: String, checkWriteBudget: Bool = true) -> String? {
+        if checkWriteBudget, WriteBudgetStore.exceeded() { return "写入预算用完" }
+        guard let model, let provider = providerManager.provider(for: model) else { return nil }
+        let est = BudgetCalculator.actualCost(
+            provider: provider, modelId: model.modelId,
+            usage: TokenUsage(inputTokens: HeuristicEstimator().estimate(text), outputTokens: 1500))
+        if case .blocked = providerManager.budgetGate(providerId: provider.id, estimatedCost: est),
+           !BudgetPreflight.mayDeferEarlyGate(provider: provider, estimated: est) {
+            return "预算闸"
+        }
+        return nil
     }
 }
 

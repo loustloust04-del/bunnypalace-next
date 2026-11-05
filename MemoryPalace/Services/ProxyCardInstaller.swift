@@ -107,6 +107,9 @@ enum ProxyCardInstaller {
     /// 探活：2s 超时。既挡孤儿广播（proxy 崩了但 mDNS 还没撤回），也把 degraded / 403
     /// 这两种"发现得到但用不了"分辨出来，免得添加完才在聊天页炸。
     static func checkHealth(_ url: URL, timeout: TimeInterval = 2) async -> ProxyHealth {
+        #if os(macOS)
+        if BenchIsolation.active { return .unreachable }
+        #endif
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = timeout

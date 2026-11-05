@@ -8,10 +8,16 @@ enum SyncStore {
 
     static let schemaVersion = 1
     static let enabledProfilesKey = "syncEnabledProfiles"
+    #if os(macOS)
+    static let stanchEnabled = UserDefaults.standard.object(forKey: "mp.stanch.S1") as? Bool ?? true
+    #endif
 
     // MARK: - 开关（单楼层试点：按楼层启用）
 
     static func isEnabled(profileId: String) -> Bool {
+        #if os(macOS)
+        if BenchIsolation.active { return false }
+        #endif
         guard !LocalMode.isOn else { return false }
         return enabledProfiles().contains(profileId)
     }
@@ -46,6 +52,9 @@ enum SyncStore {
     static var overrideRoot: URL?
 
     static func syncRoot(profileId: String) -> URL? {
+        #if os(macOS)
+        if BenchIsolation.active { return nil }
+        #endif
         let base: URL?
         if let overrideRoot {
             base = overrideRoot
@@ -86,6 +95,9 @@ enum SyncStore {
 
     /// 扫描 sync/ 下所有楼层名片（调用方自行过滤掉本机已有的）
     static func discoverRemoteFloors() -> [FloorInfo] {
+        #if os(macOS)
+        if BenchIsolation.active { return [] }
+        #endif
         let base: URL?
         if let overrideRoot {
             base = overrideRoot
@@ -184,8 +196,8 @@ enum SyncStore {
     /// 曾放进共享 sync 目录，两台设备经 iCloud 互相覆盖对方账本：A 导出的指纹把 B 的导入
     /// 记录涂掉，B 永远"已读过"新文档（双机实测抓出的事故）。
     private static func localStateDir() -> URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("MemoryPalace/sync-state", isDirectory: true)
+        let dir = AppPaths.checked(AppPaths.applicationSupport
+            .appendingPathComponent("MemoryPalace/sync-state", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -217,6 +229,9 @@ enum SyncStore {
     private static func saveImportState(_ state: [String: Date], profileId: String) {
         guard let url = importStateURL(profileId: profileId),
               let data = try? encoder.encode(state) else { return }
+        #if os(macOS)
+        if stanchEnabled, (try? Data(contentsOf: url)) == data { return }
+        #endif
         try? data.write(to: url, options: .atomic)
     }
 
@@ -231,6 +246,9 @@ enum SyncStore {
     private static func saveExportState(_ state: [String: Date], profileId: String) {
         guard let url = stateURL(profileId: profileId),
               let data = try? encoder.encode(state) else { return }
+        #if os(macOS)
+        if stanchEnabled, (try? Data(contentsOf: url)) == data { return }
+        #endif
         try? data.write(to: url, options: .atomic)
     }
 

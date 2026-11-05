@@ -71,16 +71,16 @@ final class CatalogInjectionTests: XCTestCase {
         XCTAssertGreaterThan(catalogLines.count, fullLines.count, "目录按行计费，同预算装更多条")
     }
 
-    // MARK: - 修复第一刀·刀4：关键词模式下常驻层（关系/偏好）仍全文，命中层目录化
+    // MARK: - 修复第一刀·刀4：关键词模式下常驻层仍全文，命中层目录化（C3 ② 起常驻层只收钉住的）
 
     func testKeywordModePersistentCategoriesStayFullText() {
         UserDefaults.standard.set(true, forKey: "mem_inject_catalog")
         UserDefaults.standard.set(true, forKey: "mem_inject_keyword")
         UserDefaults.standard.set(false, forKey: "mem_inject_full")
-        let rel = makeMemory("我们是彼此最亲近的人，已经一起走过很长一段日子了，这是关系层的常驻记忆", category: "relationship")
+        let rel = makeMemory("我们是彼此最亲近的人，已经一起走过很长一段日子了，这是关系层的常驻记忆", category: "relationship", pinned: true)
         let fact = makeMemory(String(repeating: "用户正在做记忆宫殿这个项目，", count: 6))
         let r = MemoryInjector.buildInjectionSplit(memories: [rel, fact], recentMessages: ["今天聊聊记忆宫殿项目"])
-        XCTAssertTrue(r.stable.contains(rel.content), "关系类走常驻层，全文")
+        XCTAssertTrue(r.stable.contains(rel.content), "钉住的走常驻层，全文")
         XCTAssertTrue(r.volatile.hasPrefix("- ["), "命中的事实类是目录行")
         XCTAssertFalse(r.volatile.contains(fact.content), "全文不进命中层")
     }

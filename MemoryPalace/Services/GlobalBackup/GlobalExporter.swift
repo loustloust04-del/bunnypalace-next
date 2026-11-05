@@ -89,6 +89,11 @@ enum GlobalExporter {
         try exportThemeBackgroundImages(to: workspace, sections: &sections, stats: &stats)
         // 卡库 ⑧c：身份库 / 导入来源 / 原件归档 / 批次整目录（体量小于主题外的大段，不单列进度）
         try exportCardLibraryFiles(to: workspace, sections: &sections, stats: &stats)
+        // 小芽对话 + 账本（plan-onboarding-xiaoya-impl P1b；体量小，同样不单列进度）
+        if let sec = try exportAssistantChat(to: workspace) {
+            sections.append(sec)
+            stats.uncompressedBytes += sec.bytes
+        }
         await MainActor.run { progress.completeSection("themes") }
 
         // B.7
@@ -511,14 +516,14 @@ enum GlobalExporter {
         let audioOut = workspace.appendingPathComponent("audiobooks", isDirectory: true)
         try FileManager.default.createDirectory(at: audioOut, withIntermediateDirectories: true)
 
-        let baseAppSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let srcRoot = baseAppSupport
+        let baseAppSupport = AppPaths.applicationSupport
+        let srcRoot = AppPaths.checked(baseAppSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("audiobooks", isDirectory: true)
+            .appendingPathComponent("audiobooks", isDirectory: true))
 
         for profile in profileManager.profiles {
             let pid = profile.id
-            let src = srcRoot.appendingPathComponent(pid, isDirectory: true)
+            let src = AppPaths.checked(srcRoot.appendingPathComponent(pid, isDirectory: true))
             guard FileManager.default.fileExists(atPath: src.path) else { continue }
             let dst = audioOut.appendingPathComponent(pid, isDirectory: true)
             do {
@@ -550,15 +555,15 @@ enum GlobalExporter {
             .appendingPathComponent("images", isDirectory: true)
         try FileManager.default.createDirectory(at: themesOut, withIntermediateDirectories: true)
 
-        let baseAppSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let srcRoot = baseAppSupport
+        let baseAppSupport = AppPaths.applicationSupport
+        let srcRoot = AppPaths.checked(baseAppSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("themes", isDirectory: true)
+            .appendingPathComponent("themes", isDirectory: true))
 
         if FileManager.default.fileExists(atPath: srcRoot.path) {
             let items = (try? FileManager.default.contentsOfDirectory(atPath: srcRoot.path)) ?? []
             for name in items {
-                let src = srcRoot.appendingPathComponent(name)
+                let src = AppPaths.checked(srcRoot.appendingPathComponent(name))
                 let dst = themesOut.appendingPathComponent(name)
                 do {
                     try FileManager.default.copyItem(at: src, to: dst)
@@ -592,6 +597,29 @@ enum GlobalExporter {
         let (sha, bytes) = try SectionHasher.hash(directory: dst)
         sections.append(.init(path: "cardlibrary", sha256: sha, bytes: bytes))
         stats.uncompressedBytes += bytes
+    }
+
+    /// assistant/ = AssistantChat/ 里的 *.json（history / ledger，以后的 script 也按目录带）；
+    /// 解不开时挪开留底的 *.corrupt-*.json 不带。没有可带的文件 → 不出这段（恢复时本机现有的不动）
+    static func exportAssistantChat(from src: URL = StagingPaths.primaryAssistantRoot,
+                                    to workspace: URL) throws -> GlobalExportManifest.SectionEntry? {
+        let fm = FileManager.default
+        let names = ((try? fm.contentsOfDirectory(atPath: src.path)) ?? [])
+            .filter { $0.hasSuffix(".json") && !$0.contains(".corrupt-") }
+            .sorted()
+        guard !names.isEmpty else { return nil }
+        let dst = workspace.appendingPathComponent("assistant", isDirectory: true)
+        try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+        for name in names {
+            let file = src.appendingPathComponent(name)
+            do {
+                try fm.copyItem(at: file, to: dst.appendingPathComponent(name))
+            } catch {
+                throw GlobalBackupError.exportFileCopyFailed(file, error)
+            }
+        }
+        let (sha, bytes) = try SectionHasher.hash(directory: dst)
+        return .init(path: "assistant", sha256: sha, bytes: bytes)
     }
 
     private static func exportFileLibrary(

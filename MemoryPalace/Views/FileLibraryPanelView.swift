@@ -1,10 +1,10 @@
 import SwiftUI
+import SwiftStreamingMarkdown
 import ImageIO
 #if os(macOS)
 import AppKit
 #else
 import UIKit
-import SwiftStreamingMarkdown  // 流式重写 Phase 2：iOS 文件预览换 fork 渲染
 #endif
 
 // MARK: - File Library Panel (右栏文件库 tab)
@@ -13,6 +13,7 @@ struct FileLibraryPanelView: View {
     @Environment(\.chatMetrics) private var metrics
     @Environment(RightPanelNavigator.self) private var desktopNavigator: RightPanelNavigator?
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+    @Environment(PresetManager.self) private var presetManager: PresetManager?
     #if os(iOS)
     @Environment(\.page2AppShellTool) private var shellTool
     #endif
@@ -21,6 +22,13 @@ struct FileLibraryPanelView: View {
     /// 楼层记忆树（memory/ 虚拟路径，第二刀返工：当普通文件夹显示，只读；self/ 可编辑）。reload 时后台读
     @State private var memoryFiles: [FileLibraryStore.FileMeta] = []
     @State private var editingSelfMemory: SelfMemoryTarget? = nil
+    @State private var editingWikiPage: WikiPageTarget? = nil
+    /// 「Prompt」虚拟根：楼层当前预设实例的插槽 + 楼层字段（和 Prompt 页同一份数据，跟着实例变）
+    @State private var promptEntries: [PromptFolder.Entry] = []
+    @State private var editingPrompt: PromptTarget? = nil
+    /// 「种子待批」：种子目录 / 页稿就是待批提案本身（reload 时后台读），改了写回同一份提案
+    @State private var seedEntries: [CatalogSeedDrafts.Entry] = []
+    @State private var editingSeed: SeedTarget? = nil
     /// 修全局卡顿：reload / 外部变更检查都在后台扫盘，回主线程只按最新一次的结果落状态
     @State private var reloadGeneration = 0
     @State private var externalCheckInFlight = false
@@ -95,6 +103,19 @@ struct FileLibraryPanelView: View {
 
     struct EditingFile: Identifiable { let id = UUID(); let path: String; let content: String; let modifiedAt: Date?; var readOnly = false }
     struct SelfMemoryTarget: Identifiable { let slug: String; var id: String { slug } }
+    struct SeedTarget: Identifiable { let entry: CatalogSeedDrafts.Entry; var id: String { entry.path } }
+    /// baseline 每次存成后跟着前移：别处在打开之后改过同一段就拒存
+    final class PromptTarget: Identifiable {
+        let entry: PromptFolder.Entry
+        var baseline: String
+        var id: String { entry.path }
+        init(entry: PromptFolder.Entry) { self.entry = entry; baseline = entry.content }
+    }
+
+    private var livePromptEntries: [PromptFolder.Entry] {
+        guard let profile = profileManager?.currentProfile, let presets = presetManager?.presets else { return [] }
+        return PromptFolder.entries(profile: profile, presets: presets)
+    }
 
     var body: some View {
         fileLibraryContent
@@ -106,6 +127,7 @@ struct FileLibraryPanelView: View {
         .onChange(of: desktopNavigator?.pendingTarget) { _, _ in consumeDesktopTarget() }
         .onChange(of: viewModeRaw) { _, _ in if viewMode == .tree { crossfade(to: "") } }
         .onChange(of: sortModeRaw) { _, _ in rebuildDerived() }
+        .onChange(of: livePromptEntries, initial: true) { _, entries in applyPrompt(entries) }
         #if os(iOS)
         .onChange(of: currentFolder, initial: true) { _, folder in
             guard let shellTool else { return }
@@ -115,6 +137,7 @@ struct FileLibraryPanelView: View {
         // 切楼层前清空，避免持有旧楼层的文件元数据（仿 MemoryPanelView）
         .onReceive(NotificationCenter.default.publisher(for: .profileWillSwitch)) { _ in
             files = []
+            seedEntries = []
             previews = [:]
             displays = [:]
             sortedFiles = []
@@ -196,6 +219,15 @@ struct FileLibraryPanelView: View {
         .sheet(item: $editingSelfMemory) { target in
             SelfMemoryEditSheet(profileId: profileId, slug: target.slug, onChange: { reload() })
         }
+        .sheet(item: $editingWikiPage) { target in
+            WikiPageEditorSheet(initial: target, onChange: { reload() })
+        }
+        .sheet(item: $editingPrompt) { target in
+            promptEditorSheet(target)
+        }
+        .sheet(item: $editingSeed) { target in
+            seedEditorSheet(target.entry)
+        }
         .sheet(item: $editingFile) { f in
             editorSheet(for: f)
                 .sheet(item: $wikiWordCard) { card in
@@ -223,8 +255,51 @@ struct FileLibraryPanelView: View {
                 reload()
             },
             onCancel: { editingFile = nil },
-            onOpenWikiLink: { target in openWikiTarget(target) }
+            onOpenWikiLink: { target in openWikiTarget(target) },
+            versionKey: .file(profileId: profileId, relativePath: f.path)
         )
+    }
+
+    @ViewBuilder
+    private func promptEditorSheet(_ target: PromptTarget) -> some View {
+        let entry = target.entry
+        let title = entry.name.isEmpty ? "未命名插槽" : entry.name
+        if entry.isEditable {
+            let pid = profileId
+            FileEditorSheet.text(
+                title: title,
+                text: entry.content,
+                format: .plain,
+                onSave: { text in
+                    guard let profiles = profileManager, let presets = presetManager else { throw PromptFolder.SaveError.gone }
+                    try PromptFolder.save(entry.path, text: text, baseline: target.baseline, profileId: pid,
+                                          profiles: profiles, presets: presets)
+                    target.baseline = text
+                },
+                onCancel: { editingPrompt = nil }
+            )
+            .interactiveDismissDisabled()
+        } else {
+            let text = FileLibraryPromptFolder.readOnlyText(entry)
+            FileEditorSheet(path: entry.path, initialContent: text, initialModifiedAt: nil, readOnly: true,
+                            currentModifiedAt: { nil },
+                            reloadExternalContent: { ReloadedFileContent(content: text, modifiedAt: nil) },
+                            onCancel: { editingPrompt = nil }, title: title)
+        }
+    }
+
+    private func seedEditorSheet(_ entry: CatalogSeedDrafts.Entry) -> FileEditorSheet {
+        let pid = profileId
+        // 种子待批是虚拟文件（提案里的字，盘上没有这个路径）：给个不变的时间戳，别报「已在外部删除」；
+        // 别处改过由保存时的 baseline 比对拦（CatalogSeedDrafts.save）
+        return FileEditorSheet(path: entry.path, initialContent: entry.content, initialModifiedAt: .distantPast, readOnly: !entry.editable,
+                               currentModifiedAt: { .distantPast },
+                               reloadExternalContent: { ReloadedFileContent(content: entry.content, modifiedAt: nil) },
+                               onSaveAsync: { text, baseline in
+                                   try await CatalogSeedDrafts.save(entry, text: text, baseline: baseline, wiki: WikiStore(profileId: pid))
+                                   reload()
+                               },
+                               onCancel: { editingSeed = nil }, title: entry.name)
     }
 
     // MARK: - Header
@@ -340,10 +415,11 @@ struct FileLibraryPanelView: View {
         return Array((folderRecent[folder] ?? []).prefix(3).enumerated()).compactMap { slot, meta in
             guard slot < sheets.count else { return nil }
             let target: FileLibraryFolderFlight.Target
-            if FileLibraryDisplay.parentFolder(meta.path) == folder {
+            if FileLibraryMemoryFolder.parentFolder(meta.path) == folder {
                 target = gallery ? .cell("card:\(meta.path)") : .card("card:\(meta.path)")
             } else {
-                let child = meta.path.dropFirst(folder.count + 1).split(separator: "/").first.map(String.init) ?? ""
+                let parent = FileLibraryMemoryFolder.parentFolder(meta.path)
+                let child = parent.dropFirst(folder.count + 1).split(separator: "/").first.map(String.init) ?? ""
                 target = .sub("shell:\(folder)/\(child)")
             }
             return FileLibraryFolderFlight.Paper(
@@ -368,7 +444,7 @@ struct FileLibraryPanelView: View {
 
     @ViewBuilder
     private var mainContent: some View {
-        if files.isEmpty && memoryFiles.isEmpty && !isSearching {
+        if files.isEmpty && memoryFiles.isEmpty && (folderIndex[""]?.folders.isEmpty ?? true) && !isSearching {
             emptyState
         } else if isSearching {
             if filteredFiles.isEmpty { noResultsState } else { searchResults(filteredFiles) }
@@ -401,7 +477,7 @@ struct FileLibraryPanelView: View {
                         FileLibraryRow(
                             tile: fileTile(meta),
                             title: highlighted(entry.title, query),
-                            time: FileLibraryDisplay.timeText(meta.modifiedAt),
+                            time: timeText(meta.modifiedAt),
                             footnote: meta.path,
                             divider: index > 0,
                             minHeight: 76
@@ -500,7 +576,7 @@ struct FileLibraryPanelView: View {
     #endif
 
     private var breadcrumb: some View {
-        let crumbs = FileLibraryDisplay.breadcrumb(currentFolder)
+        let crumbs = FileLibraryPromptFolder.breadcrumb(currentFolder)
         return HStack(spacing: 4) {
             ForEach(Array(crumbs.enumerated()), id: \.offset) { index, crumb in
                 if index > 0 {
@@ -541,11 +617,19 @@ struct FileLibraryPanelView: View {
                     folderEmptyState
                         .modifier(intro(.rest(2)))
                 }
-                folderSection(contents.folders, order: 2)
-                if !contents.folders.isEmpty && !contents.files.isEmpty {
-                    Color.clear.frame(height: 14)
+                if FileLibraryPromptFolder.foldersAfterFiles(currentFolder) {
+                    fileSection(contents.files, order: 2)
+                    if !contents.folders.isEmpty && !contents.files.isEmpty {
+                        Color.clear.frame(height: 14)
+                    }
+                    folderSection(contents.folders, order: 2 + contents.files.count)
+                } else {
+                    folderSection(contents.folders, order: 2)
+                    if !contents.folders.isEmpty && !contents.files.isEmpty {
+                        Color.clear.frame(height: 14)
+                    }
+                    fileSection(contents.files, order: 2 + contents.folders.count)
                 }
-                fileSection(contents.files, order: 2 + contents.folders.count)
             }
         }
     }
@@ -576,28 +660,33 @@ struct FileLibraryPanelView: View {
         }
     }
 
+    /// 在「Prompt」虚拟目录里：不新建、不给排序（顺序固定是 Prompt 页的）
+    private var inPromptFolder: Bool { inFolderPage && FileLibraryPromptFolder.isVirtualFolder(currentFolder) }
+
     private var viewControls: some View {
         HStack(spacing: 10) {
-            Menu {
-                Picker("排序", selection: $sortModeRaw) {
-                    Text("最近更新").tag(FileLibrarySortMode.modified.rawValue)
-                    Text("文件名").tag(FileLibrarySortMode.name.rawValue)
+            if !inPromptFolder {
+                Menu {
+                    Picker("排序", selection: $sortModeRaw) {
+                        Text("最近更新").tag(FileLibrarySortMode.modified.rawValue)
+                        Text("文件名").tag(FileLibrarySortMode.name.rawValue)
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    HStack(spacing: 3) {
+                        Text(sortMode == .modified ? "最近更新" : "文件名")
+                        Image(systemName: "chevron.down")
+                            .font(FileLibraryUI.font(9, .semibold))
+                    }
+                    .font(FileLibraryUI.font(12))
+                    .foregroundColor(Theme.textPrimary)
+                    .contentShape(Rectangle())
                 }
-                .pickerStyle(.inline)
-            } label: {
-                HStack(spacing: 3) {
-                    Text(sortMode == .modified ? "最近更新" : "文件名")
-                    Image(systemName: "chevron.down")
-                        .font(FileLibraryUI.font(9, .semibold))
-                }
-                .font(FileLibraryUI.font(12))
-                .foregroundColor(Theme.textPrimary)
-                .contentShape(Rectangle())
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .fixedSize()
             }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
             FileLibrarySegment(
                 selection: $viewModeRaw,
                 items: FileLibraryViewMode.allCases.map { .init(id: $0.rawValue, symbol: $0.iconName, title: $0.title) }
@@ -729,7 +818,7 @@ struct FileLibraryPanelView: View {
         return FileLibraryPaperCard(
             paper: FileLibraryPaper(face: paperFace(meta, lines: 5), badge: FileLibraryDisplay.badge(meta.path)),
             caption: kind == .image || kind == .binary ? FileLibraryDisplay.fileName(meta.path) : nil,
-            time: FileLibraryDisplay.timeText(meta.modifiedAt),
+            time: timeText(meta.modifiedAt),
             anchor: "card:\(meta.path)",
             frames: flightFrames,
             flight: flightState,
@@ -740,6 +829,8 @@ struct FileLibraryPanelView: View {
     /// 文件夹显示名：记忆树那几层用中文名（AI 名字取楼层变量），其余照 FileLibraryFolderStyle
     private func folderName(_ path: String) -> String {
         FileLibraryMemoryFolder.displayName(path, assistantName: assistantDisplayName)
+            ?? PromptFolder.displayName(path)
+            ?? FileLibrarySeedFolder.displayName(path, entries: seedEntries)
             ?? FileLibraryFolderStyle.displayName(forFolder: path)
     }
 
@@ -748,9 +839,14 @@ struct FileLibraryPanelView: View {
         return n.isEmpty ? "助手" : n
     }
 
-    /// 空文件夹（目前只有空着的「自己的记忆」）不显示日期
+    /// 空文件夹（目前只有空着的「自己的记忆」）和没有时间的虚拟文件夹（Prompt）不显示日期
     private func folderTime(_ folder: FileLibraryDisplay.Folder) -> String {
-        folder.fileCount == 0 ? "" : FileLibraryDisplay.timeText(folder.latest)
+        folder.fileCount == 0 ? "" : timeText(folder.latest)
+    }
+
+    /// 不知道改动时间（Prompt 的插槽 / 字段）不显示
+    private func timeText(_ date: Date) -> String {
+        date == .distantPast ? "" : FileLibraryDisplay.timeText(date)
     }
 
     private func folderLook(_ path: String) -> FileLibraryFolderLook {
@@ -793,7 +889,7 @@ struct FileLibraryPanelView: View {
     }
 
     private func folderDetail(_ folder: FileLibraryDisplay.Folder) -> String {
-        folder.fileCount == 0 ? folderCountText(folder) : "\(folderCountText(folder)) · \(FileLibraryDisplay.timeText(folder.latest))"
+        folder.fileCount == 0 || folder.latest == .distantPast ? folderCountText(folder) : "\(folderCountText(folder)) · \(FileLibraryDisplay.timeText(folder.latest))"
     }
 
     private func folderDetail(path: String) -> String {
@@ -813,6 +909,12 @@ struct FileLibraryPanelView: View {
 
     private func folderCountText(_ folder: FileLibraryDisplay.Folder) -> String {
         if folder.path == FileLibraryMemoryFolder.selfFolder { return "\(folder.fileCount) 条 · 可编辑" }
+        if folder.path == PromptFolder.root { return "\(folder.fileCount) 段 · 和 Prompt 页同步" }
+        if folder.path == PromptFolder.fieldsFolder { return "\(folder.fileCount) 段" }
+        if CatalogSeedDrafts.isSeedPath(folder.path) { return "\(folder.fileCount) 份 · 待批提案" }
+        if FileLibraryMemoryFolder.isDiagnosticFolder(folder.path) {
+            return "\(folder.fileCount) 个文件 · 只读"
+        }
         if folder.imageCount == folder.fileCount { return "\(folder.fileCount) 张图" }
         return FileLibraryFolderStyle.system(folder.path) != nil ? "\(folder.fileCount) 个" : "\(folder.fileCount) 个文件"
     }
@@ -858,22 +960,29 @@ struct FileLibraryPanelView: View {
         FileLibraryRow(
             tile: fileTile(meta),
             title: AttributedString(fileTitle(meta)),
-            time: FileLibraryDisplay.timeText(meta.modifiedAt),
+            time: timeText(meta.modifiedAt),
             divider: divider
         ) {
             Text(display(meta.path).summary ?? byteCountText(meta.bytes))
         }
     }
 
+    @ViewBuilder
     private func fileItem<Content: View>(_ meta: FileLibraryStore.FileMeta, @ViewBuilder _ content: () -> Content) -> some View {
-        content()
-            .contentShape(Rectangle())
-            .onTapGesture { openFile(meta) }
-            .contextMenu {
-                fileContextMenu(for: meta.path)
-            } preview: {
-                longPressPreview(meta)
-            }
+        if promptEntries.contains(where: { $0.path == meta.path }) {
+            content()
+                .contentShape(Rectangle())
+                .onTapGesture { openFile(meta) }
+        } else {
+            content()
+                .contentShape(Rectangle())
+                .onTapGesture { openFile(meta) }
+                .contextMenu {
+                    fileContextMenu(for: meta.path)
+                } preview: {
+                    longPressPreview(meta)
+                }
+        }
     }
 
     #if os(macOS)
@@ -907,21 +1016,23 @@ struct FileLibraryPanelView: View {
             }
             .accessibilityLabel("更多")
 
-            Button { startNewFile() } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(Theme.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+            if !inPromptFolder {
+                Button { startNewFile() } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(Theme.textSecondary)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("新建文件")
             }
-            .accessibilityLabel("新建文件")
         }
         .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .capsule)
     }
     #else
     private var moreMenu: some View {
         Menu {
-            if inFolderPage {
+            if inFolderPage && !inPromptFolder {
                 Button { startNewFile() } label: { Label("新建文件…", systemImage: "plus") }
             }
             Button { reload() } label: { Label("刷新", systemImage: "arrow.clockwise") }
@@ -1003,7 +1114,8 @@ struct FileLibraryPanelView: View {
     }
 
     private func startNewFile() {
-        newFileName = currentFolder.isEmpty || !inFolderPage || FileLibraryMemoryFolder.isMemoryPath(currentFolder) ? "" : currentFolder + "/"
+        newFileName = currentFolder.isEmpty || !inFolderPage || FileLibraryMemoryFolder.isMemoryPath(currentFolder)
+            || PromptFolder.isPromptPath(currentFolder) ? "" : currentFolder + "/"
         showNewFileAlert = true
     }
 
@@ -1086,7 +1198,7 @@ struct FileLibraryPanelView: View {
             expanded: isFolder ? isTreeFolderExpanded(node) : nil,
             tile: tile,
             name: isFolder ? folderName(node.path) : node.meta.map(fileTitle) ?? node.name,
-            trailing: isFolder ? "\(node.fileCount)" : FileLibraryDisplay.timeText(node.latest),
+            trailing: isFolder ? "\(node.fileCount)" : timeText(node.latest),
             highlighted: flashPaths.contains(node.path)
         )
         return Group {
@@ -1192,8 +1304,8 @@ struct FileLibraryPanelView: View {
 
     @ViewBuilder
     private func fileContextMenu(for path: String) -> some View {
-        if FileLibraryMemoryFolder.isMemoryPath(path) {
-            // 记忆树只读（自己的记忆点开编辑，不在这里改名 / 删）
+        if FileLibraryMemoryFolder.isMemoryPath(path) || PromptFolder.isPromptPath(path) {
+            // 记忆树只读（自己的记忆点开编辑，不在这里改名 / 删）；Prompt 的改名 / 删在 Prompt 页
             Button { copyPath(path) } label: { Label("复制路径", systemImage: "doc.on.doc") }
         } else {
             fileWriteContextMenu(for: path)
@@ -1246,7 +1358,7 @@ struct FileLibraryPanelView: View {
                     .lineLimit(2)
             }
             Spacer(minLength: 8)
-            Text(FileLibraryDisplay.timeText(meta.modifiedAt))
+            Text(timeText(meta.modifiedAt))
                 .font(FileLibraryUI.font(12))
                 .monospacedDigit()
                 .foregroundColor(Theme.textMuted)
@@ -1290,60 +1402,20 @@ struct FileLibraryPanelView: View {
         }
     }
 
-    private func buildFileTree(from files: [FileLibraryStore.FileMeta]) -> [FileTreeNode] {
-        final class Builder {
-            let name: String
-            let path: String
-            var meta: FileLibraryStore.FileMeta?
-            var children: [String: Builder] = [:]
-
-            init(name: String, path: String, meta: FileLibraryStore.FileMeta? = nil) {
-                self.name = name
-                self.path = path
-                self.meta = meta
+    private func buildFileTree(from index: [String: FileLibraryDisplay.FolderContents]) -> [FileTreeNode] {
+        func children(of path: String) -> [FileTreeNode] {
+            guard let contents = index[path] else { return [] }
+            let folders = contents.folders.map { folder in
+                FileTreeNode(name: FileLibraryDisplay.fileName(folder.path), path: folder.path, kind: .folder,
+                             meta: nil, children: children(of: folder.path), fileCount: folder.fileCount, latest: folder.latest)
             }
-        }
-
-        let root = Builder(name: "", path: "")
-        for meta in files {
-            let parts = meta.path.split(separator: "/").map(String.init)
-            guard !parts.isEmpty else { continue }
-            var current = root
-            var currentPath = ""
-            for (index, part) in parts.enumerated() {
-                currentPath = currentPath.isEmpty ? part : currentPath + "/" + part
-                if index == parts.count - 1 {
-                    current.children[part] = Builder(name: part, path: currentPath, meta: meta)
-                } else {
-                    if current.children[part] == nil {
-                        current.children[part] = Builder(name: part, path: currentPath)
-                    }
-                    current = current.children[part]!
-                }
+            let files = contents.files.map { meta in
+                FileTreeNode(name: FileLibraryDisplay.fileName(meta.path), path: meta.path, kind: .file,
+                             meta: meta, children: [], fileCount: 1, latest: meta.modifiedAt)
             }
+            return FileLibraryPromptFolder.foldersAfterFiles(path) ? files + folders : folders + files
         }
-
-        let byModified = sortMode == .modified
-        func ordered(_ lhs: FileTreeNode, _ rhs: FileTreeNode) -> Bool {
-            if lhs.kind != rhs.kind { return lhs.kind == .folder }
-            if byModified, lhs.latest != rhs.latest { return lhs.latest > rhs.latest }
-            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-        }
-
-        func convert(_ builder: Builder) -> FileTreeNode {
-            let convertedChildren = builder.children.values.map(convert).sorted(by: ordered)
-            return FileTreeNode(
-                name: builder.name,
-                path: builder.path,
-                kind: builder.meta == nil ? .folder : .file,
-                meta: builder.meta,
-                children: convertedChildren,
-                fileCount: builder.meta == nil ? convertedChildren.reduce(0) { $0 + $1.fileCount } : 1,
-                latest: builder.meta?.modifiedAt ?? convertedChildren.map(\.latest).max() ?? .distantPast
-            )
-        }
-
-        return root.children.values.map(convert).sorted(by: ordered)
+        return children(of: "")
     }
 
     /// 5 秒一次的外部变更检查：枚举整库挪后台（以前在主线程，面板开着就每 5 秒卡一下）
@@ -1397,9 +1469,9 @@ struct FileLibraryPanelView: View {
         let gen = reloadGeneration
         let pid = profileId
         Task {
-            let loaded = await Task.detached(priority: .userInitiated) { () -> (files: [FileLibraryStore.FileMeta], memory: [FileLibraryStore.FileMeta], previews: [String: String], fingerprint: String) in
+            let loaded = await Task.detached(priority: .userInitiated) { () -> (files: [FileLibraryStore.FileMeta], memory: [FileLibraryStore.FileMeta], seed: [CatalogSeedDrafts.Entry], previews: [String: String], fingerprint: String) in
                 let files = FileLibraryStore.list(profileId: pid)
-                let memory = FileLibraryMemoryFolder.visible(FileLibraryStore.memoryList(profileId: pid))
+                let memory = FileLibraryStore.memoryUIList(profileId: pid)
                 var p: [String: String] = [:]
                 for meta in files where !FileLibraryStore.isBinaryPath(meta.path) {
                     let isHTML = FileLibraryDisplay.kind(of: meta.path) == .html
@@ -1412,9 +1484,11 @@ struct FileLibraryPanelView: View {
                         p[meta.path] = FileLibraryDisplay.previewText(path: meta.path, raw: content)
                     }
                 }
-                return (files, memory, p, Self.fingerprint(for: files))
+                let seed = CatalogSeedDrafts.entries(wiki: WikiStore(profileId: pid))
+                return (files, memory, seed, p, Self.fingerprint(for: files))
             }.value
             guard gen == reloadGeneration, pid == profileId else { return }
+            seedEntries = loaded.seed
             applyReload(loaded.files, memory: loaded.memory, previews: loaded.previews, fingerprint: loaded.fingerprint)
             then?()
         }
@@ -1442,6 +1516,8 @@ struct FileLibraryPanelView: View {
                 d[meta.path] = FileLibraryDisplay.entry(path: meta.path, preview: preview)
             }
         }
+        for entry in promptEntries { d[entry.path] = FileLibraryPromptFolder.display(entry) }
+        for entry in seedEntries { d[entry.path] = FileLibrarySeedFolder.display(entry) }
         files = latestFiles
         previews = p
         displays = d
@@ -1468,7 +1544,9 @@ struct FileLibraryPanelView: View {
         let sorted = sortedForDisplay(files)
         let memorySorted = sortedForDisplay(memoryFiles)
         var index = FileLibraryDisplay.folderIndex(sorted)
-        FileLibraryMemoryFolder.merge(FileLibraryDisplay.folderIndex(memorySorted), into: &index)
+        FileLibraryMemoryFolder.merge(FileLibraryMemoryFolder.folderIndex(memorySorted), into: &index)
+        FileLibraryPromptFolder.merge(promptEntries, into: &index)
+        FileLibrarySeedFolder.merge(seedEntries, into: &index)
         for key in index.keys {
             switch sortMode {
             case .modified: index[key]?.folders.sort { $0.latest > $1.latest }
@@ -1476,20 +1554,29 @@ struct FileLibraryPanelView: View {
             }
         }
         FileLibraryMemoryFolder.pinSelfFirst(&index)
+        FileLibraryPromptFolder.pinAfterMemory(&index)
         sortedFiles = sorted
         folderIndex = index
-        fileTree = buildFileTree(from: sorted + memorySorted)
+        fileTree = buildFileTree(from: index)
         let byModified = sortMode == .modified ? sorted : files.sorted { $0.modifiedAt > $1.modifiedAt }
         recentFiles = Array(byModified.prefix(4))
         var recent: [String: [FileLibraryStore.FileMeta]] = [:]
-        for meta in byModified + memoryFiles.sorted(by: { $0.modifiedAt > $1.modifiedAt }) {
-            var folder = FileLibraryDisplay.parentFolder(meta.path)
+        for meta in byModified + memoryFiles.sorted(by: { $0.modifiedAt > $1.modifiedAt }) + FileLibraryPromptFolder.metas(promptEntries) + FileLibrarySeedFolder.metas(seedEntries) {
+            var folder = FileLibraryMemoryFolder.parentFolder(meta.path)
             while !folder.isEmpty {
                 if recent[folder, default: []].count < 3 { recent[folder, default: []].append(meta) }
-                folder = FileLibraryDisplay.parentFolder(folder)
+                folder = FileLibraryMemoryFolder.parentFolder(folder)
             }
         }
         folderRecent = recent
+    }
+
+    /// 「Prompt」跟着实例变：显示数据现算（内存里的值，不读盘），再重排文件夹
+    private func applyPrompt(_ entries: [PromptFolder.Entry]) {
+        for entry in promptEntries { displays[entry.path] = nil }
+        for entry in entries { displays[entry.path] = FileLibraryPromptFolder.display(entry) }
+        promptEntries = entries
+        rebuildDerived()
     }
 
     /// [[wiki link]] 跳转：精确路径 → basename 匹配 → 不存在则建 `目标.md` 并打开。
@@ -1594,8 +1681,16 @@ struct FileLibraryPanelView: View {
     }
 
     private func openFile(_ meta: FileLibraryStore.FileMeta) {
+        if let entry = seedEntries.first(where: { $0.path == meta.path }) {
+            editingSeed = SeedTarget(entry: entry)
+            return
+        }
         if FileLibraryMemoryFolder.isMemoryPath(meta.path) {
             openMemoryFile(meta)
+            return
+        }
+        if let entry = promptEntries.first(where: { $0.path == meta.path }) {
+            editingPrompt = PromptTarget(entry: entry)
             return
         }
         if FileLibraryStore.isBinaryPath(meta.path) {
@@ -1616,19 +1711,33 @@ struct FileLibraryPanelView: View {
         }
         do {
             let content = try FileLibraryStore.read(meta.path, profileId: profileId)
-            editingFile = EditingFile(path: meta.path, content: content, modifiedAt: meta.modifiedAt)
+            // 库里早就有的真 .prompt/ 文件：能看，写一律被拒，所以只读打开
+            editingFile = EditingFile(path: meta.path, content: content, modifiedAt: meta.modifiedAt,
+                                      readOnly: PromptFolder.isPromptPath(meta.path))
         } catch {
             operationError = error.localizedDescription
         }
     }
 
-    /// 记忆树：自己的记忆 → 编辑页；其余 → 同一个查看器，只读（后台读，回来再弹）
+    /// 记忆树：自己的记忆 → 编辑页；C 档案的页 → 可编辑（存历史）；其余 → 同一个查看器，只读（后台读，回来再弹）
     private func openMemoryFile(_ meta: FileLibraryStore.FileMeta) {
         if let slug = FileLibraryMemoryFolder.selfSlug(meta.path) {
             editingSelfMemory = SelfMemoryTarget(slug: slug)
             return
         }
         let pid = profileId
+        if let page = FileLibraryMemoryFolder.wikiPagePath(meta.path) {
+            Task {
+                let target = await WikiPageTarget.load(profileId: pid, path: page)
+                guard pid == profileId else { return }
+                guard let target else {
+                    operationError = "读不出来：\(meta.path)"
+                    return
+                }
+                editingWikiPage = target
+            }
+            return
+        }
         Task {
             let text = await Task.detached(priority: .userInitiated) {
                 try? FileLibraryStore.memoryRead(meta.path, profileId: pid)
@@ -1650,6 +1759,10 @@ struct FileLibraryPanelView: View {
             operationError = "「记忆」文件夹是只读的，新建不了文件"
             return
         }
+        guard !PromptFolder.isPromptPath(name) else {
+            operationError = "「Prompt」里的插槽请在 Prompt 页新建"
+            return
+        }
         if URL(fileURLWithPath: name).pathExtension.isEmpty { name += ".md" }
         do {
             guard !FileLibraryStore.exists(name, profileId: profileId) else {
@@ -1666,12 +1779,20 @@ struct FileLibraryPanelView: View {
         guard let p = deletingPath else { return }
         do {
             try FileLibraryStore.delete(p, profileId: profileId)
+            deleteVersionHistory(p)
             deletingPath = nil
             reload()
         } catch {
             deletingPath = nil
             operationError = error.localizedDescription
         }
+    }
+
+    /// 删 / 改名后旧 key 的版本记录、上次编辑位置跟着删（改名暂不迁移）
+    private func deleteVersionHistory(_ path: String) {
+        let key = FileVersionStore.Key.file(profileId: profileId, relativePath: path)
+        Task { try? await FileVersionStore.shared.delete(key: key) }
+        FileEditorPositionStore.shared.remove(key)
     }
 
     private func startRename(_ path: String) {
@@ -1690,6 +1811,7 @@ struct FileLibraryPanelView: View {
         do {
             guard !newPath.isEmpty else { throw NSError(domain: "FileLibrary", code: -3, userInfo: [NSLocalizedDescriptionKey: "文件名不能为空"]) }
             try FileLibraryStore.rename(oldPath, to: newPath, profileId: profileId)
+            deleteVersionHistory(oldPath)
             renamingPath = nil
             renameTargetName = ""
             reload()
@@ -1773,6 +1895,52 @@ private struct TreeLine: Identifiable {
 
 // MARK: - File Editor Sheet (预览 / raw 编辑切换)
 
+struct FileEditorPreviewLocation: Equatable {
+    let parts: [String]
+    let targetIndex: Int?
+
+    init(content: String, anchor: String?, separatesSections: Bool = false) {
+        self.init(content: content, anchor: anchor, separatesSections: separatesSections, check: {})
+    }
+
+    /// `check` 抛错 = 停（整理记录后台解析传取消检查，分节扫到一半也能停）
+    init(content: String, anchor: String?, separatesSections: Bool, check: () throws -> Void) rethrows {
+        guard separatesSections || anchor?.isEmpty == false else {
+            parts = [content]
+            targetIndex = nil
+            return
+        }
+        // 分行 / 围栏和整理记录拆块共用 RunRecordScanner：LF / CRLF / CR 都认，缩进按 CommonMark 列宽（astra 审 3294acd33 P1-1/2）
+        let marker = anchor.map { "<a id=\"\($0)\"></a>" }
+        var sections: [String] = []
+        var sectionStart = content.startIndex
+        var target: Int?
+        var fence = RunRecordScanner.FenceState()
+        for line in try RunRecordScanner.lines(content[...], check: check) {
+            guard case .outside = fence.feed(line.content), RunRecordScanner.isAnchor(line.content) else { continue }
+            let start = line.full.startIndex
+            let trimmed = line.content.trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
+            if separatesSections {
+                if sectionStart < start { sections.append(String(content[sectionStart..<start])) }
+                sectionStart = start
+                if trimmed == marker { target = sections.count }
+            } else if trimmed == marker {
+                parts = [String(content[..<start]), String(content[start...])]
+                targetIndex = 1
+                return
+            }
+        }
+        if separatesSections {
+            sections.append(String(content[sectionStart...]))
+            parts = sections
+            targetIndex = target
+        } else {
+            parts = [content]
+            targetIndex = nil
+        }
+    }
+}
+
 struct FileEditorSheet: View {
     @Environment(\.chatMetrics) private var metrics
     /// 预览里「存成问题」要写进当前楼层的文件库（09-16 两端同走聊天渲染器后需要）
@@ -1784,23 +1952,103 @@ struct FileEditorSheet: View {
     let reloadExternalContent: () throws -> ReloadedFileContent
     /// 第二个参数 = 编辑器认得的 baseline **内容**（R11 冲突判定用它算哈希，不再传 mtime）
     let onSave: (String, String) throws -> Void
+    /// 给了就走它（wiki 页：冲突检查 + 历史 + 写入在后台一起做），保存期间「保存」置灰；文件库别的文件仍走 onSave
+    let onSaveAsync: ((String, String) async throws -> Void)?
     let onCancel: () -> Void
     /// [[wiki link]] 点击（自动保存已在 sheet 内完成后才上抛）
     let onOpenWikiLink: (String) -> Void
     /// 只读（记忆树）：只有预览，没有模式切换 / 保存 / 编辑菜单，不查外部改动
     let readOnly: Bool
+    let initialAnchor: String?
+    let initialPreviewLocation: FileEditorPreviewLocation?
+    private let usesSectionedPreview: Bool
+    @State private var followsInitialAnchor = true
+    /// 整理记录（`.runs`）：后台解析好的行；点卡弹 sheet 看那一块全文
+    @State private var runDocument: RunRecordDocument?
+    @State private var openRunBlock: RunRecordDocument.Block?
+    #if os(macOS)
+    @AppStorage("lineSpacingScale") private var previewLineSpacing: Double = 1.45
+    @AppStorage("paragraphSpacingScale") private var previewParagraphSpacing: Double = 1.65
+    #endif
+    /// 顶栏标题；nil = 显示 path（文件库）
+    let title: String?
+    /// 编辑的是一段不是文件的文本（`.text(...)`）：不查外部改动、不跳双链
+    private(set) var isStandaloneText = false
+    /// A4-2 版本历史 / 上次编辑位置的 key（文件 = 楼层 + 路径；虚拟文本由调用方给稳定 id，新建的没有）。
+    /// 记不记版本看设置 → 文件库「记录版本」总开关
+    let versionKey: FileVersionStore.Key?
+    /// C 档案 wiki 页（plan-memory-c3-catalog todo 11）：顶栏「历史」+「…」里的版本历史都走 wiki 自己的历史
+    let wikiHistory: WikiHistoryTarget?
+    @State private var showWikiHistory = false
 
-    @State private var content: String
+    @State private var document: MarkdownWebEditorDocument
     @State private var savedContent: String
     @State private var mode: FileEditorMode
+    @State private var sourceDraft: String
+    @State private var sourceBaseline: String
+    @State private var liveHasPendingChanges = false
+    @State private var pendingLiveReads: [() -> Void] = []
+    @State private var pendingReadToken: Int?
+
+    private var content: String {
+        mode == .source || mode == .split ? sourceDraft : document.content
+    }
+
+    private var contentBinding: Binding<String> {
+        Binding(get: { sourceDraft }, set: { sourceDraft = $0 })
+    }
+
+    private var modeBinding: Binding<FileEditorMode> {
+        Binding(get: { mode }, set: { next in
+            withConfirmedContent { changeMode(to: next) }
+        })
+    }
+
+    private func withConfirmedContent(_ action: @escaping () -> Void) {
+        guard mode == .live else { action(); return }
+        pendingLiveReads.append(action)
+        guard pendingReadToken == nil else { return }
+        sendMarkdownCommand("flush")
+        pendingReadToken = markdownCommandToken
+    }
+
+    private func finishLiveRead(_ token: Int) {
+        guard token == pendingReadToken else { return }
+        pendingReadToken = nil
+        let reads = pendingLiveReads
+        pendingLiveReads.removeAll()
+        for read in reads { read() }
+    }
+
+    private func changeMode(to next: FileEditorMode) {
+        guard next != mode else { return }
+        if mode == .source || mode == .split {
+            positionTracker.captureSource()
+            if sourceDraft != sourceBaseline { replaceNativeContent(sourceDraft) }
+        }
+        if next == .source || next == .split {
+            sourceDraft = document.content
+            sourceBaseline = document.content
+        }
+        mode = next
+    }
+
+    private func replaceNativeContent(_ text: String) {
+        document.replace(with: text)
+        sourceDraft = text
+        sourceBaseline = text
+        liveHasPendingChanges = false
+    }
 
     private var profileId: String { profileManager?.currentProfile.id ?? "" }
 
     // 流式重写 Phase 2：跟全局字体设置同步（iOS markdown 预览用）
     @AppStorage("selectedFont") private var selectedFont: String = ""
     @AppStorage("fontScale") private var fontScale: Double = 1.2
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @State private var saveError: String?
+    @State private var isSaving = false
     @State private var showCloseConfirmation = false
     @State private var findText = ""
     @State private var findIndex = 0
@@ -1824,32 +2072,119 @@ struct FileEditorSheet: View {
     @AppStorage(FileEditorPreferences.formatBarExpandedKey) private var formatBarExpanded = FileEditorPreferences.formatBarExpandedDefault
     @State private var keyboardVisible = false
     @State private var sourceFindPresented = false
+    /// 源码模式（TextEditor 底下 UITextView）的撤销 / 重做是否可用
+    @State private var sourceCanUndo = false
+    @State private var sourceCanRedo = false
     #endif
+    /// 实时模式（CodeMirror）的撤销 / 重做是否可用，网页回报
+    @State private var liveCanUndo = false
+    @State private var liveCanRedo = false
+    @AppStorage(FileVersionHistory.enabledKey) private var versionsEnabled = true
+    /// 「…」→ 版本历史：点的那一刻定看列表还是「记不了」说明页（在说明页里去设置打开开关，这页不跟着翻）
+    @State private var versionHistoryPage: VersionHistoryPage?
+    @State private var positionTracker = FileEditorPositionTracker()
+    /// 打开时读一次上次的位置（实时模式首次配置 / 源码模式文本视图上树时各用一次）
+    @State private var restorePosition: FileEditorPositionStore.Position?
+    /// 刚从版本历史恢复且正文未变时给「换回」；恢复 / 换回各自也是 CM 可撤销的一步。
+    @State private var restoreBackup: (previous: String, restored: FileVersionHistory.Restored)?
+    /// 记版本串成一条，打开时的基线一定在第一次保存前落盘
+    @State private var versionRecording: Task<Void, Never>?
 
     init(
         path: String,
         initialContent: String,
         initialModifiedAt: Date?,
         readOnly: Bool = false,
+        initialAnchor: String? = nil,
         currentModifiedAt: @escaping () -> Date?,
         reloadExternalContent: @escaping () throws -> ReloadedFileContent,
-        onSave: @escaping (String, String) throws -> Void,
+        onSave: @escaping (String, String) throws -> Void = { _, _ in },
+        onSaveAsync: ((String, String) async throws -> Void)? = nil,
         onCancel: @escaping () -> Void,
-        onOpenWikiLink: @escaping (String) -> Void = { _ in }
+        onOpenWikiLink: @escaping (String) -> Void = { _ in },
+        title: String? = nil,
+        versionKey: FileVersionStore.Key? = nil,
+        wikiHistory: WikiHistoryTarget? = nil
     ) {
         self.path = path
+        self.title = title
+        self.versionKey = readOnly ? nil : versionKey
+        self.wikiHistory = readOnly ? nil : wikiHistory
         self.initialContent = initialContent
         self.initialModifiedAt = initialModifiedAt
         self.currentModifiedAt = currentModifiedAt
         self.reloadExternalContent = reloadExternalContent
         self.onSave = onSave
+        self.onSaveAsync = onSaveAsync
         self.onCancel = onCancel
         self.onOpenWikiLink = onOpenWikiLink
         self.readOnly = readOnly
-        _content = State(initialValue: initialContent)
+        self.initialAnchor = initialAnchor
+        let sectioned = readOnly && (
+            path.hasPrefix(CatalogRunRecord.folderName + "/")
+                || path.hasPrefix("wiki/" + CatalogRunRecord.folderName + "/")
+                || path.hasPrefix("memory/wiki/" + CatalogRunRecord.folderName + "/")
+        )
+        self.usesSectionedPreview = sectioned
+        // 整理记录的整份分节 / 锚点扫描在后台做（RunRecordDocument.load），init 里不扫
+        self.initialPreviewLocation = readOnly && initialAnchor != nil && !sectioned
+            ? FileEditorPreviewLocation(content: MarkdownFrontmatter.split(initialContent).body, anchor: initialAnchor)
+            : nil
+        _document = State(initialValue: MarkdownWebEditorDocument(content: initialContent))
+        _sourceDraft = State(initialValue: initialContent)
+        _sourceBaseline = State(initialValue: initialContent)
         _savedContent = State(initialValue: initialContent)
         _mode = State(initialValue: readOnly ? .preview : FileEditorKind(path: path).initialMode)
         _baselineModifiedAt = State(initialValue: initialModifiedAt)
+        _restorePosition = State(initialValue: readOnly ? nil : versionKey.flatMap { FileEditorPositionStore.shared.position(for: $0) })
+    }
+
+    private enum VersionHistoryPage: Identifiable {
+        case list(FileVersionStore.Key)
+        case unavailable(recordingOff: Bool)
+
+        var id: String {
+            switch self {
+            case .list: "list"
+            case .unavailable: "unavailable"
+            }
+        }
+    }
+
+    enum TextFormat {
+        case markdown
+        case plain
+    }
+
+    /// 编辑一段不是文件的文本（角色卡字段 / 世界书条目 / 系统提示词）：顶栏显示 title，
+    /// 没有外部改动检测和双链跳转；.markdown 实时 / 预览 / 源码可切，.plain 只有源码
+    static func text(
+        title: String,
+        text: String,
+        format: TextFormat,
+        onSave: @escaping (String) throws -> Void,
+        onCancel: @escaping () -> Void,
+        versionKey: FileVersionStore.Key? = nil
+    ) -> FileEditorSheet {
+        // 虚拟 path 只用来按扩展名定模式、当「分享…」出去的文件名，不上屏
+        let name = title.replacingOccurrences(of: "/", with: "-")
+        var sheet = FileEditorSheet(
+            path: (name.isEmpty ? "文本" : name) + (format == .markdown ? ".md" : ".txt"),
+            initialContent: text,
+            initialModifiedAt: nil,
+            currentModifiedAt: { nil },
+            reloadExternalContent: { ReloadedFileContent(content: text, modifiedAt: nil) },
+            onSave: { newText, _ in try onSave(newText) },
+            onCancel: onCancel,
+            title: title,
+            versionKey: versionKey
+        )
+        sheet.isStandaloneText = true
+        return sheet
+    }
+
+    var displayTitle: String {
+        title ?? path
     }
 
     var body: some View {
@@ -1857,47 +2192,22 @@ struct FileEditorSheet: View {
             VStack(spacing: 0) {
                 if usesTopChrome {
                     topChrome
-                } else if let externalChangeBanner {
-                    // iPhone = 纸 + 字：分段 / 查找 / 格式三行都收走，只有外部改动提示（有事才出）
-                    externalChangeBanner
+                } else {
+                    // iPhone = 纸 + 字：分段 / 查找 / 格式三行都收走，只有外部改动 / 恢复提示（有事才出）
+                    if let externalChangeBanner { externalChangeBanner }
+                    if let restoreBanner { restoreBanner }
                 }
 
-                switch mode {
-                case .live:
-                    MarkdownWebEditorView(
-                        content: $content,
-                        findQuery: findText.trimmingCharacters(in: .whitespacesAndNewlines),
-                        findIndex: findIndex,
-                        replaceText: replaceText,
-                        showsLineNumbers: showLineNumbers,
-                        hidesKeyboardAccessory: true,
-                        command: markdownCommand,
-                        onRequestSave: { save() },
-                        onOpenFind: { openFind(replace: false) },
-                        onReplaceDone: { findIndex = $0 },
-                        onOpenWikiLink: { target in
-                            // 跳转前自动保存，失败不跳（不丢字）
-                            if content != savedContent {
-                                save()
-                                guard saveError == nil else { return }
-                            }
-                            onOpenWikiLink(target)
-                        }
-                    )
-                case .preview:
-                    if kind == .html {
-                        HTMLPreviewWebView(
-                            content: content,
-                            onOpenLink: { fileBrowseURL = FileBrowseTarget(url: $0) }
-                        )
-                        .ignoresSafeArea(edges: .bottom)
-                    } else {
-                        markdownPreview
+                // A0：实时编辑器切走模式也不拆（藏在下面），CodeMirror 撤销历史切回来还在；
+                // 切走时网页先把防抖里没发的字发回来，内容不丢
+                ZStack {
+                    if availableModes.contains(.live) {
+                        liveEditor
+                            .opacity(mode == .live ? 1 : 0)
+                            .allowsHitTesting(mode == .live)
+                            .accessibilityHidden(mode != .live)
                     }
-                case .split:
-                    splitEditor
-                case .source:
-                    sourceEditor
+                    modeContent
                 }
             }
             .background(Theme.mainBg)
@@ -1906,7 +2216,7 @@ struct FileEditorSheet: View {
                 if !usesTopChrome { bottomBar }
             }
             #endif
-            .navigationTitle(path)
+            .navigationTitle(displayTitle)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             // 顶栏区 / 正文 / 浮条下面同一张纸（10-02 实机：三块颜色不一）
@@ -1934,19 +2244,26 @@ struct FileEditorSheet: View {
         .onChange(of: findText) { _, _ in clampFindIndex() }
         .onChange(of: content) { _, _ in clampFindIndex() }
         .onChange(of: mode) { _, newMode in
-            // 切模式会重建 WebView，残留的命令 token 会被新页面当成新命令重放
-            //（toggle 类命令重放一次=格式消失、再切回来又出现）
+            // WebView 常驻；切模式清命令，避免旧格式命令在重新激活时重放。
             markdownCommandToken = 0
             markdownCommandName = ""
             if !FileEditorTools.ownFindAvailable(kind: kind, mode: newMode) { closeFind() }
         }
         #if os(iOS)
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            keyboardVisible = true
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { notification in
+            setKeyboardVisible(true, notification: notification)
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            keyboardVisible = false
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { notification in
+            setKeyboardVisible(false, notification: notification)
         }
+        // 源码模式撤销 / 重做按钮置灰：打字（撤销组在本轮 runloop 末尾才关，下一轮再读）和撤销 / 重做后重读
+        .onChange(of: content) { _, _ in
+            guard mode == .source else { return }
+            DispatchQueue.main.async { refreshSourceUndoState() }
+        }
+        .onChange(of: keyboardVisible) { _, _ in refreshSourceUndoState() }
+        .onReceive(NotificationCenter.default.publisher(for: .NSUndoManagerDidUndoChange)) { _ in refreshSourceUndoState() }
+        .onReceive(NotificationCenter.default.publisher(for: .NSUndoManagerDidRedoChange)) { _ in refreshSourceUndoState() }
         #endif
         .onReceive(Timer.publish(every: 4, on: .main, in: .common).autoconnect()) { _ in
             checkExternalChangeForOpenFile()
@@ -1954,13 +2271,96 @@ struct FileEditorSheet: View {
         .sheet(item: $fileBrowseURL) { target in
             MiniBrowserView(initialURL: target.url)
         }
+        // 打开时的原文先记一版（和最新一版相同就不记），第一次保存后就有可比的旧版
+        .task { recordVersion(initialContent, source: .external) }
+        // 刚在设置里打开总开关：补记当前已保存的内容当基线
+        .onChange(of: versionsEnabled) { _, enabled in
+            if enabled { recordVersion(savedContent, source: .external) }
+        }
+        .sheet(item: $versionHistoryPage) { page in
+            switch page {
+            case .list(let key):
+                FileVersionHistoryView(key: key, currentContent: content) { restoreVersion($0) }
+            case .unavailable(let recordingOff):
+                FileVersionHistoryUnavailableView(recordingOff: recordingOff)
+            }
+        }
+        .sheet(isPresented: $showWikiHistory) {
+            if let wikiHistory {
+                WikiHistoryView(target: WikiHistoryTarget(store: wikiHistory.store, path: wikiHistory.path) { text in
+                    applyWikiRestore(text)
+                    wikiHistory.onRestored(text)
+                }, hasUnsavedEdits: content != savedContent)
+            }
+        }
+        // 编辑器盖住了 ContentView 根上的 toast 层，这里自己再挂一层（同一个 ToastCenter）
+        .overlay(alignment: .top) { GlobalToastOverlay() }
+        .onDisappear { savePosition() }
+    }
+
+    private var liveEditor: some View {
+        MarkdownWebEditorView(
+            document: $document,
+            findQuery: findText.trimmingCharacters(in: .whitespacesAndNewlines),
+            findIndex: findIndex,
+            replaceText: replaceText,
+            showsLineNumbers: showLineNumbers,
+            hidesKeyboardAccessory: true,
+            isActive: mode == .live,
+            command: markdownCommand,
+            onRequestSave: { saveConfirmed() },
+            onOpenFind: { openFind(replace: false) },
+            onReplaceDone: { findIndex = $0 },
+            onOpenWikiLink: isStandaloneText ? nil : { target in
+                withConfirmedContent {
+                    // 跳转前自动保存，存成了才跳（不丢字）
+                    if content != savedContent {
+                        saveConfirmed(source: .autoSave) { onOpenWikiLink(target) }
+                        return
+                    }
+                    onOpenWikiLink(target)
+                }
+            },
+            onHistoryChange: { canUndo, canRedo in
+                liveCanUndo = canUndo
+                liveCanRedo = canRedo
+            },
+            onPendingChange: { liveHasPendingChanges = true },
+            onSnapshot: { liveHasPendingChanges = false },
+            onFlushed: { finishLiveRead($0) },
+            restorePosition: restorePosition,
+            onPositionChange: { positionTracker.latest = $0 }
+        )
+    }
+
+    /// 实时模式以外的正文（实时编辑器常驻在下面，见 body）
+    @ViewBuilder
+    private var modeContent: some View {
+        switch mode {
+        case .live:
+            EmptyView()
+        case .preview:
+            if kind == .html {
+                HTMLPreviewWebView(
+                    content: content,
+                    onOpenLink: { fileBrowseURL = FileBrowseTarget(url: $0) }
+                )
+                .ignoresSafeArea(edges: .bottom)
+            } else {
+                markdownPreview
+            }
+        case .split:
+            splitEditor
+        case .source:
+            sourceEditor
+        }
     }
 
     private var kind: FileEditorKind {
         FileEditorKind(path: path)
     }
 
-    private var availableModes: [FileEditorMode] {
+    var availableModes: [FileEditorMode] {
         if readOnly { return [.preview] }
         return switch kind {
         case .markdown:
@@ -2014,30 +2414,88 @@ struct FileEditorSheet: View {
         )
     }
 
+    @ViewBuilder
     private var markdownPreview: some View {
-        let split = MarkdownFrontmatter.split(content)
-        return ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-            // 文件头属性块（她 09-16：原样当正文排着「这个属性都没渲染」）。没有 frontmatter 时 fields 为空、整块不出
-            FrontmatterCard(fields: split.fields)
-            // MarkdownUI 退役第二刀（09-16 她「总之全都用 iOS 聊天的这个新版 md 器」）：两端同走聊天那个包装。
-            // 与聊天的三处差别：不挂划线锚（`nodeId: nil`——文件会被改写，锚不稳）、
-            // 不做 $NVDA 链接化（文件是任意内容，`$PATH` 这种会变成假 ticker，R-MD #1）；
-            // 收生词与「存成问题」照常（profileId 非空）
-            ChatMarkdownView(
-                text: split.body,
-                fontName: selectedFont,
-                scale: CGFloat(fontScale),
-                nodeId: nil,
-                profileId: profileId,
-                linkifyTickers: false
-            )
-            .chatCardRenderer(nodeId: nil)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        if usesSectionedPreview {
+            runRecordPreview
+        } else {
+            plainMarkdownPreview
         }
+    }
+
+    private var plainMarkdownPreview: some View {
+        let split = MarkdownFrontmatter.split(content)
+        let location = initialPreviewLocation ?? FileEditorPreviewLocation(content: split.body, anchor: nil)
+        return ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    FrontmatterCard(fields: split.fields)
+                    ForEach(location.parts.indices, id: \.self) { index in
+                        previewMarkdown(location.parts[index])
+                            .id(index)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { _ in
+                    scrollToInitialAnchor(location.targetIndex, proxy: proxy)
+                }
+                .onAppear { scrollToInitialAnchor(location.targetIndex, proxy: proxy) }
+            }
+            .onScrollPhaseChange { _, phase in
+                if phase == .tracking || phase == .interacting || phase == .decelerating {
+                    followsInitialAnchor = false
+                }
+            }
+        }
+    }
+
+    /// 整理记录（粟粟 10-22）：原生列表（iOS UICollectionView / mac NSTableView），每轮标题一行、叙述原地、
+    /// 每个代码块折成卡，点卡弹 DisclosureSheet 用原生只读文本视图看全文。行高按宽度算准，锚点直接滚到那一轮标题行。
+    /// 解析在后台、跟着 .task 取消（关页 / 换文件 → 下一个检查点就停，被取消的结果不发布）。
+    /// 字号跟旧预览同一套 `fontScale`，iOS 再乘动态字体（读 `dynamicTypeSize` 让它变了就重算）
+    private var runRecordPreview: some View {
+        _ = dynamicTypeSize
+        let typography = RunRecordTypography.current(fontScale: fontScale)
+        return Group {
+            if let runDocument {
+                RunRecordListView(document: runDocument, typography: typography) { openRunBlock = $0 }
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .task {
+            guard runDocument == nil,
+                  let document = try? await RunRecordDocument.load(content: initialContent, anchor: initialAnchor),
+                  !Task.isCancelled else { return }
+            runDocument = document
+        }
+        .sheet(item: $openRunBlock) { block in
+            RunRecordBlockSheet(block: block, typography: typography)
+        }
+    }
+
+    private func scrollToInitialAnchor(_ target: Int?, proxy: ScrollViewProxy) {
+        guard followsInitialAnchor, let target else { return }
+        DispatchQueue.main.async {
+            guard followsInitialAnchor else { return }
+            proxy.scrollTo(target, anchor: .top)
+        }
+    }
+
+    private func previewMarkdown(_ text: String, prepared: RenderableDocument? = nil) -> some View {
+        ChatMarkdownView(
+            text: text,
+            fontName: selectedFont,
+            scale: CGFloat(fontScale),
+            preparedDocument: prepared,
+            nodeId: nil,
+            profileId: profileId,
+            linkifyTickers: false
+        )
+        .chatCardRenderer(nodeId: nil)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// W4 分屏（HTML）：源码 + 预览对半，敲码 300ms 后预览重渲。
@@ -2069,9 +2527,11 @@ struct FileEditorSheet: View {
     }
 
     private var sourceEditor: some View {
-        TextEditor(text: $content)
+        TextEditor(text: contentBinding)
             .font(.system(size: Theme.F.body))
             .scrollContentBackground(.hidden)
+            .tint(FileEditorCaret.color)
+            .background(FileEditorSourceProbe(tracker: positionTracker, restore: restorePosition))
             .padding(8)
             #if os(iOS)
             .findNavigator(isPresented: $sourceFindPresented)
@@ -2086,6 +2546,13 @@ struct FileEditorSheet: View {
     private var markdownFormatBar: some View {
         ScrollView(.horizontal, showsIndicators: Theme.hScrollIndicators) {
             HStack(spacing: 10) {
+                // 不挂 ⌘Z 快捷键：⌘Z 由 CodeMirror 自己的 keymap 接，这里再挂会和网页抢键
+                historyButton("arrow.uturn.backward", help: "撤销", enabled: liveCanUndo) { undoEdit(redo: false) }
+                historyButton("arrow.uturn.forward", help: "重做", enabled: liveCanRedo) { undoEdit(redo: true) }
+
+                Divider()
+                    .frame(height: 18)
+
                 Menu {
                     Button("标题 1") { sendMarkdownCommand("heading1") }
                     Button("标题 2") { sendMarkdownCommand("heading2") }
@@ -2121,6 +2588,19 @@ struct FileEditorSheet: View {
             .padding(.vertical, 7)
         }
         .background(Theme.mainBg.opacity(0.78))
+    }
+
+    private func historyButton(_ systemName: String, help: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 13, weight: .medium))
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(Theme.textPrimary.opacity(enabled ? 1 : 0.3))
+        .disabled(!enabled)
+        .help(help)
     }
 
     private func formatButton(_ systemName: String, command: String, help: String) -> some View {
@@ -2195,7 +2675,7 @@ struct FileEditorSheet: View {
     @ViewBuilder
     private var topChrome: some View {
         if !readOnly {
-            Picker("", selection: $mode) {
+            Picker("", selection: modeBinding) {
                 ForEach(availableModes, id: \.self) { mode in
                     Text(mode.title).tag(mode)
                 }
@@ -2217,6 +2697,9 @@ struct FileEditorSheet: View {
         if let externalChangeBanner {
             externalChangeBanner
         }
+        if let restoreBanner {
+            restoreBanner
+        }
         if kind == .markdown && mode == .live {
             markdownFormatBar
         }
@@ -2235,11 +2718,17 @@ struct FileEditorSheet: View {
             ToolbarItem(placement: .principal) { titleWithMode }
                 .sharedBackgroundVisibility(.hidden)
         }
+        if wikiHistory != nil {
+            ToolbarItem(placement: .topBarTrailing) { wikiHistoryButton }
+        }
         if !readOnly {
             ToolbarItem(placement: .topBarTrailing) { editorMenu }
             ToolbarSpacer(.fixed, placement: .topBarTrailing)
         }
         #else
+        if wikiHistory != nil {
+            ToolbarItem(placement: .primaryAction) { wikiHistoryButton }
+        }
         if !readOnly {
             ToolbarItem(placement: .primaryAction) { editorMenu }
         }
@@ -2248,16 +2737,36 @@ struct FileEditorSheet: View {
             ToolbarItem(placement: .confirmationAction) {
                 Button("保存") { save() }
                     .foregroundColor(Theme.branchIndicator)
-                    .disabled(content == savedContent)
+                    .disabled((content == savedContent && !liveHasPendingChanges) || isSaving)
                     .keyboardShortcut("s", modifiers: .command)
             }
         }
     }
 
+    private var wikiHistoryButton: some View {
+        Button { showWikiHistory = true } label: {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .tint(Theme.textSecondary)
+        .accessibilityLabel("历史")
+    }
+
+    /// wiki 恢复已落盘：编辑器换成那一版，当它已保存
+    private func applyWikiRestore(_ text: String) {
+        replaceNativeContent(text)
+        savedContent = text
+        restoreBackup = nil
+        baselineModifiedAt = currentModifiedAt()
+        externalChangeState = .none
+        ignoredExternalModifiedAt = nil
+    }
+
     /// iPhone 顶栏中间：文件名 + 下一行小灰字「实时 ⌄」（点开三选一）
     private var titleWithMode: some View {
         VStack(spacing: 1) {
-            Text(fileName)
+            Text(title ?? fileName)
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(Theme.textPrimary)
                 .lineLimit(1)
@@ -2281,7 +2790,7 @@ struct FileEditorSheet: View {
     }
 
     private var modePicker: some View {
-        Picker("显示", selection: $mode) {
+        Picker("显示", selection: modeBinding) {
             ForEach(availableModes, id: \.self) { mode in
                 Text(mode.title).tag(mode)
             }
@@ -2311,6 +2820,11 @@ struct FileEditorSheet: View {
                             Label("行号", systemImage: "list.number")
                         }
                     }
+                }
+            }
+            Section {
+                Button { openVersionHistory() } label: {
+                    Label("版本历史", systemImage: "clock.arrow.circlepath")
                 }
             }
             Section {
@@ -2403,21 +2917,61 @@ struct FileEditorSheet: View {
                     style: keyboardBarStyle,
                     expanded: $formatBarExpanded,
                     showsFormatKeys: barKind == .format,
+                    canUndo: mode == .live ? liveCanUndo : sourceCanUndo,
+                    canRedo: mode == .live ? liveCanRedo : sourceCanRedo,
                     onCommand: { sendMarkdownCommand($0) },
+                    onUndo: { undoEdit(redo: false) },
+                    onRedo: { undoEdit(redo: true) },
                     onDismissKeyboard: { dismissKeyboard() }
                 )
             }
         }
         .transition(.opacity)
-        .animation(.easeOut(duration: 0.18), value: barKind)
+    }
+
+    private func setKeyboardVisible(_ visible: Bool, notification: Notification) {
+        let duration = notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+        let curve = notification.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int ?? 0
+        let animation: Animation
+        switch curve {
+        case 1: animation = .easeIn(duration: duration)
+        case 2: animation = .easeOut(duration: duration)
+        case 3: animation = .linear(duration: duration)
+        default: animation = .easeInOut(duration: duration)
+        }
+        withAnimation(animation) { keyboardVisible = visible }
     }
 
     private func dismissKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
+
+    /// 源码模式：TextEditor 底下 UITextView 是第一响应者，撤销走它的 undoManager（和摇一摇撤销同一个）
+    private func refreshSourceUndoState() {
+        let manager = mode == .source ? FileEditorTextUndo.firstResponderUndoManager() : nil
+        sourceCanUndo = manager?.canUndo ?? false
+        sourceCanRedo = manager?.canRedo ?? false
+    }
     #endif
 
+    /// 浮条 / 格式条的撤销、重做：实时模式发命令给 CodeMirror，源码模式走 UITextView 的 undoManager
+    private func undoEdit(redo: Bool) {
+        if mode == .live {
+            sendMarkdownCommand(redo ? "redo" : "undo")
+            return
+        }
+        #if os(iOS)
+        guard mode == .source, let manager = FileEditorTextUndo.firstResponderUndoManager() else { return }
+        if redo { manager.redo() } else { manager.undo() }
+        refreshSourceUndoState()
+        #endif
+    }
+
     private func openFind(replace: Bool) {
+        withConfirmedContent { openFindConfirmed(replace: replace) }
+    }
+
+    private func openFindConfirmed(replace: Bool) {
         #if os(iOS)
         if !usesTopChrome && mode == .source {
             sourceFindPresented = true
@@ -2457,6 +3011,10 @@ struct FileEditorSheet: View {
     }
 
     private func copyAll() {
+        withConfirmedContent { copyConfirmedContent() }
+    }
+
+    private func copyConfirmedContent() {
         #if os(iOS)
         UIPasteboard.general.string = content
         #else
@@ -2511,7 +3069,7 @@ struct FileEditorSheet: View {
     }
 
     private func checkExternalChangeForOpenFile() {
-        guard !readOnly else { return }
+        guard !readOnly, !isStandaloneText else { return }
         switch externalChangeState {
         case .deleted:
             return
@@ -2541,8 +3099,9 @@ struct FileEditorSheet: View {
     private func reloadExternalVersion() {
         do {
             let reloaded = try reloadExternalContent()
-            content = reloaded.content
+            replaceNativeContent(reloaded.content)
             savedContent = reloaded.content
+            recordVersion(reloaded.content, source: .external)
             baselineModifiedAt = reloaded.modifiedAt
             externalChangeState = .none
             ignoredExternalModifiedAt = nil
@@ -2559,25 +3118,123 @@ struct FileEditorSheet: View {
         externalChangeState = .none
     }
 
-    private func save(closeAfterSuccess: Bool = false) {
+    private func save(closeAfterSuccess: Bool = false, source: FileVersionStore.Source = .manualSave) {
+        withConfirmedContent { saveConfirmed(closeAfterSuccess: closeAfterSuccess, source: source) }
+    }
+
+    /// then = 存成了再做的（跳双链）；onSaveAsync 那条存完回主线程再更新编辑器状态
+    private func saveConfirmed(closeAfterSuccess: Bool = false, source: FileVersionStore.Source = .manualSave, then: (() -> Void)? = nil) {
+        if let onSaveAsync {
+            guard !isSaving else { return }
+            isSaving = true
+            let text = content, baseline = savedContent
+            Task {
+                do {
+                    try await onSaveAsync(text, baseline)
+                    isSaving = false
+                    didSave(text, closeAfterSuccess: closeAfterSuccess, source: source)
+                    then?()
+                } catch {
+                    isSaving = false
+                    saveError = error.localizedDescription
+                }
+            }
+            return
+        }
         do {
             try onSave(content, savedContent)
-            savedContent = content
-            baselineModifiedAt = currentModifiedAt()
-            externalChangeState = .none
-            ignoredExternalModifiedAt = nil
-            saveError = nil
-            if closeAfterSuccess { onCancel() }
+            didSave(content, closeAfterSuccess: closeAfterSuccess, source: source)
+            then?()
         } catch {
             saveError = error.localizedDescription
         }
     }
 
+    private func didSave(_ text: String, closeAfterSuccess: Bool, source: FileVersionStore.Source) {
+        let restored = restoreBackup.map { $0.restored.text == text } ?? false
+        recordVersion(text, source: restored ? .restore : source)
+        restoreBackup = nil
+        // 文件库手动保存轻触一下；虚拟文本（卡库）由落盘方自己给反馈，不重复
+        if source == .manualSave && !isStandaloneText { SaveFeedback.haptic() }
+        savedContent = text
+        baselineModifiedAt = currentModifiedAt()
+        externalChangeState = .none
+        ignoredExternalModifiedAt = nil
+        saveError = nil
+        if closeAfterSuccess { onCancel() }
+    }
+
+    private func openVersionHistory() {
+        withConfirmedContent {
+            if wikiHistory != nil {
+                showWikiHistory = true
+            } else if versionsEnabled, let versionKey {
+                versionHistoryPage = .list(versionKey)
+            } else {
+                versionHistoryPage = .unavailable(recordingOff: !versionsEnabled)
+            }
+        }
+    }
+
+    private func savePosition() {
+        guard let versionKey else { return }
+        if mode == .source { positionTracker.captureSource() }
+        guard let position = positionTracker.latest else { return }
+        FileEditorPositionStore.shared.set(position, for: versionKey)
+    }
+
+    private func recordVersion(_ text: String, source: FileVersionStore.Source) {
+        guard let versionKey = FileVersionHistory.recordingKey(versionKey, enabled: versionsEnabled) else { return }
+        let previous = versionRecording
+        versionRecording = Task {
+            await previous?.value
+            do {
+                try await FileVersionStore.shared.record(key: versionKey, content: text, source: source)
+            } catch {
+                NSLog("记版本失败：%@", error.localizedDescription)
+            }
+        }
+    }
+
+    /// 显式原生替换：保存仍记成「恢复」，不以正文相等推断是否存在未回报的网页编辑。
+    private func restoreVersion(_ restored: FileVersionHistory.Restored) {
+        restoreBackup = (content, restored)
+        replaceNativeContent(restored.text)
+    }
+
+    private var restoreBanner: AnyView? {
+        guard let backup = restoreBackup, backup.restored.text == content else { return nil }
+        return AnyView(
+            HStack(spacing: 8) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Theme.textMuted)
+                Text("已换成 \(FileVersionHistory.timeText(backup.restored.date)) 的版本，保存后生效")
+                    .font(.system(size: Theme.F.caption, weight: .medium))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(2)
+                Spacer(minLength: 8)
+                Button("换回") {
+                    replaceNativeContent(backup.previous)
+                    restoreBackup = nil
+                }
+                .font(.system(size: Theme.F.caption, weight: .semibold))
+                .foregroundColor(Theme.branchIndicator)
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Theme.accent.opacity(0.34))
+        )
+    }
+
     private func close() {
-        if content == savedContent {
-            onCancel()
-        } else {
-            showCloseConfirmation = true
+        withConfirmedContent {
+            if content == savedContent {
+                onCancel()
+            } else {
+                showCloseConfirmation = true
+            }
         }
     }
 }

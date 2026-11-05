@@ -1,11 +1,11 @@
 import SwiftUI
 
 // MARK: - 设置 · 小芽（plan-小芽助手.md Q4 裁决：人设设置里可改）
-// 人设 prompt 覆写 + 说明。空 = 用内置小芽人设（会跟随 assistantName / lite-pro 默认名）。
+// 人设 prompt 覆写 + 说明。空 = 用内置小芽人设。名字恒为小芽（plan-onboarding-xiaoya-impl §2.5），覆写只在 pro 下有、只改口吻。
 
 struct XiaoyaSettingsTab: View {
     @AppStorage(AssistantPrompts.personaOverrideKey) private var personaOverride = ""
-    @AppStorage(AssistantPrompts.nameKey) private var nameOverride = ""
+    @AppStorage("settings.proMode") private var proMode = false
     @AppStorage(XiaoyaStageTheme.storageKey) private var stageThemeRaw = XiaoyaStageTheme.mint.rawValue
     @AppStorage(XiaoyaPack.read.storageKey) private var packRead = XiaoyaPack.read.defaultEnabled
     @AppStorage(XiaoyaPack.creation.storageKey) private var packCreation = XiaoyaPack.creation.defaultEnabled
@@ -16,17 +16,6 @@ struct XiaoyaSettingsTab: View {
 
     var body: some View {
         List {
-            Section {
-                TextField("小芽", text: $nameOverride)
-                    .font(.system(size: Theme.F.body))
-            } header: {
-                Text("名字")
-            } footer: {
-                Text("留空用默认：lite 叫「小芽」，pro 叫「Rosemary」。跟楼层 AI 的名字互不相干。")
-                    .foregroundColor(Theme.textMuted)
-            }
-            .listRowBackground(Theme.sidebarBg)
-
             // 剪纸舞台四选一（plan-小芽-v2 §3.6）：迷你舞台是真布景渲染，亮色出太阳、暗色出月亮
             Section {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
@@ -73,33 +62,35 @@ struct XiaoyaSettingsTab: View {
 
             modelSection
 
-            Section {
-                TextEditor(text: $personaOverride)
-                    .font(.system(size: Theme.F.secondary))
-                    .frame(minHeight: 220)
-            } header: {
-                Text("人设 prompt")
-            } footer: {
-                Text("留空使用内置人设。改了立即生效，下一轮对话就用新人设。")
-                    .foregroundColor(Theme.textMuted)
-            }
-            .listRowBackground(Theme.sidebarBg)
+            if proMode {
+                Section {
+                    TextEditor(text: $personaOverride)
+                        .font(.system(size: Theme.F.secondary))
+                        .frame(minHeight: 220)
+                } header: {
+                    Text("人设 prompt")
+                } footer: {
+                    Text("留空使用内置人设。只改口吻，不改名字——她一直叫小芽。改了立即生效，下一轮对话就用新人设。")
+                        .foregroundColor(Theme.textMuted)
+                }
+                .listRowBackground(Theme.sidebarBg)
 
-            Section {
-                Button("查看内置人设") {
-                    personaOverride = AssistantPrompts.defaultPersona(name: AssistantPrompts.assistantName)
-                }
-                .foregroundColor(Theme.branchIndicator)
-                if !personaOverride.isEmpty {
-                    Button("恢复默认（清空覆写）", role: .destructive) {
-                        personaOverride = ""
+                Section {
+                    Button("查看内置人设") {
+                        personaOverride = AssistantPrompts.defaultPersona(name: AssistantPrompts.assistantName)
                     }
+                    .foregroundColor(Theme.branchIndicator)
+                    if !personaOverride.isEmpty {
+                        Button("恢复默认（清空覆写）", role: .destructive) {
+                            personaOverride = ""
+                        }
+                    }
+                } footer: {
+                    Text("「查看内置人设」会把默认人设填进编辑框，方便在它基础上改。")
+                        .foregroundColor(Theme.textMuted)
                 }
-            } footer: {
-                Text("「查看内置人设」会把默认人设填进编辑框，方便在它基础上改。")
-                    .foregroundColor(Theme.textMuted)
+                .listRowBackground(Theme.sidebarBg)
             }
-            .listRowBackground(Theme.sidebarBg)
 
             Section {
                 Label("能做什么：写角色卡、改预设、管世界书、查记忆", systemImage: "sparkles")
@@ -142,7 +133,7 @@ struct XiaoyaSettingsTab: View {
         } header: {
             Text("模型")
         } footer: {
-            Text("本机模型不联网、不花钱，手机上会慢一些；在「设置 › API › 本机模型」下载。")
+            Text("本机模型不联网、不花钱，手机上会慢一些；在「设置 › 模型和API › 本机模型」下载。")
                 .foregroundColor(Theme.textMuted)
         }
         .listRowBackground(Theme.sidebarBg)

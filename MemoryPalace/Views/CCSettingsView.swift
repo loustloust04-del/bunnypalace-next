@@ -27,9 +27,12 @@ struct CCSettingsView: View {
     @State private var cleanupDays: Int? = nil      // ~/.claude/settings.json 的 cleanupPeriodDays，nil=未设置
     @State private var retentionWriteFailed = false
     private static let retentionPresets = [30, 365, 3650, 36500]
-    private static let claudeSettingsPath = NSString(string: "~/.claude/settings.json").expandingTildeInPath
+    private static var claudeSettingsPath: String {
+        AppPaths.checked(AppPaths.home.appendingPathComponent(".claude/settings.json")).path
+    }
 
     private func readCleanupDays() -> Int? {
+        if BenchIsolation.active { return nil }
         guard let data = FileManager.default.contents(atPath: Self.claudeSettingsPath),
               let text = String(data: data, encoding: .utf8) else { return nil }
         return (try? AgentConfigEditor.value(at: ["cleanupPeriodDays"], in: text)) as? Int
@@ -38,6 +41,7 @@ struct CCSettingsView: View {
     /// 只动 cleanupPeriodDays 这一个 key（AgentConfigEditor：保 key 顺序/注释、原子写、没变不写）。
     /// 文件存在但解析不了 → 拒绝写（绝不覆盖）。
     private func writeCleanupDays(_ days: Int) -> Bool {
+        if BenchIsolation.active { return false }
         do {
             try AgentConfigEditor.update(fileAt: URL(fileURLWithPath: Self.claudeSettingsPath)) {
                 try AgentConfigEditor.setting(days, at: ["cleanupPeriodDays"], in: $0)

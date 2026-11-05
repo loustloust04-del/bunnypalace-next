@@ -26,8 +26,8 @@ test("只有 LAN（Tailscale 没跑）→ tailscale undefined ← 这正是时�
 })
 
 test("只有 Tailscale（出国公共 WiFi，无可用私网段）", () => {
-  const d = detectInterfaces({ utun3: [iface("100.116.36.98")] })
-  expect(d.tailscale).toBe("100.116.36.98")
+  const d = detectInterfaces({ utun3: [iface("100.101.102.103")] })
+  expect(d.tailscale).toBe("100.101.102.103")
   expect(d.lan).toBeUndefined()
 })
 

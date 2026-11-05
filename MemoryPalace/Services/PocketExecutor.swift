@@ -38,73 +38,76 @@ final class PocketExecutor: NSObject, WKNavigationDelegate, WKUIDelegate {
         #endif
     }
 
-    func execute(_ cmd: [String: Any]) {
+    /// reply：调用方给的结果发送口（A1 R2 R1-5）——绑定命令来源的那条连接，所有结果（含 JS / 截图的异步回调）都只经它回；
+    /// 来源连接没了它自己只记诊断不发，这里不碰「当前连接」
+    func execute(_ cmd: [String: Any], reply send: @escaping ([String: Any]) -> Void) {
         guard let id = cmd["id"] as? String,
               let action = cmd["action"] as? String else { return }
+        let reply = { (ok: Bool, result: String?, error: String?) in send(Self.resultFrame(id: id, ok: ok, result: result, error: error)) }
 
         let wv = ensureWebView()
 
         switch action {
         case "ping":
-            reply(id: id, ok: true, result: "pong")
+            reply(true, "pong", nil)
 
         case "goto":
             if let s = cmd["url"] as? String, let url = URL(string: s) {
                 wv.load(URLRequest(url: url))
-                reply(id: id, ok: true, result: "loading")
+                reply(true, "loading", nil)
             } else {
-                reply(id: id, ok: false, error: "bad url")
+                reply(false, nil, "bad url")
             }
 
         case "js":
             if let js = (cmd["js"] as? String) ?? (cmd["code"] as? String) {
-                wv.evaluateJavaScript(js) { [weak self] value, error in
+                wv.evaluateJavaScript(js) { value, error in
                     if let error {
-                        self?.reply(id: id, ok: false, error: error.localizedDescription)
+                        reply(false, nil, error.localizedDescription)
                     } else {
-                        self?.reply(id: id, ok: true, result: String(describing: value ?? ""))
+                        reply(true, String(describing: value ?? ""), nil)
                     }
                 }
             } else {
-                reply(id: id, ok: false, error: "no js")
+                reply(false, nil, "no js")
             }
 
         case "html":
-            wv.evaluateJavaScript("document.documentElement.outerHTML") { [weak self] value, _ in
-                self?.reply(id: id, ok: true, result: value as? String ?? "")
+            wv.evaluateJavaScript("document.documentElement.outerHTML") { value, _ in
+                reply(true, value as? String ?? "", nil)
             }
 
         case "screenshot":
             let cfg = WKSnapshotConfiguration()
-            wv.takeSnapshot(with: cfg) { [weak self] image, error in
+            wv.takeSnapshot(with: cfg) { image, error in
                 #if os(macOS)
                 if let image,
                    let tiffData = image.tiffRepresentation,
                    let bitmap = NSBitmapImageRep(data: tiffData),
                    let png = bitmap.representation(using: .png, properties: [:]) {
-                    self?.reply(id: id, ok: true, result: "data:image/png;base64," + png.base64EncodedString())
+                    reply(true, "data:image/png;base64," + png.base64EncodedString(), nil)
                 } else {
-                    self?.reply(id: id, ok: false, error: error?.localizedDescription ?? "snapshot failed")
+                    reply(false, nil, error?.localizedDescription ?? "snapshot failed")
                 }
                 #else
                 if let png = image?.pngData() {
-                    self?.reply(id: id, ok: true, result: "data:image/png;base64," + png.base64EncodedString())
+                    reply(true, "data:image/png;base64," + png.base64EncodedString(), nil)
                 } else {
-                    self?.reply(id: id, ok: false, error: error?.localizedDescription ?? "snapshot failed")
+                    reply(false, nil, error?.localizedDescription ?? "snapshot failed")
                 }
                 #endif
             }
 
         default:
-            reply(id: id, ok: false, error: "unknown action")
+            reply(false, nil, "unknown action")
         }
     }
 
-    private func reply(id: String, ok: Bool, result: String? = nil, error: String? = nil) {
+    nonisolated private static func resultFrame(id: String, ok: Bool, result: String?, error: String?) -> [String: Any] {
         var obj: [String: Any] = ["type": "pocket_result", "id": id, "ok": ok]
         if let result { obj["result"] = result }
         if let error { obj["error"] = error }
-        CCBridgeWebSocketClient.shared.send(obj) { _ in }
+        return obj
     }
 
     // MARK: - WKUIDelegate noop（离屏不弹 alert）

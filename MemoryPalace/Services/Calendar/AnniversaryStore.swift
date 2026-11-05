@@ -80,11 +80,11 @@ struct AnniversaryStore: Sendable {
     init(root: URL) { self.root = root }
 
     static func forProfile(_ profileId: String) -> AnniversaryStore {
-        AnniversaryStore(root: FileLibraryStore.libraryRoot(profileId: profileId)
-            .appendingPathComponent("calendar/anniversaries", isDirectory: true))
+        AnniversaryStore(root: AppPaths.checked(FileLibraryStore.libraryRoot(profileId: profileId)
+            .appendingPathComponent("calendar/anniversaries", isDirectory: true)))
     }
 
-    private func url(for id: String) -> URL { root.appendingPathComponent(ActivityCacheStore.sanitize(id) + ".json") }
+    private func url(for id: String) -> URL { AppPaths.checked(root.appendingPathComponent(ActivityCacheStore.sanitize(id) + ".json")) }
 
     private static let encoder: JSONEncoder = {
         let e = JSONEncoder()
@@ -109,12 +109,12 @@ struct AnniversaryStore: Sendable {
 
     private func load(at url: URL) -> Anniversary? {
         MainThreadIO.note(.read, "AnniversaryStore.load")
-        return (try? Data(contentsOf: url)).flatMap { try? Self.decoder.decode(Anniversary.self, from: $0) }
+        return (try? Data(contentsOf: AppPaths.checked(url))).flatMap { try? Self.decoder.decode(Anniversary.self, from: $0) }
     }
 
     /// 照片文件的位置（文件可能还没从 iCloud 下来：调用方读不到就画占位，别清引用）
     func photoURL(_ a: Anniversary) -> URL? {
-        a.photo.map { root.appendingPathComponent(ActivityCacheStore.sanitize($0)) }
+        a.photo.map { AppPaths.checked(root.appendingPathComponent(ActivityCacheStore.sanitize($0))) }
     }
 
     enum PhotoChange: Equatable, Sendable {
@@ -136,7 +136,7 @@ struct AnniversaryStore: Sendable {
             break
         case .replace(let jpeg):
             let name = "\(ActivityCacheStore.sanitize(a.id))-\(AnniversaryPhoto.hash8(jpeg)).jpg"
-            try jpeg.write(to: root.appendingPathComponent(name), options: .atomic)
+            try jpeg.write(to: AppPaths.checked(root.appendingPathComponent(name)), options: .atomic)
             copy.photo = name
         case .remove:
             copy.photo = nil
@@ -144,7 +144,7 @@ struct AnniversaryStore: Sendable {
         copy.updatedAt = Date()
         try Self.encoder.encode(copy).write(to: url(for: a.id), options: .atomic)
         if let old = onDisk, old != copy.photo {
-            try? FileManager.default.removeItem(at: root.appendingPathComponent(ActivityCacheStore.sanitize(old)))
+            try? FileManager.default.removeItem(at: AppPaths.checked(root.appendingPathComponent(ActivityCacheStore.sanitize(old))))
         }
         return copy
     }
@@ -153,7 +153,7 @@ struct AnniversaryStore: Sendable {
     func delete(id: String) throws {
         let photo = load(at: url(for: id))?.photo
         try FileManager.default.removeItem(at: url(for: id))
-        if let photo { try? FileManager.default.removeItem(at: root.appendingPathComponent(ActivityCacheStore.sanitize(photo))) }
+        if let photo { try? FileManager.default.removeItem(at: AppPaths.checked(root.appendingPathComponent(ActivityCacheStore.sanitize(photo)))) }
     }
 }
 

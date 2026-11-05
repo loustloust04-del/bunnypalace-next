@@ -40,8 +40,10 @@ enum ConnectRuler {
     /// 每次进程一个
     static let runId = UUID().uuidString
 
-    /// A 刀开关有效值登记处（plan §3）：每加一刀，在这里登记它进程启动时读到的有效值（如 "A1": "1"）。现在还没有刀
-    static func switches() -> [String: String] { [:] }
+    /// A 刀开关有效值登记处（plan §3）：每加一刀，在这里登记它进程启动时读到的有效值（如 "A1": "1"）
+    static func switches() -> [String: String] {
+        ["A1": CCBridgeWebSocketClient.a1TransportOffMain ? "1" : "0"]   // MP_APP_CONNECT_A1：连接状态机离开主线程
+    }
 
     /// 本模块所在镜像的 LC_UUID = 实际在跑的是哪个包。Release 是主二进制；Debug 的代码在拆出来的 .debug.dylib，
     /// #dsohandle 指的就是它。只读进程内已映射的 Mach-O 头，不读文件
@@ -362,6 +364,8 @@ struct ConnectRulerEpisode {
     var busy: BusySummary?
     var busyWindow: ConnectBusyWindow?
     var launchFail = false
+    /// 探测结果 / didOpen / client_info 在哪条路上处理：main = 原主线程路径，a1 = transport 串行队列（A1）
+    var transport = "main"
 
     /// 候选只留最近 maxCandidates 条（最终赢家一定在最后几轮），更早的丢掉计 droppedCandidates
     static let maxCandidates = 32
@@ -372,10 +376,11 @@ struct ConnectRulerEpisode {
         self.busyWindow = busyWindow
     }
 
-    /// 连接入口（主线程）：同一个时刻既是 entryNs 也是忙段窗口起点
-    static func start() -> ConnectRulerEpisode {
+    /// 连接入口：同一个时刻既是 entryNs 也是忙段窗口起点。busyWindow=false（A1，入口在 transport 上）时窗口由调用方
+    /// 拿 entryNs 到主线程上另挂（ConnectBusyWindow 只能在主线程建、收）
+    static func start(busyWindow: Bool = true) -> ConnectRulerEpisode {
         let ns = ConnectClock.nowNs()
-        var ep = ConnectRulerEpisode(entryNs: ns, busyWindow: ConnectBusyWindow(startNs: ns))
+        var ep = ConnectRulerEpisode(entryNs: ns, busyWindow: busyWindow ? ConnectBusyWindow(startNs: ns) : nil)
         ep.id = ConnectRunCounters.bump(\.started)
         return ep
     }
@@ -404,22 +409,37 @@ struct ConnectRulerEpisode {
     @discardableResult
     mutating func noteOpen(task: ObjectIdentifier, lastTask: ObjectIdentifier?, attempt: Int?, currentGen: Int,
                            wsOpenNs: UInt64, wsOpenWall: Date, uiNs: UInt64, uiWall: Date) -> Bool {
-        guard let ws, task == lastTask, attempt == ws.attempt, ws.gen == currentGen, self.uiNs == nil else {
+        guard noteTransportOpen(task: task, lastTask: lastTask, attempt: attempt, currentGen: currentGen,
+                                wsOpenNs: wsOpenNs, wsOpenWall: wsOpenWall) else { return false }
+        noteUI(uiNs: uiNs, uiWall: uiWall, busy: busyWindow?.finish(at: uiNs))
+        busyWindow = nil
+        return true
+    }
+
+    /// noteOpen 的前一半（A1 在 transport 上调）：只核归属、记 didOpen 回调时刻。主线程进入另由 noteUI 补
+    @discardableResult
+    mutating func noteTransportOpen(task: ObjectIdentifier, lastTask: ObjectIdentifier?, attempt: Int?, currentGen: Int,
+                                    wsOpenNs: UInt64, wsOpenWall: Date) -> Bool {
+        guard let ws, task == lastTask, attempt == ws.attempt, ws.gen == currentGen, self.wsOpenNs == nil else {
             invalid += 1
             return false
         }
         self.wsOpenNs = wsOpenNs
         self.wsOpenWall = wsOpenWall
-        self.uiNs = uiNs
-        self.uiWall = uiWall
-        if let w = busyWindow { busy = w.finish(at: uiNs) }
-        busyWindow = nil
         return true
     }
 
-    /// client_info 交给当前 task 之后调；只认已归属成功的那次打开
+    /// noteOpen 的后一半：「已连上」排到主线程的 block 首行。只认归属成功的那次打开；busy = 连接窗口忙段（收在这一刻）
+    mutating func noteUI(uiNs: UInt64, uiWall: Date, busy: BusySummary?) {
+        guard wsOpenNs != nil, self.uiNs == nil else { return }
+        self.uiNs = uiNs
+        self.uiWall = uiWall
+        if let busy { self.busy = busy }
+    }
+
+    /// client_info 交给当前 task 之后调；只认已归属成功的那次打开（A1 下它早于主线程进入）
     mutating func noteClientInfo(at ns: UInt64) {
-        guard uiNs != nil, clientInfoNs == nil else { return }
+        guard wsOpenNs != nil, clientInfoNs == nil else { return }
         clientInfoNs = ns
     }
 
@@ -443,6 +463,7 @@ struct ConnectRulerEpisode {
             "dev": deviceId,
             "sw": ConnectRuler.switches(),
             "ep": id,
+            "transport": transport,
             "counts": ["started": counts.started, "ok": counts.ok, "replaced": counts.replaced, "report_failed": counts.reportFailed],
             "finish_ms": rel(finishNs) ?? 0,
             "candidates": candidates.map { $0.json(entryNs: entryNs) },

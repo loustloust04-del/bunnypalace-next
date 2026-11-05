@@ -17,6 +17,14 @@ struct XiaoyaStageView: View {
     var onLedger: (() -> Void)?
     /// 右上角齿轮：小芽设置（v3 §3）
     var onSettings: (() -> Void)?
+    /// 小票下一行「正在帮：某某」= 当前所在楼层，只读（plan-onboarding-xiaoya-impl §10-5）；nil 不显示
+    var helping: Profile? = nil
+    /// 灯泡剪纸：点开小芽的提示 + 词典（§11-4 / §12-A）；nil = 不画
+    var onTips: (() -> Void)? = nil
+    /// 收到新 tip 时 +1：灯泡弹一下
+    var tipPulse = 0
+    /// 没看过的 tip 数：> 0 时灯泡更亮 + 轻晃 + 红数字
+    var tipUnseen = 0
 
     static var faceHeight: CGFloat {
         #if os(macOS)
@@ -77,7 +85,10 @@ struct XiaoyaStageView: View {
     var body: some View {
         HStack(alignment: collapsed ? .center : .bottom, spacing: collapsed ? 10 : 6) {
             face
-            ticket
+            VStack(alignment: .leading, spacing: 8) {
+                ticket
+                if !collapsed, let helping { helpingLine(helping) }
+            }
                 .padding(.bottom, collapsed ? 0 : 14)
             Spacer(minLength: 0)
         }
@@ -87,6 +98,14 @@ struct XiaoyaStageView: View {
         .padding(.bottom, collapsed ? XiaoyaStageBackdrop.edgeDepth : XiaoyaStageBackdrop.edgeDepth + 16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: collapsed ? .leading : .bottomLeading)
         .frame(height: collapsed ? Self.collapsedHeight : Self.expandedHeight)
+        // §12-A 定稿：灯泡浮在小芽左边的幕布上（屏幕左缘和小芽之间），小芽和小票不挪
+        .overlay(alignment: .bottomLeading) {
+            if !collapsed, let onTips {
+                XiaoyaTipBulb(unseen: tipUnseen, pulse: tipPulse, action: onTips)
+                    .offset(x: -6, y: -(XiaoyaStageBackdrop.edgeDepth + 32))
+                    .transition(.opacity)
+            }
+        }
         .overlay(alignment: .topTrailing) { cornerButtons }
         .background(alignment: .bottom) {
             GeometryReader { geo in
@@ -222,6 +241,18 @@ struct XiaoyaStageView: View {
         }
         .padding(.trailing, 14)
         .padding(.top, collapsed ? 26 : 44)
+    }
+
+    /// 「正在帮：澪」：就是当前所在楼层，只读
+    private func helpingLine(_ floor: Profile) -> some View {
+        Text("正在帮：\(floor.name)")
+            .lineLimit(1)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(palette.ticketInk)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(palette.ticket.opacity(0.92), in: Capsule())
+            .shadow(color: .black.opacity(0.2), radius: 0, x: 1, y: 2)
     }
 
     private func cornerButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {

@@ -24,6 +24,10 @@ struct CodingSessionActionItems: View {
             }
             if meta.host.isEmpty {
                 Button("在 Finder 中显示") {
+                    if let error = CodingSessionResume.handoffError {
+                        onError(error)
+                        return
+                    }
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: meta.projectPath)])
                 }
             }

@@ -10,10 +10,18 @@ struct WorldBookEntryEditView: View {
     let onSave: (WorldBookEntry) throws -> Void
     let onDelete: (() -> Void)?
     let onCancel: () -> Void
+    /// 正文版本历史 / 编辑位置；新建的条目没有
+    let versionKey: FileVersionStore.Key?
 
     enum Failure: LocalizedError {
         case entryMissing
-        var errorDescription: String? { "这一条已经不在了（可能被别处删掉），没有保存" }
+        case invalidFields
+        var errorDescription: String? {
+            switch self {
+            case .entryMissing: "这一条已经不在了（可能被别处删掉），没有保存"
+            case .invalidFields: "条目里还有要改的设置（看表单里的红字），改好才能保存；正文已经写回表单"
+            }
+        }
     }
 
     @State private var comment: String
@@ -32,12 +40,17 @@ struct WorldBookEntryEditView: View {
     @State private var matchWholeWords: Bool
     @State private var caseSensitive: Bool
     @State private var saveError: String?
+    @State private var confirmingDiscard = false
+    /// 最近一次落盘的条目：正文全屏编辑器存过之后，「有没有改动」跟它比
+    @State private var savedEntry: WorldBookEntry
     private let initialKeysText: String
     private let initialSecondaryText: String
 
     init(entry: WorldBookEntry, bookName: String, isNew: Bool, readOnly: Bool,
-         onSave: @escaping (WorldBookEntry) throws -> Void, onDelete: (() -> Void)?, onCancel: @escaping () -> Void) {
+         onSave: @escaping (WorldBookEntry) throws -> Void, onDelete: (() -> Void)?, onCancel: @escaping () -> Void,
+         versionKey: FileVersionStore.Key? = nil) {
         self.entry = entry
+        self.versionKey = versionKey
         self.bookName = bookName
         self.isNew = isNew
         self.readOnly = readOnly
@@ -63,6 +76,7 @@ struct WorldBookEntryEditView: View {
         _isConstant = State(initialValue: entry.isConstant)
         _matchWholeWords = State(initialValue: entry.matchWholeWords)
         _caseSensitive = State(initialValue: entry.caseSensitive)
+        _savedEntry = State(initialValue: entry)
     }
 
     // MARK: - 校验（只提示，不改值）
@@ -130,6 +144,8 @@ struct WorldBookEntryEditView: View {
         return next
     }
 
+    private var isDirty: Bool { !readOnly && edited != savedEntry }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -143,10 +159,12 @@ struct WorldBookEntryEditView: View {
                                 .textFieldStyle(.plain).font(.system(size: 15))
                         }
                         field("正文") {
-                            TextEditor(text: $content)
-                                .font(.system(size: 14))
-                                .frame(minHeight: 120)
-                                .scrollContentBackground(.hidden)
+                            LongTextField(title: "正文", text: $content,
+                                          editorTitle: "世界书条目 · " + (comment.isEmpty ? WorldBookLibrary.title(of: entry) : comment),
+                                          placeholder: "命中关键词时注入的内容，点一下开始写",
+                                          showsTitle: false, readOnly: readOnly,
+                                          versionKey: versionKey,
+                                          onCommit: { _ in try persist() })
                         }
                         TicketNotch()
                         IOSSubLabel(text: "触发")
@@ -212,7 +230,10 @@ struct WorldBookEntryEditView: View {
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(readOnly ? "关闭" : "取消") { onCancel() }.foregroundColor(Theme.textMuted)
+                    Button(readOnly ? "关闭" : "取消") {
+                        if isDirty { confirmingDiscard = true } else { onCancel() }
+                    }
+                    .foregroundColor(Theme.textMuted)
                 }
                 if !readOnly {
                     ToolbarItem(placement: .confirmationAction) {
@@ -223,6 +244,7 @@ struct WorldBookEntryEditView: View {
                 }
             }
         }
+        .discardChangesGuard(isDirty: isDirty, confirming: $confirmingDiscard, onDiscard: onCancel)
         .alert("保存失败", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
             Button("好的") { saveError = nil }
         } message: { Text(saveError ?? "") }
@@ -369,8 +391,20 @@ struct WorldBookEntryEditView: View {
             .padding(.top, 6)
     }
 
+    /// onSave 只管落盘（表单「完成」和正文全屏编辑器的「保存」都走它），表单保存成功后自己关
     private func save() {
         guard canSave else { return }
-        do { try onSave(edited) } catch { saveError = error.localizedDescription }
+        do {
+            try persist()
+            onCancel()
+        } catch { saveError = error.localizedDescription }
+    }
+
+    private func persist() throws {
+        guard canSave else { throw Failure.invalidFields }
+        let next = edited
+        try onSave(next)
+        savedEntry = next
+        SaveFeedback.saved("已保存")
     }
 }

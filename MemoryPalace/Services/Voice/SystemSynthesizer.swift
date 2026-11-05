@@ -18,7 +18,7 @@ struct SystemSynthesizer: VoiceSynthesizer {
         } else if let language = Locale.preferredLanguages.first {
             utterance.voice = AVSpeechSynthesisVoice(language: language)
         }
-        let url = FileManager.default.temporaryDirectory
+        let url = AppPaths.temporaryDirectory
             .appendingPathComponent("system-voice-\(UUID().uuidString).wav")
         defer { try? FileManager.default.removeItem(at: url) }
         try await SystemSpeechRenderer().render(utterance, to: url)

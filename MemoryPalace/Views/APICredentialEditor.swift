@@ -25,6 +25,8 @@ struct APICredentialEditor: View {
     @State private var presetSelection: String = "_custom_"        // "_custom_" 或 preset.id（如 "openrouter"）
     @State private var customType: ProviderType = .openaiCompatible
     @State private var customBaseURL: String = ""
+    @State private var regionSelection: String? = nil                 // 预设的区域（nil = 默认；CredentialDraft.ownRegion = 卡上自己的地址）
+    @State private var presetProtocol: ProviderType? = nil           // 预设区域的接口格式（nil = 预设默认）
     @State private var apiKey: String = ""
     @State private var revealKey: Bool = false
     @State private var isFetching: Bool = false
@@ -63,6 +65,15 @@ struct APICredentialEditor: View {
     @State private var oauthAuthURL: URL? = nil       // 当前飞行中的授权 URL（inline 显示给用户复制/打开）
     @State private var oauthPasted: String = ""       // 用户粘贴的 callback URL
     private let oauthCoordinator = ChatGPTOAuthLoginCoordinator()
+    @AppStorage("chatgptOAuthRiskAcked") private var chatgptOAuthRiskAcked = false
+    @State private var confirmChatGPTRisk = false
+
+    // OpenRouter 一键登录（plan-provider-presets §5.5）：拿到的 key 只进草稿，点保存才落盘
+    // 登录归属在 orLogin 里：换家 / 取消 / 关页作废，作废的结果不写 key
+    @State private var orLogin = OpenRouterLoginRunner()
+    @State private var orObtainedKey: String? = nil
+    @State private var orPasted: String = ""
+    @Environment(\.openURL) private var openURL
 
     private var ccBridgeIsConnected: Bool {
         _ = connectionTick   // 显式依赖，重连后 +1 强制刷新
@@ -76,20 +87,19 @@ struct APICredentialEditor: View {
         return pm.credentials.first(where: { $0.id == id })
     }
 
-    private var currentType: ProviderType {
-        if presetSelection == "_custom_" { return customType }
-        return APIProvider.presets.first(where: { $0.id == presetSelection })?.type ?? .openaiCompatible
+    /// 页面上的卡草稿（不含 key）：类型 / 地址 / 测试 / 保存都从它算（CredentialDraft，plan-onboarding-xiaoya-impl P1a）
+    private var currentDraft: CredentialDraft {
+        CredentialDraft(presetSelection: presetSelection, customType: customType, customBaseURL: customBaseURL,
+                        nickname: nickname, emoji: emoji, models: draftModels, toolsSupported: toolsSupported,
+                        regionSelection: regionSelection, presetProtocol: presetProtocol)
     }
+
+    private var currentType: ProviderType { currentDraft.type }
 
     /// Ollama 跑在用户自己的机器上：地址得能改（iOS 上 localhost 是手机自己，#092 零散雷）
-    private var editsBaseURL: Bool {
-        presetSelection == "_custom_" || presetSelection == APIProvider.ollama.id
-    }
+    private var editsBaseURL: Bool { currentDraft.editsBaseURL }
 
-    private var currentBaseURL: String {
-        if editsBaseURL { return customBaseURL }
-        return APIProvider.presets.first(where: { $0.id == presetSelection })?.baseURL ?? ""
-    }
+    private var currentBaseURL: String { currentDraft.baseURL }
 
     private var emojiTaken: Bool {
         providerManager?.isEmojiTaken(emoji, excluding: credentialId) ?? false
@@ -101,6 +111,8 @@ struct APICredentialEditor: View {
 
     /// #092 C：HTTP 两种卡的模型清单只改页面草稿，点「保存」才落盘；取消就全撤。
     @State private var draftModels: [ProviderModel] = []
+    /// 本页拉 /models 拿到的元数据：保存成功才按真实卡 id 写进旁表，取消就丢；nil = 没拉过，保存不动卡上已有的
+    @State private var draftHints: [String: ModelHint]? = nil
     /// 打开页面时的样子（判断有没有改动：有改动就不许下滑关页）
     @State private var original: DraftSnapshot? = nil
 
@@ -109,17 +121,126 @@ struct APICredentialEditor: View {
         var customType: ProviderType
         var toolsSupported: Bool
         var modelIds: [String]
+        var regionSelection: String?
+        var presetProtocol: ProviderType?
+
+        var draft: CredentialDraft {
+            CredentialDraft(presetSelection: presetSelection, customType: customType, customBaseURL: customBaseURL,
+                            regionSelection: regionSelection, presetProtocol: presetProtocol)
+        }
     }
 
+    /// 区域 / 格式按语义记（CredentialDraft.effective*）：旧草稿恢复出的 nil 和装卡写明的默认值不算改动
     private var snapshot: DraftSnapshot {
-        DraftSnapshot(emoji: emoji, nickname: nickname, presetSelection: presetSelection, customBaseURL: customBaseURL,
-                      apiKey: apiKey, customType: customType, toolsSupported: toolsSupported, modelIds: draftModels.map(\.modelId))
+        let d = currentDraft
+        return DraftSnapshot(emoji: emoji, nickname: nickname, presetSelection: presetSelection, customBaseURL: customBaseURL,
+                             apiKey: apiKey, customType: customType, toolsSupported: toolsSupported, modelIds: draftModels.map(\.modelId),
+                             regionSelection: d.effectiveRegionSelection, presetProtocol: d.effectivePresetProtocol)
     }
 
     private var isDirty: Bool { original.map { $0 != snapshot } ?? false }
 
+    // MARK: 草稿保活（plan-api-draft-and-fix-jump §2.2）
+
+    @Environment(\.scenePhase) private var scenePhase
+    /// 保存 / 取消 / 删卡之后不再存草稿（关页时的 onDisappear 也会走存草稿）
+    @State private var draftFinished = false
+    /// 页顶「接着上次没存完的填 · 丢掉」
+    @State private var restoredFromDraft = false
+    /// 恢复出来的模型清单和它所属的提供商：装载时给 presetSelection 赋值会触发 resetDraftModelsForProvider，
+    /// 见到同一家（CredentialDraft.providerKey：预设 + 区域 + 格式）就还原这份，不冲成预设清单
+    @State private var restoredDraft: (providerKey: String, models: [ProviderModel])? = nil
+
+    /// 上一次存下 / 恢复出来的样子：没有新改动就不重存（不重新武装「冷启动自动弹」、不续期，astra #5）
+    @State private var lastDraftSnapshot: DraftSnapshot? = nil
+
+    private var draftSlot: String { credentialId ?? APIDraft.newSlot }
+
+    /// 切后台 / 关页那一刻存一次：只 HTTP 卡、只在有改动时；改回原样了就清掉这一页的旧草稿（astra #4）
+    private func saveDraftIfNeeded() {
+        guard loadedOnce, !draftFinished, isHTTPCard else { return }
+        guard isDirty else {
+            APIDraftStore.clear(slot: draftSlot)
+            lastDraftSnapshot = nil
+            return
+        }
+        guard snapshot != lastDraftSnapshot else { return }
+        let savedKey = credentialId.flatMap { providerManager?.apiKey(for: $0) } ?? ""
+        let draft = APIDraft(slot: draftSlot, emoji: emoji, nickname: nickname, presetSelection: presetSelection,
+                             customBaseURL: customBaseURL, customType: customType.rawValue, toolsSupported: toolsSupported,
+                             models: draftModels.map { .init(modelId: $0.modelId, name: $0.name) },
+                             regionSelection: regionSelection, presetProtocol: presetProtocol?.rawValue)
+        if APIDraftStore.save(draft, key: apiKey == savedKey && !isNew ? nil : apiKey) { lastDraftSnapshot = snapshot }
+    }
+
+    /// 装载完、`original` 定下之后再盖：`original` 仍是已存卡 / 空白的样子 → isDirty 为真，下滑照样被拦
+    private func restoreDraftIfAny() {
+        guard let loaded = APIDraftStore.load(slot: draftSlot) else { return }
+        let d = loaded.draft
+        let type = ProviderType(rawValue: d.customType) ?? .openaiCompatible
+        let models = d.models.map { ProviderModel(credentialId: draftId, modelId: $0.modelId, name: $0.name) }
+        let restored = CredentialDraft(presetSelection: d.presetSelection, customType: type, customBaseURL: d.customBaseURL,
+                                       regionSelection: d.regionSelection, presetProtocol: d.presetProtocol.flatMap(ProviderType.init(rawValue:)))
+        restoredDraft = (restored.providerKey, models)
+        if !d.emoji.isEmpty { emoji = d.emoji }
+        nickname = d.nickname
+        presetSelection = d.presetSelection
+        customType = type
+        customBaseURL = d.customBaseURL
+        regionSelection = restored.regionSelection
+        presetProtocol = restored.presetProtocol
+        toolsSupported = d.toolsSupported
+        draftModels = models
+        if let key = loaded.key { apiKey = key }
+        restoredFromDraft = true
+        lastDraftSnapshot = snapshot
+    }
+
+    /// 「丢掉」：清草稿，字段回到打开时的样子
+    private func discardDraft() {
+        APIDraftStore.clear(slot: draftSlot)
+        restoredDraft = nil
+        restoredFromDraft = false
+        lastDraftSnapshot = nil
+        guard let o = original else { return }
+        emoji = o.emoji
+        nickname = o.nickname
+        presetSelection = o.presetSelection
+        customType = o.customType
+        customBaseURL = o.customBaseURL
+        regionSelection = o.regionSelection
+        presetProtocol = o.presetProtocol
+        apiKey = o.apiKey
+        toolsSupported = o.toolsSupported
+        draftModels = resolvedCredential?.models ?? []
+    }
+
+    private var draftBanner: some View {
+        Section {
+            HStack {
+                Text("接着上次没存完的填")
+                    .font(.system(size: Theme.SettingsFont.secondary))
+                    .foregroundColor(Theme.textSecondary)
+                Spacer()
+                Button("丢掉") { discardDraft() }
+                    .font(.system(size: Theme.SettingsFont.secondary, weight: .medium))
+                    .foregroundColor(Theme.branchIndicator)
+                    .buttonStyle(.plain)
+            }
+        }
+        .listRowBackground(Theme.accent.opacity(0.6))
+    }
+
+    private static var resignActiveNote: Notification.Name {
+        #if os(iOS)
+        UIApplication.willResignActiveNotification
+        #else
+        NSApplication.willResignActiveNotification
+        #endif
+    }
+
     /// 走 HTTP 的两种卡（测试 / 拉模型都用草稿）；桥卡、ChatGPT 账号、本机模型照旧
-    private var isHTTPCard: Bool { currentType == .openaiCompatible || currentType == .anthropic }
+    private var isHTTPCard: Bool { currentDraft.isHTTP }
 
     /// 模型区显示的清单：HTTP 卡看草稿，别的看已存的卡
     private var displayModels: [ProviderModel] {
@@ -143,24 +264,7 @@ struct APICredentialEditor: View {
 
     /// 当前页面上的草稿卡（不进卡表）：测试、拉模型、保存都从它出发
     private func makeDraft(id: String) -> APICredential {
-        let useCustom = presetSelection == "_custom_"
-        let preset = APIProvider.presets.first(where: { $0.id == presetSelection })
-        return APICredential(
-            id: id,
-            name: nickname.trimmingCharacters(in: .whitespaces),
-            emoji: emoji.trimmingCharacters(in: .whitespaces),
-            presetId: useCustom ? nil : presetSelection,
-            type: currentType,
-            baseURL: BaseURLNormalizer.normalize(currentBaseURL, type: currentType),
-            extraHeaders: useCustom
-                ? (currentType == .anthropic ? ["anthropic-version": "2023-06-01"] : [:])
-                : (preset?.extraHeaders ?? [:]),
-            models: draftModels.map { ProviderModel(credentialId: id, modelId: $0.modelId, name: $0.name) },
-            createdAt: resolvedCredential?.createdAt ?? Date(),
-            lastUsedAt: resolvedCredential?.lastUsedAt,
-            lastUsedModelId: resolvedCredential?.lastUsedModelId,
-            toolsSupported: toolsSupported ? nil : false
-        )
+        currentDraft.makeCredential(id: id, existing: resolvedCredential)
     }
 
     /// 拉到的并进草稿（只加不删，顺序：原有的在前）
@@ -172,9 +276,7 @@ struct APICredentialEditor: View {
     }
 
     /// 单例卡（同类全局只能一张）：新建时它已经存在 → 不许再存一张覆盖它
-    private var isSingletonPreset: Bool {
-        currentType == .chatgptOAuth || currentType == .ccBridge || currentType == .localMLX
-    }
+    private var isSingletonPreset: Bool { currentDraft.isSingletonPreset }
 
     private func singletonExists(_ presetId: String) -> Bool {
         let singleton = [APIProvider.ccBridge.id, APIProvider.codexBridge.id, APIProvider.chatgptOAuth.id, APICredential.localId]
@@ -202,6 +304,7 @@ struct APICredentialEditor: View {
 
     var body: some View {
         List {
+            if restoredFromDraft { draftBanner }
             identitySection
             providerSection
             if isNew && presetSelection == APIProvider.claudeP.id {
@@ -242,7 +345,12 @@ struct APICredentialEditor: View {
         #endif
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("取消") { dismiss() }
+                Button("取消") {
+                    draftFinished = true
+                    APIDraftStore.clear(slot: draftSlot)
+                    orLogin.cancel()
+                    dismiss()
+                }
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button(savedFlash ? "✓" : isSaving ? "保存中…" : saveFetchFailed ? "仍然保存" : "保存") { save() }
@@ -277,14 +385,27 @@ struct APICredentialEditor: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            let name = APIProvider.presets.first(where: { $0.id == presetSelection })?.name ?? "自定义"
-            Text("换成「\(name)」会清掉这张卡原来的 \(resolvedCredential?.models.count ?? 0) 个模型（收藏、主模型里指向它们的也一起清掉），改用新家的清单并重新拉一次。")
+            Text("换成「\(switchTargetName)」会清掉这张卡原来的 \(resolvedCredential?.models.count ?? 0) 个模型（收藏、主模型里指向它们的也一起清掉），改用新家的清单并重新拉一次。")
         }
         .onChange(of: presetSelection) { _, _ in resetDraftModelsForProvider() }
         .onChange(of: customType) { _, _ in resetDraftModelsForProvider() }
+        .onChange(of: regionSelection) { _, _ in resetDraftModelsForProvider() }
+        .onChange(of: presetProtocol) { _, _ in resetDraftModelsForProvider() }
+        .onChange(of: currentDraft.providerKey) { _, key in orLogin.providerChanged(to: key) }
         .onChange(of: customBaseURL) { _, _ in saveFetchFailed = false }
         .onChange(of: apiKey) { _, _ in saveFetchFailed = false }
-        .onDisappear { discovery.stop() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { saveDraftIfNeeded() }
+        }
+        // 两层 sheet 里 scenePhase 收不收得到没实测（plan 未查证 1）：应用级通知兜底，重复写无害
+        .onReceive(NotificationCenter.default.publisher(for: Self.resignActiveNote)) { _ in saveDraftIfNeeded() }
+        .onDisappear {
+            discovery.stop()
+            // 关页 / 取消 / 保存后：进行中的 OpenRouter 登录作废（只是切去浏览器不会走到这里）
+            orLogin.cancel()
+            // mac 关设置窗 / 换楼层整树重建也算「没存完」（Q4）
+            saveDraftIfNeeded()
+        }
     }
 
     // MARK: - Sections
@@ -324,18 +445,24 @@ struct APICredentialEditor: View {
 
     private var providerSection: some View {
         Section {
-            Picker("提供商", selection: $presetSelection) {
-                ForEach(APIProvider.presets, id: \.id) { preset in
-                    // .menu Picker 的行只吃 Text/Image/Label（自定义 SwiftUI 视图会被丢），
-                    // 所以这里不能用 ProviderIconView：没品牌图的三家退回纯文字（原样），不画圆片。
-                    let title = isNew && singletonExists(preset.id) ? preset.name + "（已添加）" : preset.name
-                    if let asset = ProviderIcon.assetName(presetId: preset.id) {
-                        Label { Text(title) } icon: { Image(asset) }.tag(preset.id)
-                    } else {
-                        Text(title).tag(preset.id)
+            Picker("提供商", selection: providerSelection) {
+                ForEach(APIProvider.menuSections, id: \.title) { section in
+                    Section(section.title) {
+                        ForEach(section.presets, id: \.id) { preset in
+                            // .menu Picker 的行只吃 Text/Image/Label（自定义 SwiftUI 视图会被丢），
+                            // 所以这里不能用 ProviderIconView：没品牌图的三家退回纯文字（原样），不画圆片。
+                            let title = isNew && singletonExists(preset.id) ? preset.name + "（已添加）" : preset.name
+                            if let asset = ProviderIcon.assetName(presetId: preset.id) {
+                                Label { Text(title) } icon: { Image(asset) }.tag(preset.id)
+                            } else {
+                                Text(title).tag(preset.id)
+                            }
+                        }
                     }
                 }
-                Text("自定义").tag("_custom_")
+                Section {
+                    Text("自定义").tag("_custom_")
+                }
             }
             .pickerStyle(.menu)
             .tint(Theme.branchIndicator)
@@ -344,6 +471,33 @@ struct APICredentialEditor: View {
                 Text("这张卡已经在列表里了（同类只能有一张），回上一页点它编辑。")
                     .font(.system(size: Theme.SettingsFont.caption))
                     .foregroundColor(.red)
+            }
+
+            if let preset = currentDraft.preset, preset.regions.count > 1 || offersOwnRegion {
+                Picker(preset.regionLabel, selection: regionPickerSelection) {
+                    ForEach(preset.regions) { region in
+                        Text(region.name).tag(region.id)
+                    }
+                    if offersOwnRegion {
+                        Text("这张卡自己的地址").tag(CredentialDraft.ownRegion)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(Theme.branchIndicator)
+            }
+
+            if currentDraft.region?.isPlan == true {
+                Text("套餐 key 只能填在套餐地址上，按量的 key 填这里会被拒。")
+                    .font(.system(size: Theme.SettingsFont.caption))
+                    .foregroundColor(Theme.textSecondary)
+            }
+
+            if let region = currentDraft.region, region.offers(.openaiCompatible), region.offers(.anthropic) {
+                Picker("接口格式", selection: protocolSelection) {
+                    Text("OpenAI 兼容").tag(ProviderType.openaiCompatible)
+                    Text("Anthropic").tag(ProviderType.anthropic)
+                }
+                .pickerStyle(.segmented)
             }
 
             if presetSelection == "_custom_" {
@@ -384,6 +538,11 @@ struct APICredentialEditor: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+                if currentDraft.usesOwnBaseURL {
+                    Text("用的是这张卡自己的地址")
+                        .font(.system(size: Theme.SettingsFont.caption))
+                        .foregroundColor(Theme.textMuted)
+                }
             }
 
             if let endpoint = BaseURLNormalizer.chatEndpoint(base: currentBaseURL, type: currentType) {
@@ -399,6 +558,21 @@ struct APICredentialEditor: View {
                 }
             }
 
+            if let url = currentDraft.keysURL, let preset = currentDraft.preset {
+                Link(destination: url) {
+                    HStack(spacing: 4) {
+                        Text("去 \(preset.name) 拿 key")
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: Theme.SettingsFont.caption))
+                    }
+                    .foregroundColor(Theme.branchIndicator)
+                }
+            }
+
+            if let terms = currentDraft.region?.terms, let preset = currentDraft.preset {
+                planTermsNote(terms, presetName: preset.name)
+            }
+
             if isProxyCard {
                 textOnlyNote
             }
@@ -406,6 +580,53 @@ struct APICredentialEditor: View {
             Text("提供商")
         }
         .listRowBackground(Theme.mainBg)
+    }
+
+    /// 换提供商时区域、格式回到这家的默认（写在 setter 里：装载卡 / 恢复草稿直接赋值不走这里，读出来的区域不会被冲掉）；
+    /// 换回卡原来那家就还原卡原来的区域和格式（沿用自己地址的连地址、协议一起还原，CredentialDraft.switchPreset）
+    private var providerSelection: Binding<String> {
+        Binding(get: { presetSelection }, set: { new in
+            guard new != presetSelection else { return }
+            var d = currentDraft
+            d.switchPreset(to: new, original: original?.draft)
+            presetSelection = d.presetSelection
+            regionSelection = d.regionSelection
+            presetProtocol = d.presetProtocol
+            customBaseURL = d.customBaseURL
+            customType = d.customType
+        })
+    }
+
+    /// 这张卡原来沿用自己的地址、现在还在原来那家：区域 Picker 多一项「这张卡自己的地址」，
+    /// 只有一个区域也显示，能选回官方地址（选了按换家处理，plan-provider-presets §5.2）
+    private var offersOwnRegion: Bool {
+        guard let o = original else { return false }
+        return o.regionSelection == CredentialDraft.ownRegion && o.presetSelection == presetSelection
+    }
+
+    private var regionPickerSelection: Binding<String> {
+        Binding(get: { currentDraft.usesOwnBaseURL ? CredentialDraft.ownRegion : currentDraft.region?.id ?? "" },
+                set: { new in
+                    var d = currentDraft
+                    d.switchRegion(to: new, original: original?.draft)
+                    regionSelection = d.regionSelection
+                    presetProtocol = d.presetProtocol
+                })
+    }
+
+    private var protocolSelection: Binding<ProviderType> {
+        Binding(get: { currentType }, set: { presetProtocol = $0 })
+    }
+
+    /// 「换提供商？」确认框里的目标名：多区域带区域名，两种格式都有带格式名
+    private var switchTargetName: String {
+        guard let preset = currentDraft.preset else { return "自定义" }
+        var parts = [preset.name]
+        if preset.regions.count > 1, let region = currentDraft.region { parts.append(region.name) }
+        if let region = currentDraft.region, region.offers(.openaiCompatible), region.offers(.anthropic) {
+            parts.append(currentType == .anthropic ? "Anthropic 格式" : "OpenAI 兼容格式")
+        }
+        return parts.joined(separator: " · ")
     }
 
     private func baseURLField(placeholder: String) -> some View {
@@ -437,6 +658,29 @@ struct APICredentialEditor: View {
                 .font(.system(size: Theme.SettingsFont.caption))
                 .foregroundColor(Theme.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// 套餐条款提示（plan-provider-presets §5.1 第 7 行，Q1 = A）：讲清楚官方怎么说，选择留给用户
+    private func planTermsNote(_ terms: PlanTerms, presetName: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: Theme.SettingsFont.caption))
+                .foregroundColor(Theme.textMuted)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(presetName)官方说明：\(terms.summary)")
+                    .font(.system(size: Theme.SettingsFont.caption))
+                    .foregroundColor(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Link(destination: terms.url) {
+                    HStack(spacing: 4) {
+                        Text("看原文")
+                        Image(systemName: "arrow.up.right")
+                    }
+                    .font(.system(size: Theme.SettingsFont.caption))
+                    .foregroundColor(Theme.branchIndicator)
+                }
+            }
         }
     }
 
@@ -620,6 +864,8 @@ struct APICredentialEditor: View {
         #endif
     }
 
+    private var keyPlaceholder: String { currentDraft.region?.keyHint ?? "sk-..." }
+
     @ViewBuilder
     private var keySection: some View {
         if currentType == .chatgptOAuth {
@@ -630,9 +876,12 @@ struct APICredentialEditor: View {
             ccBridgeConnectionSections
         } else {
             Section {
+                if currentDraft.preset?.login == .openRouter {
+                    openRouterLoginRows
+                }
                 HStack {
                     if revealKey {
-                        TextField("sk-...", text: $apiKey)
+                        TextField(keyPlaceholder, text: $apiKey)
                             .font(.system(size: Theme.SettingsFont.mono, design: .monospaced))
                             .autocorrectionDisabled(true)
                             #if os(iOS)
@@ -641,8 +890,9 @@ struct APICredentialEditor: View {
 
                             #endif
                     } else {
-                        SecureField("sk-...", text: $apiKey)
+                        SecureField(keyPlaceholder, text: $apiKey)
                             .font(.system(size: Theme.SettingsFont.mono, design: .monospaced))
+                            .textContentType(.oneTimeCode)
                             .autocorrectionDisabled(true)
                             #if os(iOS)
 
@@ -707,11 +957,174 @@ struct APICredentialEditor: View {
         }
     }
 
+    // MARK: - OpenRouter 一键登录
+
+    @ViewBuilder
+    private var openRouterLoginRows: some View {
+        if let attempt = orLogin.manualAttempt {
+            openRouterManualSteps(attempt)
+        } else {
+            Button {
+                startOpenRouterLogin()
+            } label: {
+                HStack {
+                    Image(systemName: "person.crop.circle.badge.checkmark")
+                        .font(.system(size: 20))
+                        .foregroundColor(Theme.branchIndicator)
+                    Text("用 OpenRouter 账号登录")
+                        .font(.system(size: Theme.SettingsFont.body, weight: .medium))
+                        .foregroundColor(Theme.textPrimary)
+                    Spacer()
+                    if orLogin.isWaiting {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(orLogin.isWaiting)
+            #if os(macOS)
+            if orLogin.isWaiting && OpenRouterLogin.callbackMode == .localhost {
+                HStack {
+                    Text("在浏览器里登录完会自动回来。")
+                        .font(.system(size: Theme.SettingsFont.caption))
+                        .foregroundColor(Theme.textMuted)
+                    Spacer()
+                    Button("取消") { orLogin.cancel() }
+                        .font(.system(size: Theme.SettingsFont.secondary))
+                        .foregroundColor(Theme.textMuted)
+                        .buttonStyle(.plain)
+                }
+            }
+            #endif
+        }
+        if let key = orObtainedKey, key == apiKey {
+            Text("已拿到 key。这把 key 在你的 OpenRouter 账号里，叫『记忆花园』，不用了可以去 OpenRouter 网站删掉。")
+                .font(.system(size: Theme.SettingsFont.caption))
+                .foregroundColor(Theme.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let err = orLogin.errorText {
+            Text(err)
+                .font(.system(size: Theme.SettingsFont.caption))
+                .foregroundColor(.red)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// 无回调模式：网页上显示授权码，粘回来换 key（样式同 ChatGPT 登录的粘贴步骤）
+    private func openRouterManualSteps(_ attempt: OpenRouterLogin.Attempt) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                stepHeader(1, "在浏览器里登录 OpenRouter")
+                Button {
+                    openURL(attempt.url)
+                } label: {
+                    Label("打开登录页", systemImage: "safari")
+                        .foregroundColor(Theme.branchIndicator)
+                }
+                .buttonStyle(.plain)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                stepHeader(2, "把网页上显示的授权码粘回来")
+                TextField("授权码", text: $orPasted, axis: .vertical)
+                    .lineLimit(1...4)
+                    .font(.system(size: 11, design: .monospaced))
+                    .autocorrectionDisabled(true)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.mainBg))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.textMuted.opacity(0.3), lineWidth: 0.5))
+                HStack {
+                    #if os(iOS)
+                    Button {
+                        if let s = UIPasteboard.general.string { orPasted = s }
+                    } label: {
+                        Label("粘贴", systemImage: "doc.on.clipboard")
+                            .font(.system(size: Theme.SettingsFont.secondary))
+                            .foregroundColor(Theme.branchIndicator)
+                    }
+                    .buttonStyle(.plain)
+                    #endif
+
+                    Spacer()
+
+                    Button {
+                        orLogin.cancel()
+                        orPasted = ""
+                    } label: {
+                        Text("取消")
+                            .font(.system(size: Theme.SettingsFont.secondary))
+                            .foregroundColor(Theme.textMuted)
+                    }
+                    .buttonStyle(.plain)
+
+                    let pastedEmpty = orPasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    Button {
+                        finishOpenRouterManual()
+                    } label: {
+                        Text("完成登录")
+                            .font(.system(size: Theme.SettingsFont.body, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(Capsule().fill(pastedEmpty ? Theme.textMuted.opacity(0.5) : Theme.branchIndicator))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(pastedEmpty || orLogin.isExchanging)
+                }
+                if orLogin.isExchanging {
+                    HStack(spacing: 4) {
+                        ProgressView().controlSize(.small)
+                        Text("正在换 key…").font(.system(size: Theme.SettingsFont.caption)).foregroundColor(Theme.textMuted)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func startOpenRouterLogin() {
+        let providerKey = currentDraft.providerKey
+        let mode = OpenRouterLogin.callbackMode
+        if mode == .manualCode {
+            orPasted = ""
+            openURL(orLogin.beginManual(providerKey: providerKey).url)
+            return
+        }
+        let flow = OpenRouterLoginFlow()
+        orLogin.start(providerKey: providerKey, context: { currentDraft.providerKey }, work: {
+            #if os(macOS)
+            if mode == .localhost { return try await flow.runLocalhost() }
+            #endif
+            return try await flow.runCustomScheme()
+        }, apply: applyOpenRouterKey)
+    }
+
+    private func finishOpenRouterManual() {
+        orLogin.finishManual(pasted: orPasted, context: { currentDraft.providerKey }, exchange: { code, verifier in
+            try await OpenRouterLogin.exchange(code: code, verifier: verifier)
+        }, apply: { key in
+            applyOpenRouterKey(key)
+            orPasted = ""
+        })
+    }
+
+    private func applyOpenRouterKey(_ key: String) {
+        apiKey = key
+        orObtainedKey = key
+        testResult = nil
+    }
+
     // MARK: - ChatGPT OAuth 登录（inline 引导，不弹 sheet）
 
     @ViewBuilder
     private var chatgptOAuthSections: some View {
         Section {
+            chatgptRiskNote
             if !oauthLoggedInAccountId.isEmpty {
                 // 已登录态
                 HStack {
@@ -741,9 +1154,9 @@ struct APICredentialEditor: View {
                 }
                 .buttonStyle(.plain)
             } else if oauthAuthURL == nil {
-                // 未开始：显示登录按钮
+                // 未开始：显示登录按钮（第一次点先确认风险，plan-provider-presets §5.6）
                 Button {
-                    startOAuthLogin()
+                    if chatgptOAuthRiskAcked { startOAuthLogin() } else { confirmChatGPTRisk = true }
                 } label: {
                     HStack {
                         Image(systemName: "person.crop.circle.badge.checkmark")
@@ -770,10 +1183,31 @@ struct APICredentialEditor: View {
         } header: {
             Text("ChatGPT 账号")
         } footer: {
-            Text("用你的 ChatGPT 账号（订阅）登录后可调 GPT-5.2 等模型，无需买 API key。\nToken 存本机 Keychain。\n实验性：codex backend 未公开，可能随时不可用。")
+            Text("用你的 ChatGPT 账号（订阅）登录后可调 GPT-5.2 等模型，无需买 API key。\nToken 存本机 Keychain。")
                 .font(.system(size: Theme.SettingsFont.caption))
         }
         .listRowBackground(Theme.mainBg)
+        .alert("用 ChatGPT 账号登录？", isPresented: $confirmChatGPTRisk) {
+            Button("我知道了，继续登录") {
+                chatgptOAuthRiskAcked = true
+                startOAuthLogin()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这种登录方式不是 OpenAI 正式开放给第三方的，可能随时失效，也可能影响你的账号。")
+        }
+    }
+
+    private var chatgptRiskNote: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: Theme.SettingsFont.caption))
+                .foregroundColor(Theme.textMuted)
+            Text("这个登录借用的是 Codex 命令行工具的通道，不是 OpenAI 给第三方 app 开放的正式接口。OpenAI 随时可能关掉它，也可能限制你的账号。不想冒这个险，就用 OpenAI 的 API key。")
+                .font(.system(size: Theme.SettingsFont.caption))
+                .foregroundColor(Theme.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     @ViewBuilder
@@ -1103,6 +1537,7 @@ struct APICredentialEditor: View {
                     .foregroundColor(Theme.textSecondary)
                 SecureField("LAN 模式必填，loopback 留空", text: $apiKey)
                     .font(.system(size: Theme.SettingsFont.mono, design: .monospaced))
+                    .textContentType(.oneTimeCode)
                     #if os(iOS)
 
                     .textInputAutocapitalization(.never)
@@ -1240,6 +1675,9 @@ struct APICredentialEditor: View {
             presetSelection = c.presetId ?? "_custom_"
             customType = c.type
             customBaseURL = c.baseURL
+            let loaded = CredentialDraft.loaded(from: c)
+            regionSelection = loaded.regionSelection
+            presetProtocol = loaded.presetProtocol
             toolsSupported = c.toolsSupported ?? true
             apiKey = pm.apiKey(for: c.id) ?? ""
             draftModels = c.models
@@ -1261,14 +1699,22 @@ struct APICredentialEditor: View {
         hubURLDraft = UserDefaults.standard.string(forKey: "ccBridgeBaseURLOverride") ?? ""
         hubBackupDraft = UserDefaults.standard.string(forKey: "ccBridgeBaseURLBackup") ?? ""
         original = snapshot
+        restoreDraftIfAny()
     }
 
     /// 换了提供商 / 协议：草稿清单换成新家的预设清单（换回原来的就还原原清单）；旧的测试结论作废
     private func resetDraftModelsForProvider() {
         guard loadedOnce else { return }
+        // 换了家：保存时清掉卡上旧家的元数据（除非重新拉到）；没换家 / 新卡：不动
+        draftHints = providerChanged ? [:] : nil
         testResult = nil
         fetchError = nil
         saveFetchFailed = false
+        // 恢复出来的草稿：同一家就还原草稿里的清单和地址（装载时赋值 presetSelection 也会走到这里）
+        if let r = restoredDraft, currentDraft.providerKey == r.providerKey {
+            draftModels = r.models
+            return
+        }
         if isNew && presetSelection == APIProvider.ollama.id {
             #if os(iOS)
             customBaseURL = ""
@@ -1276,13 +1722,11 @@ struct APICredentialEditor: View {
             customBaseURL = APIProvider.ollama.baseURL
             #endif
         }
-        if let c = resolvedCredential, presetSelection == (c.presetId ?? "_custom_"),
-           presetSelection != "_custom_" || customType == c.type {
+        if let c = resolvedCredential, currentDraft.providerKey == CredentialDraft.loaded(from: c).providerKey {
             draftModels = c.models
             return
         }
-        let preset = APIProvider.presets.first(where: { $0.id == presetSelection })
-        draftModels = (preset?.models ?? []).map { ProviderModel(credentialId: draftId, modelId: $0.modelId, name: $0.name) }
+        draftModels = currentDraft.preset?.seedModels(in: currentDraft.region, credentialId: draftId) ?? []
     }
 
     /// 扫码后写入：整体替换 Hub 地址（主 / 备 / 中继）+ Token → 立即重连（ccBridge 卡 id 固定 cc-bridge）
@@ -1330,10 +1774,10 @@ struct APICredentialEditor: View {
         persist(pm, adopt: fresh)
     }
 
-    /// 已存卡的提供商 / 协议变了（只改地址不算：同一家换个中转地址，模型多半还能用）
+    /// 已存卡的提供商 / 协议 / 区域 / 接口格式变了（只改地址不算：同一家换个中转地址，模型多半还能用）
     private var providerChanged: Bool {
         guard let c = resolvedCredential else { return false }
-        return presetSelection != (c.presetId ?? "_custom_") || (presetSelection == "_custom_" && customType != c.type)
+        return currentDraft.providerKey != CredentialDraft.loaded(from: c).providerKey
     }
 
     private func fetchThenPersist(_ pm: ProviderManager) {
@@ -1342,12 +1786,13 @@ struct APICredentialEditor: View {
         let draft = makeDraft(id: draftId)
         let key = apiKey
         Task {
-            let r = await ProviderProbe.fetchModels(draft: draft, key: key)
+            let r = await ProviderProbe.discoverModels(draft: draft, key: key)
             await MainActor.run {
                 isSaving = false
                 switch r {
-                case .success(let list) where !list.isEmpty:
-                    _ = mergeIntoDraft(list)
+                case .success(let found) where !found.models.isEmpty:
+                    _ = mergeIntoDraft(found.models)
+                    if let h = found.hints { draftHints = h }
                     persist(pm, adopt: true)
                 case .success:
                     fetchError = "模型列表是空的。手填一个模型 ID，再点「仍然保存」。"
@@ -1360,56 +1805,18 @@ struct APICredentialEditor: View {
         }
     }
 
-    /// 唯一落盘入口：卡 + key 一起写；adopt = 新卡（或换了家的卡）挑一个模型收藏、按 K3 接管主模型
+    /// 唯一落盘入口：卡 + key 一起写；adopt = 新卡（或换了家的卡）挑一个模型收藏；保存前没有别的能用的卡才接管主模型（K3）
     private func persist(_ pm: ProviderManager, adopt: Bool) {
-        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let preset = APIProvider.presets.first(where: { $0.id == presetSelection })
-
-        // 固定 id 的特例：Claude Code / Codex / ChatGPT 账号 / 本机模型都是单卡全局服务，id = 预设 id
-        // （cc-bridge / codex-bridge / chatgpt-oauth / local-mlx）。以前 ccBridge 一律 "cc-bridge"，
-        // 新建 Codex 会盖掉 Claude Code 卡、下次启动整张被删（#092 零散雷）
-        let cardId: String
-        if let existingId = credentialId {
-            cardId = existingId
-        } else if isSingletonPreset {
-            cardId = presetSelection
-        } else {
-            cardId = "cred-\(UUID().uuidString)"
-        }
-
-        var cred = makeDraft(id: cardId)
-        if cred.name.isEmpty { cred.name = "未命名" }
-        if cred.emoji.isEmpty { cred.emoji = "🔑" }
-        if !isHTTPCard {
-            // 桥卡 / ChatGPT 账号 / 本机模型：模型清单不走草稿，沿用已存的（新建时用预设自带的）
-            cred.models = resolvedCredential?.models
-                ?? (preset?.models.map { ProviderModel(credentialId: cardId, modelId: $0.modelId, name: $0.name) } ?? [])
-        }
-        let dropped = Set((resolvedCredential?.models ?? []).map(\.id)).subtracting(cred.models.map(\.id))
-
-        pm.addCredential(cred)
-        pm.forgetModels(dropped)
         if currentType == .ccBridge {
             // ccBridge：Hub URL override + 备用 URL 写 UserDefaults（暂全局）
             CCBridgeEndpoints.saveManual(primary: hubURLDraft, backup: hubBackupDraft)
-            // Token 可空（loopback）
-            pm.setApiKey(trimmedKey, for: cardId)
-        } else if currentType == .chatgptOAuth {
-            // chatgptOAuth：登录时已即时存了 token；这里不动 keychain
-            // 仅落卡（emoji/昵称/preset/baseURL/extraHeaders/models）
-        } else if currentType == .localMLX {
-            // 没有 key；已经装好的模型顺手收藏，选择器里马上能看见
-            for model in cred.models where AssistantModelStore.installedDirectory(modelId: model.modelId) != nil
-                && !pm.isFavoriteModel(id: model.id) {
-                pm.toggleFavoriteModel(id: model.id)
-            }
-        } else {
-            pm.setApiKey(trimmedKey, for: cardId)
         }
-        if adopt, let pick = ProviderManager.autoPickModel(cred.models, presetFirst: preset?.models.first?.modelId) {
-            pm.adoptNewModel(pick)
-        }
+        // 卡 id / 模型清单 / forgetModels / 钥匙串 / 本机模型收藏 / K3 接管都在 CredentialCommitter 里
+        CredentialCommitter.commit(currentDraft, key: apiKey, existing: resolvedCredential,
+                                   adopt: adopt ? .autoPick : .none, modelHints: draftHints, providerManager: pm)
 
+        draftFinished = true
+        APIDraftStore.clear(slot: draftSlot)
         savedFlash = true
         original = snapshot
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -1444,12 +1851,13 @@ struct APICredentialEditor: View {
             let draft = makeDraft(id: draftId)
             let key = apiKey
             Task {
-                let r = await ProviderProbe.fetchModels(draft: draft, key: key)
+                let r = await ProviderProbe.discoverModels(draft: draft, key: key)
                 await MainActor.run {
                     isFetching = false
                     switch r {
-                    case .success(let list):
-                        if mergeIntoDraft(list) == 0 && draftModels.isEmpty { fetchError = "拉取成功但 0 个模型" }
+                    case .success(let found):
+                        if let h = found.hints { draftHints = h }
+                        if mergeIntoDraft(found.models) == 0 && draftModels.isEmpty { fetchError = "拉取成功但 0 个模型" }
                     case .failure(let err):
                         fetchError = err.localizedDescription
                     }
@@ -1470,7 +1878,8 @@ struct APICredentialEditor: View {
 
     private func deleteCredential() {
         guard let pm = providerManager, let id = credentialId else { return }
-        pm.removeCredential(id: id)
+        draftFinished = true
+        pm.removeCredential(id: id)   // 草稿一起清（removeCredential 里）
         pm.resolveStaleSelectedModel()
         pm.resolveStaleFavorites()
         dismiss()
@@ -1580,6 +1989,11 @@ struct ModelPoolPage: View {
     @State private var search: String = ""
     /// nil = 全部；非 nil = 只看这张卡的模型
     @State private var filterCredentialId: String? = nil
+
+    /// 从报错「去看」进来时筛到那张卡（SettingsJump `.modelPool`）
+    init(initialFilterCredentialId: String? = nil) {
+        _filterCredentialId = State(initialValue: initialFilterCredentialId)
+    }
     /// 仅显示已收藏（☆）的模型
     @State private var favoritesOnly: Bool = false
 
@@ -1859,6 +2273,26 @@ struct ModelPoolPage: View {
                         .font(.system(size: Theme.SettingsFont.caption))
                         .foregroundColor(Theme.textMuted)
                         .lineLimit(1)
+                }
+                // #094 参数自适配（Q6）：这个地址 + 模型被拒过、记下不发的参数；点 × 清掉，下次照常发
+                if let provider = pm?.provider(for: row.model),
+                   let adapted = ParamAdaptStore.shared.entry(providerType: provider.type, baseURL: provider.baseURL, modelId: row.model.modelId) {
+                    HStack(spacing: 4) {
+                        Text("自动适配：\(adapted.summary)")
+                            .font(.system(size: Theme.SettingsFont.caption))
+                            .foregroundColor(Theme.textMuted)
+                            .lineLimit(1)
+                        Button {
+                            ParamAdaptStore.shared.remove(key: ParamAdaptStore.key(providerType: provider.type, baseURL: provider.baseURL,
+                                                                                    modelId: row.model.modelId))
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: Theme.SettingsFont.caption))
+                                .foregroundColor(Theme.textMuted.opacity(0.6))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("清除自动适配")
+                    }
                 }
             }
 

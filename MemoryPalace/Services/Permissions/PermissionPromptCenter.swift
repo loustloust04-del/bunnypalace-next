@@ -19,7 +19,7 @@ final class PermissionPromptCenter {
     #endif
 
     struct Request: Identifiable {
-        let id = UUID()
+        let id: UUID
         let domain: PermissionDomain
         /// 卡上多显示一行（run_command 的命令预览）；nil = 只显示域说明
         let detail: String?
@@ -95,19 +95,29 @@ final class PermissionPromptCenter {
     /// 卡还没弹出来就在烧秒数——那就是 BUG-9「点了允许却收到超时」的根因。
     func decide(_ domain: PermissionDomain, detail: String? = nil, secretLabels: String? = nil,
                 approval: Approval? = nil) async -> Decision {
-        // 前一张卡还挂着（理论不该发生）：等它结清再问，避免覆盖丢 continuation
         while pendingRequest != nil {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            do { try await Task.sleep(nanoseconds: 100_000_000) }
+            catch { return .timedOut }
         }
-        return await withCheckedContinuation { continuation in
-            var req = Request(domain: domain, detail: detail, secretLabels: secretLabels, continuation: continuation)
-            req.approval = approval
-            // 正看着这个对话：卡出在对话底部，不弹窗、不超时（粟粟 10-03）
-            req.inline = approval != nil && approval?.conversationId == self.visibleConversationId
-            self.cancelTimers()
-            self.pendingRequest = req
-            self.presentedId = nil
-            if !req.inline { self.armPresentationFallback(req.id) }
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            guard !Task.isCancelled else { return .timedOut }
+            return await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: .timedOut)
+                    return
+                }
+                var req = Request(id: id, domain: domain, detail: detail, secretLabels: secretLabels, continuation: continuation)
+                req.approval = approval
+                // 正看着这个对话：卡出在对话底部，不弹窗、不超时（粟粟 10-03）
+                req.inline = approval != nil && approval?.conversationId == self.visibleConversationId
+                self.cancelTimers()
+                self.pendingRequest = req
+                self.presentedId = nil
+                if !req.inline { self.armPresentationFallback(req.id) }
+            }
+        } onCancel: {
+            Task { @MainActor in self.finish(id, .timedOut) }
         }
     }
 

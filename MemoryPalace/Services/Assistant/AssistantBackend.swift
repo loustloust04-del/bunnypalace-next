@@ -24,6 +24,13 @@ struct AssistantBackendRequest {
     var enableThinking = false
 }
 
+/// 一次工具轮除了调用本身还带回来的：Anthropic 原样内容块（思考 / 签名 / 正文 / tool_use）、思考 token、兼容接口的 reasoning
+struct AssistantTurnExtras {
+    var assistantContent: [[String: Any]]?
+    var thinkingTokens: Int?
+    var reasoning: ReasoningCapture?
+}
+
 struct AssistantNudge {
     var afterTurns: Int
     var reply: String
@@ -41,16 +48,24 @@ protocol AssistantBackend: AnyObject {
 
 @MainActor
 final class AssistantCloudBackend: AssistantBackend {
-    private let router = ProviderRouter(usageContext: UsageContext(kind: .assistant))
+    private let router: ProviderRouter
     private let model: ProviderModel
     private let providerManager: ProviderManager
 
-    init(model: ProviderModel, providerManager: ProviderManager) {
+    /// usage = 账本里算谁的（小芽 .assistant；C3 手动整理 .catalog，算写入预算）
+    init(model: ProviderModel, providerManager: ProviderManager, usage: UsageContext = UsageContext(kind: .assistant)) {
         self.model = model
         self.providerManager = providerManager
+        router = ProviderRouter(usageContext: usage)
     }
 
+    /// 上一次请求记进账本的花费（没记 / 本机 = nil）
+    var lastCostUSD: Double? { router.lastUsageRecord?.costUSD }
+    /// 上一次工具轮的完整回复（种子 checkpoint 要存、续轮要原样回灌）
+    private(set) var lastTurnExtras: AssistantTurnExtras?
+
     func run(_ request: AssistantBackendRequest, onEvent: @escaping @MainActor (AssistantBackendEvent) -> Void) {
+        lastTurnExtras = nil
         router.sendStreaming(
             model: model,
             messages: request.history,
@@ -61,7 +76,16 @@ final class AssistantCloudBackend: AssistantBackend {
             onToken: { token in Task { @MainActor in onEvent(.token(token)) } },
             onComplete: { fullText, _ in Task { @MainActor in onEvent(.finished(fullText)) } },
             onError: { error in Task { @MainActor in onEvent(.failed("\(error)")) } },
-            onToolCalls: { calls, _ in Task { @MainActor in onEvent(.toolCalls(calls)) } }
+            onToolCalls: { [weak self] calls, usage in
+                let thinking = usage?.reasoningTokens
+                Task { @MainActor in
+                    if let self {
+                        self.lastTurnExtras = AssistantTurnExtras(assistantContent: self.router.lastAssistantBlocks.wireContent,
+                                                                  thinkingTokens: thinking, reasoning: self.router.lastReasoning)
+                    }
+                    onEvent(.toolCalls(calls))
+                }
+            }
         )
     }
 

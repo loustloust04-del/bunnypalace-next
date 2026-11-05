@@ -1,0 +1,9 @@
+# 已核实的误报（Atlas 10-23）：UserDefaults 键名、测试假 key、steward-checkpoint 自测故意放的假 AWS key
+62f30f4bba2dd9bbe00a45ce6c2ab08a37e9a0e7:MemoryPalace/Services/CodingSessions/CodingSessionLibrary.swift:generic-api-key:118
+442492eec3419c30e863913e96f73423565354eb:MemoryPalace/Services/CodingSessions/CodingSessionLibrary.swift:generic-api-key:111
+96a6bad23442100b5fa0781c62c1c14f51cba5f0:MemoryPalaceTests/SessionCloseoutQueueTests.swift:generic-api-key:320
+dfc523a70f7aee48b7eec7dac7d611b16cb22baa:MemoryPalaceTests/APIDraftStoreTests.swift:generic-api-key:81
+cf40ab794c884e86474759802253b1ecb91ac464:scripts/steward-checkpoint.test.sh:aws-access-token:87
+cf40ab794c884e86474759802253b1ecb91ac464:scripts/steward-checkpoint.test.sh:aws-access-token:99
+cf40ab794c884e86474759802253b1ecb91ac464:scripts/steward-checkpoint.test.sh:generic-api-key:87
+cf40ab794c884e86474759802253b1ecb91ac464:scripts/steward-checkpoint.test.sh:generic-api-key:99

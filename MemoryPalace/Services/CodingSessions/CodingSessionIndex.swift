@@ -74,13 +74,16 @@ final class CodingSessionIndex {
     private static let migrationLock = NSLock()
 
     static var defaultURL: URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        AppPaths.checked(AppPaths.caches
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("coding-index.sqlite")
+            .appendingPathComponent("coding-index.sqlite"))
     }
 
     let url: URL
     private var db: OpaquePointer?
+    #if (DEBUG || PERF_BENCH) && os(macOS)
+    var macPerfMainPrepare: (@Sendable () -> Void)?
+    #endif
 
     /// - Parameter readOnly: AI 工具用（N5，Wake `open_read_only`）：不建目录、不切 WAL、不跑迁移，绝不写库；库还没建好或版本不对直接报错
     init(url: URL = CodingSessionIndex.defaultURL, readOnly: Bool = false) throws {
@@ -1008,7 +1011,10 @@ final class CodingSessionIndex {
     }
 
     private func prepare(_ sql: String) throws -> Statement {
-        try Statement(db: db, sql: sql)
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if let macPerfMainPrepare, Thread.isMainThread { macPerfMainPrepare() }
+        #endif
+        return try Statement(db: db, sql: sql)
     }
 
     private func exec(_ sql: String) throws {

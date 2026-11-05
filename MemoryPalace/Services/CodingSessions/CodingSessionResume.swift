@@ -4,6 +4,14 @@ import AppKit
 /// 在终端继续（Wake `services/terminal`）：拼好命令写成临时 `.command` 交给系统打开（默认 = 终端）。
 /// 不走 AppleScript → 不弹「控制终端」授权；脚本用交互登录 shell 跑，PATH 与她平时终端一致（R-WN #11）。
 enum CodingSessionResume {
+    /// 所有外部续跑、桌面深链与 AppleScript 的交接门；测试宿主的显式假服务不受影响。
+    static var handoffError: String? {
+        #if DEBUG || PERF_BENCH
+        if BenchIsolation.active { return "bench 禁止向系统或外部应用交接" }
+        #endif
+        return nil
+    }
+
     /// (可执行名, 参数)（Wake `agent_bin` + `resume_args`）；没有按会话续跑形制的家（Kiro / Gemini / OpenClaw）回 nil。
     /// 项目目录在就先 cd（Claude / Qoder / dsh 必须在原目录，其余无害）
     static func invocation(for meta: CodingSessionMeta) -> (bin: String, args: [String])? {
@@ -72,8 +80,9 @@ enum CodingSessionResume {
     /// 写临时脚本并打开；失败回错误说明
     @discardableResult
     static func resume(_ meta: CodingSessionMeta) -> String? {
+        if let error = handoffError { return error }
         guard let body = script(for: meta) else { return noResume(meta) }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("mp-resume-\(UUID().uuidString.prefix(8)).command")
+        let url = AppPaths.temporaryDirectory.appendingPathComponent("mp-resume-\(UUID().uuidString.prefix(8)).command")
         do {
             try body.write(to: url, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
@@ -84,6 +93,7 @@ enum CodingSessionResume {
     }
 
     static func revealInFinder(_ path: String) {
+        guard handoffError == nil else { return }
         let url = URL(fileURLWithPath: path)
         if FileManager.default.fileExists(atPath: url.path) {
             NSWorkspace.shared.activateFileViewerSelecting([url])

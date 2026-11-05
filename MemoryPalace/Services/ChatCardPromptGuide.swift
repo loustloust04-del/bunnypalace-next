@@ -93,6 +93,28 @@ enum ChatCardPromptGuide {
 
     static func section(_ kind: String) -> String { parsed.sections[kind] ?? "" }
 
+    /// 系统提示放哪一版：card_guide 下发 → 目录；对方关了 card_guide / 工具总开关（粟粟 10-15 选 A）→ 整段不发；
+    /// 这张卡本来就发不了工具（CC / 本机模型 / 卡上关了工具调用）→ 全文
+    enum Mode { case index, full, none }
+
+    private static let diceViaTool = "要掷骰子 / 抽签时调用 roll_dice 工具（真随机），它返回一段 card-dice 代码块和一行结果摘要，把代码块原样放进回复；不要自己编结果。对方发来还没掷的骰子卡、让你替 TA 掷时，把那张卡的 id 传给 roll_dice（连同它的 dice 或 options、title），结果就落在原卡上。没有 roll_dice 工具时，"
+
+    /// 点名的工具（roll_dice / ask_user / run_command）这一轮没有就去掉那几句；都有时原文不变
+    static func adjusted(_ text: String, available: Set<String>) -> String {
+        var s = text
+        if !available.contains(DiceTool.toolName) {
+            s = s.replacingOccurrences(of: diceViaTool, with: "要掷骰子 / 抽签时，")
+        }
+        if !available.contains(AskUserTool.toolName) {
+            s = s.replacingOccurrences(of: "。只是让对方在几个选项里点一个，用 ask_user 工具）", with: "）")
+                .replacingOccurrences(of: "有 ask_user 工具时，只是让对方在几个选项里点一个就用 ask_user；card-ask 留给要对方填值、填表、填敏感值的时候。", with: "")
+        }
+        if !available.contains(RunCommandTool.toolName) {
+            s = s.replacingOccurrences(of: "写进 run_command 或 MCP 工具的参数", with: "写进 MCP 工具的参数")
+        }
+        return s
+    }
+
     /// card_guide 的返回：要的那几种的完整写法 + 公共规则；不认识的种类说一声，一个都不认识就全给
     static func guide(for requested: [String]) -> String {
         let normalized = requested.map { raw -> String in

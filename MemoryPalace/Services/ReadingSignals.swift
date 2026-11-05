@@ -13,11 +13,11 @@ enum ReadingSignals {
     // MARK: - 路径
 
     static func logURL(profileId: String) -> URL {
-        FileLibraryStore.libraryRoot(profileId: profileId).appendingPathComponent("reading-log.json")
+        AppPaths.checked(FileLibraryStore.libraryRoot(profileId: profileId).appendingPathComponent("reading-log.json"))
     }
 
     static func eventsURL(profileId: String) -> URL {
-        FileLibraryStore.libraryRoot(profileId: profileId).appendingPathComponent("reading-events.jsonl")
+        AppPaths.checked(FileLibraryStore.libraryRoot(profileId: profileId).appendingPathComponent("reading-events.jsonl"))
     }
 
     // MARK: - 数据结构

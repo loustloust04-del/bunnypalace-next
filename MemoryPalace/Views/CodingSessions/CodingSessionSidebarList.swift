@@ -262,6 +262,9 @@ struct CodingSessionSidebarList: View {
         // 按创建时间排序时行尾显示创建时间，其余显示更新时间（Wake）
         let time = inTimeline && library.sort == .created ? meta.createdAt : meta.updatedAt
         return Button {
+            #if DEBUG || PERF_BENCH
+            PerfHarnessMacDriver.action()
+            #endif
             // 已选中的根会话再点一下 = 展开 / 收起子会话（Wake）
             if selected && childCount > 0 {
                 library.toggleRoot(meta.key)
@@ -350,6 +353,9 @@ struct CodingSessionSidebarList: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        #if DEBUG || PERF_BENCH
+        .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "code:\(meta.key)") } }
+        #endif
         .help(CodingSessionFormat.title(meta))
         .contextMenu {
             CodingSessionActionItems(meta: meta, onRename: { startRename(meta) }, onError: { actionError = $0 })

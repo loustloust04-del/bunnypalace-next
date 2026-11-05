@@ -1,7 +1,7 @@
 import XCTest
 @testable import 记忆花园
 
-/// v4-1 §六：当前窗口不注入和原文重复的东西；同一个窗口待续只带一次；发送时记账
+/// v4-1 §六：当前窗口不注入和原文重复的东西；待续单独一段、同一个窗口只带一次；发送时记账（c2c3-v2 第 7 段：一天一条 + 老条目）
 final class TimelineInjectionTests: XCTestCase {
 
     let pid = "xctest-timeline-inject"
@@ -30,11 +30,14 @@ final class TimelineInjectionTests: XCTestCase {
         XCTAssertTrue(TimelineStore.injectable(v1, currentConversationId: "cur", windowIds: window), "老条目没有 id，照注")
     }
 
-    func testPendingOnlyOnLatestPerWindow() throws {
-        let text = try XCTUnwrap(TimelineStore.injectionText([entry(8, "a", last: nil, pending: "旧的"), entry(9, "b", last: nil, pending: "乙"),
-                                                              entry(10, "a", last: nil, pending: "新的")]))
-        XCTAssertFalse(text.contains("旧的"), "同一个窗口只在最新那条后面带待续")
-        XCTAssertTrue(text.contains("（待续：新的）") && text.contains("（待续：乙）"))
+    /// 待续还没迁移的楼层：照读老条目里的老字段，同一个窗口只取最新那条；单独一段，不跟在条目后面
+    func testUnmigratedPendingFromLatestLegacyEntry() throws {
+        let entries = ["2026-10-08": [entry(8, "a", last: nil, pending: "旧的")], "2026-10-09": [entry(9, "b", last: nil, pending: "乙")],
+                       "2026-10-10": [entry(10, "a", last: nil, pending: "新的")]]
+        let text = try XCTUnwrap(TimelineStore.injection(records: [:], entries: entries, today: "2026-10-10", currentConversationId: "",
+                                                         windowIds: [], openPending: nil).text)
+        XCTAssertFalse(text.contains("旧的"), "同一个窗口只取最新那条的待续")
+        XCTAssertTrue(text.contains("[待续]") && text.contains("《a》conv a：新的") && text.contains("《b》conv b：乙"))
         XCTAssertTrue(text.hasPrefix("[时间轴]"), "给小克看的名字和记忆 app 一致")
     }
 
@@ -50,19 +53,26 @@ final class TimelineInjectionTests: XCTestCase {
                        "老段没有 id 看下标：它盖到的最后一条在窗口里就不注")
     }
 
-    /// 记账记下的条目 = 插槽文字里实际出现的那几条
-    func testSlotEntriesMatchText() throws {
+    /// 记账记下的单位 = 插槽文字里实际出现的那几行（今天算第 1 天：11 号、10 号带各项，9 号往前只带主调）
+    func testSlotUnitsMatchText() throws {
         let tl = TimelineStore.dir(profileId: pid)
-        try TimelineStore.write([entry(8, "other-0001", last: "o1", pending: "甲"), entry(9, "cur-00001", last: "h1"),
-                                 entry(10, "cur-00001", last: "gone")], month: "2026-10", in: tl)
+        func item(_ conv: String, _ d: Int, to: String) -> TimelineDayRecord.Item {
+            .init(kind: .segment, conversationId: conv, window: conv, title: "\(conv) 第\(d)天", start: date(d, 10), end: date(d, 11), from: "f", to: to)
+        }
+        try TimelineStore.save(.init(days: [
+            TimelineDayRecord(date: "2026-10-09", headline: "九号的主调", items: [item("other-0001", 9, to: "o9")]),
+            TimelineDayRecord(date: "2026-10-10", headline: "十号的主调", items: [item("other-0001", 10, to: "o1"), item("cur-00001", 10, to: "gone")]),
+            TimelineDayRecord(date: "2026-10-11", headline: "十一号的主调", items: [item("cur-00001", 11, to: "h1")]),
+        ], entries: [entry(8, "old-00001", last: "x")]), month: "2026-10", in: tl)
         let slot = CalendarInjection.timelineSlot(profileId: pid, currentConversationId: "cur-00001", windowIds: ["h1"], now: date(11, 12))
         let text = try XCTUnwrap(slot.timeline)
-        XCTAssertEqual(slot.entries.map(\.dayKey), ["2026-10-08", "2026-10-10"])
-        for e in slot.entries { XCTAssertTrue(text.contains(TimelineStore.line(e, withPending: true).components(separatedBy: "（待续").first!)) }
-        XCTAssertFalse(text.contains("第9天"))
-        MemoryInjectionMeter.record(profileId: pid, hits: [], memories: [], timelineKeys: slot.entries.map(MemoryInjectionMeter.key),
-                                    contextKeys: ["cur-0000|n1"])
-        XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid)?.timelineKeys, ["2026-10-08|other-0001", "2026-10-10|cur-00001"])
+        for u in slot.units { XCTAssertTrue(text.contains(u.line)) }
+        XCTAssertFalse(text.contains("cur-00001 第11天"), "原文还在窗口里的不注")
+        XCTAssertFalse(text.contains("other-0001 第9天"), "第 3 天往前只带主调")
+        XCTAssertTrue(text.contains("10-08 周四：（旧格式）《old-00001》old-00001 第8天 conv old-0000"), "8 号只有老条目、没有主调：带一行老条目的话题，标旧格式")
+        MemoryInjectionMeter.record(profileId: pid, hits: [], memories: [], timelineKeys: slot.units.map(\.key), contextKeys: ["cur-0000|n1"])
+        XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid)?.timelineKeys,
+                       ["2026-10-08", "2026-10-09", "2026-10-10", "2026-10-10|other-0001|o1", "2026-10-10|cur-00001|gone", "2026-10-11"])
         XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid)?.contextKeys, ["cur-0000|n1"])
     }
 }

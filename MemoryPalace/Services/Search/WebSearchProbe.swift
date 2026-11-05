@@ -10,7 +10,11 @@ enum WebSearchProbe {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return nil
         }
+        #if os(macOS)
+        return AppPaths.checked(docs.appendingPathComponent(filename))
+        #else
         return docs.appendingPathComponent(filename)
+        #endif
     }
 
     static func log(_ msg: String) {

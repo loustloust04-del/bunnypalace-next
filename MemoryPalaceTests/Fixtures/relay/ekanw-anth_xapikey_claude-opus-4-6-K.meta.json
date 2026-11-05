@@ -1,0 +1,17 @@
+{
+ "source": "2026-10-16 中转实测原文（ekanw，new-api v1.0.0-rc.25），id 已固定化",
+ "path": "/v1/messages",
+ "status": 200,
+ "content_type": "text/event-stream",
+ "request_body": {
+  "model": "按量K-claude-opus-4-6",
+  "max_tokens": 256,
+  "stream": true,
+  "messages": [
+   {
+    "role": "user",
+    "content": "1+1=?"
+   }
+  ]
+ }
+}

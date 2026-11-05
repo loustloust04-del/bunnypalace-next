@@ -46,6 +46,8 @@ struct GeneralPage: View {
                         let newUser = editingUserName.trimmingCharacters(in: .whitespacesAndNewlines)
                         let newAssistant = editingAssistantName.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !newUser.isEmpty { userName = newUser }
+                        // 当前楼层才是真相源（小芽 / 楼层编辑写的都是它），只写镜像键会被楼层值盖回去；顺带记默认称呼（H9）
+                        profileManager?.renameCurrent(userName: newUser, assistantName: newAssistant)
                         if !newAssistant.isEmpty { assistantName = newAssistant }
                         dismiss()
                     }) {

@@ -16,11 +16,10 @@ struct ClaudeCodeAdapter: CodingSessionAdapter {
     ]
 
     func listSessionFiles() -> [CodingSessionFileRef] {
-        let fm = FileManager.default
-        guard let projects = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
+        guard let projects = try? AppPaths.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
         var refs: [CodingSessionFileRef] = []
         for project in projects {
-            guard let entries = try? fm.contentsOfDirectory(at: project, includingPropertiesForKeys: CodingParse.refKeys) else { continue }
+            guard let entries = try? AppPaths.contentsOfDirectory(at: project, includingPropertiesForKeys: CodingParse.refKeys) else { continue }
             for entry in entries where entry.pathExtension == "jsonl" {
                 if let ref = CodingParse.defaultFileRef(.claudeCode, entry) { refs.append(ref) }
             }
@@ -56,7 +55,7 @@ struct ClaudeCodeAdapter: CodingSessionAdapter {
 
     func loadSidechain(_ ref: CodingSessionFileRef, id: String) throws -> [CodingMessage] {
         let file = Self.subagentsDir(ref).appendingPathComponent("\(id).jsonl")
-        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        guard FileManager.default.fileExists(atPath: AppPaths.checkedPath(file.path)) else { return [] }
         return try CodingImageBudget.decoding { try Self.parse(file, includeSidechain: true).messages }
     }
 
@@ -64,7 +63,7 @@ struct ClaudeCodeAdapter: CodingSessionAdapter {
         var paths = [meta.filePath]
         let sidecar = URL(fileURLWithPath: meta.filePath).deletingLastPathComponent().appendingPathComponent(meta.nativeId)
         var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: sidecar.path, isDirectory: &isDir), isDir.boolValue {
+        if FileManager.default.fileExists(atPath: AppPaths.checkedPath(sidecar.path), isDirectory: &isDir), isDir.boolValue {
             paths.append(sidecar.path)
         }
         return paths
@@ -260,12 +259,12 @@ struct ClaudeCodeAdapter: CodingSessionAdapter {
 
     private static func listSidechains(_ ref: CodingSessionFileRef) -> [CodingSidechain] {
         let dir = subagentsDir(ref)
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
+        guard let entries = try? AppPaths.contentsOfDirectory(atPath: dir.path) else { return [] }
         var out: [CodingSidechain] = []
         for name in entries where name.hasSuffix(".jsonl") {
             let id = String(name.dropLast(6))
             var info = CodingSidechain(id: id)
-            if let data = try? Data(contentsOf: dir.appendingPathComponent("\(id).meta.json")),
+            if let data = try? Data(contentsOf: AppPaths.checked(dir.appendingPathComponent("\(id).meta.json"))),
                let meta = (try? JSONSerialization.jsonObject(with: data)) as? CodingParse.JSON {
                 info.agentType = meta["agentType"] as? String
                 info.description = meta["description"] as? String

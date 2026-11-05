@@ -79,8 +79,9 @@ struct MessageSegmentsView: View {
             case .text(let s):
                 result.append(.text(s))
                 i += 1
-            case .thinking(let text, _):
-                result.append(.thinking(text))
+            case .thinking(let text, _, _):
+                // 原生思考 omitted / redacted / 进度更新为空：不画（plan-thinking §3.8）
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { result.append(.thinking(text)) }
                 i += 1
             case .toolUse(let id, let name, let inputJSON, let integration, let icon):
                 // Peek next: 若紧邻的是匹配 id 的 toolResult → 配对
@@ -191,7 +192,8 @@ struct MessageSegmentsView: View {
                     onQuote: onQuoteText,
                     // M1 三格：用户消息带复杂段（工具/附件混排）时正文走这条路，
                     // 不接就会漏回主文字。`isUser` 原来只有声明零使用点，正是给这儿的。
-                    role: isUser ? .user : .assistant
+                    role: isUser ? .user : .assistant,
+                    lineSpacingScaleOverride: simplifyMarkdown ? lineSpacingScale : nil
                 )
                 .chatCardRenderer(nodeId: nodeId, streaming: isStreaming)
                 .environment(\.openURL, OpenURLAction { url in

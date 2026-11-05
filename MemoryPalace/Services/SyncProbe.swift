@@ -7,10 +7,10 @@ enum SyncProbe {
     private static let maxBytes = 512 * 1024
 
     private static var logURL: URL {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("MemoryPalace", isDirectory: true)
+        let dir = AppPaths.checked(AppPaths.caches
+            .appendingPathComponent("MemoryPalace", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("sync-probe.log")
+        return AppPaths.checked(dir.appendingPathComponent("sync-probe.log"))
     }
 
     private static let stamp: DateFormatter = {

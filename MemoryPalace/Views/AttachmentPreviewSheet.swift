@@ -167,7 +167,7 @@ struct AttachmentPreviewSheet: View {
     }
 
     private func prepareTempFiles() {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("preview_\(UUID().uuidString)")
+        let dir = AppPaths.temporaryDirectory.appendingPathComponent("preview_\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         tempURLs = items.map { item in
             switch item {

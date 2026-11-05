@@ -46,6 +46,7 @@ enum PendingImportApplier {
         case p1_archiveFloors = "p1.5"
         case p1_snapshotUserDefaults = "p1.6"
         case p1_archiveCardLibrary = "p1.7"
+        case p1_archiveAssistant = "p1.8"
         // Phase 2（codex Round 5 #1：verifyPrimary 必须紧跟 installStore + installStoreExternal，
         //          stickers/audiobooks/themes/floors 装之前 — 减少校验失败时的破坏面）
         case p2_installStore = "p2.1"
@@ -59,6 +60,7 @@ enum PendingImportApplier {
         case p2_writeSlugMap = "p2.9"
         case p2_clearSyncState = "p2.10"
         case p2_installCardLibrary = "p2.11"
+        case p2_installAssistant = "p2.12"
     }
 
     struct Marker: Codable {
@@ -231,6 +233,9 @@ enum PendingImportApplier {
             (.p1_archiveCardLibrary, {
                 try moveIfExists(StagingPaths.primaryCardLibraryRoot, to: archiveRoot.appendingPathComponent("cardlibrary", isDirectory: true))
             }),
+            (.p1_archiveAssistant, {
+                try archiveAssistantIfIncoming(archive: archiveRoot.appendingPathComponent("assistant", isDirectory: true))
+            }),
         ]
 
         for (step, action) in p1Steps {
@@ -287,6 +292,9 @@ enum PendingImportApplier {
             }),
             (.p2_installCardLibrary, {
                 try moveIfExists(StagingPaths.stagingCardLibraryRoot, to: StagingPaths.primaryCardLibraryRoot)
+            }),
+            (.p2_installAssistant, {
+                try installAssistant()
             }),
             (.p2_applyUserDefaults, {
                 try applyStagingUserDefaults(from: stagingDir)
@@ -400,6 +408,7 @@ enum PendingImportApplier {
             (archiveRoot.appendingPathComponent("themes", isDirectory: true), StagingPaths.primaryThemesRoot, "themes"),
             (archiveRoot.appendingPathComponent("floors", isDirectory: true), StagingPaths.primaryFilelibraryRoot, "floors"),
             (archiveRoot.appendingPathComponent("cardlibrary", isDirectory: true), StagingPaths.primaryCardLibraryRoot, "cardlibrary"),
+            (archiveRoot.appendingPathComponent("assistant", isDirectory: true), StagingPaths.primaryAssistantRoot, "assistant"),
         ]
 
         SearchIndexStore.removeFiles()
@@ -467,6 +476,18 @@ enum PendingImportApplier {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(marker)
         try data.write(to: StagingPaths.pendingImportMarkerURL, options: .atomic)
+    }
+
+    /// 小芽对话 + 账本：包里带了这段（staging 在）才把本机的归档；旧包没有 → 本机现有的不动（粟粟 10-15 拍板 7）
+    static func archiveAssistantIfIncoming(staging: URL = StagingPaths.stagingAssistantRoot,
+                                           primary: URL = StagingPaths.primaryAssistantRoot, archive: URL) throws {
+        guard FileManager.default.fileExists(atPath: staging.path) else { return }
+        try moveIfExists(primary, to: archive)
+    }
+
+    static func installAssistant(staging: URL = StagingPaths.stagingAssistantRoot,
+                                 primary: URL = StagingPaths.primaryAssistantRoot) throws {
+        try moveIfExists(staging, to: primary)
     }
 
     private static func moveIfExists(_ src: URL, to dst: URL) throws {

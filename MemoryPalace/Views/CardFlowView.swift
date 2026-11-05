@@ -460,6 +460,7 @@ struct CardFlowView: View {
     @AppStorage("gardenSceneEnabled") private var gardenSceneEnabled = true
     /// pop-tuner：行级弹入只在气泡模式（文章模式粟粟拍了不弹）
     @AppStorage("chatBubbleMode") private var chatBubbleMode = false
+    private var messageSpacing: Double { chatBubbleMode ? 0 : bubbleSpacing }
     /// 「隐藏时间戳」现在管列表中间的时间分割线（TASK page1-消息-20）
     @AppStorage("hideTimestamp") private var hideTimestamp: Bool = false
     #if os(iOS)
@@ -513,28 +514,21 @@ struct CardFlowView: View {
             revision: viewModel.perfPathRevision, path: viewModel.currentPath,
             profileId: profileManager?.currentProfile.id, conversationId: viewModel.selectedConversation?.id,
             occlusionBottom: 100 + metrics.listInsetV, occlusionTop: 150 + metrics.listInsetV,
-            keyboardPad: max(0, keyboardBridge.extra) + max(0, keyboardBridge.barGrowth), spacing: bubbleSpacing)
+            keyboardPad: max(0, keyboardBridge.extra) + max(0, keyboardBridge.barGrowth), spacing: messageSpacing)
     }
     #endif
 
-    /// L4 A3：列表内容求值一次的共享显示数据（正则 / 引用索引走纯数据快照，头像在 SwiftUI 侧一并取一次）
-    private typealias RowDisplay = (snapshot: ChatDisplaySnapshot, avatars: ChatAvatars)
-
-    private func makeRowDisplay() -> RowDisplay {
+    /// L4 A3：正则与引用索引在列表外求值一次，行内共用纯数据快照。
+    private func makeRowDisplay() -> ChatDisplaySnapshot {
         let p = profileManager?.currentProfile
-        let snapshot = ChatDisplaySnapshot(
+        return ChatDisplaySnapshot(
             path: viewModel.currentPath, profile: p,
             preset: p.flatMap { presetManager?.preset(byId: $0.presetId) },
             cards: profileManager?.characterCardManager?.cards ?? [])
-        let avatars = p.map {
-            ChatAvatars(user: AvatarImageCache.image(for: $0.userAvatarData, key: $0.id + "-user"),
-                        assistant: AvatarImageCache.image(for: $0.assistantAvatarData, key: $0.id + "-assistant"))
-        } ?? .none
-        return (snapshot, avatars)
     }
 
     @ViewBuilder
-    private func makeBubbleView(for node: MessageNode, display: RowDisplay?) -> some View {
+    private func makeBubbleView(for node: MessageNode, display: ChatDisplaySnapshot?, isLastInRun: Bool) -> some View {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         let _ = AirPerfProbe.enabled ? PerfCount.hit("chatRowBody") : ()
         let _ = PerfHarness.noteBubble(node.id)
@@ -549,21 +543,13 @@ struct CardFlowView: View {
         let isNodeSearchMatch = viewModel.inConvMatches.contains(node.id)
         // A4：reply_to 引用预览——按 replyToId 在当前 path 找被引用消息（user 的 id 或 cc 的 ccMessageId）
         let quoted: String? = {
-            if let display { return display.snapshot.quotedPreview(for: node) }
+            if let display { return display.quotedPreview(for: node) }
             // 选段引用：优先落库的选段文本（她选哪段显示哪段）；老数据回退按 replyToId 找整条截断
             if let rq = node.replyQuote, !rq.isEmpty { return String(rq.prefix(50)) }
             guard let rid = node.replyToId,
                   let target = viewModel.currentPath.first(where: { $0.id == rid || $0.ccMessageId == rid }) else { return nil }
             let t = target.content.trimmingCharacters(in: .whitespacesAndNewlines)
             return t.isEmpty ? nil : String(t.prefix(50))
-        }()
-        let avatars: ChatAvatars = {
-            if let display { return display.avatars }
-            guard let p = profileManager?.currentProfile else { return .none }
-            return ChatAvatars(
-                user: AvatarImageCache.image(for: p.userAvatarData, key: p.id + "-user"),
-                assistant: AvatarImageCache.image(for: p.assistantAvatarData, key: p.id + "-assistant")
-            )
         }()
         BubbleView(
             node: node,
@@ -574,7 +560,6 @@ struct CardFlowView: View {
             viewModel: viewModel,
             isHighlighted: isNodeHighlighted,
             isSearchMatch: isNodeSearchMatch,
-            avatars: avatars,
             onToggleFavorite: { viewModel.toggleFavorite(node) },
             onTogglePin: { viewModel.togglePin(node) },
             onSoftDelete: { MessageDust.vanish(key: node.id) { viewModel.softDelete(node) } },   // 散成灰再删（§12）
@@ -582,6 +567,7 @@ struct CardFlowView: View {
             onRegenerate: makeRegenerateAction(for: node),
             onEdit: makeEditAction(for: node),
             isBeingEdited: viewModel.editingMessage?.nodeId == node.id,
+            isLastInRun: isLastInRun,
             onQuoteText: { txt in
                 #if os(iOS)
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -589,7 +575,7 @@ struct CardFlowView: View {
                 viewModel.startQuotingText(txt, node: node)
             },
             regexScripts: {
-                if let display { return display.snapshot.regexScripts }
+                if let display { return display.regexScripts }
                 // ⑤a：与发送同一解析（全局 → 预设实例 → 绑定卡 / 楼层旧规则），显示阶段在气泡里再按 user / assistant 分流
                 guard let profile = profileManager?.currentProfile else { return [] }
                 return RegexPipeline.scripts(profile: profile, preset: presetManager?.preset(byId: profile.presetId),
@@ -598,6 +584,62 @@ struct CardFlowView: View {
         )
         // 对话内查找：只给命中的气泡注入词（没命中的恒为空，词变了不牵动它们）
         .environment(\.chatSearchTerms, viewModel.inConvHitIds.contains(node.id) ? viewModel.inConvTerms : [])
+    }
+
+    @ViewBuilder
+    private func messageRows(display: ChatDisplaySnapshot?, dividers: [String: Date]) -> some View {
+        let bubbleRuns: [String: ChatBubbleRunCache.Layout] = chatBubbleMode
+            ? viewModel.bubbleRunCache.layouts(for: viewModel.currentPath, dividers: dividers,
+                                              includesTimeDividers: !hideTimestamp)
+            : [:]
+        ForEach(viewModel.currentPath.reversed(), id: \.id) { node in
+            let run = bubbleRuns[node.id]
+            VStack(spacing: 0) {
+                if let time = dividers[node.id] {
+                    ChatTimeDividerView(date: time, spacing: messageSpacing, bubbleMode: chatBubbleMode)
+                }
+                makeBubbleView(for: node, display: display, isLastInRun: run?.hasTail ?? true)
+                    #if (DEBUG || PERF_BENCH) && os(macOS)
+                    .background {
+                        if PerfHarnessMac.enabled {
+                            MacPerfAnchor(key: "bubble:\(viewModel.selectedConversation?.id ?? ""):\(node.id)")
+                        }
+                    }
+                    #endif
+                    // 多选气泡：行只读「是否在多选」，选中与否只有勾选圆 / 选中底两个叶子读
+                    .modifier(selectionRow(for: node))
+            }
+            .padding(.top, run?.spacingBefore ?? 0)
+            .id(node.id)
+            // pop-tuner v7：行级不再弹整行（整行弹入视觉过重，
+            // 调音台与真实差距主因）——弹泡下沉 BubbleModeRow 内（popPending），
+            // 只弹泡，与调音台预览同形态。
+            // v6 对称反转保留：默认事务=push 柔和（旧行让位在容器层结算），
+            // 白名单新泡行升级 popAnimation（行内泡的 transition 插值用它）
+            .transaction { t in
+                if BubblePopTuning.enabled, t.animation != nil, viewModel.popNodeIds.contains(node.id) {
+                    t.animation = BubblePopTuning.popAnimation
+                }
+            }
+            .background(
+                GeometryReader { geo in
+                    Color.clear.task(id: geo.frame(in: .named("scrollContent")).midY) {
+                        stickerVM.bubblePositions[node.id] = geo.frame(in: .named("scrollContent")).midY
+                        #if os(iOS)
+                        let f = geo.frame(in: .named("scrollContent"))
+                        ChatScrubberModel.shared.rowFrames[node.id] = f.minY...f.maxY
+                        #endif
+                    }
+                }
+            )
+            .flippedUpsideDown()  // 反转列表：cell 翻回正
+            #if os(iOS)
+            // 可拖滚动条抓点：只在已实化行里找视口中心那条
+            .modifier(ChatScrubberRowTracker(id: node.id))
+            // 删除散成灰：截这一行用的锚点（§12）
+            .background(MessageDustAnchor(key: node.id))
+            #endif
+        }
     }
 
     /// 多选气泡的行修饰（research-multi-select-bubbles §9-3）
@@ -609,7 +651,7 @@ struct CardFlowView: View {
             isUser: node.role == "user",
             bubbleMode: chatBubbleMode,
             selectable: selectable,
-            rowSpacing: bubbleSpacing,
+            rowSpacing: messageSpacing,
             onTap: { handleSelectionTap(node) },
             onCommandTap: { [viewModel] in
                 guard selectable, viewModel.editingMessage == nil else { return }
@@ -842,17 +884,19 @@ struct CardFlowView: View {
                             // UIView.animate 滚回（补偿器同款技法，GPU 平移绝对整体）。
                             Color.clear.frame(height: max(0, keyboardBridge.extra) + max(0, keyboardBridge.barGrowth))
                             #endif
-                            LazyVStack(spacing: bubbleSpacing) {
+                            LazyVStack(spacing: messageSpacing) {
                                 // 审批卡（粟粟 10-03）：AI 要跑命令 / 调要授权的工具时垫底显示，不弹窗
                                 if let request = PermissionPromptCenter.shared.pendingRequest, request.inline,
                                    request.approval?.conversationId == viewModel.selectedConversation?.id {
                                     ApprovalCardView(request: request)
+                                        .padding(.top, chatBubbleMode ? 10 : 0)
                                         .id(request.id)
                                         .flippedUpsideDown()
                                 }
                                 // 进度卡（粟粟 10-03）：API 模型连调工具时在审批卡上面；读 VM 都在 Host 里
                                 if let cid = viewModel.selectedConversation?.id {
                                     TurnActivityHost(viewModel: viewModel, conversationId: cid,
+                                                     spacingBefore: chatBubbleMode ? 10 : 0,
                                                      onStop: { viewModel.cancelAssistantTurn(context: modelContext) })
                                         .flippedUpsideDown()
                                 }
@@ -860,7 +904,8 @@ struct CardFlowView: View {
                                 // 反转列表：物理最前 = 视觉最底，所以放 ForEach 前面。
                                 // 进度卡 B（粟粟 10-03）：hub 推了 CC 状态就出状态卡（干活中 / 等你 / 做完了），没有就照旧三个点
                                 if let cid = viewModel.selectedConversation?.id {
-                                    CCPhaseHost(conversationId: cid, waitingForReply: viewModel.ccWaitingSince[cid] != nil)
+                                    CCPhaseHost(conversationId: cid, waitingForReply: viewModel.ccWaitingSince[cid] != nil,
+                                                spacingBefore: chatBubbleMode ? 10 : 0)
                                         .flippedUpsideDown()
                                 }
                                 #if (DEBUG || PERF_BENCH) && os(iOS)
@@ -883,52 +928,16 @@ struct CardFlowView: View {
                                 #else
                                 let dividers = hideTimestamp ? [:] : viewModel.timeDividerCache.dividers(for: viewModel.currentPath)
                                 #endif
-                                ForEach(viewModel.currentPath.reversed(), id: \.id) { node in
-                                    VStack(spacing: 0) {
-                                        if let time = dividers[node.id] { ChatTimeDividerView(date: time, spacing: bubbleSpacing) }
-                                        makeBubbleView(for: node, display: rowDisplay)
-                                            // 多选气泡：行只读「是否在多选」，选中与否只有勾选圆 / 选中底两个叶子读
-                                            .modifier(selectionRow(for: node))
-                                    }
-                                        .id(node.id)
-                                        // pop-tuner v7：行级不再弹整行（头像+昵称+泡一起弹=视觉过重，
-                                        // 调音台与真实差距主因）——弹泡下沉 BubbleModeRow 内（popPending），
-                                        // 头像/昵称直出只有泡弹，与调音台预览同形态。
-                                        // v6 对称反转保留：默认事务=push 柔和（旧行让位在容器层结算），
-                                        // 白名单新泡行升级 popAnimation（行内泡的 transition 插值用它）
-                                        .transaction { t in
-                                            if t.animation != nil, viewModel.popNodeIds.contains(node.id) {
-                                                t.animation = BubblePopTuning.popAnimation
-                                            }
-                                        }
-                                        .background(
-                                            GeometryReader { geo in
-                                                Color.clear.task(id: geo.frame(in: .named("scrollContent")).midY) {
-                                                    stickerVM.bubblePositions[node.id] = geo.frame(in: .named("scrollContent")).midY
-                                                    #if os(iOS)
-                                                    let f = geo.frame(in: .named("scrollContent"))
-                                                    ChatScrubberModel.shared.rowFrames[node.id] = f.minY...f.maxY
-                                                    #endif
-                                                }
-                                            }
-                                        )
-                                        .flippedUpsideDown()  // 反转列表：cell 翻回正
-                                        #if os(iOS)
-                                        // 可拖滚动条抓点：只在已实化行里找视口中心那条
-                                        .modifier(ChatScrubberRowTracker(id: node.id))
-                                        // 删除散成灰：截这一行用的锚点（§12）
-                                        .background(MessageDustAnchor(key: node.id))
-                                        #endif
-                                }
+                                messageRows(display: rowDisplay, dividers: dividers)
                             }
                             // pop-tuner v3：旧行推移用无冲劲柔和 spring（popAnimation 的 initialVelocity
                             // 会把倒数第二条"甩"出去=粟粟报的干扰，新泡的爆发绑在 transition 自身）；
                             // 门=白名单非空，打开对话首帧集合为空天然关死
                             .animation(
-                                chatBubbleMode && !viewModel.popNodeIds.isEmpty ? BubblePopTuning.pushAnimation : nil,
+                                chatBubbleMode && BubblePopTuning.enabled && !viewModel.popNodeIds.isEmpty ? BubblePopTuning.pushAnimation : nil,
                                 value: viewModel.currentPath.count
                             )
-                            .padding(.horizontal, metrics.listInsetH)
+                            .padding(.horizontal, chatBubbleMode ? 16 : metrics.listInsetH)
                             .padding(.vertical, metrics.listInsetV)
                             .frame(maxWidth: Theme.contentMaxWidth)
                             .frame(maxWidth: .infinity)
@@ -940,6 +949,9 @@ struct CardFlowView: View {
                             )
                         }
                         .coordinateSpace(name: "scrollContent")
+                        #if (DEBUG || PERF_BENCH) && os(macOS)
+                        .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "transcript") } }
+                        #endif
                         #if os(macOS)
                         // 拖文件 = 上传成附件（plan-mac-code-mode-gaps §6）。挂在贴纸 drop 里面一层：Finder 拖文件
                         // 可能也带纯文字，让贴纸那层先接到会吞掉；贴纸拖动不带 fileURL，照旧穿到下面那层
@@ -959,7 +971,8 @@ struct CardFlowView: View {
                                 radius: blurRadius,
                                 inputBarBottom: keyboardBridge.containerTop + keyboardBridge.barVisibleHeight,
                                 keyboardVisible: keyboardBridge.kbVisible,
-                                enabled: !viewModel.currentPath.isEmpty && !stickerVM.isEditingStickers
+                                enabled: !viewModel.currentPath.isEmpty && !stickerVM.isEditingStickers,
+                                topFadeEnd: chatBubbleMode ? 180 : 130
                             )
                             .frame(width: 0, height: 0)
                         }
@@ -1001,7 +1014,8 @@ struct CardFlowView: View {
                             inputFieldTop: keyboardBridge.inputFieldTop,
                             inputBarBottom: keyboardBridge.containerTop + keyboardBridge.barVisibleHeight,
                             keyboardVisible: keyboardBridge.kbVisible,
-                            hasInputGeometry: keyboardBridge.containerTop > 0
+                            hasInputGeometry: keyboardBridge.containerTop > 0,
+                            bubbleMode: chatBubbleMode
                         )
                     }
                     // 状态栏 tap → 滚视觉顶（最旧消息 = 物理底）。走 UIKit 绝对 offset，不 scrollTo 首条（长对话卡数秒）
@@ -1838,7 +1852,9 @@ struct ChatInputBar: View {
         HitchProbe.mark("kickBarLayout")
         #endif
         StreamScrollAnchor.muteCompensator(0.3)
-        DispatchQueue.main.async { KeyboardInsetBridge.shared.barKick.send() }
+        DispatchQueue.main.async {
+            KeyboardInsetBridge.shared.barKick.send()
+        }
     }
     #endif
 
@@ -2062,6 +2078,11 @@ struct ChatInputBar: View {
         .onChange(of: viewModel.editingMessage?.token, initial: true) { _, _ in applyEditingIfNeeded() }
         .onChange(of: viewModel.composerInsert?.token) { _, _ in applyComposerInsert() }
         .onChange(of: viewModel.cardSendRequest?.token) { _, _ in applyCardSend() }
+        .onChange(of: viewModel.modelPickerRequested, initial: true) { _, requested in
+            guard requested else { return }
+            viewModel.modelPickerRequested = false
+            showModelPicker = true
+        }
         .animation(.easeOut(duration: 0.22), value: isEditingMessage)
         #if os(iOS)
         // 编辑卡插拔 = 栈高变化，同 chip 行：踢 UIKit 容器 re-solve（Bug3 同款）
@@ -2075,6 +2096,10 @@ struct ChatInputBar: View {
             set: { if !$0 { viewModel.budgetBlockedMessage = nil } }
         )) {
             Button("好") { viewModel.budgetBlockedMessage = nil }
+            Button("去改预算") {
+                viewModel.budgetBlockedMessage = nil
+                SettingsJump.shared.request(.budget, delay: 0.35)   // 等 alert 收起再开设置
+            }
         } message: {
             Text(viewModel.budgetBlockedMessage ?? "")
         }
@@ -3108,6 +3133,7 @@ struct InputFieldContainer: View {
         .padding(.leading, 6)
         .transition(.identity)   // C7b：换行时按钮直接落位，不飞、不淡出重影
     }
+
     #endif
 
     private var sendButton: some View { sendButtonCore() }
@@ -3431,8 +3457,8 @@ struct ModelPickerPopover: View {
                     .foregroundColor(Theme.textPrimary)
             }
             Text(hasAnyCredentialWithKey
-                 ? "去 设置 → API → 全部模型，收藏几个常用的，这里就显示了。"
-                 : "去 设置 → API 加一张 API key 卡，再到「全部模型」里收藏几个模型。")
+                 ? "去 设置 → 模型和API → 全部模型，收藏几个常用的，这里就显示了。"
+                 : "去 设置 → 模型和API 加一张 API key 卡，再到「全部模型」里收藏几个模型。")
                 .font(.system(size: Theme.F.caption))
                 .foregroundColor(Theme.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -3753,7 +3779,6 @@ struct BubbleView: View {
     var viewModel: ConversationViewModel?
     var isHighlighted: Bool = false
     var isSearchMatch: Bool = false
-    var avatars: ChatAvatars = .none
     let onToggleFavorite: () -> Void
     let onTogglePin: () -> Void
     let onSoftDelete: () -> Void
@@ -3763,6 +3788,7 @@ struct BubbleView: View {
     var onEdit: (() -> Void)? = nil
     /// 输入框正在编辑这条：气泡变透明 + 圆角虚线
     var isBeingEdited: Bool = false
+    var isLastInRun: Bool = true
     var onQuoteText: ((String) -> Void)? = nil   // A4：长按「引用」，传被引用文字（气泡模式=单 block，文章模式=整条）
     var regexScripts: [RegexScript] = []
 
@@ -3799,11 +3825,9 @@ struct BubbleView: View {
     @AppStorage("lineSpacingScale") private var lineSpacingScale: Double = 1.45
     @AppStorage("paragraphSpacingScale") private var paragraphSpacingScale: Double = 1.65
     @AppStorage("hideTimestamp") private var hideTimestamp: Bool = false
-    @AppStorage("hideRoleName") private var hideRoleName: Bool = false
     @AppStorage("hideActionBar") private var hideActionBar: Bool = false
     @AppStorage("chatBubbleMode") private var chatBubbleMode = false
-    @AppStorage("showAvatar") private var showAvatar = true
-    @AppStorage("bubbleModeCornerRadius") private var bubbleModeCornerRadius: Double = 23
+    @AppStorage("bubbleModeCornerRadius") private var bubbleModeCornerRadius: Double = 20
     @State private var showBranchPicker = false
     @State private var showTagPicker = false
     /// 流式显示节拍器（research-streaming-smoothness）：显示文本按 30Hz 追赶到达文本
@@ -3833,6 +3857,11 @@ struct BubbleView: View {
     private var hasMessageBody: Bool {
         if isStreaming || (messageError == nil && messageNotice == nil) { return true }
         if let segments = ChatDisplaySnapshot.segments(of: node), !segments.isEmpty {
+            // 普通回复挂思考：正文看 content；只剩报错 / 已停止时只画思考行，思考隐藏就整个不画（不出空正文泡）
+            if segments.isAttachedThinkingReply {
+                return !ChatSystemMessage.split(node.content).body.isEmpty
+                    || (segments.attachedThinkingText != nil && DisclosureKind.thinking.mode != .hidden)
+            }
             return !ChatSystemMessage.removingTrailingError(from: segments).isEmpty
         }
         return !ChatSystemMessage.split(node.content).body.isEmpty
@@ -3875,8 +3904,9 @@ struct BubbleView: View {
     /// 这里只服务定稿/用户/vm 缺失路径；抽出供 iOS/macOS 两分支复用（顺带治 type-check）。
     @ViewBuilder
     private func simpleStaticBody(thinkingResult: ContentCleaner.ThinkingResult?, cleaned: String) -> some View {
-        // Thinking block (collapsible)：[thinking] 标签提取 或 CC 思考链回传（ccThinking）
-        if let thinking = thinkingResult?.thinking ?? (showCCThinking ? node.ccThinking : nil), !thinking.isEmpty {
+        // Thinking block (collapsible)：[thinking] 标签提取 或 CC 思考链回传（ccThinking）或原生思考摘要（thinking 回传 §3.8，回复完成后出现）
+        if let thinking = thinkingResult?.thinking ?? (showCCThinking ? node.ccThinking : nil)
+            ?? (isStreaming ? nil : ChatDisplaySnapshot.segments(of: node)?.nativeThinkingText), !thinking.isEmpty {
             ThinkingDisclosure(text: thinking, nodeId: node.id, profileId: node.profileId,
                                summary: node.thinkingSummary,
                                onNeedSummary: { [node, providerManager] in
@@ -4073,9 +4103,16 @@ struct BubbleView: View {
             } else {
                 if hasMessageBody { innerBody }
                 if let messageError {
+                    // 报错「去改」（plan-api-draft-and-fix-jump §3.5）：按文字认类型，点了才去账本找卡
+                    let fixKind = isStreaming ? nil : FixJump.kind(for: messageError)
                     ChatSystemCapsule(text: messageError, symbol: "exclamationmark.circle", isError: true,
                                       actionTitle: onRegenerate == nil || isStreaming ? nil : "重试",
-                                      action: isStreaming ? nil : onRegenerate)
+                                      action: isStreaming ? nil : onRegenerate,
+                                      secondaryTitle: fixKind?.buttonTitle,
+                                      secondaryAction: fixKind.map { kind in { [node, providerManager, viewModel] in
+                                          FixJump.perform(kind, nodeId: node.id, errorText: messageError,
+                                                          providerManager: providerManager, viewModel: viewModel)
+                                      } })
                 } else if let messageNotice {
                     ChatSystemCapsule(text: messageNotice, symbol: "pause.circle")
                 }
@@ -4134,6 +4171,7 @@ struct BubbleView: View {
                 onEntranceDone: { viewModel?.pendingEntranceNodeIds.remove(node.id) },
                 // pop-tuner v7：发消息弹泡（行内泡级，白名单自动销账防滚回重弹）
                 popPending: viewModel?.popNodeIds.contains(node.id) ?? false,
+                isLastInRun: isLastInRun,
                 selectedFont: selectedFont, fontScale: fontScale,
                 // 气泡模式外观锁定为 iMessage 固定值，不受「气泡外观（高级）」滑块影响
                 // （圆角圆度 / padding / 行距段距只准普通模式调）。字号 fontScale 仍可调。
@@ -4144,9 +4182,7 @@ struct BubbleView: View {
                 bubblePaddingH: BubbleModeRow.fixedPaddingH,
                 bubblePaddingV: BubbleModeRow.fixedPaddingV,
                 userName: userName, assistantName: assistantName,
-                hideTimestamp: hideTimestamp, hideRoleName: hideRoleName,
-                showAvatar: showAvatar,
-                avatars: avatars,
+                hideTimestamp: hideTimestamp,
                 blockMenuSpecs: { block, voicePath in bubbleMenuSpecs(quoteText: block, voicePath: voicePath) },
                 onQuoteText: onQuoteText,
                 isHighlighted: isHighlighted,
@@ -4174,18 +4210,15 @@ struct BubbleView: View {
     private var articleModeBody: some View {
         let userVoiceNote = isUserVoiceNote
         return VStack(alignment: isUser ? .trailing : .leading, spacing: 8) {
-            // Role label（时间挪到列表中间的分割线 + 长按菜单底部，TASK page1-消息-20；名字隐藏且没有小标时整行不 render）
-            if !hideRoleName || (isUser && (node.styleIdSnapshot != nil || node.cardEventsData != nil)) {
-                HStack(spacing: 4) {
-                    if !hideRoleName {
-                        Text(isUser ? userName : assistantName)
-                            .font(.caption2.weight(.medium))
-                            .foregroundColor(Theme.textMuted)
-                    }
-                    if isUser { StyleChip(styleId: node.styleIdSnapshot); CardEventsChip(node: node) }
-                }
-                .padding(.horizontal, 4)
+            // 文章署名常显，只把名字向正文方向内移6pt，不挪卡片徽标。
+            HStack(spacing: 4) {
+                Text(isUser ? userName : assistantName)
+                    .font(.caption2.weight(.medium))
+                    .foregroundColor(Theme.textMuted)
+                    .padding(isUser ? .trailing : .leading, 6)
+                if isUser { StyleChip(styleId: node.styleIdSnapshot); CardEventsChip(node: node) }
             }
+            .padding(.horizontal, 4)
 
             // 附件条（气泡外，上方）— 图片 + 文件都放这
             if let segs = ChatDisplaySnapshot.segments(of: node)?.hydratedForDisplay(profileId: node.profileId) {

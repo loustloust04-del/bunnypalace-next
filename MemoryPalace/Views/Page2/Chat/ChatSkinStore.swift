@@ -18,7 +18,7 @@ import UIKit
 /// P3 换成 `mp-asset://` 后这套目录仍然是皮肤的落地位置，只是不再需要 ChatWeb 这一份拷贝。
 enum ChatSkinStore {
     static var root: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        AppPaths.applicationSupport
     }
     static var webDir: URL { root.appendingPathComponent("ChatWeb", isDirectory: true) }
     static var skinsDir: URL { root.appendingPathComponent("ChatSkins", isDirectory: true) }

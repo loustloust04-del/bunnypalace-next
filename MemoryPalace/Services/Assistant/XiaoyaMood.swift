@@ -24,8 +24,16 @@ struct XiaoyaStageState: Equatable {
         case approved, discarded, stopped, overwhelmed, refused
     }
 
+    /// 引导剧本的表情覆盖层（plan-onboarding-xiaoya-impl §4.2，小样 mood()）：盖在 base 上，
+    /// 她在想 / 在翻（busy）和短暂反馈照样压过它
+    struct Scripted: Equatable {
+        var mood: XiaoyaMood
+        var status: String
+    }
+
     var base: Base = .idle
     var feedback: Feedback?
+    var scripted: Scripted?
 
     var mood: XiaoyaMood {
         if let feedback {
@@ -37,6 +45,7 @@ struct XiaoyaStageState: Equatable {
             case .refused: return .nope
             }
         }
+        if let scripted, !isBusy { return scripted.mood }
         switch base {
         case .idle: return .smirk
         case .thinking, .reading: return .huh
@@ -55,6 +64,7 @@ struct XiaoyaStageState: Equatable {
             case .refused: return "这个我现在做不了"
             }
         }
+        if let scripted, !isBusy { return scripted.status }
         switch base {
         case .idle: return "在呢"
         case .thinking: return "在想…"

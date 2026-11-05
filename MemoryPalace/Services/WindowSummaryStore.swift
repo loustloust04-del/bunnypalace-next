@@ -22,6 +22,10 @@ enum WindowSummaryStore {
         SessionSummaryStore.load(conversationId: conversationId, in: dir(root: root))
     }
 
+    static func loadStrict(conversationId: String, in root: URL) throws -> SessionSummary? {
+        try SessionSummaryStore.loadStrict(conversationId: conversationId, in: dir(root: root))
+    }
+
     static func save(_ s: SessionSummary, in root: URL) throws {
         try SessionSummaryStore.save(s, in: dir(root: root))
     }

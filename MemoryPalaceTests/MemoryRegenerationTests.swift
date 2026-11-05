@@ -1,7 +1,7 @@
 import XCTest
 @testable import 记忆花园
 
-/// v4-1 §九：重新生成（假写手、临时目录当测试楼层）——备份逐字一致、中途失败原件不动、回滚逐字一致
+/// 记忆备份 / 恢复（临时目录当测试楼层）——备份逐字一致、核对、恢复失败挪回来、回滚逐字一致；三代搬迁复用的 `work`
 final class MemoryRegenerationTests: XCTestCase {
 
     private var floor: URL!
@@ -14,6 +14,12 @@ final class MemoryRegenerationTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        // 测试里改过权限的先改回来，不然删不掉
+        if let e = FileManager.default.enumerator(atPath: floor.path) {
+            for case let rel as String in e {
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: floor.appendingPathComponent(rel).path)
+            }
+        }
         try? FileManager.default.removeItem(at: floor)
     }
 
@@ -42,25 +48,14 @@ final class MemoryRegenerationTests: XCTestCase {
                                                title: "删掉的", text: "凌晨聊的", pending: "")], month: "2026-10", in: tl)
     }
 
-    private struct Boom: Error {}
-
-    /// 假写手：按提示词认是哪种写手，给合格的输出；failOn = 第几次调用抛错
-    private func writers(failOn: Int? = nil) -> MemoryRegeneration.Writers {
-        var n = 0
-        return .init(persona: "你是小克。", speakers: .init(userName: "粟粟", assistantName: "小克")) { system, _ in
-            n += 1
-            if n == failOn { throw Boom() }
-            if system.contains("「时间轴」") { return "【话题】\n- 第\(n)次写的话题\n【待续】\n- 无" }
-            return "标题：第\(n)段\n【经过】接着聊\n【原话】粟粟：「嗯」"
-        }
-    }
-
-    private func snapshot() -> [String: String] {
+    /// 这几个文件夹里的全部文件 → 内容
+    private func snapshot(_ folders: [String] = MemoryRegeneration.folders, base: URL? = nil) -> [String: String] {
+        let base = base ?? root
         var out: [String: String] = [:]
-        for f in MemoryRegeneration.folders {
-            let dir = root.appendingPathComponent(f)
-            for (rel, _) in MemoryRegeneration.fileSizes(dir) {
-                out[f + rel] = try? String(contentsOf: dir.appendingPathComponent(String(rel.dropFirst())), encoding: .utf8)
+        for f in folders {
+            let dir = base.appendingPathComponent(f)
+            for rel in ((try? MemoryRegeneration.inventory(dir)) ?? [:]).keys {
+                out[f + "/" + rel] = try? String(contentsOf: dir.appendingPathComponent(rel), encoding: .utf8)
             }
         }
         return out
@@ -70,71 +65,12 @@ final class MemoryRegenerationTests: XCTestCase {
         id == "conv-live-0001" ? .init(title: "色色", messages: messages(), isCC: false) : nil
     }
 
-    func testBackupIsByteIdenticalAndRewriteFollowsNewRules() async throws {
-        try seedBroken()
-        let before = snapshot()
-        let report = try await MemoryRegeneration.run(memoryRoot: root, startDay: date(10, 1, 5), now: date(10, 11, 12),
-                                                      writers: writers(), legacySeed: { _ in nil }, source: { self.source($0) })
-        XCTAssertEqual(report.failures, [])
-        XCTAssertEqual(report.windows, 1)
-        // 备份和原件逐字一致
-        for (path, text) in before {
-            let backed = try String(contentsOf: report.backup.appendingPathComponent(path), encoding: .utf8)
-            XCTAssertEqual(backed, text, path)
-        }
-        XCTAssertTrue(report.backup.path.contains("记忆备份/v4-1-"))
-        XCTAssertFalse(report.backup.path.contains("/memory/"), "备份放在 memory/ 旁边，不在里面")
-
-        // 上下文摘要：老收尾段拿掉了（API 窗口原来没有压缩段、锚点 0 → 不写新的，只剩收尾段的文件整个拿掉）
-        XCTAssertNil(SessionSummaryStore.load(conversationId: "conv-live-0001", in: SessionSummaryStore.dir(root: root)))
-        // 窗口总结：一份，最后那段写到最后一条
-        let w = try XCTUnwrap(WindowSummaryStore.load(conversationId: "conv-live-0001", in: root))
-        XCTAssertEqual(w.closedThrough, "n5")
-        XCTAssertEqual(w.segments.map(\.kind), [.closeout])
-        // 时间轴：按天切成 10-09、10-10 两条，进 10 月文件；9 月里那条老的写成了就不放回
-        let tl = TimelineStore.dir(root: root)
-        let oct = TimelineStore.entries(month: "2026-10", in: tl)
-        XCTAssertEqual(oct.filter { $0.conversationId == "conv-live-0001" }.map(\.day), ["2026-10-09", "2026-10-10"])
-        XCTAssertTrue(TimelineStore.entries(month: "2026-09", in: tl).isEmpty)
-        XCTAssertEqual(oct.filter { $0.conversationId == "conv-gone-0001" }.count, 1, "删掉的窗口：旧条目原样保留")
-        // 暂存目录清掉了
-        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: MemoryRegeneration.backupRoot(memoryRoot: root).path)) ?? []
-        XCTAssertFalse(leftovers.contains { $0.hasPrefix("staging-") })
-    }
-
-    func testWriterThrowsMidwayLeavesOriginalsUntouched() async throws {
-        try seedBroken()
-        let before = snapshot()
-        do {
-            _ = try await MemoryRegeneration.run(memoryRoot: root, startDay: date(10, 1, 5), now: date(10, 11, 12),
-                                                 writers: writers(failOn: 2), legacySeed: { _ in nil }, source: { self.source($0) })
-            XCTFail("写手抛错应该整个停下")
-        } catch is Boom {}
-        XCTAssertEqual(snapshot(), before, "原件一字不动")
-        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: MemoryRegeneration.backupRoot(memoryRoot: root).path)) ?? []
-        XCTAssertFalse(leftovers.contains { $0.hasPrefix("staging-") }, "暂存目录被清掉")
-    }
-
-    func testFormatFailureIsReportedAndOldEntryKept() async throws {
-        try seedBroken()
-        let bad = MemoryRegeneration.Writers(persona: "", speakers: .init(userName: "粟粟", assistantName: "小克")) { system, _ in
-            system.contains("「时间轴」") ? "（想了很久）……想到了" : "标题：一段\n【经过】接着聊\n【原话】粟粟：「嗯」"
-        }
-        let report = try await MemoryRegeneration.run(memoryRoot: root, startDay: date(10, 1, 5), now: date(10, 11, 12),
-                                                      writers: bad, legacySeed: { _ in nil }, source: { self.source($0) })
-        XCTAssertEqual(report.failures.count, 1, "第一天就没写成：停下，后面的天不写（astra #3）：\(report.failures)")
-        XCTAssertTrue(report.failures.allSatisfy { $0.contains("时间轴") && $0.contains("格式不对") })
-        let tl = TimelineStore.dir(root: root)
-        let all = TimelineStore.months(in: tl).flatMap { TimelineStore.entries(month: $0, in: tl) }
-        XCTAssertEqual(all.filter { $0.conversationId == "conv-live-0001" }.map(\.text), ["（想了很久）……想到了"], "没写成的那天留着旧的")
-    }
-
-    // MARK: - astra 一轮
-
     private func msgs(_ n: Int, from start: Date, prefix: String = "n") -> [SessionSegmentWriter.Message] {
         (0..<n).map { .init(id: "\(prefix)\($0)", role: $0 % 2 == 0 ? "user" : "assistant", content: "第\($0)条",
                             date: start.addingTimeInterval(TimeInterval($0) * 60)) }
     }
+
+    // MARK: - work（三代搬迁 a2Full 复用）
 
     /// #1：原覆盖 [0,300) 全在范围里 → 重建整段 [0,300)，不套首次补写的 150 条上限；CC 分支同样从头建
     func testRebuildsFullOriginalCoverage() {
@@ -151,87 +87,34 @@ final class MemoryRegenerationTests: XCTestCase {
         XCTAssertEqual(cc.contextParts.reduce(0) { $0 + $1.count }, 400, "那天已经过去：整截都写")
     }
 
-    /// #2：上下文摘要有一截没写成 → 这个窗口的上下文摘要文件原样保留（水位不超过真写到的地方）
-    func testContextFailureKeepsOriginalFile() async throws {
-        let m = msgs(130, from: date(10, 5, 9))
-        let seg = SessionSegment(kind: .rolling, title: "老压缩", start: date(10, 5, 9), end: m[119].date!, from: 0, to: 120,
-                                 lastNodeId: "n119", story: "老经过", quotes: "", pending: "仍未")
-        let original = SessionSummary(conversationId: "conv-ctx-0001", title: "窗", compressedCount: 120, segments: [seg], updatedAt: date(10, 6, 0))
-        try SessionSummaryStore.save(original, in: SessionSummaryStore.dir(root: root))
-        var contextCalls = 0
-        let writers = MemoryRegeneration.Writers(persona: "", speakers: .init(userName: "粟粟", assistantName: "小克")) { system, _ in
-            if system.contains("「时间轴」") { return "【话题】\n- 话题\n【待续】\n- 无" }
-            if system.contains("「上下文摘要」") {
-                contextCalls += 1
-                return contextCalls == 1 ? "标题：第一截\n【经过】好\n【原话】粟粟：「嗯」" : "（想了很久）……想到了"
-            }
-            return "标题：最后\n【经过】好\n【原话】粟粟：「嗯」"
-        }
-        let report = try await MemoryRegeneration.run(memoryRoot: root, startDay: date(10, 1, 5), now: date(10, 11, 12), writers: writers,
-                                                      legacySeed: { _ in nil },
-                                                      source: { $0 == "conv-ctx-0001" ? .init(title: "窗", messages: m, isCC: false) : nil })
-        XCTAssertTrue(report.failures.contains { $0.contains("上下文摘要") }, "\(report.failures)")
-        let after = try XCTUnwrap(SessionSummaryStore.load(conversationId: "conv-ctx-0001", in: SessionSummaryStore.dir(root: root)))
-        XCTAssertEqual(after.segments, original.segments, "整份保留原文件，不留半截")
-        XCTAssertEqual(after.compressedCount, 120)
-        XCTAssertEqual(WindowSummaryStore.load(conversationId: "conv-ctx-0001", in: root)?.segments.first?.title, "老压缩", "窗口总结抄的是原上下文摘要")
+    /// 锚点曾因老收尾段盖住窗外只推不写：重写时按 compressedCount 补上下文摘要，不然窗外那截没人总结
+    func testAnchorOnlyWindowGetsContextRewritten() throws {
+        let closeout = SessionSegment(kind: .closeout, title: "老收尾", start: date(10, 9, 21), end: date(10, 10, 11), from: 0, to: 6,
+                                      lastNodeId: "n5", story: "", quotes: "", pending: "")
+        let old = SessionSummary(conversationId: "conv-live-0001", title: "色色", compressedCount: 4, segments: [closeout], updatedAt: date(10, 10, 12))
+        let w = MemoryRegeneration.work(old: old, source: try XCTUnwrap(source("conv-live-0001")), scopeStart: date(10, 1, 5), now: date(10, 11, 12))
+        XCTAssertEqual(w.contextParts, [0..<4])
+        XCTAssertTrue(w.keep.segments.isEmpty, "老收尾段拿掉")
     }
 
-    /// #3：一天三份，第二份没写成 → 这天撤回、留旧条目，后面的天不写；放回的老 v2 改成老格式，水位停在最后写成的那天
-    func testTimelineStopsAtFirstFailedDay() async throws {
-        let a = msgs(3, from: date(10, 8, 20), prefix: "a")
-        let b = msgs(180, from: date(10, 9, 9), prefix: "b")
-        let c = msgs(2, from: date(10, 10, 9), prefix: "c")
-        let all = a + b + c
-        let tl = TimelineStore.dir(root: root)
-        let oldB = TimelineEntry(start: date(10, 9, 9), end: date(10, 9, 12), conversationId: "conv-tl-0001", title: "窗", text: "B 的老条目", pending: "")
-        let oldC = TimelineEntry(start: date(10, 10, 9), end: date(10, 10, 10), conversationId: "conv-tl-0001", title: "窗", text: "- C 的老 v2",
-                                 pending: "", day: "2026-10-10", lastNodeId: "c1")
-        try TimelineStore.write([oldB, oldC], month: "2026-10", in: tl)
-        var timelineCalls = 0
-        let writers = MemoryRegeneration.Writers(persona: "", speakers: .init(userName: "粟粟", assistantName: "小克")) { system, _ in
-            guard system.contains("「时间轴」") else { return "标题：一段\n【经过】好\n【原话】粟粟：「嗯」" }
-            timelineCalls += 1
-            // 第 1 次 = A；第 2 次 = B 第一份；第 3、4 次 = B 第二份（连重写一起都不合格）
-            return (3...4).contains(timelineCalls) ? "（想了很久）……想到了" : "【话题】\n- 第\(timelineCalls)次\n【待续】\n- 无"
-        }
-        let report = try await MemoryRegeneration.run(memoryRoot: root, startDay: date(10, 1, 5), now: date(10, 11, 12), writers: writers,
-                                                      legacySeed: { _ in nil },
-                                                      source: { $0 == "conv-tl-0001" ? .init(title: "窗", messages: all, isCC: false) : nil })
-        XCTAssertEqual(timelineCalls, 4, "B 失败就停，C 不写")
-        XCTAssertEqual(report.failures.count, 1)
-        XCTAssertTrue(report.failures[0].contains("2026-10-09"))
-        let entries = TimelineStore.entries(month: "2026-10", in: tl).filter { $0.conversationId == "conv-tl-0001" }
-        XCTAssertEqual(entries.filter { $0.day != nil }.map(\.day), ["2026-10-08"], "只有写成的 A 是新条目")
-        XCTAssertEqual(Set(entries.filter { $0.day == nil }.map(\.text)), ["B 的老条目", "- C 的老 v2"], "没写成的那天和后面的天留旧的")
-        let latest = TimelineStore.latest(conversationId: "conv-tl-0001", v2Only: true, in: tl)
-        XCTAssertEqual(latest?.lastNodeId, "a2", "水位停在 A：日常收尾从 B 接着补")
-        XCTAssertEqual(SessionCloseout.timelineStart(pathIds: all.map(\.id), dates: all.map(\.date), latest: latest, legacyLast: nil, notBefore: 0), 3)
+    /// 三代搬迁 astra #4：跨起点的段（起点以前开始）整段留着，只拿掉整段在起点以后的
+    func testWorkKeepsSegmentsCrossingStart() {
+        let m = msgs(10, from: date(9, 30, 22), prefix: "o") + msgs(60, from: date(10, 5, 9))
+        let cross = SessionSegment(kind: .rolling, title: "跨起点", start: m[0].date!, end: m[19].date!, from: 0, to: 20,
+                                   lastNodeId: m[19].id, story: "", quotes: "", pending: "仍未")
+        let crossClose = SessionSegment(kind: .closeout, title: "跨起点收尾", start: m[5].date!, end: m[25].date!, from: 5, to: 26,
+                                        lastNodeId: m[25].id, story: "", quotes: "", pending: "")
+        let after = SessionSegment(kind: .rolling, title: "起点以后", start: m[20].date!, end: m[49].date!, from: 20, to: 50,
+                                   lastNodeId: m[49].id, story: "", quotes: "", pending: "仍未")
+        let old = SessionSummary(conversationId: "c", title: "t", compressedCount: 50, segments: [cross, crossClose, after], updatedAt: date(10, 6, 0))
+        let w = MemoryRegeneration.work(old: old, source: .init(title: "t", messages: m, isCC: false), scopeStart: date(10, 1, 5), now: date(10, 11, 12))
+        XCTAssertEqual(w.keep.segments.map(\.title), ["跨起点", "跨起点收尾"])
+        XCTAssertEqual(w.contextParts, [20..<50], "只重写整段在起点以后的那截")
     }
 
-    private struct InjectedFailure: Error {}
+    // MARK: - 备份
 
-    /// #4：替换中途装新目录失败 → 旧目录挪回来，原件一字不动；暂存目录留着
-    func testSwapFailureMovesOldBack() async throws {
-        try seedBroken()
-        let before = snapshot()
-        let failingMove: MemoryRegeneration.FileOp = { from, to in
-            if from.path.contains("/staging-"), to.lastPathComponent == SessionSummaryStore.folder, !from.lastPathComponent.hasPrefix("old-") {
-                throw InjectedFailure()
-            }
-            try FileManager.default.moveItem(at: from, to: to)
-        }
-        do {
-            _ = try await MemoryRegeneration.run(memoryRoot: root, startDay: date(10, 1, 5), now: date(10, 11, 12), writers: writers(),
-                                                 legacySeed: { _ in nil }, source: { self.source($0) }, move: failingMove)
-            XCTFail("应该抛")
-        } catch is InjectedFailure {}
-        XCTAssertEqual(snapshot(), before, "已经换上的 timeline 撤回、挪开的 sessions 挪回")
-        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: MemoryRegeneration.backupRoot(memoryRoot: root).path)) ?? []
-        XCTAssertTrue(leftovers.contains { $0.hasPrefix("staging-") }, "替换开始后失败：暂存目录留着备查")
-    }
-
-    /// #4：恢复时拷贝失败 → 拷了一半的删掉，挪开的挪回来，不发布「回滚前」
+    /// #4：恢复时拷贝失败 → 拷了一半的删掉，挪开的挪回来，「回滚前」撤掉
     func testRestoreCopyFailureMovesCurrentBack() throws {
         try seedBroken()
         let backup = try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v4-1-test")
@@ -245,6 +128,8 @@ final class MemoryRegenerationTests: XCTestCase {
         XCTAssertEqual(snapshot(), current, "现在的文件原样回来")
         XCTAssertFalse(MemoryRegeneration.backups(memoryRoot: root).contains { $0.lastPathComponent.hasPrefix("回滚前-") })
     }
+
+    private struct InjectedFailure: Error {}
 
     /// #5：拷到一半的备份不列、不让恢复；清单分得清「原本没有」和「没拷完」
     func testHalfBackupIsNotListedOrRestorable() throws {
@@ -274,33 +159,301 @@ final class MemoryRegenerationTests: XCTestCase {
         XCTAssertThrowsError(try MemoryRegeneration.restore(backup: good, memoryRoot: root, now: date(10, 11, 13)))
     }
 
-    func testRestoreMatchesBackup() async throws {
+    /// 恢复后和备份逐字一致；现在的挪进「回滚前」
+    func testRestoreMatchesBackup() throws {
         try seedBroken()
         let before = snapshot()
-        let report = try await MemoryRegeneration.run(memoryRoot: root, startDay: date(10, 1, 5), now: date(10, 11, 12),
-                                                      writers: writers(), legacySeed: { _ in nil }, source: { self.source($0) })
+        let backup = try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v4-1-test")
+        try TimelineStore.write([], month: "2026-11", in: TimelineStore.dir(root: root))
+        try WindowSummaryStore.save(SessionSummary(conversationId: "conv-live-0001", title: "色色", compressedCount: 0, segments: [],
+                                                   updatedAt: date(10, 11, 12)), in: root)
         XCTAssertNotEqual(snapshot(), before)
-        try MemoryRegeneration.restore(backup: report.backup, memoryRoot: root, now: date(10, 11, 13))
+        try MemoryRegeneration.restore(backup: backup, memoryRoot: root, now: date(10, 11, 13))
         XCTAssertEqual(snapshot(), before, "回滚后和备份逐字一致")
         XCTAssertTrue(MemoryRegeneration.backups(memoryRoot: root).contains { $0.lastPathComponent.hasPrefix("回滚前-") })
     }
 
-    /// 锚点曾因老收尾段盖住窗外只推不写：重写时按 compressedCount 补上下文摘要，不然窗外那截没人总结
-    func testAnchorOnlyWindowGetsContextRewritten() throws {
-        let closeout = SessionSegment(kind: .closeout, title: "老收尾", start: date(10, 9, 21), end: date(10, 10, 11), from: 0, to: 6,
-                                      lastNodeId: "n5", story: "", quotes: "", pending: "")
-        let old = SessionSummary(conversationId: "conv-live-0001", title: "色色", compressedCount: 4, segments: [closeout], updatedAt: date(10, 10, 12))
-        let w = MemoryRegeneration.work(old: old, source: try XCTUnwrap(source("conv-live-0001")), scopeStart: date(10, 1, 5), now: date(10, 11, 12))
-        XCTAssertEqual(w.contextParts, [0..<4])
-        XCTAssertTrue(w.keep.segments.isEmpty, "老收尾段拿掉")
-        XCTAssertEqual(w.timelineParts, [0..<3, 3..<6], "时间轴按天切")
+    // MARK: - 三代搬迁 · 备份 / 恢复（plan-memory-migrate-3gen B1–B3）
+
+    private let five = MemoryMigration.folders
+
+    private func put(_ rel: String, _ text: String, in base: URL? = nil) throws {
+        let url = (base ?? root).appendingPathComponent(rel)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: url)
     }
 
-    func testEstimateCountsWindowsAndCalls() throws {
+    private func text(_ rel: String, in base: URL? = nil) -> String? {
+        try? String(contentsOf: (base ?? root).appendingPathComponent(rel), encoding: .utf8)
+    }
+
+    /// B1：五个都进备份、逐字一致；原本没有的 windows/ 也算这份备份管的（covered），清单 folders 只列原本有的；B3 认 v5搬迁- 前缀；
+    /// 清单逐个文件记大小 + SHA256（astra #10）
+    func testMigrationBackupCoversFiveFolders() throws {
         try seedBroken()
-        let e = MemoryRegeneration.estimate(startDay: date(10, 1, 5), memoryRoot: root, now: date(10, 11, 12)) { self.source($0) }
-        XCTAssertEqual(e.windows, 1)
-        XCTAssertEqual(e.goneWindows, 1)
-        XCTAssertEqual(e.calls, 3, "窗口总结 1 + 时间轴两天各 1")
+        try put("pending/待续.md", "待续本子")
+        try put("summaries/conv-old-x.md", "第一代")
+        let before = snapshot(five)
+        let b = try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v5搬迁-t1", folders: five)
+        let m = try XCTUnwrap(MemoryRegeneration.manifest(of: b))
+        XCTAssertEqual(m.covered, five)
+        XCTAssertEqual(Set(m.folders), Set(five).subtracting([WindowSummaryStore.folder]))
+        XCTAssertEqual(snapshot(five, base: b), before, "备份和原件逐字一致")
+        XCTAssertEqual(Set(m.files?.keys ?? [:].keys), Set(before.keys), "清单里逐个文件都有")
+        XCTAssertEqual(m.files?["pending/待续.md"]?.size, "待续本子".utf8.count)
+        XCTAssertEqual(MemoryRegeneration.backups(memoryRoot: root).map(\.lastPathComponent), ["v5搬迁-t1"])
+    }
+
+    /// B1：拷完大小对不上 → 抛错、不发布正式名字、memory/ 一字不动
+    func testMigrationBackupSizeMismatchPublishesNothing() throws {
+        try seedBroken()
+        try put("pending/待续.md", "待续本子，好几个字")
+        let before = snapshot(five)
+        let truncating: MemoryRegeneration.FileOp = { from, to in
+            try FileManager.default.copyItem(at: from, to: to)
+            if from.lastPathComponent == PendingStore.folder {
+                try Data("短".utf8).write(to: to.appendingPathComponent(PendingStore.fileName))
+            }
+        }
+        XCTAssertThrowsError(try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v5搬迁-bad", folders: five, copy: truncating)) {
+            XCTAssertEqual($0 as? MemoryRegeneration.RegenError, .backupMismatch(PendingStore.folder))
+        }
+        XCTAssertTrue(MemoryRegeneration.backups(memoryRoot: root).isEmpty)
+        XCTAssertEqual(snapshot(five), before)
+    }
+
+    /// astra #10：同样大小、内容不一样也核得出来
+    func testBackupSameSizeDifferentContentIsMismatch() throws {
+        try put("pending/待续.md", "甲乙丙")
+        let swapped: MemoryRegeneration.FileOp = { from, to in
+            try FileManager.default.copyItem(at: from, to: to)
+            if from.lastPathComponent == PendingStore.folder {
+                try Data("丙乙甲".utf8).write(to: to.appendingPathComponent(PendingStore.fileName))
+            }
+        }
+        XCTAssertThrowsError(try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v5搬迁-same", folders: five, copy: swapped)) {
+            XCTAssertEqual($0 as? MemoryRegeneration.RegenError, .backupMismatch(PendingStore.folder))
+        }
+        XCTAssertTrue(MemoryRegeneration.backups(memoryRoot: root).isEmpty)
+    }
+
+    /// astra #10：读不了的文件 → 核对直接抛错，不当成 0 字节通过
+    func testUnreadableFileStopsBackup() throws {
+        try put("pending/待续.md", "待续本子")
+        let file = root.appendingPathComponent("pending/待续.md")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+        XCTAssertThrowsError(try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v5搬迁-unread", folders: five))
+        XCTAssertTrue(MemoryRegeneration.backups(memoryRoot: root).isEmpty)
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: MemoryRegeneration.backupRoot(memoryRoot: root).path)) ?? []
+        XCTAssertEqual(leftovers, [], "什么都没建")
+    }
+
+    /// astra #5：五个文件夹里（文件夹本身或里面）有符号链接 → 停下、什么都不改、报路径
+    func testSymlinkStopsBackup() throws {
+        try seedBroken()
+        let elsewhere = floor.appendingPathComponent("别处", isDirectory: true)
+        try put("待续.md", "活的", in: elsewhere)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent(PendingStore.folder), withDestinationURL: elsewhere)
+        let before = snapshot(five)
+        XCTAssertThrowsError(try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v5搬迁-link", folders: five)) {
+            XCTAssertEqual($0 as? MemoryRegeneration.RegenError, .symlink(self.root.appendingPathComponent(PendingStore.folder).path))
+        }
+        XCTAssertEqual(snapshot(five), before)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: MemoryRegeneration.backupRoot(memoryRoot: root).path), "什么都没建")
+
+        // 里面一层的符号链接也拦
+        try FileManager.default.removeItem(at: root.appendingPathComponent(PendingStore.folder))
+        let inner = TimelineStore.dir(root: root).appendingPathComponent("2026-12.md")
+        try FileManager.default.createSymbolicLink(at: inner, withDestinationURL: elsewhere.appendingPathComponent("待续.md"))
+        XCTAssertThrowsError(try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v5搬迁-link2", folders: five)) {
+            guard case .symlink(let path)? = $0 as? MemoryRegeneration.RegenError else { return XCTFail("\($0)") }
+            XCTAssertTrue(path.hasSuffix("/timeline/2026-12.md"), path)
+        }
+        XCTAssertTrue(MemoryRegeneration.backups(memoryRoot: root).isEmpty)
+    }
+
+    /// astra #10：恢复前按清单核备份——文件被改过 / 少了 / 多了都拒绝，现在的一字不动
+    func testRestoreRefusesBackupNotMatchingManifest() throws {
+        try seedBroken()
+        let b = try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v5搬迁-t3", folders: five)
+        let current = snapshot(five)
+        let file = try XCTUnwrap(try MemoryRegeneration.inventory(b.appendingPathComponent(TimelineStore.folder)).keys.sorted().first)
+        let url = b.appendingPathComponent(TimelineStore.folder).appendingPathComponent(file)
+        let original = try Data(contentsOf: url)
+        try Data("被改过".utf8).write(to: url)
+        XCTAssertThrowsError(try MemoryRegeneration.restore(backup: b, memoryRoot: root, now: date(10, 16, 1))) {
+            XCTAssertEqual($0 as? MemoryRegeneration.RegenError, .incompleteBackup("备份里的文件和清单对不上"))
+        }
+        try FileManager.default.removeItem(at: url)
+        XCTAssertThrowsError(try MemoryRegeneration.restore(backup: b, memoryRoot: root, now: date(10, 16, 1)), "少了")
+        try original.write(to: url)
+        try put("timeline/多出来的.md", "x", in: b)
+        XCTAssertThrowsError(try MemoryRegeneration.restore(backup: b, memoryRoot: root, now: date(10, 16, 1)), "多了")
+        XCTAssertEqual(snapshot(five), current)
+        XCTAssertFalse(MemoryRegeneration.backups(memoryRoot: root).contains { $0.lastPathComponent.hasPrefix("回滚前-") })
+    }
+
+    /// astra #11：现在的全部挪开以后、开始拷回以前，「回滚前」就已经发布（备份列表里看得到、清单完整）
+    func testRestorePublishesAsideBeforeCopyingBack() throws {
+        try seedBroken()
+        let b = try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v5搬迁-t4", folders: five)
+        try put("sessions/新写的.md", "搬完以后写的")
+        let current = snapshot(five)
+        var seenAtCopy: [String: String]?
+        let watching: MemoryRegeneration.FileOp = { from, to in
+            if seenAtCopy == nil, let aside = MemoryRegeneration.backups(memoryRoot: self.root).first(where: { $0.lastPathComponent.hasPrefix("回滚前-") }) {
+                seenAtCopy = self.snapshot(self.five, base: aside)
+                XCTAssertNotNil(MemoryRegeneration.manifest(of: aside)?.files)
+            }
+            try FileManager.default.copyItem(at: from, to: to)
+        }
+        try MemoryRegeneration.restore(backup: b, memoryRoot: root, now: date(10, 16, 1), copy: watching)
+        XCTAssertEqual(seenAtCopy, current, "拷回第一份以前，回滚前就已经能恢复")
+    }
+
+    /// astra #1：恢复失败、挪回也失败 → 挪开的原件一个不删，抛错报出确切路径
+    func testRestoreRollbackFailureKeepsAside() throws {
+        try seedBroken()
+        let b = try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v4-1-test")
+        try put("timeline/2026-11.md", "备份以后才有的")
+        let current = snapshot()
+        // 拷时间轴时有人在 memory/ 里又建了 sessions/ 并且删不掉；拷 sessions/ 时失败
+        let hostile: MemoryRegeneration.FileOp = { from, to in
+            if from.lastPathComponent == SessionSummaryStore.folder {
+                try self.put("sessions/占位.md", "别人建的")
+                try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: to.path)
+                throw InjectedFailure()
+            }
+            try FileManager.default.copyItem(at: from, to: to)
+        }
+        var reported: String?
+        XCTAssertThrowsError(try MemoryRegeneration.restore(backup: b, memoryRoot: root, now: date(10, 16, 1), copy: hostile)) {
+            if case .rollbackIncomplete(let path)? = $0 as? MemoryRegeneration.RegenError { reported = path }
+        }
+        let aside = try XCTUnwrap(reported.map { URL(fileURLWithPath: $0) }, "报出了路径")
+        XCTAssertTrue(aside.lastPathComponent.hasPrefix("回滚前-"))
+        // 挪开的原件一个不少：时间轴挪回去了，sessions/ 挪不回去就整份留在回滚前
+        var now = snapshot()
+        for (k, v) in snapshot([SessionSummaryStore.folder], base: aside) { now[k] = v }
+        now["sessions/占位.md"] = nil
+        XCTAssertEqual(now, current)
+        XCTAssertNotNil(MemoryRegeneration.manifest(of: aside), "回滚前还在、能恢复")
+    }
+
+    /// B2：恢复老 v4-1 备份（清单没有 covered、没有文件清单）→ 只动老三个，pending/ summaries/ 原样不动
+    func testRestoringOldBackupLeavesPendingAndSummaries() throws {
+        try seedBroken()
+        let b = try MemoryRegeneration.makeBackup(memoryRoot: root, name: "v4-1-old")
+        // 老清单：没有 covered 这个字段
+        try put("manifest.json", #"{"folders":["timeline","sessions"],"createdAt":"2026-10-11T12:00:00Z"}"#, in: b)
+        XCTAssertNil(MemoryRegeneration.manifest(of: b)?.covered)
+        try put("pending/待续.md", "搬完以后的待续")
+        try put("summaries/conv-old-x.md", "第一代")
+        try MemoryRegeneration.restore(backup: b, memoryRoot: root, now: date(10, 16, 1))
+        XCTAssertEqual(text("pending/待续.md"), "搬完以后的待续")
+        XCTAssertEqual(text("summaries/conv-old-x.md"), "第一代")
+        let aside = try XCTUnwrap(MemoryRegeneration.backups(memoryRoot: root).first { $0.lastPathComponent.hasPrefix("回滚前-") })
+        XCTAssertEqual(MemoryRegeneration.manifest(of: aside)?.coveredFolders, MemoryRegeneration.folders)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: aside.appendingPathComponent(PendingStore.folder).path), "回滚前也只挪老三个")
+    }
+
+    /// B2：恢复 v5 搬迁备份 → 五个都回到备份那刻（备份时没有的 windows/ 恢复后也没有）；待续缓存清掉，读回备份那刻
+    func testRestoringMigrationBackupBringsPendingBack() throws {
+        let pid = "xctest-regen-pending"
+        let proot = FileLibraryStore.memoryRoot(profileId: pid)
+        defer {
+            PendingStore.forget(profileId: pid)
+            UserDefaults.standard.removeObject(forKey: PendingStore.migratedKey(profileId: pid))
+            try? FileManager.default.removeItem(at: proot.deletingLastPathComponent())
+        }
+        try PendingStore.add(["问结果"], conversationId: "c1", day: "2026-10-14", anchor: nil, profileId: pid)
+        try put("summaries/conv-old-x.md", "第一代", in: proot)
+        try put("sessions/c1.md", "老 A2", in: proot)
+        let b = try MemoryRegeneration.makeBackup(memoryRoot: proot, name: "v5搬迁-t2", folders: five)
+        try PendingStore.add(["搬完才有的"], conversationId: "c1", day: "2026-10-16", anchor: nil, profileId: pid)
+        try put("windows/c1.md", "新 A3", in: proot)
+        try put("sessions/c1.md", "新 A2", in: proot)
+        XCTAssertEqual(PendingStore.load(profileId: pid)?.count, 2)
+        try MemoryRegeneration.restore(backup: b, memoryRoot: proot, now: date(10, 16, 2), profileId: pid)
+        XCTAssertEqual(PendingStore.load(profileId: pid)?.map(\.text), ["问结果"], "待续本子回到备份那刻")
+        XCTAssertEqual(text("sessions/c1.md", in: proot), "老 A2")
+        XCTAssertEqual(text("summaries/conv-old-x.md", in: proot), "第一代")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: proot.appendingPathComponent(WindowSummaryStore.folder).path),
+                       "备份时原本没有的 windows/，恢复后也没有")
+        let aside = try XCTUnwrap(MemoryRegeneration.backups(memoryRoot: proot).first { $0.lastPathComponent.hasPrefix("回滚前-") })
+        XCTAssertEqual(text("windows/c1.md", in: aside), "新 A3", "搬完以后写的挪进回滚前")
+        XCTAssertEqual(MemoryRegeneration.manifest(of: aside)?.covered, five)
+    }
+
+    private func pendingFloor(_ pid: String) -> URL {
+        let proot = FileLibraryStore.memoryRoot(profileId: pid)
+        addTeardownBlock {
+            PendingStore.forget(profileId: pid)
+            UserDefaults.standard.removeObject(forKey: PendingStore.migratedKey(profileId: pid))
+            try? FileManager.default.removeItem(at: proot.deletingLastPathComponent())
+        }
+        return proot
+    }
+
+    /// astra #7：恢复失败也清待续缓存——盘上的本子和缓存不一样时，失败挪回来以后读的是盘上的
+    func testRestoreFailureStillForgetsPendingCache() throws {
+        let pid = "xctest-regen-pending-fail"
+        let proot = pendingFloor(pid)
+        try PendingStore.add(["问结果"], conversationId: "c1", day: "2026-10-14", anchor: nil, profileId: pid)
+        try put("sessions/c1.md", "老 A2", in: proot)
+        let b = try MemoryRegeneration.makeBackup(memoryRoot: proot, name: "v5搬迁-t5", folders: five)
+        XCTAssertEqual(PendingStore.load(profileId: pid)?.count, 1, "缓存热着")
+        let onDisk = [PendingItem(id: "p0001", text: "问结果", state: .done, conversationId: "c1", day: "2026-10-14", anchor: nil)]
+        try Data(PendingStore.render(onDisk).utf8).write(to: PendingStore.fileURL(profileId: pid))
+        let failing: MemoryRegeneration.FileOp = { from, to in
+            if from.lastPathComponent == SessionSummaryStore.folder { throw InjectedFailure() }
+            try FileManager.default.copyItem(at: from, to: to)
+        }
+        XCTAssertThrowsError(try MemoryRegeneration.restore(backup: b, memoryRoot: proot, now: date(10, 16, 2), copy: failing, profileId: pid))
+        XCTAssertEqual(PendingStore.load(profileId: pid), onDisk, "缓存清了，读回挪回来的那份")
+    }
+
+    /// astra #7：恢复期间改待续（pending_notes / 设置里改）要等恢复做完，落在恢复以后的本子上，不拿旧缓存整份写回去
+    func testPendingEditDuringRestoreWaitsAndLandsOnRestored() throws {
+        let pid = "xctest-regen-pending-lock"
+        let proot = pendingFloor(pid)
+        try PendingStore.add(["问结果"], conversationId: "c1", day: "2026-10-14", anchor: nil, profileId: pid)
+        let b = try MemoryRegeneration.makeBackup(memoryRoot: proot, name: "v5搬迁-t6", folders: five)
+        try PendingStore.add(["现在的"], conversationId: "c1", day: "2026-10-16", anchor: nil, profileId: pid)
+        let added = DispatchSemaphore(value: 0)
+        var blocked = false
+        let editing: MemoryRegeneration.FileOp = { from, to in
+            try FileManager.default.copyItem(at: from, to: to)
+            guard from.lastPathComponent == PendingStore.folder else { return }
+            Thread.detachNewThread {
+                _ = try? PendingStore.add(["恢复中加的"], conversationId: "c1", day: "2026-10-16", anchor: nil, profileId: pid)
+                added.signal()
+            }
+            blocked = added.wait(timeout: .now() + 0.3) == .timedOut
+        }
+        try MemoryRegeneration.restore(backup: b, memoryRoot: proot, now: date(10, 16, 2), copy: editing, profileId: pid)
+        XCTAssertTrue(blocked, "恢复拿着锁，改待续进不来")
+        XCTAssertEqual(added.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(PendingStore.load(profileId: pid)?.map(\.text), ["问结果", "恢复中加的"], "加在恢复以后的本子上，旧缓存没写回去")
+    }
+
+    // MARK: - astra #6 搬迁 / 恢复全局一趟
+
+    @MainActor
+    func testMaintenanceGateIsExclusiveAndReleases() async {
+        let gate = MemoryMaintenance.shared
+        var inner: Result<String, MemoryMaintenance.Refusal> = .success("还没试")
+        let outer = await gate.exclusive("搬迁") { () async -> String in
+            XCTAssertEqual(gate.holder, "搬迁")
+            inner = await gate.exclusive("恢复") { () async -> String in "不该跑" }
+            return "跑了"
+        }
+        XCTAssertEqual(outer, .success("跑了"))
+        XCTAssertEqual(inner, .failure(.held), "另一趟拿不到资格，什么都不跑")
+        XCTAssertNil(gate.holder, "结束放开")
+        let regenerating = await SessionCloseout.shared.regenerating
+        XCTAssertFalse(regenerating, "日常写手放开")
+        let again = await gate.exclusive("恢复") { "又能跑了" }
+        XCTAssertEqual(again, .success("又能跑了"))
     }
 }

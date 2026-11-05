@@ -18,6 +18,31 @@ enum LocalTerminalLaunch {
         var droppedDirectory: String?
     }
 
+    #if DEBUG || PERF_BENCH
+    /// 仅作隔离安全输出；不是 L-term 恒定负载生成器，也不解析 shell 文本。
+    enum BenchSyntheticOutput {
+        static let command = "mp-bench-synthetic-output"
+        static let executable = "/usr/bin/printf"
+        static let arguments = ["%s\\n", "[bench] synthetic terminal output (not L-term)"]
+        static let rejectionArguments = ["%s\\n", "[bench] 拒绝通用 shell、续跑命令或任意 cwd；仅支持固定合成输出或已校验根内 TUI 文件。"]
+        static let environment = ["PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8", "TERM": "xterm-256color"]
+
+        static var directory: String {
+            guard let root = BenchIsolation.root else {
+                preconditionFailure("active bench 必须有隔离根")
+            }
+            return root.path
+        }
+
+        static func accepts(directory: String?) -> Bool {
+            directory == nil || directory == Self.directory
+        }
+    }
+    /// R1-3 writes timestamped ANSI redraws into a root-local regular file.
+    /// Consume it through a real PTY without admitting shell text or a generator executable.
+    static let benchTUIFilePrefix = "mp-bench-tui-file:"
+    #endif
+
     /// `-c "<run>; exec <shell> -l -i"` 成立的 shell（R-MT I6）；其余退回往 PTY 写命令
     static let posixShells: Set<String> = ["zsh", "bash", "sh", "ksh", "dash"]
 
@@ -34,7 +59,32 @@ enum LocalTerminalLaunch {
     /// 无命令 = 登录交互 shell；有命令：POSIX 家族先跑它、结束后留在交互 shell 里（与 Ghostty 续跑同形），其余 shell 起好后往 PTY 写这一行。
     /// 目录一律走 forkpty 的工作目录，命令里不带 cd
     static func spec(command: String?, directory: String?, environment: [String: String],
-                     home: String = FileManager.default.homeDirectoryForCurrentUser.path) -> Spec {
+                     home: String = AppPaths.home.path) -> Spec {
+        #if DEBUG || PERF_BENCH
+        if BenchIsolation.active {
+            if environment["MP_PERF_RUN"] == "1", let command,
+               command.hasPrefix(benchTUIFilePrefix), BenchSyntheticOutput.accepts(directory: directory),
+               let isolation = BenchIsolation.configuration {
+                let path = String(command.dropFirst(benchTUIFilePrefix.count))
+                if let url = try? isolation.check(URL(fileURLWithPath: path)),
+                   let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+                   attributes[.type] as? FileAttributeType == .typeRegular {
+                    return Spec(executable: "/usr/bin/tail", args: ["-c", "+1", "-f", url.path],
+                                execName: "tail",
+                                environment: BenchSyntheticOutput.environment.map { "\($0.key)=\($0.value)" }.sorted(),
+                                directory: BenchSyntheticOutput.directory, typedCommand: nil)
+                }
+            }
+            let accepted = (command == nil || command == BenchSyntheticOutput.command)
+                && BenchSyntheticOutput.accepts(directory: directory)
+            // 拒绝信息也仅由不可变系统 printf 输出；不启动 shell、不查 SHELL、账户库或请求的 cwd。
+            return Spec(executable: BenchSyntheticOutput.executable,
+                        args: accepted ? BenchSyntheticOutput.arguments : BenchSyntheticOutput.rejectionArguments,
+                        execName: "printf",
+                        environment: BenchSyntheticOutput.environment.map { "\($0.key)=\($0.value)" }.sorted(),
+                        directory: BenchSyntheticOutput.directory, typedCommand: nil)
+        }
+        #endif
         let shell = userShell(environment: environment)
         let name = (shell as NSString).lastPathComponent
         var args = ["-l"]

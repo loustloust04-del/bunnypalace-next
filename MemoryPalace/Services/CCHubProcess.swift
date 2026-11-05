@@ -87,16 +87,16 @@ final class CCHubProcess: ObservableObject {
     // MARK: - Workdir / Secrets
 
     private var supportDirURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("cc-bridge", isDirectory: true)
+            .appendingPathComponent("cc-bridge", isDirectory: true))
     }
 
     /// Claude 的家：和思考链 hook 装的是同一个（astra P1-4），不再自己另算一份
     var ccWorkdirURL: URL { CCThinkingHookInstaller.workdir }
     /// Codex 的家（hub 的 codexHome 兜底同一个位置）
-    var codexWorkdirURL: URL { supportDirURL.appendingPathComponent("gpt-rp", isDirectory: true) }
-    var secretsDirURL: URL { supportDirURL.appendingPathComponent("secrets", isDirectory: true) }
+    var codexWorkdirURL: URL { AppPaths.checked(supportDirURL.appendingPathComponent("gpt-rp", isDirectory: true)) }
+    var secretsDirURL: URL { AppPaths.checked(supportDirURL.appendingPathComponent("secrets", isDirectory: true)) }
 
     private func prepareDirectories() {
         for dir in [supportDirURL, ccWorkdirURL, codexWorkdirURL, secretsDirURL] {
@@ -159,7 +159,7 @@ final class CCHubProcess: ObservableObject {
         env["MP_CC_SECRETS_DIR"] = secretsDirURL.path
         if let mcp = mcpServerBinaryURL { env["MP_CC_MCP_SERVER_BIN"] = mcp.path }
         // GUI app spawn 子进程 PATH 不含 brew/npm/bun，手动补
-        let home = NSHomeDirectory()
+        let home = AppPaths.home.path
         env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:\(home)/.bun/bin:\(home)/.local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
         p.environment = env
 

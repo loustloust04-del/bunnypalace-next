@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>画板 UI 小样</title>
+<style>
+:root{
+  --cream:#FFFBF6; --mint:#E7EEEC; --accent:#8EBD9F; --accent-d:#6FA383;
+  --ink:#3b352d; --muted:#9a8f80; --line:#ece4d8; --desk:#f3eee6;
+}
+*{box-sizing:border-box}
+body{margin:0;background:#ebe6de;font:14px/1.45 -apple-system,"PingFang SC",sans-serif;color:var(--ink)}
+header{max-width:1240px;margin:0 auto;padding:18px 24px 4px}
+header h1{font-size:18px;margin:0 0 4px}
+header p{margin:0;color:var(--muted);font-size:12.5px}
+.row{display:flex;flex-wrap:wrap;gap:28px;justify-content:center;max-width:1240px;margin:16px auto 40px;padding:0 16px}
+.col{display:flex;flex-direction:column;align-items:center;gap:10px}
+.col h2{font-size:14px;margin:0;font-weight:600}
+.col .sub{font-size:11.5px;color:var(--muted);max-width:360px;text-align:center}
+
+/* 手机 */
+.phone{width:360px;height:782px;border-radius:52px;background:#111;padding:10px;box-shadow:0 20px 50px rgba(40,30,20,.25)}
+.screen{position:relative;width:100%;height:100%;border-radius:43px;overflow:hidden;background:var(--cream)}
+.status{position:absolute;top:0;left:0;right:0;height:44px;display:flex;justify-content:space-between;align-items:center;padding:0 28px;font-weight:600;font-size:14px;z-index:5}
+.island{position:absolute;top:10px;left:50%;transform:translateX(-50%);width:110px;height:32px;border-radius:20px;background:#000;z-index:6}
+
+/* 背后聊天（被 sheet 压暗） */
+.chat{position:absolute;inset:0;padding:60px 16px;background:var(--cream)}
+.chat .b{max-width:70%;padding:9px 12px;border-radius:18px;margin:8px 0;font-size:13px}
+.chat .ai{background:#fff}
+.chat .me{background:var(--mint);margin-left:auto}
+.dim{position:absolute;inset:0;background:rgba(0,0,0,.18)}
+
+/* sheet */
+.sheet{position:absolute;left:0;right:0;bottom:0;top:52px;background:var(--cream);border-radius:34px 34px 0 0;box-shadow:0 -6px 30px rgba(0,0,0,.12);display:flex;flex-direction:column;overflow:hidden}
+.grabber{width:36px;height:5px;border-radius:3px;background:rgba(60,50,40,.22);margin:7px auto 0}
+.nav{display:flex;align-items:center;gap:8px;padding:8px 14px 6px}
+.nav .title{flex:1;text-align:center;font-weight:600;font-size:16px}
+.gbtn{height:38px;min-width:38px;border-radius:19px;display:flex;align-items:center;justify-content:center;gap:2px;background:rgba(255,255,255,.75);
+  box-shadow:inset 0 0 0 .5px rgba(0,0,0,.08),0 1px 6px rgba(60,40,20,.08);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border:0;cursor:pointer;color:var(--ink);padding:0 4px}
+.gbtn svg{width:19px;height:19px}
+.gbtn.ok{background:var(--accent);color:#fff;box-shadow:0 2px 8px rgba(110,160,130,.35)}
+.gbtn .seg{width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:17px}
+.gbtn .seg.off{opacity:.35}
+.paper-btn{font-size:13px;font-weight:500;padding:0 12px;gap:5px}
+
+.canvas{position:relative;flex:1;margin:4px 12px 0;border-radius:20px;overflow:hidden;background:#fbf8f2;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.06)}
+.canvas svg.art{position:absolute;inset:0;width:100%;height:100%}
+
+/* A：笔筒 */
+.tray{position:relative;height:138px;display:flex;align-items:flex-end;padding:0 6px 22px 8px;gap:2px}
+.shelf{position:absolute;left:10px;right:10px;bottom:16px;height:46px;border-radius:16px;background:linear-gradient(#fff,#f6f1ea);box-shadow:0 -1px 0 rgba(0,0,0,.04),0 2px 8px rgba(60,40,20,.07)}
+.pens{position:relative;display:flex;align-items:flex-end;gap:0;flex:1;overflow-x:auto;scrollbar-width:none;padding-top:20px;height:118px}
+.pen{flex:0 0 auto;width:25px;height:96px;display:flex;align-items:flex-end;justify-content:center;transform:translateY(18px);transition:transform .25s cubic-bezier(.3,1.4,.5,1);cursor:pointer}
+.pen.on{transform:translateY(0)}
+.pen svg{width:25px;height:90px;filter:drop-shadow(0 2px 2px rgba(60,40,20,.15))}
+.tray-side{position:relative;display:flex;flex-direction:column;align-items:center;gap:8px;padding-left:8px;margin-bottom:6px}
+.well{width:34px;height:34px;border-radius:50%;padding:3px;background:conic-gradient(#e58a8a,#e9b98a,#a6cf9a,#8fc3c0,#a49ad0,#e58a8a);cursor:pointer}
+.well i{display:block;width:100%;height:100%;border-radius:50%;border:2px solid #fff}
+.sizes{display:flex;gap:5px;align-items:center}
+.sizes b{display:block;border-radius:50%;background:var(--ink);opacity:.35;cursor:pointer}
+.sizes b.on{opacity:1}
+.pdiv{flex:0 0 auto;width:1px;height:40px;margin:0 3px 4px;background:rgba(60,50,40,.18);align-self:flex-end}
+.rbtn{width:34px;height:30px;border-radius:15px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink);background:rgba(60,50,40,.06)}
+.rbtn.on{background:var(--mint);color:var(--accent-d)}
+.rbtn svg{width:20px;height:20px}
+.ruler{position:absolute;left:-40px;top:58%;width:460px;height:54px;transform:rotate(-14deg);background:rgba(255,255,255,.55);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);border:1px solid rgba(60,50,40,.18);border-radius:6px;display:none;
+  background-image:repeating-linear-gradient(90deg,rgba(60,50,40,.45) 0 1px,transparent 1px 10px),repeating-linear-gradient(90deg,rgba(60,50,40,.55) 0 1px,transparent 1px 50px);background-size:100% 9px,100% 16px;background-repeat:no-repeat}
+.ruler.on{display:block}
+.tlabel{position:absolute;bottom:2px;left:0;right:0;text-align:center;font-size:11px;color:var(--muted)}
+
+/* 弹出调色 */
+.pop{position:absolute;right:12px;bottom:140px;width:236px;background:rgba(255,255,255,.92);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border-radius:22px;padding:12px;box-shadow:0 10px 30px rgba(60,40,20,.2);display:none}
+.pop.on{display:block}
+.pop .grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+.pop .grid i{width:28px;height:28px;border-radius:50%;cursor:pointer;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.1)}
+.pop .grid i.on{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--ink)}
+.pop .lab{font-size:11px;color:var(--muted);margin:10px 2px 6px}
+.pop input{width:100%;accent-color:var(--accent-d)}
+
+/* B：玻璃工具条 */
+.bar-wrap{position:absolute;left:0;right:0;bottom:24px;display:flex;flex-direction:column;align-items:center;gap:8px}
+.sub-bar{display:flex;align-items:center;gap:8px;padding:7px 12px;border-radius:24px;background:rgba(255,255,255,.72);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);box-shadow:inset 0 0 0 .5px rgba(255,255,255,.9),0 4px 18px rgba(60,40,20,.12)}
+.sub-bar i{width:22px;height:22px;border-radius:50%;cursor:pointer;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.1)}
+.sub-bar i.on{box-shadow:0 0 0 2px #fff,0 0 0 3.5px var(--ink)}
+.sub-bar input{width:84px;accent-color:var(--accent-d)}
+.glass-bar{display:flex;align-items:center;gap:2px;padding:6px;border-radius:30px;background:rgba(255,255,255,.72);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);box-shadow:inset 0 0 0 .5px rgba(255,255,255,.9),0 6px 22px rgba(60,40,20,.15)}
+.tb{width:36px;height:42px;border-radius:21px;border:0;background:transparent;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink);position:relative}
+.tb svg{width:21px;height:21px}
+.tb.on{background:var(--mint)}
+.tb .dot{position:absolute;bottom:6px;width:5px;height:5px;border-radius:50%}
+.hint-name{font-size:11px;color:var(--muted);height:14px}
+
+/* 设置页 */
+.settings{position:absolute;inset:0;background:#f4f1ec;padding-top:44px;overflow-y:auto}
+.snav{display:flex;align-items:center;padding:6px 16px 10px}
+.snav .t{flex:1;text-align:center;font-weight:600;font-size:16px;margin-right:38px}
+.group-title{font-size:12px;color:var(--muted);padding:14px 32px 6px}
+.group{margin:0 16px;background:#fff;border-radius:16px;overflow:hidden}
+.cell{display:flex;align-items:center;gap:12px;padding:10px 14px;min-height:46px;border-bottom:.5px solid var(--line)}
+.cell:last-child{border-bottom:0}
+.cell .ic{width:30px;height:30px;display:flex;align-items:center;justify-content:center}
+.cell .ic svg{width:24px;height:42px;transform:rotate(-38deg)}
+.cell .name{flex:1;font-size:14.5px}
+.toggle{width:48px;height:29px;border-radius:15px;background:#e3ddd4;position:relative;cursor:pointer;transition:.2s}
+.toggle::after{content:'';position:absolute;top:2px;left:2px;width:25px;height:25px;border-radius:50%;background:#fff;box-shadow:0 2px 4px rgba(0,0,0,.15);transition:.2s}
+.toggle.on{background:var(--accent)}
+.toggle.on::after{left:21px}
+.colors{display:flex;flex-wrap:wrap;gap:9px;padding:12px 14px}
+.colors i{width:30px;height:30px;border-radius:50%;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.1);position:relative}
+.colors .add{display:flex;align-items:center;justify-content:center;background:var(--mint);color:var(--accent-d);font-style:normal;font-size:20px;font-weight:500}
+.foot{font-size:11.5px;color:var(--muted);padding:6px 32px 0}
+.val{color:var(--muted);font-size:14px}
+.chev{color:#c9bfb2}
+</style>
+</head>
+<body>
+<header>
+  <h1>画板 UI 重做 · 小样</h1>
+  <p>改成从下面弹上来的 sheet（下拉关；画画时下拉不会误关，要点 ✕）。不要橡皮泥：用 app 本来的暖奶白 + 浅薄荷，按钮是 iOS 26 原生的玻璃圆钮。两个方案二选一，第三台是设置页。都能点：选笔、点颜色圈、点粗细。</p>
+</header>
+
+<div class="row">
+  <!-- A -->
+  <div class="col">
+    <h2>A · 笔筒</h2>
+    <div class="sub">底下一排画出来的笔，选中的往上冒（备忘录那种）。竖线分三组：水彩 / 钢笔 ｜ 铅笔 / 马克笔 / 蜡笔 / 单线笔（系统 PencilKit）｜ 橡皮 / 套索。右边：尺子开关、颜色圈（点开调色）、三档粗细。</div>
+    <div class="phone"><div class="screen" id="A">
+      <div class="island"></div><div class="status"><span>9:41</span><span>●●● ▮</span></div>
+      <div class="chat"><div class="b ai">今天想画点什么？</div><div class="b me">画一束花给你</div></div>
+      <div class="dim"></div>
+      <div class="sheet">
+        <div class="grabber"></div>
+        <div class="nav">
+          <button class="gbtn" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          <button class="gbtn paper-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3.5" width="14" height="17" rx="2.5"/><path d="M8.5 9h7M8.5 12.5h7M8.5 16h4" stroke-linecap="round"/></svg>水彩纸</button>
+          <div class="title"></div>
+          <div class="gbtn"><span class="seg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 010 11H11"/></svg></span><span class="seg off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 000 11H13"/></svg></span></div>
+          <button class="gbtn ok" title="保存"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+        </div>
+        <div class="canvas"><svg class="art" viewBox="0 0 336 470"></svg><div class="ruler" id="A-rulerbar"></div></div>
+        <div class="tray">
+          <div class="shelf"></div>
+          <div class="pens" id="A-pens"></div>
+          <div class="tray-side">
+            <div class="rbtn" id="A-ruler" title="尺子"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2.5" y="8" width="19" height="8" rx="1.5" transform="rotate(-30 12 12)"/><path d="M7.4 13.9l-1-1.7M10.4 12.2l-1-1.7M13.4 10.4l-1-1.7M16.4 8.7l-1-1.7" stroke-linecap="round" transform="rotate(0)"/></svg></div>
+            <div class="well" id="A-well"><i></i></div>
+            <div class="sizes" id="A-sizes"></div>
+          </div>
+          <div class="tlabel" id="A-name"></div>
+        </div>
+        <div class="pop" id="A-pop">
+          <div class="grid" id="A-grid"></div>
+          <div class="lab">水量</div><input type="range" value="60">
+        </div>
+      </div>
+    </div></div>
+  </div>
+
+  <!-- B -->
+  <div class="col">
+    <h2>B · 玻璃工具条</h2>
+    <div class="sub">画布占满，底下浮一条玻璃胶囊放笔（图标），上面一条小胶囊放当前笔的颜色 + 粗细。更省地方。</div>
+    <div class="phone"><div class="screen" id="B">
+      <div class="island"></div><div class="status"><span>9:41</span><span>●●● ▮</span></div>
+      <div class="chat"><div class="b ai">今天想画点什么？</div><div class="b me">画一束花给你</div></div>
+      <div class="dim"></div>
+      <div class="sheet">
+        <div class="grabber"></div>
+        <div class="nav">
+          <button class="gbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          <button class="gbtn paper-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3.5" width="14" height="17" rx="2.5"/><path d="M8.5 9h7M8.5 12.5h7M8.5 16h4" stroke-linecap="round"/></svg>水彩纸</button>
+          <div class="title"></div>
+          <div class="gbtn"><span class="seg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 010 11H11"/></svg></span><span class="seg off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 000 11H13"/></svg></span></div>
+          <button class="gbtn ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+        </div>
+        <div class="canvas" style="margin-bottom:12px"><svg class="art" viewBox="0 0 336 600"></svg>
+          <div class="bar-wrap">
+            <div class="sub-bar" id="B-sub"></div>
+            <div class="glass-bar" id="B-bar"></div>
+            <div class="hint-name" id="B-name"></div>
+          </div>
+        </div>
+      </div>
+    </div></div>
+  </div>
+
+  <!-- 设置 -->
+  <div class="col">
+    <h2>设置 · 贴纸 ·「画笔」</h2>
+    <div class="sub">系统列表样式：每支笔一行开关（画板里只出开着的），两组颜色可加可删（长按删），默认纸一行。</div>
+    <div class="phone"><div class="screen">
+      <div class="island"></div><div class="status"><span>9:41</span><span>●●● ▮</span></div>
+      <div class="settings">
+        <div class="snav"><button class="gbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button><div class="t">贴纸</div></div>
+        <div class="group-title">画笔</div>
+        <div class="group" id="S-pens"></div>
+        <div class="foot">关掉的笔不出现在画板里。</div>
+        <div class="group-title">水彩颜色</div>
+        <div class="group"><div class="colors" id="S-water"></div></div>
+        <div class="group-title">墨水颜色（钢笔 / 铅笔 / 马克笔…）</div>
+        <div class="group"><div class="colors" id="S-ink"></div></div>
+        <div class="foot">长按颜色可以删掉。</div>
+        <div class="group-title">纸</div>
+        <div class="group"><div class="cell"><span class="name">默认纸</span><span class="val">水彩纸</span><span class="chev">›</span></div></div>
+        <div style="height:40px"></div>
+      </div>
+    </div></div>
+  </div>
+</div>
+
+<script>
+const WATER=['#c8505a','#e58a5c','#e9b949','#6f9a4c','#2f7f7a','#3a6fb0','#6a5aa8','#8a5a44','#4a5560'];
+const INK=['#22314a','#1c1c1c','#5a2b2b','#2c4a3a','#4a3a6a','#8a3b2e'];
+// 笔的插画：笔杆 + 笔头（笔头用当前颜色）
+const PENS=[
+ {id:'water',name:'水彩',svg:c=>`<rect x="11" y="34" width="8" height="62" rx="3" fill="#d9c6ad"/><rect x="10" y="26" width="10" height="12" rx="2" fill="#c9ccd1"/><path d="M10 27 Q15 2 20 27 Z" fill="${c}"/><path d="M12 25 Q15 8 17 25" fill="#fff" opacity=".25"/>`},
+ {id:'pen',name:'尖头钢笔',svg:c=>`<rect x="9" y="40" width="12" height="56" rx="5" fill="#2f3a45"/><rect x="9" y="36" width="12" height="6" fill="#c9a96a"/><path d="M9 37 L15 6 L21 37 Z" fill="#d7d9dc"/><path d="M15 9 L15 30" stroke="#8a8f96" stroke-width="1"/><circle cx="15" cy="30" r="1.6" fill="#8a8f96"/><path d="M14 6 L16 6 L15 3 Z" fill="${c}"/>`},
+ {id:'nib',name:'平头钢笔',svg:c=>`<rect x="9" y="40" width="12" height="56" rx="5" fill="#6b3f3a"/><rect x="9" y="36" width="12" height="6" fill="#c9a96a"/><path d="M9 37 L11 8 L19 8 L21 37 Z" fill="#d7d9dc"/><rect x="11" y="5" width="8" height="4" fill="${c}"/><path d="M15 10 L15 30" stroke="#8a8f96" stroke-width="1"/>`},
+ {id:'pencil',name:'铅笔',svg:c=>`<rect x="10" y="30" width="10" height="66" fill="#f2d9a6"/><rect x="13" y="30" width="4" height="66" fill="#e8c98e"/><path d="M10 31 L15 8 L20 31 Z" fill="#ead2b0"/><path d="M13.3 16 L15 8 L16.7 16 Z" fill="${c}"/>`},
+ {id:'marker',name:'马克笔',svg:c=>`<rect x="8" y="34" width="14" height="62" rx="4" fill="#f4f2ee"/><rect x="8" y="34" width="14" height="10" fill="${c}" opacity=".85"/><path d="M10 35 L12 14 L18 10 L20 35 Z" fill="#e9e6e0"/><path d="M12 14 L18 10 L18 16 L12 18 Z" fill="${c}"/>`},
+ {id:'crayon',name:'蜡笔',svg:c=>`<rect x="9" y="30" width="12" height="66" rx="2" fill="${c}"/><rect x="9" y="44" width="12" height="40" fill="#fff" opacity=".35"/><path d="M9 31 L13 14 L17 14 L21 31 Z" fill="${c}"/>`},
+ {id:'mono',name:'单线笔',svg:c=>`<rect x="10" y="30" width="10" height="66" rx="4" fill="#ece8e1"/><path d="M10 31 L13.5 14 L16.5 14 L20 31 Z" fill="#d9d4cc"/><rect x="14" y="7" width="2" height="8" fill="${c}"/>`},
+ {id:'eraser',name:'橡皮',svg:c=>`<rect x="9" y="22" width="12" height="74" rx="3" fill="#f4f2ee"/><rect x="9" y="22" width="12" height="24" rx="3" fill="#f0b8b0"/>`},
+  ,{id:'lasso',name:'套索（圈选铅笔类的线，挪 / 删）',svg:c=>`<rect x="10" y="34" width="10" height="62" rx="4" fill="#ece8e1"/><path d="M10 35 L13 22 L17 22 L20 35 Z" fill="#d9d4cc"/><ellipse cx="15" cy="12" rx="9" ry="7" fill="none" stroke="#8a8f96" stroke-width="1.4" stroke-dasharray="2.5 2"/>`},
+];
+const ICON={
+ lasso:'<ellipse cx="12" cy="10" rx="7" ry="5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="3 2.4"/><path d="M9 15c-1 3 1 5 3 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>',
+ water:'<path d="M12 3c3 4.5 6 7.6 6 11a6 6 0 0 1-12 0c0-3.4 3-6.5 6-11z" fill="none" stroke="currentColor" stroke-width="1.8"/>',
+ pen:'<path d="M12 3l3.5 9-3.5 9-3.5-9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 3v9" stroke="currentColor" stroke-width="1.4"/>',
+ nib:'<path d="M8 4h8l1 8-5 9-5-9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 12v6" stroke="currentColor" stroke-width="1.4"/>',
+ pencil:'<path d="M5 19l2-5L16 5l3 3-9 9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M14 7l3 3" stroke="currentColor" stroke-width="1.6"/>',
+ marker:'<path d="M6 18l3-7 7-7 4 4-7 7z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 20h7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>',
+ crayon:'<path d="M6 18l2-6 8-8 4 4-8 8z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M10 10l4 4" stroke="currentColor" stroke-width="1.4"/>',
+ mono:'<path d="M4 16c3-6 6 2 9-4s5-2 7-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+ eraser:'<path d="M5 15l8-8 6 6-6 6H9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 11l6 6" stroke="currentColor" stroke-width="1.6"/>',
+};
+const st={A:{tool:'water',color:'#3a6fb0',ink:'#22314a',size:1},B:{tool:'water',color:'#3a6fb0',ink:'#22314a',size:.55}};
+const colorOf=(s,id)=>id==='water'?s.color:s.ink;
+
+// 画布上的示例画：水彩花 + 钢笔线
+function art(svg,h){
+  svg.innerHTML=`
+  <defs><filter id="wc" x="-20%" y="-20%" width="140%" height="140%"><feTurbulence type="fractalNoise" baseFrequency=".035" numOctaves="2" seed="4"/><feDisplacementMap in="SourceGraphic" scale="9"/><feGaussianBlur stdDeviation=".6"/></filter>
+  <filter id="paper"><feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="3"/><feColorMatrix values="0 0 0 0 .5 0 0 0 0 .45 0 0 0 0 .4 0 0 0 .07 0"/></filter></defs>
+  <rect width="100%" height="100%" filter="url(#paper)"/>
+  <g filter="url(#wc)" style="mix-blend-mode:multiply">
+    <circle cx="140" cy="${h*.3}" r="34" fill="#c8505a" opacity=".42"/><circle cx="182" cy="${h*.27}" r="30" fill="#e58a5c" opacity=".38"/><circle cx="165" cy="${h*.37}" r="28" fill="#c8505a" opacity=".32"/>
+    <circle cx="214" cy="${h*.34}" r="22" fill="#6a5aa8" opacity=".3"/>
+    <path d="M150 ${h*.42} q-6 ${h*.18} -18 ${h*.3}" stroke="#6f9a4c" stroke-width="10" fill="none" opacity=".4" stroke-linecap="round"/>
+    <ellipse cx="118" cy="${h*.56}" rx="26" ry="11" fill="#6f9a4c" opacity=".35" transform="rotate(-30 118 ${h*.56})"/>
+  </g>
+  <path d="M92 ${h*.18} c30 -22 120 -30 150 10 s10 90 -40 100 s-120 -20 -110 -70" stroke="#22314a" stroke-width="1.3" fill="none" opacity=".75"/>
+  <text x="60" y="${h*.8}" font-family="Snell Roundhand, cursive" font-size="30" fill="#22314a" opacity=".8">for you</text>`;
+}
+document.querySelectorAll('svg.art').forEach((s,i)=>art(s,i?600:470));
+
+/* A */
+function renderA(){
+  const s=st.A;
+  document.getElementById('A-pens').innerHTML=PENS.map(p=>(p.id==='pencil'||p.id==='eraser'?'<span class="pdiv"></span>':'')+`<div class="pen ${p.id===s.tool?'on':''}" data-id="${p.id}"><svg viewBox="0 0 30 96">${p.svg(colorOf(s,p.id))}</svg></div>`).join('');
+  document.querySelectorAll('#A-pens .pen').forEach(e=>e.onclick=()=>{s.tool=e.dataset.id; renderA();});
+  document.querySelector('#A-well i').style.background=s.tool==='eraser'?'#f0b8b0':colorOf(s,s.tool);
+  document.getElementById('A-sizes').innerHTML=[6,10,15].map((d,i)=>`<b data-i="${i}" class="${i===s.size?'on':''}" style="width:${d}px;height:${d}px"></b>`).join('');
+  document.querySelectorAll('#A-sizes b').forEach(b=>b.onclick=()=>{s.size=+b.dataset.i; renderA();});
+  document.getElementById('A-name').textContent=PENS.find(p=>p.id===s.tool).name;
+  const list=s.tool==='water'?WATER:INK;
+  document.getElementById('A-grid').innerHTML=list.map(c=>`<i data-c="${c}" class="${c===colorOf(s,s.tool)?'on':''}" style="background:${c}"></i>`).join('');
+  document.querySelectorAll('#A-grid i').forEach(e=>e.onclick=()=>{ if(s.tool==='water') s.color=e.dataset.c; else s.ink=e.dataset.c; renderA(); });
+  document.querySelector('#A-pop .lab').style.display=document.querySelector('#A-pop input').style.display= s.tool==='water'?'':'none';
+}
+document.getElementById('A-ruler').onclick=()=>{ document.getElementById('A-ruler').classList.toggle('on'); document.getElementById('A-rulerbar').classList.toggle('on'); };
+document.getElementById('A-well').onclick=()=>document.getElementById('A-pop').classList.toggle('on');
+renderA();
+
+/* B */
+function renderB(){
+  const s=st.B;
+  document.getElementById('B-bar').innerHTML=PENS.map(p=>`<button class="tb ${p.id===s.tool?'on':''}" data-id="${p.id}" title="${p.name}"><svg viewBox="0 0 24 24">${ICON[p.id]}</svg>${p.id!=='eraser'?`<span class="dot" style="background:${colorOf(s,p.id)};opacity:${p.id===s.tool?1:0}"></span>`:''}</button>`).join('');
+  document.querySelectorAll('#B-bar .tb').forEach(e=>e.onclick=()=>{s.tool=e.dataset.id; renderB();});
+  const list=s.tool==='water'?WATER.slice(0,7):INK;
+  document.getElementById('B-sub').innerHTML= (s.tool==='eraser'?'':list.map(c=>`<i data-c="${c}" class="${c===colorOf(s,s.tool)?'on':''}" style="background:${c}"></i>`).join(''))
+    +`<input type="range" min="0" max="1" step=".01" value="${s.size}">`;
+  document.querySelectorAll('#B-sub i').forEach(e=>e.onclick=()=>{ if(s.tool==='water') s.color=e.dataset.c; else s.ink=e.dataset.c; renderB(); });
+  document.getElementById('B-name').textContent=PENS.find(p=>p.id===s.tool).name;
+}
+renderB();
+
+/* 设置 */
+const on=new Set(PENS.map(p=>p.id).filter(i=>i!=='eraser'));
+function renderS(){
+  document.getElementById('S-pens').innerHTML=PENS.filter(p=>p.id!=='eraser'&&p.id!=='lasso').map(p=>`<div class="cell"><span class="ic"><svg viewBox="0 0 30 96">${p.svg(p.id==='water'?'#3a6fb0':'#22314a')}</svg></span><span class="name">${p.name}</span><span class="toggle ${on.has(p.id)?'on':''}" data-id="${p.id}"></span></div>`).join('');
+  document.querySelectorAll('#S-pens .toggle').forEach(t=>t.onclick=()=>{ on.has(t.dataset.id)?on.delete(t.dataset.id):on.add(t.dataset.id); renderS(); });
+  document.getElementById('S-water').innerHTML=WATER.map(c=>`<i style="background:${c}"></i>`).join('')+'<i class="add">＋</i>';
+  document.getElementById('S-ink').innerHTML=INK.map(c=>`<i style="background:${c}"></i>`).join('')+'<i class="add">＋</i>';
+}
+renderS();
+</script>
+</body>
+</html>

@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>输入框 @ 文件</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --page:#EFE9DF; --bg:#F7F2EA; --card:#FFFDF9; --ink:#2B2420; --muted:#8C8178; --faint:#B9AFA5;
+  --line:rgba(43,36,32,.10); --glass:rgba(255,253,249,.78); --tileBg:rgba(43,36,32,.06);
+  --badge:#2F2723; --badgeInk:#FFFFFF; --hl:rgba(140,96,60,.16); --hlInk:#6B4A2E;
+  --bubbleMe:#E9E1D5; --bubbleAi:#FFFDF9; --shadow:0 10px 30px rgba(60,40,20,.12);
+  --sel:#2F2723;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --page:#14110F; --bg:#1C1815; --card:#26211D; --ink:#EFE7DD; --muted:#A39789; --faint:#6F655C;
+    --line:rgba(239,231,221,.12); --glass:rgba(38,33,29,.82); --tileBg:rgba(239,231,221,.08);
+    --badge:#EFE7DD; --badgeInk:#1C1815; --hl:rgba(214,170,120,.20); --hlInk:#E3C29C;
+    --bubbleMe:#3A322B; --bubbleAi:#26211D; --shadow:0 10px 30px rgba(0,0,0,.45); --sel:#EFE7DD;
+  }
+}
+:root[data-theme="dark"]{
+  --page:#14110F; --bg:#1C1815; --card:#26211D; --ink:#EFE7DD; --muted:#A39789; --faint:#6F655C;
+  --line:rgba(239,231,221,.12); --glass:rgba(38,33,29,.82); --tileBg:rgba(239,231,221,.08);
+  --badge:#EFE7DD; --badgeInk:#1C1815; --hl:rgba(214,170,120,.20); --hlInk:#E3C29C;
+  --bubbleMe:#3A322B; --bubbleAi:#26211D; --shadow:0 10px 30px rgba(0,0,0,.45); --sel:#EFE7DD;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--page);color:var(--ink);font-family:"Noto Sans SC",-apple-system,"PingFang SC",sans-serif;line-height:1.55;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1320px;margin:0 auto;padding:40px 16px 64px}
+h1{font-size:26px;font-weight:700;letter-spacing:.5px}
+.sub{color:var(--muted);font-size:14px;margin-top:6px}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin:26px 0 36px}
+.note{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px 18px;font-size:13.5px}
+.note h3{font-size:14.5px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.note ul{padding-left:18px}.note li{margin:3px 0}
+.note b{font-weight:600}
+.tag{font-size:11px;font-weight:600;background:var(--badge);color:var(--badgeInk);border-radius:999px;padding:1px 8px}
+.screens{display:flex;flex-wrap:wrap;gap:34px;justify-content:center}
+.col{display:flex;flex-direction:column;align-items:center;gap:12px}
+.cap{font-size:14px;font-weight:600}.cap span{color:var(--muted);font-weight:400;font-size:12.5px;display:block;text-align:center}
+.phone{width:390px;max-width:100%;height:780px;background:var(--bg);border-radius:46px;border:10px solid #1d1916;position:relative;overflow:hidden;box-shadow:var(--shadow)}
+.status{height:46px;display:flex;justify-content:space-between;align-items:flex-end;padding:0 28px 6px;font-size:13px;font-weight:600}
+.top{display:flex;align-items:center;justify-content:space-between;padding:6px 14px}
+.round{width:36px;height:36px;border-radius:50%;background:var(--glass);border:1px solid var(--line);display:grid;place-items:center}
+.pill{background:var(--glass);border:1px solid var(--line);border-radius:999px;padding:7px 14px;font-size:13px;font-weight:600}
+.msgs{padding:10px 14px;display:flex;flex-direction:column;gap:10px}
+.b{max-width:76%;padding:9px 13px;border-radius:18px;font-size:14px}
+.b.me{align-self:flex-end;background:var(--bubbleMe)}
+.b.ai{align-self:flex-start;background:var(--bubbleAi);border:1px solid var(--line)}
+.bottom{position:absolute;left:0;right:0;bottom:0;padding:0 12px 28px;display:flex;flex-direction:column;gap:8px}
+.input{background:var(--glass);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border:1px solid var(--line);border-radius:20px;display:flex;align-items:center;gap:6px;padding:6px 6px 6px 6px;box-shadow:0 2px 10px rgba(60,40,20,.06)}
+.input .txt{flex:1;font-size:15px;padding:4px 4px}
+.caret{display:inline-block;width:2px;height:17px;background:var(--ink);vertical-align:-3px;margin-left:1px;animation:bl 1s steps(1) infinite}
+@keyframes bl{50%{opacity:0}}
+.ib{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;flex:none}
+.send{background:var(--badge)}
+.send svg{stroke:var(--badgeInk)}
+svg{stroke:var(--ink);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.muted svg,svg.muted{stroke:var(--muted)}
+.at{background:var(--hl);color:var(--hlInk);border-radius:6px;padding:0 3px;font-weight:500}
+/* suggestions */
+.sugg{background:var(--glass);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);border:1px solid var(--line);border-radius:18px;padding:6px;box-shadow:var(--shadow)}
+.sugg .hd{font-size:11.5px;color:var(--muted);padding:4px 10px 6px;display:flex;justify-content:space-between}
+.row{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:12px}
+.row.on{background:var(--tileBg)}
+.tile{width:36px;height:36px;border-radius:9px;background:var(--tileBg);display:grid;place-items:center;font-size:10px;font-weight:700;letter-spacing:.3px;color:var(--ink);flex:none;overflow:hidden;position:relative}
+.tile.img{background:linear-gradient(135deg,#E8C9A8,#B98D6B 60%,#7C5A43)}
+.tile.img2{background:linear-gradient(160deg,#F1E3CF,#D9B48E 55%,#A57C5B)}
+.tile.img3{background:radial-gradient(circle at 30% 30%,#F6E8D3,#C9A27C 70%)}
+.rt{flex:1;min-width:0}
+.rn{font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rn mark{background:none;color:var(--hlInk);font-weight:700;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}
+.rm{font-size:11.5px;color:var(--muted)}
+.ret{font-size:11px;color:var(--faint)}
+/* chips */
+.chips{display:flex;gap:8px;overflow:hidden;padding:2px 2px 0}
+.chip{position:relative;display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:6px 10px 6px 6px;min-width:0;flex:none;max-width:180px}
+.chip .tile{width:34px;height:34px}
+.chip .cn{font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px}
+.chip .cm{font-size:10.5px;color:var(--muted)}
+.x{position:absolute;top:-6px;right:-6px;width:18px;height:18px;border-radius:50%;background:var(--badge);display:grid;place-items:center}
+.x svg{stroke:var(--badgeInk);stroke-width:2.4}
+.chip.photo{padding:0;width:52px;height:52px;border-radius:12px;overflow:visible}
+.chip.photo .ph{width:100%;height:100%;border-radius:12px}
+/* panel */
+.panel{position:absolute;left:0;right:0;bottom:0;background:var(--glass);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-top:1px solid var(--line);border-radius:22px 22px 0 0;padding:12px 0 30px;box-shadow:0 -8px 30px rgba(60,40,20,.10)}
+.tools{margin:0 12px;background:var(--card);border:1px solid var(--line);border-radius:16px;display:flex;align-items:center;padding:2px 4px}
+.tb{width:40px;height:40px;display:grid;place-items:center;border-radius:12px}
+.tb.on{background:var(--tileBg)}
+.tb svg{stroke:var(--muted)}.tb.on svg{stroke:var(--ink)}
+.attach{margin-left:auto;background:var(--badge);color:var(--badgeInk);font-size:12px;font-weight:500;border-radius:999px;padding:5px 11px;display:flex;align-items:center;gap:4px}
+.attach svg{stroke:var(--badgeInk);width:11px;height:11px}
+.secHd{display:flex;justify-content:space-between;align-items:baseline;padding:14px 18px 8px;font-size:12.5px;color:var(--muted)}
+.secHd b{color:var(--ink);font-weight:600;font-size:13.5px}
+.strip{display:flex;gap:10px;padding:0 16px 4px;overflow:hidden}
+.cell{width:80px;flex:none;display:flex;flex-direction:column;gap:5px}
+.sq{width:80px;height:80px;border-radius:10px;background:var(--tileBg);display:grid;place-items:center;font-size:15px;font-weight:700;letter-spacing:.5px;position:relative}
+.sq.img{background:linear-gradient(135deg,#E8C9A8,#B98D6B 60%,#7C5A43)}
+.sq.img3{background:radial-gradient(circle at 30% 30%,#F6E8D3,#C9A27C 70%)}
+.sq .mini{position:absolute;left:8px;bottom:7px;font-size:9px;font-weight:600;color:var(--muted);letter-spacing:0}
+.sq.sel{outline:2.5px solid var(--sel);outline-offset:-2.5px}
+.ck{position:absolute;top:4px;right:4px;width:20px;height:20px;border-radius:50%;background:var(--sel);display:grid;place-items:center}
+.ck svg{stroke:var(--badgeInk);stroke-width:2.6;width:11px;height:11px}
+.ring{position:absolute;top:5px;right:5px;width:18px;height:18px;border-radius:50%;border:1.5px solid rgba(255,255,255,.9);background:rgba(0,0,0,.08)}
+.sq:not(.img):not(.img3) .ring{border-color:var(--faint);background:transparent}
+.cl{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+.cl small{display:block;color:var(--faint);font-size:10px}
+.entries{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:12px 16px 0}
+.entry{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;display:flex;align-items:center;gap:10px}
+.entry .ei{width:34px;height:34px;border-radius:10px;background:var(--tileBg);display:grid;place-items:center}
+.entry b{font-size:13.5px;font-weight:600;display:block}
+.entry small{font-size:11px;color:var(--muted)}
+.dim{position:absolute;inset:0;background:linear-gradient(180deg,transparent 40%,rgba(30,20,10,.04))}
+.alt{margin-top:2px;font-size:12px;color:var(--muted);max-width:390px;text-align:center}
+.tiny{font-size:11px;color:var(--muted);padding:0 6px}
+.divider{height:1px;background:var(--line);margin:6px 6px}
+.mac{margin-top:44px}
+.mac h2,.form h2{font-size:18px;margin-bottom:10px}
+.form{margin-top:30px}
+pre{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;font-size:12.5px;overflow:auto;font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap}
+@media (max-width:440px){.phone{border-width:6px;border-radius:36px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>输入框 @ 文件 · 最近文件横条</h1>
+  <p class="sub">page1 日常聊天 · 10-02 小样 · 研究见 research-input-file-mention.md</p>
+
+  <div class="notes">
+    <div class="note">
+      <h3><span class="tag">A</span>打 @ 找文件库里的文件</h3>
+      <ul>
+        <li>输入框<b>末尾</b>出现 <b>@+字</b>，文字框正上方浮出候选（最多 5 条），和 CC 斜杠命令浮板同一个位置。</li>
+        <li>只比<b>文件名</b>（再加文件夹名）：名字开头命中排最前，其次名字里含，最后文件夹含；同档新的在前。<b>@嗷 → 嗷呜嗷呜.md</b> 排第一。</li>
+        <li>拼音输入法组字期间不出候选，字上屏才出。</li>
+        <li>点选后：输入框里的「@嗷」被删掉，<b>附件条里多一张文件卡</b>（推荐）——不在字里塞小药丸。</li>
+      </ul>
+    </div>
+    <div class="note">
+      <h3><span class="tag">B</span>📎 变成「最近文件」横条</h3>
+      <ul>
+        <li>点「＋」面板里的 📎 不再直接弹系统文件单，像相册那样在下方换成一条横滑：文件库里最近改过的文件。</li>
+        <li>图片显示缩略图，其他显示扩展名小方块（MD / PDF / TXT…）+ 名字。点一下勾选，可多选，工具栏出「附加 N 个」。</li>
+        <li>下面两个入口：<b>文件库</b>（搜索 + 浏览全部，多选）、<b>手机里的文件</b>（就是原来的系统文件单）。</li>
+      </ul>
+    </div>
+    <div class="note">
+      <h3><span class="tag">发</span>发给 AI 的样子</h3>
+      <ul>
+        <li>文件库文件<b>当普通文件附件发</b>，和从手机选文件完全一样，发送那条路不动。</li>
+        <li>普通模型：文字类（md / txt / pdf 抽字）拼在消息后面，最多 6 万字；图片走看图；CC：收原文件。</li>
+        <li>发出去的是那一刻的内容，之后在文件库改了不影响这条消息。</li>
+        <li>iCloud 里还没下载到本机的文件暂时搜不到（文件库 iCloud 默认关）。</li>
+      </ul>
+    </div>
+    <div class="note">
+      <h3><span class="tag">mac</span>电脑上</h3>
+      <ul>
+        <li>输入框是同一个，@ 候选两端都有；mac 加键盘：↑↓ 选、回车 / Tab 确定、Esc 关（候选打开时回车不发送）。</li>
+        <li>📎 同样换成最近文件横条，第二个入口叫「电脑上的文件」；拖文件进输入框照旧。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="screens">
+    <!-- 屏 1 -->
+    <div class="col">
+      <div class="cap">① 打「@嗷」<span>输入框上方浮出文件候选</span></div>
+      <div class="phone">
+        <div class="status"><span>9:41</span><span>5G ▮</span></div>
+        <div class="top">
+          <div class="round"><svg width="16" height="16" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></div>
+          <div class="pill">小雾</div>
+          <div class="round"><svg width="16" height="16" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></div>
+        </div>
+        <div class="msgs">
+          <div class="b ai">昨晚那篇写完了吗？想看。</div>
+          <div class="b me">写完啦，我发你</div>
+        </div>
+        <div class="bottom">
+          <div class="sugg">
+            <div class="hd"><span>文件库</span><span>3 个</span></div>
+            <div class="row on">
+              <div class="tile">MD</div>
+              <div class="rt"><div class="rn"><mark>嗷</mark>呜嗷呜.md</div><div class="rm">日记 · 昨天 23:40</div></div>
+              <div class="ret">↵</div>
+            </div>
+            <div class="row">
+              <div class="tile img"></div>
+              <div class="rt"><div class="rn"><mark>嗷</mark>呜头像草稿.png</div><div class="rm">图片 · 9月28日</div></div>
+            </div>
+            <div class="row">
+              <div class="tile">TXT</div>
+              <div class="rt"><div class="rn">小狗叫声<mark>嗷</mark>嗷.txt</div><div class="rm">随手记 · 9月12日</div></div>
+            </div>
+          </div>
+          <div class="input">
+            <div class="ib"><svg width="20" height="20" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+            <div class="txt">给你看这个 <span class="at">@嗷</span><span class="caret"></span></div>
+            <div class="ib send"><svg width="16" height="16" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></div>
+          </div>
+        </div>
+      </div>
+      <div class="alt">没有匹配时浮层不出现（不显示「无结果」）；Esc / 删掉 @ / 打空格都收起。</div>
+    </div>
+
+    <!-- 屏 1b -->
+    <div class="col">
+      <div class="cap">①′ 选中后<span>「@嗷」消失，附件条多一张文件卡（推荐）</span></div>
+      <div class="phone">
+        <div class="status"><span>9:41</span><span>5G ▮</span></div>
+        <div class="top">
+          <div class="round"><svg width="16" height="16" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></div>
+          <div class="pill">小雾</div>
+          <div class="round"><svg width="16" height="16" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></div>
+        </div>
+        <div class="msgs">
+          <div class="b ai">昨晚那篇写完了吗？想看。</div>
+          <div class="b me">写完啦，我发你</div>
+        </div>
+        <div class="bottom">
+          <div class="chips">
+            <div class="chip"><div class="tile">MD</div><div><div class="cn">嗷呜嗷呜.md</div><div class="cm">文件库 · 4 KB</div></div><div class="x"><svg width="9" height="9" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></div></div>
+          </div>
+          <div class="input">
+            <div class="ib"><svg width="20" height="20" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+            <div class="txt">给你看这个 <span class="caret"></span></div>
+            <div class="ib send"><svg width="16" height="16" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></div>
+          </div>
+        </div>
+      </div>
+      <div class="alt">为什么不做字里的小药丸：iOS 输入框是自管提交节奏的 UITextView，塞内嵌附件要改光标 / 删除 / 组字三套逻辑；附件条已有预览、删除、编辑重发，现成。</div>
+    </div>
+
+    <!-- 屏 2 -->
+    <div class="col">
+      <div class="cap">② 点 📎<span>底部换成「最近文件」横条 + 两个入口，可多选</span></div>
+      <div class="phone">
+        <div class="status"><span>9:41</span><span>5G ▮</span></div>
+        <div class="top">
+          <div class="round"><svg width="16" height="16" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></div>
+          <div class="pill">小雾</div>
+          <div class="round"><svg width="16" height="16" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></div>
+        </div>
+        <div class="msgs">
+          <div class="b ai">昨晚那篇写完了吗？想看。</div>
+          <div class="b me">写完啦，我发你</div>
+        </div>
+        <div class="panel">
+          <div class="tools">
+            <div class="tb"><svg width="18" height="18" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg></div>
+            <div class="tb"><svg width="18" height="18" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg></div>
+            <div class="tb on"><svg width="18" height="18" viewBox="0 0 24 24"><path d="M20 11l-8.5 8.5a5 5 0 01-7-7L13 4a3.3 3.3 0 014.7 4.7l-8.6 8.6a1.7 1.7 0 01-2.4-2.4L14.5 7"/></svg></div>
+            <div class="tb"><svg width="18" height="18" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M9 10h.01M15 10h.01M9 15c1.5 1.3 4.5 1.3 6 0"/></svg></div>
+            <div class="tb"><svg width="18" height="18" viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4M9 12h6M9 16h4"/></svg></div>
+            <div class="attach"><svg viewBox="0 0 24 24"><path d="M20 11l-8.5 8.5a5 5 0 01-7-7L13 4"/></svg>附加 2 个</div>
+          </div>
+          <div class="secHd"><b>最近文件</b><span>文件库 · 按修改时间</span></div>
+          <div class="strip">
+            <div class="cell"><div class="sq sel">MD<span class="mini">日记</span><div class="ck"><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></div></div><div class="cl">嗷呜嗷呜.md<small>昨天</small></div></div>
+            <div class="cell"><div class="sq img sel"><div class="ck"><svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></svg></div></div><div class="cl">头像草稿.png<small>9月28日</small></div></div>
+            <div class="cell"><div class="sq">PDF<span class="mini">资料</span><div class="ring"></div></div><div class="cl">租房合同.pdf<small>9月27日</small></div></div>
+            <div class="cell"><div class="sq img3"><div class="ring"></div></div><div class="cl">海边.jpg<small>9月25日</small></div></div>
+          </div>
+          <div class="entries">
+            <div class="entry"><div class="ei"><svg width="18" height="18" viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></div><div><b>文件库</b><small>搜索、浏览全部</small></div></div>
+            <div class="entry"><div class="ei"><svg width="18" height="18" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/></svg></div><div><b>手机里的文件</b><small>系统「文件」</small></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="alt">横条 80pt 方格、圆角 10，和最近照片同尺寸同勾选样式；方块小字是所在文件夹。最近 12 个，滑到底是「文件库…」。</div>
+    </div>
+
+    <!-- 屏 3 -->
+    <div class="col">
+      <div class="cap">③ 选好后<span>附件条：文件卡 + 图片缩略图，右上角可删</span></div>
+      <div class="phone">
+        <div class="status"><span>9:41</span><span>5G ▮</span></div>
+        <div class="top">
+          <div class="round"><svg width="16" height="16" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></div>
+          <div class="pill">小雾</div>
+          <div class="round"><svg width="16" height="16" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></div>
+        </div>
+        <div class="msgs">
+          <div class="b ai">昨晚那篇写完了吗？想看。</div>
+          <div class="b me">写完啦，我发你</div>
+        </div>
+        <div class="bottom">
+          <div class="chips">
+            <div class="chip"><div class="tile">MD</div><div><div class="cn">嗷呜嗷呜.md</div><div class="cm">文件库 · 4 KB</div></div><div class="x"><svg width="9" height="9" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></div></div>
+            <div class="chip photo"><div class="ph tile img" style="width:52px;height:52px;border-radius:12px"></div><div class="x"><svg width="9" height="9" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></div></div>
+            <div class="chip"><div class="tile">PDF</div><div><div class="cn">租房合同.pdf</div><div class="cm">手机 · 1.2 MB</div></div><div class="x"><svg width="9" height="9" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></div></div>
+          </div>
+          <div class="input">
+            <div class="ib"><svg width="20" height="20" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+            <div class="txt">帮我看看这几个<span class="caret"></span></div>
+            <div class="ib send"><svg width="16" height="16" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></div>
+          </div>
+        </div>
+      </div>
+      <div class="alt">就是现有附件条（引用 / 附件 / 排队同一排），只多一行来源小字「文件库 / 手机」。</div>
+    </div>
+  </div>
+
+  <div class="form">
+    <h2>发出去模型看到的</h2>
+<pre>帮我看看这几个
+
+[附件：嗷呜嗷呜.md · Markdown 文稿]
+（文件全文，最多 6 万字）
+[/附件]
+
+[图片附件：头像草稿.png · PNG 图像]   ← 图片本身走看图
+
+[附件：租房合同.pdf · PDF 文稿]
+（PDF 抽出来的文字）
+[/附件]</pre>
+  </div>
+</div>
+</body>
+</html>

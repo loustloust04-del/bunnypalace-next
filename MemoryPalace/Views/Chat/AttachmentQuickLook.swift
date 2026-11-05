@@ -72,7 +72,7 @@ private struct AttachmentQuickLookModifier: ViewModifier {
 
 private enum AttachmentPreviewFiles {
     static func write(_ req: AttachmentPreviewRequest) -> URL? {
-        let dir = FileManager.default.temporaryDirectory
+        let dir = AppPaths.temporaryDirectory
             .appendingPathComponent("attachment-preview", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let file = dir.appendingPathComponent(req.name)

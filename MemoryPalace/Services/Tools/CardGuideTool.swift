@@ -17,10 +17,12 @@ enum CardGuideTool {
         )
     }
 
-    static func execute(inputJSON: String) -> (text: String, isError: Bool) {
+    /// available：这一轮能调到的工具名，写法里点名的工具没有就去掉那几句（和系统提示同一口径）；nil = 原样
+    static func execute(inputJSON: String, available: Set<String>? = nil) -> (text: String, isError: Bool) {
         let args = (try? JSONSerialization.jsonObject(with: Data(inputJSON.utf8))) as? [String: Any]
         let kinds = (args?["kinds"] as? [Any])?.compactMap { $0 as? String } ?? []
-        return (ChatCardPromptGuide.guide(for: kinds), false)   // 参数坏了就全给，别让模型卡住
+        let text = ChatCardPromptGuide.guide(for: kinds)   // 参数坏了就全给，别让模型卡住
+        return (available.map { ChatCardPromptGuide.adjusted(text, available: $0) } ?? text, false)
     }
 
     /// 这一轮发出去的工具里有没有它（有才在系统提示里只放目录；工具定义可能是平铺的也可能包在 function 里）

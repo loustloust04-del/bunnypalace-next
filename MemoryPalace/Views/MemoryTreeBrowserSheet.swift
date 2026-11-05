@@ -89,7 +89,7 @@ struct MemoryTreeBrowserSheet: View {
         let airSpan = AirProbeSections.enabled ? AirProbeSections.enter("MemoryTreeBrowserSheet.reload") : nil
         defer { if let airSpan { AirProbeSections.leave(airSpan) } }
         #endif
-        groups = MemoryTreeGroup.group(FileLibraryStore.memoryList(profileId: profileId), onlyFolder: onlyFolder)
+        groups = MemoryTreeGroup.group(FileLibraryMemoryFolder.visible(FileLibraryStore.memoryList(profileId: profileId)), onlyFolder: onlyFolder)
         // 活着的在前（新→旧），已失效的放最后
         let all = onlyFolder == nil ? SelfMemoryStore.list(profileId: profileId) : []
         selfMemories = all.filter(\.isActive) + all.filter { !$0.isActive }
@@ -106,6 +106,7 @@ struct MemoryTreeGroup: Identifiable, Equatable {
         "": "画像等", "summaries": "旧对话摘要", "daily": "旧日记",
         "heartvoice": "心声", "cc": "CC 同步来的笔记", "self": "自己的记忆",
         "sessions": "上下文摘要", "windows": "窗口总结", "timeline": "时间轴",
+        "wiki": "C 档案",
     ]
     var title: String { Self.titles[folder] ?? folder }
 

@@ -228,7 +228,7 @@ struct HTMLArtifactPreviewSheet: View {
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "")
             .replacingOccurrences(of: " ", with: "-")
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("artifact_\(UUID().uuidString)")
+        let dir = AppPaths.temporaryDirectory.appendingPathComponent("artifact_\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("网页-\(stamp).html")
         guard let data = content.data(using: .utf8), (try? data.write(to: url)) != nil else { return nil }

@@ -380,7 +380,7 @@ enum ClaudeImporter {
             switch seg {
             case .text(let s):
                 if !s.isEmpty { parts.append(s) }
-            case .thinking(let text, _):
+            case .thinking(let text, _, _):
                 if !text.isEmpty { parts.append("<<<THINK>>>\n\(text)\n<<</THINK>>>") }
             case .toolUse(_, let name, let inputJSON, _, _):
                 parts.append("🔧 \(name) \(inputJSON)")

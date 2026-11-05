@@ -14,6 +14,9 @@ struct Page2HomeView: View {
     @State private var homeGlobalMinY: CGFloat = 0
     @State private var isKeyboardVisible = false
     @State private var pageScene = Page2SceneState.shared
+    /// 长按 / 拖动总开关用的前后台：翻页宿主里的 `scenePhase` 回到 active 不会触发重绘，要等别的事碰一下才更新，
+    /// 从后台回来长按一直关着（粟粟 10-14 Air）。直接听 UIKit 通知。
+    @State private var appActive = UIApplication.shared.applicationState == .active
     @State private var home = Page2HomeStore.shared
     @State private var appearance = Page2AppearanceStore.shared
     @State private var drag = Page2DragCoordinator()
@@ -232,6 +235,8 @@ struct Page2HomeView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { resetTransientPresentation() } else { pageScene.date = Date() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in appActive = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in appActive = false }
         .onChange(of: pageScene.isActive) { _, active in
             if !active { resetTransientPresentation() } else if Page2DateRule.shouldWrite(old: pageScene.date, now: Date()) { pageScene.date = Date() }
         }
@@ -303,7 +308,7 @@ struct Page2HomeView: View {
 
     private var mainContent: some View {
         GeometryReader { geometry in
-            Page2GestureContainer(editing: editing, library: showsLibrary, isPaging: { paging.isScrolling || !paging.stackScrolling.isEmpty }, isDragging: { drag.sourceID != nil }, paging: paging, enabled: pageScene.isActive && scenePhase == .active && !hasCommittedFolder && !showsSearch && !modalPresented && resize.sourceID == nil, available: { !modalPresented && !showsSearch && !hasCommittedFolder && resize.sourceID == nil && paging.stackScrolling.isEmpty }, excludesTouchAt: resizeHandleContains, excludesSearchAt: stackContains,
+            Page2GestureContainer(editing: editing, library: showsLibrary, isPaging: { paging.isScrolling || !paging.stackScrolling.isEmpty }, isDragging: { drag.sourceID != nil }, paging: paging, enabled: pageScene.isActive && appActive && !hasCommittedFolder && !showsSearch && !modalPresented && resize.sourceID == nil, available: { !modalPresented && !showsSearch && !hasCommittedFolder && resize.sourceID == nil && paging.stackScrolling.isEmpty }, excludesTouchAt: resizeHandleContains, excludesSearchAt: stackContains,
                                   coordinateInset: 32, dockHeight: dockIconSide + 2 * metrics.dockVerticalInset, location: drag.location, onTap: editTapped,
                                   onSnapshot: { drag.previewImage = $0 }, menuAt: dragTarget, menuFor: contextMenu, onSecondaryTap: secondaryTapped, onPress: pressChanged, onPan: panChanged, probeState: probeState) {
                 ZStack(alignment: .topLeading) {
@@ -585,10 +590,10 @@ struct Page2HomeView: View {
         }.frame(minWidth: max(0, gridSize.width - 72)).padding(.horizontal, 18).padding(.vertical, metrics.dockVerticalInset)
     }
 
-    /// 长按失效排查（粟粟 10-14 Air，疑竖条后台相关）：enabled / available 的每一项 + 外壳竖条状态
+    /// 长按失效排查（粟粟 10-14 Air）：enabled / available 的每一项 + 外壳竖条状态
     private func probeState() -> String {
         let shell = Page2AppShell.shared, scene = Page2SceneState.shared
-        return "home: sceneActive=\(pageScene.isActive) phase=\(scenePhase) folder=\(hasCommittedFolder) search=\(showsSearch) resize=\(resize.sourceID != nil) " +
+        return "home: sceneActive=\(pageScene.isActive) phase=\(scenePhase) appActive=\(appActive) uiState=\(UIApplication.shared.applicationState.rawValue) folder=\(hasCommittedFolder) search=\(showsSearch) resize=\(resize.sourceID != nil) " +
             "scrolling=\(paging.isScrolling) stacks=\(paging.stackScrolling.count) library=\(showsLibrary) " +
             "modal=\(modalPresented)[w=\(showsWidgets) pick=\(showsAppPicker) look=\(showsAppearance) wall=\(showsWallpaper) pages=\(showsPages) reset=\(resetConfirmation) " +
             "menuItem=\(menuItem != nil) container=\(containerItem != nil) stack=\(presentedStack != nil) config=\(configuringWidget != nil) icon=\(iconTool != nil) " +

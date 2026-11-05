@@ -30,8 +30,8 @@ final class HTMLThumbnailRenderer: NSObject, WKNavigationDelegate {
     private static let renderSize = CGSize(width: 320, height: 430)
 
     private static var cacheDir: URL {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("MemoryPalace/html-thumbs", isDirectory: true)
+        let dir = AppPaths.checked(AppPaths.caches
+            .appendingPathComponent("MemoryPalace/html-thumbs", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -42,7 +42,7 @@ final class HTMLThumbnailRenderer: NSObject, WKNavigationDelegate {
 
     private static func cacheURL(for key: String) -> URL {
         let hash = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined().prefix(32)
-        return cacheDir.appendingPathComponent("\(hash).png")
+        return AppPaths.checked(cacheDir.appendingPathComponent("\(hash).png"))
     }
 
     fileprivate static func cached(for key: String) -> ThumbImage? {

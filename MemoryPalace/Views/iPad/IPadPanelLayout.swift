@@ -466,6 +466,9 @@ final class IPadPanelLayout {
     }
 
     func setCollapsed(_ groupId: String, _ collapsed: Bool) {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         if groupId == Self.mainGroup {
             if tabGroupCollapsed != collapsed { tabGroupCollapsed = collapsed }
         } else if collapsed != groupCollapsed.contains(groupId) {
@@ -491,6 +494,9 @@ final class IPadPanelLayout {
 
     /// 左 / 底列 折成图标 ⇄ 展开
     func toggleColumnCollapsed(_ edge: PanelEdge) {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         guard edge != .right else { dockShown.toggle(); return }
         if collapsedColumns.contains(edge) { collapsedColumns.remove(edge) } else { collapsedColumns.insert(edge) }
     }
@@ -507,6 +513,9 @@ final class IPadPanelLayout {
 
     /// 选中一个停靠工具：全局焦点 + 组内选中 + 展开它的组
     func select(_ toolId: String) {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         if selectedTool != toolId { selectedTool = toolId }
         let g = group(of: toolId)
         if g != Self.mainGroup, groupSelected[g] != toolId { groupSelected[g] = toolId }
@@ -575,6 +584,9 @@ final class IPadPanelLayout {
             if floatGroupOf[toolId] != nil { selectFloat(toolId) }
             return
         }
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         var tools = openTools
         tools.append(toolId)
         while tools.count > openLimit {
@@ -588,6 +600,9 @@ final class IPadPanelLayout {
     }
 
     func close(_ toolId: String) {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         let g = group(of: toolId)
         let neighbor = neighborTab(of: toolId)
         openTools.removeAll { $0 == toolId }
@@ -753,6 +768,9 @@ final class IPadPanelLayout {
     @discardableResult
     func minimize(_ toolId: String, in size: CGSize, widgetCells: Int) -> Bool {
         guard isOpen(toolId), !minimized.contains(toolId), hasRoomForOneMore(in: size, widgetCells: widgetCells) else { return false }
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         let fromTab = mode == .docked && tabs.contains(toolId)
         if fromTab {
             let g = group(of: toolId)
@@ -772,6 +790,9 @@ final class IPadPanelLayout {
     /// 点桌面上那块：回它原来的形态（tab 就回原组并选中，窗就回原位置到最前）
     func restore(_ toolId: String) {
         guard minimized.contains(toolId) else { return }
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         minimized.removeAll { $0 == toolId }
         let from = minimizedFrom[toolId]
         minimizedFrom[toolId] = nil
@@ -813,6 +834,9 @@ final class IPadPanelLayout {
 
     /// 选中浮窗里的某个 tab 并把那扇窗提到最前
     func selectFloat(_ toolId: String) {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         let window = windowId(of: toolId)
         if window != toolId || floatSelected[window] != nil {
             if floatSelected[window] != toolId { floatSelected[window] = toolId }

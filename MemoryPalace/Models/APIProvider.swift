@@ -97,6 +97,8 @@ struct APICredential: Identifiable, Codable {
     var toolsSupported: Bool?
     /// `type == .unsupported` 时保存原始 type 字符串，编码时原样写回（降级→升级不丢数据）。
     var unknownTypeRaw: String?
+    /// 选的是预设里哪个区域（plan-provider-presets §2.2）。nil = 老卡 / 自定义卡 / 导入的旧配置，用 baseURL 反查
+    var regionId: String?
 
     init(
         id: String,
@@ -111,7 +113,8 @@ struct APICredential: Identifiable, Codable {
         lastUsedAt: Date? = nil,
         lastUsedModelId: String? = nil,
         toolsSupported: Bool? = nil,
-        unknownTypeRaw: String? = nil
+        unknownTypeRaw: String? = nil,
+        regionId: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -126,11 +129,12 @@ struct APICredential: Identifiable, Codable {
         self.lastUsedModelId = lastUsedModelId
         self.toolsSupported = toolsSupported
         self.unknownTypeRaw = unknownTypeRaw
+        self.regionId = regionId
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, emoji, presetId, type, baseURL, extraHeaders, models
-        case createdAt, lastUsedAt, lastUsedModelId, toolsSupported, unknownTypeRaw
+        case createdAt, lastUsedAt, lastUsedModelId, toolsSupported, unknownTypeRaw, regionId
     }
 
     init(from decoder: Decoder) throws {
@@ -154,6 +158,7 @@ struct APICredential: Identifiable, Codable {
         self.lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         self.lastUsedModelId = try c.decodeIfPresent(String.self, forKey: .lastUsedModelId)
         self.toolsSupported = try c.decodeIfPresent(Bool.self, forKey: .toolsSupported)
+        self.regionId = try c.decodeIfPresent(String.self, forKey: .regionId)
         // 老存档可能带 modelRatio/completionRatio/groupRatio/currencyRate —— 静默忽略
     }
 
@@ -174,243 +179,8 @@ struct APICredential: Identifiable, Codable {
         try c.encodeIfPresent(lastUsedModelId, forKey: .lastUsedModelId)
         try c.encodeIfPresent(toolsSupported, forKey: .toolsSupported)
         try c.encodeIfPresent(unknownTypeRaw, forKey: .unknownTypeRaw)
+        try c.encodeIfPresent(regionId, forKey: .regionId)
     }
-}
-
-// MARK: - API Provider (降级：只读预设目录)
-//
-// M1 之前 APIProvider 既是预设又是列表实体；现在只是「新建卡」时给详情页带出 type/baseURL/extraHeaders/预填模型 的模板。
-// 不再持久化、不进列表、不与 Keychain 关联。
-
-struct APIProvider: Identifiable {
-    let id: String                          // 预设 id，如 "openrouter"
-    var name: String
-    var type: ProviderType
-    var baseURL: String
-    var extraHeaders: [String: String]
-    var models: [ProviderModel]             // 模板里预填的模型（构造 credential 时复制一份过去）
-}
-
-extension APIProvider {
-    /// 内置预设目录。M2 详情页的"选提供商"下拉就读它。
-    static let presets: [APIProvider] = {
-        var list: [APIProvider] = [
-            .chatgptOAuth, .anthropic, .openai, .openrouter, .deepseek, .groq, .xai,
-            .siliconflow, .dashscope, .zhipu, .doubao, .gemini, .moonshot, .ollama, .claudeP, .ccBridge, .codexBridge,
-        ]
-        // 本机模型（plan-小芽-v3 §1）：放在 Ollama 后面；模拟器跑不了 MLX，不列
-        if LocalLLMService.isSupported {
-            list.insert(.localMLX, at: list.firstIndex(where: { $0.id == APIProvider.ollama.id })! + 1)
-        }
-        #if PERSONAL_APPS
-        #if DEBUG
-        // 粟粟自用：只进她的 Debug 包，Release / TestFlight 不出现
-        list.insert(.kimiP, at: list.firstIndex(where: { $0.id == APIProvider.claudeP.id })! + 1)
-        #endif
-        #endif
-        return list
-    }()
-
-    static let chatgptOAuth = APIProvider(
-        id: "chatgpt-oauth",
-        name: "GPT OAuth (账号登录)",
-        type: .chatgptOAuth,
-        baseURL: "https://chatgpt.com/backend-api/codex",
-        extraHeaders: [:],
-        models: [
-            // 兜底预设，登录后会从 /models 拉真列表覆盖
-            ProviderModel(credentialId: "chatgpt-oauth", modelId: "gpt-5.2", name: "GPT-5.2"),
-        ]
-    )
-
-    static let anthropic = APIProvider(
-        id: "anthropic",
-        name: "Anthropic",
-        type: .anthropic,
-        baseURL: "https://api.anthropic.com/v1",
-        extraHeaders: ["anthropic-version": "2023-06-01"],
-        models: [
-            ProviderModel(credentialId: "anthropic", modelId: "claude-opus-5-5", name: "Claude Opus 5.5"),
-            ProviderModel(credentialId: "anthropic", modelId: "claude-sonnet-5-5", name: "Claude Sonnet 5.5"),
-            ProviderModel(credentialId: "anthropic", modelId: "claude-haiku-5-5", name: "Claude Haiku 5.5"),
-            ProviderModel(credentialId: "anthropic", modelId: "claude-fable-5-1", name: "Claude Fable 5.1"),
-            ProviderModel(credentialId: "anthropic", modelId: "claude-opus-4-8", name: "Claude Opus 4.8"),
-            ProviderModel(credentialId: "anthropic", modelId: "claude-sonnet-4-6", name: "Claude Sonnet 4.6"),
-            ProviderModel(credentialId: "anthropic", modelId: "claude-opus-4-6", name: "Claude Opus 4.6"),
-            ProviderModel(credentialId: "anthropic", modelId: "claude-haiku-4-5", name: "Claude Haiku 4.5"),
-        ]
-    )
-
-    static let openai = APIProvider(
-        id: "openai",
-        name: "OpenAI",
-        type: .openaiCompatible,
-        baseURL: "https://api.openai.com/v1",
-        extraHeaders: [:],
-        models: [
-            ProviderModel(credentialId: "openai", modelId: "gpt-4o", name: "GPT-4o"),
-            ProviderModel(credentialId: "openai", modelId: "gpt-4o-mini", name: "GPT-4o Mini"),
-            ProviderModel(credentialId: "openai", modelId: "gpt-4.1", name: "GPT-4.1"),
-            ProviderModel(credentialId: "openai", modelId: "gpt-4.1-mini", name: "GPT-4.1 Mini"),
-            ProviderModel(credentialId: "openai", modelId: "gpt-4.1-nano", name: "GPT-4.1 Nano"),
-            ProviderModel(credentialId: "openai", modelId: "o3", name: "o3"),
-            ProviderModel(credentialId: "openai", modelId: "o3-mini", name: "o3 Mini"),
-            ProviderModel(credentialId: "openai", modelId: "o4-mini", name: "o4 Mini"),
-        ]
-    )
-
-    static let openrouter = APIProvider(
-        id: "openrouter",
-        name: "OpenRouter",
-        type: .openaiCompatible,
-        baseURL: "https://openrouter.ai/api/v1",
-        extraHeaders: [
-            "HTTP-Referer": "MemoryPalace/1.0",
-            "X-Title": "MemoryPalace",
-        ],
-        models: [
-            ProviderModel(credentialId: "openrouter", modelId: "anthropic/claude-sonnet-4", name: "Claude Sonnet 4"),
-            ProviderModel(credentialId: "openrouter", modelId: "anthropic/claude-haiku-4", name: "Claude Haiku 4"),
-            ProviderModel(credentialId: "openrouter", modelId: "anthropic/claude-sonnet-4.5", name: "Claude Sonnet 4.5"),
-            ProviderModel(credentialId: "openrouter", modelId: "openai/gpt-4o", name: "GPT-4o"),
-            ProviderModel(credentialId: "openrouter", modelId: "openai/gpt-4o-mini", name: "GPT-4o Mini"),
-            ProviderModel(credentialId: "openrouter", modelId: "openai/gpt-4.1", name: "GPT-4.1"),
-            ProviderModel(credentialId: "openrouter", modelId: "google/gemini-2.5-pro-preview", name: "Gemini 2.5 Pro"),
-            ProviderModel(credentialId: "openrouter", modelId: "google/gemini-2.5-flash-preview", name: "Gemini 2.5 Flash"),
-            ProviderModel(credentialId: "openrouter", modelId: "deepseek/deepseek-chat", name: "DeepSeek V3"),
-            ProviderModel(credentialId: "openrouter", modelId: "deepseek/deepseek-reasoner", name: "DeepSeek R1"),
-            ProviderModel(credentialId: "openrouter", modelId: "x-ai/grok-3-mini", name: "Grok 3 Mini"),
-        ]
-    )
-
-    static let deepseek = APIProvider(
-        id: "deepseek",
-        name: "DeepSeek",
-        type: .openaiCompatible,
-        baseURL: "https://api.deepseek.com/v1",
-        extraHeaders: [:],
-        models: [
-            ProviderModel(credentialId: "deepseek", modelId: "deepseek-chat", name: "DeepSeek V3"),
-            ProviderModel(credentialId: "deepseek", modelId: "deepseek-reasoner", name: "DeepSeek R1"),
-        ]
-    )
-
-    static let groq = APIProvider(
-        id: "groq",
-        name: "Groq",
-        type: .openaiCompatible,
-        baseURL: "https://api.groq.com/openai/v1",
-        extraHeaders: [:],
-        models: [
-            ProviderModel(credentialId: "groq", modelId: "llama-3.3-70b-versatile", name: "Llama 3.3 70B"),
-            ProviderModel(credentialId: "groq", modelId: "llama-3.1-8b-instant", name: "Llama 3.1 8B"),
-            ProviderModel(credentialId: "groq", modelId: "gemma2-9b-it", name: "Gemma 2 9B"),
-            ProviderModel(credentialId: "groq", modelId: "mixtral-8x7b-32768", name: "Mixtral 8x7B"),
-        ]
-    )
-
-    static let xai = APIProvider(
-        id: "xai",
-        name: "xAI",
-        type: .openaiCompatible,
-        baseURL: "https://api.x.ai/v1",
-        extraHeaders: [:],
-        models: [
-            ProviderModel(credentialId: "xai", modelId: "grok-3", name: "Grok 3"),
-            ProviderModel(credentialId: "xai", modelId: "grok-3-mini", name: "Grok 3 Mini"),
-        ]
-    )
-
-    static let siliconflow = APIProvider(
-        id: "siliconflow", name: "SiliconFlow",
-        type: .openaiCompatible, baseURL: "https://api.siliconflow.cn/v1",
-        extraHeaders: [:], models: []
-    )
-
-    static let dashscope = APIProvider(
-        id: "dashscope", name: "通义千问 (DashScope)",
-        type: .openaiCompatible, baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        extraHeaders: [:], models: []
-    )
-
-    static let zhipu = APIProvider(
-        id: "zhipu", name: "智谱 (GLM)",
-        type: .openaiCompatible, baseURL: "https://open.bigmodel.cn/api/paas/v4",
-        extraHeaders: [:], models: []
-    )
-
-    static let doubao = APIProvider(
-        id: "doubao", name: "豆包 (Volcengine)",
-        type: .openaiCompatible, baseURL: "https://ark.cn-beijing.volces.com/api/v3",
-        extraHeaders: [:], models: []
-    )
-
-    static let gemini = APIProvider(
-        id: "gemini", name: "Google Gemini",
-        type: .openaiCompatible, baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
-        extraHeaders: [:], models: []
-    )
-
-    static let moonshot = APIProvider(
-        id: "moonshot", name: "Moonshot / Kimi",
-        type: .openaiCompatible, baseURL: "https://api.moonshot.cn/v1",
-        extraHeaders: [:], models: []
-    )
-
-    static let ollama = APIProvider(
-        id: "ollama", name: "Ollama (本地)",
-        type: .openaiCompatible, baseURL: "http://localhost:11434/v1",
-        extraHeaders: [:], models: []
-    )
-
-    /// 本机 claude-proxy（把 `claude -p` 包成 Anthropic 兼容端点，走订阅不烧 API 钱）。
-    /// baseURL 空是**有意的**：地址由局域网发现填（每台 Mac 不一样），选中它时编辑器展开发现列表。
-    /// 用户看到的就是一个叫 claude-p 的提供商，不需要理解 Bonjour/"发现"这些词。
-    static let claudeP = APIProvider(
-        id: "claude-p", name: "claude-p",
-        type: .anthropic, baseURL: "",
-        extraHeaders: ["anthropic-version": "2023-06-01"], models: []
-    )
-
-    #if PERSONAL_APPS
-    #if DEBUG
-    /// 本机 kimi-proxy（`~/Desktop/susu-project/kimi-proxy`，Kimi Code 订阅包成 Anthropic 兼容端点）。
-    /// 地址是粟粟那台 Mac 的局域网 IP，只进 Debug 包。
-    static let kimiP = APIProvider(
-        id: "kimi-p", name: "kimi-p",
-        type: .anthropic, baseURL: "http://192.168.31.20:8793",
-        extraHeaders: ["anthropic-version": "2023-06-01"],
-        models: [
-            ProviderModel(credentialId: "kimi-p", modelId: "k3", name: "Kimi K3"),
-            ProviderModel(credentialId: "kimi-p", modelId: "k3-256k", name: "Kimi K3-256K"),
-        ]
-    )
-    #endif
-    #endif
-
-    /// 本机模型：没有 key、没有网络；模型跟着 app 内置清单（AssistantLocalModel.catalog）
-    static let localMLX = APIProvider(
-        id: APICredential.localId, name: "本机模型",
-        type: .localMLX, baseURL: "",
-        extraHeaders: [:],
-        models: AssistantLocalModel.catalog.map { ProviderModel(credentialId: APICredential.localId, modelId: $0.id, name: $0.title) }
-    )
-
-    static let ccBridge = APIProvider(
-        id: "cc-bridge", name: "Claude Code (本地)",
-        type: .ccBridge, baseURL: "ws://127.0.0.1:7890/cc",
-        extraHeaders: [:],
-        models: [ProviderModel(credentialId: "cc-bridge", modelId: "cc-local", name: "Claude Code")]
-    )
-
-    /// Codex 与 Claude Code 平级的本地模型（07-20 粟粟拍）：同 ccBridge 通道（发送链零分叉），
-    /// 靠 credential id "codex-bridge" 区分 engine——选它时 session picker 列 mp-codex-*。
-    static let codexBridge = APIProvider(
-        id: "codex-bridge", name: "Codex (本地)",
-        type: .ccBridge, baseURL: "ws://127.0.0.1:7890/cc",
-        extraHeaders: [:],
-        models: [ProviderModel(credentialId: "codex-bridge", modelId: "codex-local", name: "Codex")]
-    )
 }
 
 extension APICredential {
@@ -781,9 +551,9 @@ final class ProviderManager {
         }
     }
 
-    /// mac 上回环地址就是本机 hub；iOS 上得扫码配过对（配了主 / 备 / 中继任一个）
+    /// mac 上回环地址就是本机 hub；iOS 模拟器的回环也是这台 Mac（不用配对）；真机得扫码配过对（配了主 / 备 / 中继任一个）
     private static var bridgeReachable: Bool {
-        #if os(macOS)
+        #if os(macOS) || targetEnvironment(simulator)
         return true
         #else
         return !CCBridgeEndpoints.configuredURLs(fallbackToLocal: false).isEmpty
@@ -801,13 +571,64 @@ final class ProviderManager {
         return models.first(where: { !ProviderProbe.isNonChatModel($0.modelId) }) ?? models.first
     }
 
-    /// 新卡落盘后：收藏挑中的模型；当前主模型（🌞）空着或不能用时才把它设成主模型（粟粟 10-14 拍 K3）
-    func adoptNewModel(_ model: ProviderModel) {
-        if !isFavoriteModel(id: model.id) { toggleFavoriteModel(id: model.id) }
-        let current = UserDefaults.standard.string(forKey: "selectedChatModel") ?? ""
-        if current.isEmpty || !isModelUsable(id: current) {
-            UserDefaults.standard.set(model.id, forKey: "selectedChatModel")
+    /// 接管栈（F6 + astra 10-15）：每次接管压一层「哪张卡 / 接管成哪个模型 / 顶掉了哪个」，删掉接管的卡时只退自己那一层。
+    /// 存 UserDefaults，不随 forgetModels 清，最多留 5 层
+    struct AdoptionLayer: Equatable {
+        var cardId: String
+        var adopted: String
+        var previous: String
+    }
+
+    static let adoptionStackKey = "selectedChatModelAdoptionStack"
+    static let adoptionStackLimit = 5
+
+    private static func loadAdoptionStack() -> [AdoptionLayer] {
+        let raw = UserDefaults.standard.array(forKey: adoptionStackKey) as? [[String: String]] ?? []
+        return raw.compactMap { d in
+            guard let c = d["cardId"], let a = d["adopted"], let p = d["previous"] else { return nil }
+            return AdoptionLayer(cardId: c, adopted: a, previous: p)
         }
+    }
+
+    private static func saveAdoptionStack(_ stack: [AdoptionLayer]) {
+        if stack.isEmpty {
+            UserDefaults.standard.removeObject(forKey: adoptionStackKey)
+        } else {
+            UserDefaults.standard.set(stack.map { ["cardId": $0.cardId, "adopted": $0.adopted, "previous": $0.previous] },
+                                      forKey: adoptionStackKey)
+        }
+    }
+
+    /// 新卡落盘后：收藏挑中的模型；保存前一张能用的卡都没有时才把它设成主模型（K3，粟粟 10-15 改：
+    /// 原「主模型空着或不能用就接管」会让没钉模型的对话跟着全局漂到新卡上）
+    func adoptNewModel(_ model: ProviderModel, hadUsableCard: Bool) {
+        if !isFavoriteModel(id: model.id) { toggleFavoriteModel(id: model.id) }
+        let defaults = UserDefaults.standard
+        let current = defaults.string(forKey: "selectedChatModel") ?? ""
+        guard Self.shouldAdopt(currentEmpty: current.isEmpty, currentUsable: !current.isEmpty && isModelUsable(id: current),
+                               hadUsableCard: hadUsableCard) else { return }
+        defaults.set(model.id, forKey: "selectedChatModel")
+        Self.saveAdoptionStack(Self.pushAdoption(Self.loadAdoptionStack(), cardId: model.credentialId,
+                                                 adopted: model.id, current: current))
+    }
+
+    /// 同一张卡再次接管（换了家 / 换了模型，forgetModels 先把主模型清空了）→ 沿用它那层原来的退回目标，只换接管的模型；
+    /// 否则主模型非空就压新一层；主模型空着没东西可退，栈不动
+    static func pushAdoption(_ stack: [AdoptionLayer], cardId: String, adopted: String, current: String) -> [AdoptionLayer] {
+        var stack = stack
+        if let i = stack.lastIndex(where: { $0.cardId == cardId }),
+           current.isEmpty || current == stack[i].adopted {
+            var layer = stack.remove(at: i)
+            layer.adopted = adopted
+            stack.append(layer)
+        } else if !current.isEmpty {
+            stack.append(AdoptionLayer(cardId: cardId, adopted: adopted, previous: current))
+        }
+        return Array(stack.suffix(adoptionStackLimit))
+    }
+
+    static func shouldAdopt(currentEmpty: Bool, currentUsable: Bool, hadUsableCard: Bool) -> Bool {
+        !hadUsableCard && (currentEmpty || !currentUsable)
     }
 
     /// 卡上删掉的模型：收藏、🌞 主模型、🌛 记忆模型里指向它们的一并清掉
@@ -866,14 +687,31 @@ final class ProviderManager {
             ?? availableModels.first
     }
 
-    /// 若 `selectedChatModel` 指向不存在的模型 → 清空，避免 picker 静默 fallback 到无关模型。
+    /// 若 `selectedChatModel` 指向不存在的模型 → 是新卡接管来的就按接管栈退回接管前那个（还在的话，F6），否则清空，避免 picker 静默 fallback 到无关模型。
     func resolveStaleSelectedModel() {
         let key = "selectedChatModel"
-        guard let current = UserDefaults.standard.string(forKey: key), !current.isEmpty else { return }
-        if model(byId: current) == nil {
-            print("[ProviderManager] selectedChatModel '\(current)' no longer resolvable, clearing")
-            UserDefaults.standard.set("", forKey: key)
+        let defaults = UserDefaults.standard
+        let current = defaults.string(forKey: key) ?? ""
+        let r = Self.staleReplacement(current: current, stack: Self.loadAdoptionStack(),
+                                      resolvable: { model(byId: $0) != nil })
+        guard let next = r.next else { return }
+        print("[ProviderManager] selectedChatModel '\(current)' no longer resolvable, \(next.isEmpty ? "clearing" : "restoring '\(next)'")")
+        defaults.set(next, forKey: key)
+        Self.saveAdoptionStack(r.stack)
+    }
+
+    /// next：nil = 不动；"" = 清空；其它 = 恢复成它。只弹「接管成当前主模型」的那一层，下层留着；
+    /// 退回的目标也已失效、而它自己又是接管来的，就顺着它那层再往下退
+    static func staleReplacement(current: String, stack: [AdoptionLayer],
+                                 resolvable: (String) -> Bool) -> (next: String?, stack: [AdoptionLayer]) {
+        guard !current.isEmpty, !resolvable(current) else { return (nil, stack) }
+        var stack = stack
+        var target = current
+        while let i = stack.lastIndex(where: { $0.adopted == target }) {
+            target = stack.remove(at: i).previous
+            if !target.isEmpty, resolvable(target) { return (target, stack) }
         }
+        return ("", stack)
     }
 
     // MARK: - Saved Credential List
@@ -1090,6 +928,8 @@ final class ProviderManager {
         credentials.removeAll { $0.id == id }
         apiKeyCache.removeValue(forKey: id)
         KeychainStore.remove(account: id)
+        APIDraftStore.clear(slot: id)   // 这张卡没存完的草稿（含草稿 key）一起删：编辑页 / 列表左滑 / 右键都走这里
+        ModelHints.shared.replace(credentialId: id, with: [:])   // 旁表里这张卡的模型元数据
         persist()
     }
 
@@ -1146,7 +986,7 @@ final class ProviderManager {
             return .failure(NSError(domain: "ProviderManager", code: -7,
                                     userInfo: [NSLocalizedDescriptionKey: "这张卡的类型（\(c.unknownTypeRaw ?? "未知")）当前版本不支持"]))
         case .openaiCompatible, .anthropic, .chatgptOAuth:
-            return await ProviderProbe.fetchModels(draft: c, key: key)
+            return await ProviderProbe.fetchModels(draft: c, key: key, hints: .shared)   // 已存的卡：元数据按卡 id 落旁表
         }
     }
 

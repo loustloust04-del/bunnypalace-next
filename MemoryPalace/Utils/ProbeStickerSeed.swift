@@ -23,7 +23,10 @@ private enum ProbeLogFile {
     nonisolated(unsafe) private static var handle: FileHandle?
 
     private static var url: URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("probe.log")
+        if TestHostIsolation.active {
+            return TestHostIsolation.home?.appendingPathComponent("Documents/probe.log")
+        }
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("probe.log")
     }
 
     static func append(_ line: String) {

@@ -1,5 +1,17 @@
 import Foundation
 
+/// 一份账（v5 · A12）：预算控件（`BudgetSection`）能接不同的账——全局总闸一份、记忆写入预算一份
+protocol BudgetAccount: AnyObject {
+    var budgetUSD: Double { get }
+    var isBudgetSet: Bool { get }
+    var spentUSD: Double { get }
+    /// 没填过时按多少算
+    var defaultBudgetUSD: Double { get }
+    func setBudgetUSD(_ value: Double)
+    func clearBudget()
+    func resetSpent()
+}
+
 /// 全局保险闸 — 水库总闸门。
 ///
 /// 粟粟决策（2026-04-23）：所有 API 请求（无论 provider、无论主/副模型）汇总到
@@ -9,12 +21,13 @@ import Foundation
 /// UserDefaults key 不再使用（按"清零重来"策略不迁移），但 APIProvider 里的
 /// Codable 字段保留避免破坏老 customProviders JSON 的兼容性。
 @Observable
-final class GlobalBudgetStore {
+final class GlobalBudgetStore: BudgetAccount {
     static let shared = GlobalBudgetStore()
 
     /// 从未拨款时的**默认有效额度**（粟粟 08-27 拍：10 美元）。
     /// 不是「不限」——不限要用户自己填一个大数。明确填 0 仍然是全停。
     static let defaultBudgetUSD: Double = 10
+    var defaultBudgetUSD: Double { Self.defaultBudgetUSD }
 
     private let enabledKey = "globalBudgetEnabled"
     private let budgetKey  = "globalBudgetUSD"

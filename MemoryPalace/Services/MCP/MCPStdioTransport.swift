@@ -41,6 +41,9 @@ final class MCPStdioTransport: MCPTransport {
     }
 
     func connect() async throws {
+        if BenchIsolation.active {
+            throw MCPError.serverError("隔离运行不可启动本地 MCP")
+        }
         lock.lock()
         let running = process != nil
         lock.unlock()
@@ -52,7 +55,7 @@ final class MCPStdioTransport: MCPTransport {
         var env = MacShellBackend().environment()
         for (key, value) in extraEnv { env[key] = value }
         p.environment = env
-        p.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        p.currentDirectoryURL = AppPaths.checked(AppPaths.home)
 
         let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
         p.standardInput = inPipe

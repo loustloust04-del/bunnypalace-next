@@ -23,6 +23,9 @@ enum NotifyTool {
     }
 
     static func execute(args: [String: Any]) async -> DeviceToolExec {
+        #if os(macOS)
+        if BenchIsolation.active { return DeviceToolIO.fail("unavailable", "性能隔离模式禁用通知") }
+        #endif
         guard let title = DeviceToolIO.str(args, "title") else { return DeviceToolIO.fail("missing_param", "缺 title") }
         let center = UNUserNotificationCenter.current()
         var status = await center.notificationSettings().authorizationStatus

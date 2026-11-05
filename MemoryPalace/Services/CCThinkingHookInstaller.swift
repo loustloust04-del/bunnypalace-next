@@ -14,28 +14,30 @@ enum CCThinkingHookInstaller {
 
     /// CC workdir，跟 hub.ts 的 ccWorkdir() 默认值一致。
     static var workdir: URL {
-        if let overrideRoot { return overrideRoot.appendingPathComponent("cc-rp", isDirectory: true) }
+        if let overrideRoot { return AppPaths.checked(overrideRoot.appendingPathComponent("cc-rp", isDirectory: true)) }
         if let path = ProcessInfo.processInfo.environment["MP_CC_WORKDIR"], !path.isEmpty {
-            return URL(fileURLWithPath: path, isDirectory: true)
+            return AppPaths.checked(URL(fileURLWithPath: path, isDirectory: true))
         }
-        let legacy = NSString(string: "~/Desktop/cc-rp").expandingTildeInPath
+        let fallback = AppPaths.checked(AppPaths.applicationSupport
+            .appendingPathComponent("MemoryPalace/cc-bridge/cc-rp", isDirectory: true))
+        if BenchIsolation.active { return fallback }
+        let legacy = AppPaths.home.appendingPathComponent("Desktop/cc-rp", isDirectory: true)
         var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: legacy, isDirectory: &isDir), isDir.boolValue {
-            return URL(fileURLWithPath: legacy, isDirectory: true)
+        if FileManager.default.fileExists(atPath: legacy.path, isDirectory: &isDir), isDir.boolValue {
+            return AppPaths.checked(legacy)
         }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MemoryPalace/cc-bridge/cc-rp", isDirectory: true)
+        return fallback
     }
 
     /// hook 脚本与 stash 所在目录：Application Support/MemoryPalace/cc
     static var supportDir: URL {
         let base = overrideRoot?.appendingPathComponent("support", isDirectory: true)
-            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return base.appendingPathComponent("MemoryPalace/cc", isDirectory: true)
+            ?? AppPaths.applicationSupport
+        return AppPaths.checked(base.appendingPathComponent("MemoryPalace/cc", isDirectory: true))
     }
 
-    static var settingsURL: URL { workdir.appendingPathComponent(".claude/settings.json") }
-    static var stashURL: URL { supportDir.appendingPathComponent("settings-stash.json") }
+    static var settingsURL: URL { AppPaths.checked(workdir.appendingPathComponent(".claude/settings.json")) }
+    static var stashURL: URL { AppPaths.checked(supportDir.appendingPathComponent("settings-stash.json")) }
 
     private static let thinkingMarker = "thinking-hook.py"
     private static let askMarker = "askuser-hook.py"
@@ -73,6 +75,7 @@ enum CCThinkingHookInstaller {
     /// 返回是否写了文件；settings.json 解析不了时抛错且不动文件、不记 stash。
     @discardableResult
     static func applySettings(thinkingHookPath: String, askHookPath: String?) throws -> Bool {
+        if BenchIsolation.active { throw CocoaError(.featureUnsupported) }
         var pending: [(keyPath: String, original: Any?)] = []
         let wrote = try AgentConfigEditor.update(fileAt: settingsURL) { text in
             pending = []
@@ -119,6 +122,7 @@ enum CCThinkingHookInstaller {
     /// 用户后来自己加的 hook / key 不受影响。返回是否写了文件。
     @discardableResult
     static func uninstall() throws -> Bool {
+        if BenchIsolation.active { throw CocoaError(.featureUnsupported) }
         var stash = AgentConfigStash(url: stashURL)
         let entries = stash.entries(for: settingsURL)
         var wrote = false

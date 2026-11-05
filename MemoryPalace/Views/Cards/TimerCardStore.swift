@@ -300,6 +300,7 @@ struct SystemTimerNotifications: TimerNotificationScheduling {
     var gate: TimerNotificationGate = .shared
 
     func schedule(id: String, title: String, body: String, at date: Date, conversationId: String) {
+        if TestHostIsolation.blocks(.notifications) { return }
         let center = UNUserNotificationCenter.current()
         let token = gate.begin(id)
         let gate = gate
@@ -321,6 +322,7 @@ struct SystemTimerNotifications: TimerNotificationScheduling {
 
     func cancel(id: String) {
         gate.invalidate(id)
+        if TestHostIsolation.blocks(.notifications) { return }
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["card-timer-\(id)"])
     }
 }

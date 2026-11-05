@@ -64,6 +64,7 @@ final class KeyboardInsetBridge: ObservableObject {
     /// 的 containerTop/growth、PassthroughContainerView 的 hitTest 放行线都读它。主线程读写；非 @Published
     ///（发布走 publishKeyboardGeometry 统一出口，带曲线）。
     var barVisibleHeight: CGFloat = 74
+    let compactBarHeight: CGFloat = 74
     /// 输入条此刻只是 ➕ 面板的透明占位：carrier 整块放行触摸（InputBarStack 写，主线程；astra R6 C1）
     var barIsPlaceholder = false
     /// 录语音锁定态浮在输入条上方的锁 + 大按钮（plan-voice-note M5c）：落在这块里的触摸不放行给聊天列表。

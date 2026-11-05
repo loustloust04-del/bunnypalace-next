@@ -18,19 +18,26 @@ struct WindowSummaryRow: Identifiable, Equatable {
 
 /// 窗口总结格的纯函数（可测）
 enum WindowSummaryListLayout {
-    /// 每个窗口那份文件 → 一行；一段都没有的不出；aliveTitles = 还在的对话（id → 现在的标题），不在里面 = 删了。
-    /// 最近动过的在上（文件最后写入），同时写的按最后一段结束时间
-    static func rows(_ summaries: [SessionSummary], aliveTitles: [String: String]) -> [WindowSummaryRow] {
-        summaries.compactMap { s -> WindowSummaryRow? in
-            guard !s.segments.isEmpty else { return nil }
-            let dated = s.segments.filter { $0.start > .distantPast }
-            let alive = aliveTitles[s.conversationId]
-            let title = (alive?.isEmpty == false ? alive : nil) ?? s.title
-            return WindowSummaryRow(conversationId: s.conversationId, title: title,
+    /// windows/ 和 sessions/ 合起来一个窗口一行（不另读 summaries/：三代搬迁时已落成第 0 段，Q3）；一段都没有的不出；
+    /// segmentCount = A2 段数（第 0 段 + 正式段 + 尾段，老收尾段不算，三代搬迁 W2）。
+    /// aliveTitles = 还在的对话（id → 现在的标题），不在里面 = 删了。最近动过的在上（文件最后写入），同时写的按最后一段结束时间
+    static func rows(windows: [SessionSummary], sessions: [SessionSummary], aliveTitles: [String: String]) -> [WindowSummaryRow] {
+        let w = Dictionary(windows.map { ($0.conversationId, $0) }, uniquingKeysWith: { a, _ in a })
+        let s = Dictionary(sessions.map { ($0.conversationId, $0) }, uniquingKeysWith: { a, _ in a })
+        return Set(w.keys).union(s.keys).compactMap { id -> WindowSummaryRow? in
+            let all = (w[id]?.segments ?? []) + (s[id]?.segments ?? [])
+            guard !all.isEmpty else { return nil }
+            let doc = WindowSummaryReader.doc(conversationId: id, window: w[id], context: s[id])
+            let dated = all.filter { $0.start > .distantPast }
+            let alive = aliveTitles[id]
+            let title = (alive?.isEmpty == false ? alive : nil) ?? doc.title
+            return WindowSummaryRow(conversationId: id, title: title,
                                     first: dated.map(\.start).min(), last: dated.map(\.end).max(),
-                                    segmentCount: s.segments.count, updatedAt: s.updatedAt, isGone: alive == nil)
+                                    segmentCount: doc.a2.count,
+                                    updatedAt: max(w[id]?.updatedAt ?? .distantPast, s[id]?.updatedAt ?? .distantPast),
+                                    isGone: alive == nil)
         }
-        .sorted { ($0.updatedAt, $0.last ?? .distantPast) > ($1.updatedAt, $1.last ?? .distantPast) }
+        .sorted { ($0.updatedAt, $0.last ?? .distantPast, $0.conversationId) > ($1.updatedAt, $1.last ?? .distantPast, $1.conversationId) }
     }
 
     /// 「10月1日 – 10月9日」；同一天只写一天；没有日期 nil
@@ -41,11 +48,11 @@ enum WindowSummaryListLayout {
         return calendar.isDate(a, inSameDayAs: b) ? s : "\(s) – \(MemoryDateText.short(b, now: now, calendar: calendar))"
     }
 
-    /// 「正在记」现在不记的原因；nil = 照常列队列。两个开关只关一个时收尾照跑，开着的那个照写
-    static func queueNote(masterOn: Bool, summaryOn: Bool, timelineOn: Bool, queueEmpty: Bool) -> String? {
+    /// 「正在记」现在不记的原因；nil = 照常列队列。收尾只看 A3 写入开关（`SessionCloseout.closeoutEnabled`）；
+    /// A4 一天一条另外按天拼，不在这个队列里
+    static func queueNote(masterOn: Bool, a3On: Bool, queueEmpty: Bool) -> String? {
         if !masterOn { return "记忆总开关关着，现在不记" }
-        // v4-1 Q3：两个开关任一个开着就收尾（各写各的）
-        if !summaryOn && !timelineOn { return "「上下文摘要和窗口总结」「时间轴」都关着，窗口收尾不跑" }
+        if !a3On { return "A3 窗口总结关着，窗口收尾不跑" }
         return queueEmpty ? "现在没有等着记的窗口" : nil
     }
 }
@@ -128,10 +135,10 @@ final class MemorySessionsModel {
         }
     }
 
-    /// 后台：读 windows/（没有的补 sessions/）每个窗口那份文件 → 查哪些对话还在（后台 context，只取 id、标题）
+    /// 后台：读 windows/ 和 sessions/ 每个窗口那份文件 → 查哪些对话还在（后台 context，只取 id、标题）
     nonisolated static func read(profileId: String, container: ModelContainer) -> [WindowSummaryRow] {
-        let all = WindowSummaryReader.listAll(profileId: profileId)
-        let ids = Array(Set(all.map(\.conversationId)))
+        let windows = WindowSummaryStore.all(profileId: profileId), sessions = SessionSummaryStore.all(profileId: profileId)
+        let ids = Array(Set((windows + sessions).map(\.conversationId)))
         var alive: [String: String] = [:]
         if !ids.isEmpty {
             var d = FetchDescriptor<Conversation>(predicate: #Predicate {
@@ -140,7 +147,7 @@ final class MemorySessionsModel {
             d.propertiesToFetch = [\.id, \.title]
             for c in (try? ModelContext(container).fetch(d)) ?? [] { alive[c.id] = c.title }
         }
-        return WindowSummaryListLayout.rows(all, aliveTitles: alive)
+        return WindowSummaryListLayout.rows(windows: windows, sessions: sessions, aliveTitles: alive)
     }
 }
 
@@ -151,12 +158,15 @@ struct MemorySessionsView: View {
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.settingsMetrics) private var m
     @AppStorage("mem_master") private var memMaster = true
-    @AppStorage("mem_content_summary") private var summaryOn = true
-    @AppStorage("mem_content_timeline") private var timelineOn = true
+    // 写入开关：只为跟着刷新，读都过 MemoryWriterSettings（A3 没写过跟老键 mem_content_summary）
+    @AppStorage("mem_content_summary") private var writeA2 = true
+    @AppStorage("mem_write_a3") private var writeA3 = true
     @State private var detail: WindowSummaryRow? = nil
     @State private var pendingStop: MemoryStopTarget? = nil
 
     private var profileId: String { profileManager?.currentProfile.id ?? "" }
+
+    private var a3On: Bool { _ = (writeA2, writeA3); return MemoryWriterSettings.isOn(.a3) }
 
     var body: some View {
         // 窗口列表和「正在记」是两次后台读：两份都到了才上台，一次出来
@@ -214,8 +224,8 @@ struct MemorySessionsView: View {
         .overlay {
             if model.rows.isEmpty {
                 MemoryEmptyState(title: "还没有窗口总结",
-                                 message: memMaster && (summaryOn || timelineOn)
-                                    ? "每个窗口聊完、安静 30 分钟后，会在这里记下"
+                                 message: memMaster && a3On
+                                    ? "每个窗口聊完、安静 12 小时后，会在这里记下"
                                     : "现在不记新的，原因看上面「正在记」那行")
                     .allowsHitTesting(false)
             }
@@ -225,7 +235,7 @@ struct MemorySessionsView: View {
     /// 「正在记」：收尾巡检接下来要写的对话 + 每个现在什么状态；空时一行灰字
     @ViewBuilder
     private var queueRows: some View {
-        if let note = WindowSummaryListLayout.queueNote(masterOn: memMaster, summaryOn: summaryOn, timelineOn: timelineOn, queueEmpty: model.queue.isEmpty) {
+        if let note = WindowSummaryListLayout.queueNote(masterOn: memMaster, a3On: a3On, queueEmpty: model.queue.isEmpty) {
             Text(note)
                 .font(.system(size: m.secondarySize))
                 .foregroundColor(Theme.textMuted)
@@ -299,7 +309,9 @@ struct MemorySessionsView: View {
     }
 
     private func subtitle(_ r: WindowSummaryRow) -> String {
-        let parts = [WindowSummaryListLayout.dateRange(first: r.first, last: r.last), "记了 \(r.segmentCount) 段"].compactMap { $0 }
+        // 「记了 N 段」= A2 段数；只有窗口总结、还没有 A2 的不写
+        let parts = [WindowSummaryListLayout.dateRange(first: r.first, last: r.last),
+                     r.segmentCount > 0 ? "记了 \(r.segmentCount) 段" : nil].compactMap { $0 }
         let text = parts.joined(separator: " · ")
         return r.isGone ? "\(text) · 这个窗口已经删了" : text
     }

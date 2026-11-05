@@ -7,16 +7,31 @@ final class GroupRoomUIKitTests: XCTestCase {
 
     // MARK: - BubbleTailPath
 
-    func testTailPathMatchesSwiftUIShapeBounds() {
+    func testTailStaysInsideSidesAndScalesWithClampedRadius() {
         let rect = CGRect(x: 10, y: 20, width: 180, height: 64)
         for isUser in [true, false] {
-            for hasTail in [true, false] {
-                let ui = BubbleTailPath.cgPath(in: rect, isUser: isUser, radius: 23, hasTail: hasTail).boundingBoxOfPath
-                let swiftUI = BubbleTailShape(isUser: isUser, radius: 23, hasTail: hasTail).path(in: rect).boundingRect
-                XCTAssertEqual(ui.minX, swiftUI.minX, accuracy: 0.001, "isUser=\(isUser) hasTail=\(hasTail)")
-                XCTAssertEqual(ui.minY, swiftUI.minY, accuracy: 0.001)
-                XCTAssertEqual(ui.maxX, swiftUI.maxX, accuracy: 0.001)
-                XCTAssertEqual(ui.maxY, swiftUI.maxY, accuracy: 0.001)
+            for radius in [CGFloat(0), 12, 23, 80] {
+                for scale in [CGFloat(0.8), 1] {
+                    let bounds = BubbleTailPath.cgPath(in: rect, isUser: isUser, radius: radius,
+                                                       hasTail: true, tailScale: scale).boundingBoxOfPath
+                    XCTAssertEqual(bounds.minX, rect.minX, accuracy: 0.001)
+                    XCTAssertEqual(bounds.maxX, rect.maxX, accuracy: 0.001)
+                    XCTAssertEqual(bounds.minY, rect.minY, accuracy: 0.001)
+                    XCTAssertEqual(bounds.maxY, rect.maxY + min(radius, 32) * scale / 3, accuracy: 0.001)
+                }
+            }
+        }
+    }
+
+    func testMirroredTailJunctionsRemainFilledWithoutWindingHoles() {
+        let rect = CGRect(x: 10, y: 20, width: 180, height: 64)
+        let samples: [(CGFloat, CGFloat)] = [(40, -8), (45, -4), (55, -1), (45, 2), (35, 10), (28, 18)]
+        for isUser in [true, false] {
+            let path = BubbleTailPath.cgPath(in: rect, isUser: isUser, radius: 20, hasTail: true)
+            for (dx, dy) in samples {
+                let point = CGPoint(x: isUser ? rect.maxX - dx / 3 : rect.minX + dx / 3,
+                                    y: rect.maxY + dy / 3)
+                XCTAssertTrue(path.contains(point), "isUser=\(isUser)，接缝点\(point)不应被反向填充挖空")
             }
         }
     }

@@ -20,6 +20,8 @@ final class CharacterFloorService {
     private let profiles: ProfileManager
     private let presets: PresetManager
     private var inFlight: [String: Task<Profile, Error>] = [:]
+    /// 新楼层继承的默认头像（§11-7）；测试换临时文件
+    var defaultAvatar: DefaultUserAvatar = .live
 
     init(cards: CharacterCardManager, profiles: ProfileManager, presets: PresetManager) {
         self.cards = cards
@@ -27,15 +29,16 @@ final class CharacterFloorService {
         self.presets = presets
     }
 
-    func enter(card: CharacterCard) async throws -> Profile {
+    /// activate = false：楼层照建、照发布，但不切过去（小芽引导里导卡，人留在小芽 app 里，H6）
+    func enter(card: CharacterCard, activate: Bool = true) async throws -> Profile {
         if let task = inFlight[card.id] { return try await task.value }
-        let task = Task { @MainActor in try self.enterOnce(cardId: card.id) }
+        let task = Task { @MainActor in try self.enterOnce(cardId: card.id, activate: activate) }
         inFlight[card.id] = task
         defer { inFlight[card.id] = nil }
         return try await task.value
     }
 
-    private func enterOnce(cardId: String) throws -> Profile {
+    private func enterOnce(cardId: String, activate: Bool) throws -> Profile {
         // #037：只读时楼层列表是 seed，找不到绑定楼层不等于楼层没了，别把卡标成 missing
         try profiles.ensureWritable()
         // 重新读模板，连点和旧视图快照都不能覆盖刚提交的绑定。
@@ -47,11 +50,12 @@ final class CharacterFloorService {
                 try cards.update(card)
                 throw Failure.floorMissing
             }
-            profiles.switchTo(profile)
+            if activate { profiles.switchTo(profile) }
             return profile
         }
 
-        let (profile, preset, book) = try Self.makeFloor(card: card, presets: presets)
+        let (profile, preset, book) = try Self.makeFloor(card: card, presets: presets, userName: Self.floorUserName(profiles),
+                                                         userAvatar: defaultAvatar.load())
         let context = ModelContext(profiles.container)
         context.autosaveEnabled = false
         var presetSaved = false
@@ -83,21 +87,24 @@ final class CharacterFloorService {
             if !cleanupErrors.isEmpty { throw Failure.rollback(([original.localizedDescription] + cleanupErrors).joined(separator: "；")) }
             throw original
         }
-        profiles.publish(profile, activate: true)
+        profiles.publish(profile, activate: activate)
         return profile
     }
 
     /// 无副作用构造（③a 第一阶段）：楼层、楼层预设实例、卡内书，不写任何存储。首次进入和整包导入（⑧c）共用
-    static func makeFloor(card: CharacterCard, presets: PresetManager) throws -> (profile: Profile, preset: Preset, book: WorldBook?) {
+    static func makeFloor(card: CharacterCard, presets: PresetManager, userName: String = "你",
+                          userAvatar: Data? = nil) throws -> (profile: Profile, preset: Preset, book: WorldBook?) {
         let report = card.hasWorldBook ? try card.decodeWorldBook() : nil
         var profile = Profile(name: card.name, emoji: "🎭", description: "\(card.name)的楼层",
-                              userName: "你", assistantName: card.name,
+                              userName: userName, assistantName: card.name,
                               systemPrompt: card.systemPrompt, characterDescription: card.description,
                               characterPersonality: card.personality, scenario: card.scenario,
                               chatExamples: card.mesExample, postInstructions: card.postHistoryInstructions,
                               characterCardID: card.name,
                               // ⑧c-4 B：楼层头像存 ≤512px 缩略图，原 PNG 只在卡上留一份
                               coverImageData: card.originals.thumbnail ?? CardImageThumbnail.make(from: card.imageData))
+        // 默认头像（§11-7）：跟默认称呼一样，卡楼层里的「你」带上她挑过的头像
+        profile.userAvatarData = userAvatar
         var preset = presets.preset(byId: profile.presetId) ?? .balanced
         preset.id = UUID().uuidString
         preset.ownerProfileId = profile.id
@@ -120,6 +127,49 @@ final class CharacterFloorService {
             profile.linkedWorldBookIDs = [value.id.uuidString]
         }
         return (profile, preset, book)
+    }
+
+    /// B6：卡楼层里的 {{user}} 用当前楼层的称呼，没填用全局用户名，都没有才「你」。
+    /// 链首是默认称呼（H9，plan-onboarding-xiaoya-impl §4.4）：引导里导卡时人在哪层不一定，那层的称呼不算数
+    static func floorUserName(_ profiles: ProfileManager, defaults: UserDefaults = .standard) -> String {
+        TavernSync.userName([defaults.string(forKey: DefaultUserName.key), profiles.currentProfile.userName,
+                             defaults.string(forKey: "userName"), defaults.string(forKey: "onboardingUserName")])
+    }
+
+    static func boundCard(profileId: String, cards: [CharacterCard]) -> CharacterCard? {
+        cards.first { $0.bindingState == .active && $0.linkedProfileId == profileId }
+    }
+
+    /// B5：楼层是从卡建的、卡有开场白 → 新对话要带的开场白；不是卡楼层返回空
+    static func greetings(profileId: String, cards: [CharacterCard]) -> [String] {
+        boundCard(profileId: profileId, cards: cards)?.greetings ?? []
+    }
+
+    /// B1：绑着这张卡的楼层（目前一张卡最多绑一个）
+    func boundFloors(card: CharacterCard) -> [Profile] {
+        guard card.bindingState == .active, let id = card.linkedProfileId else { return [] }
+        return profiles.profiles.filter { $0.id == id }
+    }
+
+    /// B1：把卡写进绑着它的楼层 + 楼层预设实例的 main / jailbreak 槽（只换导卡时原样拷过去、之后没改过的槽）。
+    /// previous = 改卡前那版；连同导入原件一起当「楼层可能拷自的版本」。返回同步了几个楼层、哪些槽你改过没覆盖
+    @discardableResult
+    func syncFloors(card: CharacterCard, previous: CharacterCard?, onlyProfileId: String? = nil) throws -> (floors: Int, skipped: [String]) {
+        try profiles.ensureWritable()
+        let original = card.rawJSONData.flatMap { try? CharacterCard(from: TavernCard.parseJSON(data: $0)) }
+        let sources = [previous, original].compactMap { $0 }
+        var skipped: [String] = []
+        let floors = boundFloors(card: card).filter { onlyProfileId == nil || $0.id == onlyProfileId }
+        for profile in floors {
+            // 只动这个楼层自己的实例，不碰共享模板
+            let instance = presets.preset(byId: profile.presetId).flatMap { $0.ownerProfileId == profile.id ? $0 : nil }
+            let template = instance?.sourceTemplateId.flatMap { presets.preset(byId: $0) }
+            let outcome = TavernSync.apply(card: card, sources: sources, profile: profile, preset: instance, template: template)
+            if outcome.profile != profile { profiles.updateProfile(outcome.profile) }
+            if let preset = outcome.preset, preset.prompts != instance?.prompts { presets.save(preset) }
+            skipped += outcome.skipped
+        }
+        return (floors.count, skipped)
     }
 
     func newChat(card: CharacterCard) throws -> Conversation {

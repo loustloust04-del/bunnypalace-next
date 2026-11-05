@@ -62,12 +62,24 @@ struct LocalModelsSections: View {
         }
     }
 
-    @ViewBuilder
     private func row(_ model: AssistantLocalModel) -> some View {
+        LocalModelDownloadRow(model: model, onDelete: { confirmDelete = model })
+    }
+}
+
+/// 一个本机模型的下载那一行（下载 / 暂停 / 继续 / 用流量 / 重试 / 已装好）。API 卡的本机模型段和记忆 C2 页共用（v5 · B3）；
+/// onDelete = nil 时装好了只显示「已装好」
+struct LocalModelDownloadRow: View {
+    let model: AssistantLocalModel
+    var title: String? = nil
+    var onDelete: (() -> Void)? = nil
+    @State private var models = AssistantModelStore.shared
+
+    var body: some View {
         let fmt: (Int64) -> String = { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
         switch models.state(model) {
         case .notInstalled:
-            Button("下载（\(fmt(model.totalBytes))）") { models.download(model) }
+            Button("\(title ?? "下载")（\(fmt(model.totalBytes))）") { models.download(model) }
         case .downloading(let received, let total):
             VStack(alignment: .leading, spacing: 6) {
                 ProgressView(value: Double(received), total: Double(max(total, 1)))
@@ -98,7 +110,9 @@ struct LocalModelsSections: View {
             HStack {
                 Label("已装好", systemImage: "checkmark.circle").foregroundColor(Theme.textSecondary)
                 Spacer()
-                Button("删除", role: .destructive) { confirmDelete = model }.buttonStyle(.borderless)
+                if let onDelete {
+                    Button("删除", role: .destructive) { onDelete() }.buttonStyle(.borderless)
+                }
             }
         }
     }

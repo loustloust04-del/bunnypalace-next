@@ -14,8 +14,9 @@ enum GroupRoomMetrics {
     static let avatarGap: CGFloat = 6
     /// 头像底边比最后一个气泡底边再低一点
     static let avatarDrop: CGFloat = 4
-    static let paddingH = CGFloat(BubbleModeRow.fixedPaddingH)
-    static let paddingV = CGFloat(BubbleModeRow.fixedPaddingV)
+    static let paddingH: CGFloat = 18
+    static let paddingV: CGFloat = 15
+    static let lineSpacing: CGFloat = 1.45
     static let bubbleSpacing: CGFloat = 4
     /// 同一人连发挨紧，换人隔开（iMessage 群聊）
     static let runGap: CGFloat = 4
@@ -35,9 +36,7 @@ enum GroupRoomMetrics {
     static let reactionDrop: CGFloat = 2
     static let reactionOverhang: CGFloat = GroupReactionBadgeView.height / 2
 
-    static var cornerRadius: CGFloat {
-        CGFloat(UserDefaults.standard.object(forKey: "bubbleModeCornerRadius") as? Double ?? 23)
-    }
+    static let cornerRadius: CGFloat = 23
     static var fontScale: CGFloat {
         let scale = UserDefaults.standard.double(forKey: "fontScale")
         return scale > 0 ? scale : 1.2
@@ -46,9 +45,9 @@ enum GroupRoomMetrics {
     static var bodyFont: UIFont { FontManager.uiFont(size: 13.5 * textScale) }
     static func maxBubbleWidth(listWidth: CGFloat) -> CGFloat { min(listWidth * 0.76, 540) }
 
-    /// 字体 / 圆角设置的指纹：变了布局缓存作废
+    /// 字体设置变了，布局缓存作废。
     static var settingsKey: String {
-        "\(UserDefaults.standard.string(forKey: "selectedFont") ?? "")|\(fontScale)|\(cornerRadius)"
+        "\(UserDefaults.standard.string(forKey: "selectedFont") ?? "")|\(fontScale)"
     }
 }
 
@@ -125,13 +124,13 @@ struct GroupMessageLayout {
             let style = GroupMarkdownRenderer.Style(
                 font: font, textColor: UIColor(Theme.userText), accentColor: accent,
                 codeBackground: .clear,
-                lineSpacing: 4 * GroupRoomMetrics.fontScale * CGFloat(BubbleModeRow.fixedLineSpacing),
+                lineSpacing: 4 * GroupRoomMetrics.fontScale * GroupRoomMetrics.lineSpacing,
                 quoteColor: UIColor(Theme.userText).withAlphaComponent(0.65))
             return GroupMarkdownRenderer.mergingQuoteBlocks(BubbleModeRow.splitBlocks(content)).map {
                 GroupMarkdownRenderer.plain($0, style: style, handles: model.memberHandles)
             }
         }
-        // 行距 5 = 气泡模式 markdown 正文（fork iOS 段落行距）
+        // 群聊 AI 正文保持原来的 5pt 行距。
         let style = GroupMarkdownRenderer.Style(
             font: font, textColor: UIColor(Theme.assistantText), accentColor: accent,
             codeBackground: UIColor(Theme.accent).withAlphaComponent(0.72), lineSpacing: 5,

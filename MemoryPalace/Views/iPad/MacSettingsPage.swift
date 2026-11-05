@@ -33,7 +33,17 @@ extension SettingsRoute {
         switch self {
         case .healthPermissions: "健康"
         case .memoryExtractPrompt: "提取提示词"
-        case .dreamPrompt: "画像生成提示词"
+        case .memoryWriterA2, .memoryWriterA3, .memoryWriterA4, .memoryWriterB1, .memoryWriterB4, .memoryWriterC, .memoryWriterC2, .memoryWriterC3:
+            memoryWriterID.map { "\($0.code) \($0.title(assistant: Self.assistantName))" } ?? ""
+        case .memoryCatalogStopWords: "不触发的词"
+        case .memoryWriteBudget: "写入预算"
+        case .memoryOpenWindow: "开窗口带什么"
+        case .memoryPending: "待续"
+        case .memoryArchiveList: "从聊天里记住的"
+        case .memorySelfList: "\(Self.assistantName)的记忆"
+        case .memoryAudit: "整理台"
+        case .memoryProposal: "整理提案"
+        case .memoryProposalItem: "目录项"
         case .themeLibrary: "主题库"
         case .themeColors: "主题颜色"
         case .chatBackground: "聊天背景"
@@ -45,6 +55,7 @@ extension SettingsRoute {
         case .acknowledgements: "开源致谢"
         case .voiceServices: "语音服务"
         case .importRecordDetail: "导入详情"
+        case .toolDrawer: "工具抽屉"
         }
     }
 
@@ -53,8 +64,17 @@ extension SettingsRoute {
         case .healthPermissions: MacHealthPermissionPage()
         case .memoryExtractPrompt:
             PromptEditorPage.memoryExtract
-        case .dreamPrompt:
-            PromptEditorPage.dream
+        case .memoryWriterA2, .memoryWriterA3, .memoryWriterA4, .memoryWriterB1, .memoryWriterB4, .memoryWriterC, .memoryWriterC2, .memoryWriterC3:
+            if let id = memoryWriterID { MemoryWriterPage(id: id) }
+        case .memoryCatalogStopWords: CatalogStopWordsPage()
+        case .memoryWriteBudget: WriteBudgetPage()
+        case .memoryOpenWindow: MemoryOpenWindowPage()
+        case .memoryPending: PendingListPage()
+        case .memoryArchiveList: MemoryArchiveListPage()
+        case .memorySelfList: SelfMemoryListPage()
+        case .memoryAudit: MemoryAuditPage().memorySubpage("整理台")
+        case .memoryProposal: MacWikiProposalRoute()
+        case .memoryProposalItem: MacWikiProposalItemRoute()
         case .themeLibrary: ThemeLibraryPage()
         case .themeColors: ThemeColorsPage()
         case .chatBackground: ChatBackgroundPage()
@@ -66,6 +86,7 @@ extension SettingsRoute {
         case .acknowledgements: MacAcknowledgementsPage()
         case .voiceServices: VoiceServicesPage()
         case .importRecordDetail: MacImportRecordDetailRoute()
+        case .toolDrawer: ToolDrawerPage(viewModel: nil)
         }
     }
 }
@@ -326,22 +347,25 @@ struct MacSettingsForm<Content: View>: View {
 struct MacSettingsSidebarGroup: Identifiable {
     let title: String
     let tabs: [SettingsView.SettingsTab]
+    /// 只在侧栏搜索有词时出现（世界书 / 正则：内容在卡库，设置目录不列）
+    var searchOnly = false
     var id: String { title }
 
     static let all: [Self] = [
         // A1：mac 删「主题」tab，主题库成外观页二级（`SettingsRoute.themeLibrary`）
-        .init(title: "基础", tabs: [.general, .macWorkspace, .appearance, .permissions]),
-        .init(title: "AI 与对话", tabs: [.api, .usage, .persona, .xiaoya, .memory, .tts, .mcp, .regex, .worldBook]),
+        .init(title: "基础", tabs: [.general, .macWorkspace, .appearance, .permissions, .rightPanel]),
+        .init(title: "AI 与对话", tabs: [.api, .usage, .persona, .xiaoya, .memory, .tts, .mcp]),
         .init(title: "编程工具", tabs: [.myComputer, .claudeCode, .codex, .agent]),
-        .init(title: "模块", tabs: moduleTabs),
+        .init(title: "子应用", tabs: subAppTabs),
         .init(title: "文件与数据", tabs: [.attachment, .fileLibrary, .data]),
         .init(title: "其他", tabs: [.config, .manual, .debug, .about]),
+        .init(title: "内容", tabs: [.worldBook, .regex], searchOnly: true),
     ]
 
     #if PERSONAL_APPS
-    private static let moduleTabs: [SettingsView.SettingsTab] = [.rightPanel, .sticker, .health, .calendar, .trading, .reading, .vocab, .groupChat]
+    private static let subAppTabs: [SettingsView.SettingsTab] = [.sticker, .health, .calendar, .trading, .reading, .vocab, .groupChat]
     #else
-    private static let moduleTabs: [SettingsView.SettingsTab] = [.rightPanel, .sticker, .health, .calendar, .reading, .vocab, .groupChat]
+    private static let subAppTabs: [SettingsView.SettingsTab] = [.sticker, .health, .calendar, .reading, .vocab, .groupChat]
     #endif
 }
 

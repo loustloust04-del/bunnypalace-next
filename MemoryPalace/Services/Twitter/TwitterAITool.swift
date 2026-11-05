@@ -52,7 +52,7 @@ enum TwitterAITool {
         guard let action = args["action"] as? String, actions.contains(action) else {
             return fail("action 只能是：\(actions.joined(separator: " / "))")
         }
-        let mediaDir = (mediaRoot ?? TwitterArchiveImporter.defaultMediaRoot()).appendingPathComponent(profileId, isDirectory: true)
+        let mediaDir = AppPaths.checked((mediaRoot ?? TwitterArchiveImporter.defaultMediaRoot()).appendingPathComponent(profileId, isDirectory: true))
         do {
             let primary = try TwitterAccounts.ensureAIAccount(name: aiName, avatarJPEG: aiAvatar, profileId: profileId,
                                                                context: context, mediaDir: mediaDir)

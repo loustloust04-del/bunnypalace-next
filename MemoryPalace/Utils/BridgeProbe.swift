@@ -13,7 +13,11 @@ enum BridgeProbe {
     }()
     private static var handle: FileHandle? = {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        #if os(macOS)
+        let url = AppPaths.checked(docs.appendingPathComponent("bridge-probe.log"))
+        #else
         let url = docs.appendingPathComponent("bridge-probe.log")
+        #endif
         if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int, size > 5_000_000 {
             try? FileManager.default.removeItem(at: url)
         }

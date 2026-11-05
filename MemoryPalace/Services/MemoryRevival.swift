@@ -1,7 +1,7 @@
 import Foundation
 
 /// 找回失效记忆（修复第一刀·刀2）：库里只记了失效时间没记原因，
-/// 按失效时间聚批——同一分钟内一起失效 ≥3 条的算一批（做梦毕业 / 整理记忆是成批标的），其余算零散。
+/// 按失效时间聚批——同一分钟内一起失效 ≥3 条的算一批（做梦毕业 / 审计台批量删是成批标的），其余算零散。
 enum MemoryRevival {
     static let minBatchSize = 3
     static let window: TimeInterval = 60
@@ -38,7 +38,7 @@ enum MemoryRevival {
         return (batches.reversed(), scattered.sorted(by: newestFirst))
     }
 
-    /// 「已删除」弹层：档案成批的 = 整理时合并掉的；零散的档案和{{char}}自己记下的删掉的并一组
+    /// 「已删除」弹层：档案成批的 = 一起删掉的；零散的档案和{{char}}自己记下的删掉的并一组
     /// （库里只记了删的时间没记是谁删的，「你删的」「{{char}}划掉的」分不开），按删的时间新→旧
     static func trash(archive: [Memory], assistant: [SelfMemory]) -> (batches: [Batch], scattered: [MemoryRowItem]) {
         let (batches, loose) = group(archive)

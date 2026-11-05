@@ -21,16 +21,16 @@ struct ActivityCacheStore: Sendable {
     let root: URL
 
     static func defaultRoot(profileId: String) -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("MemoryPalace/calendar", isDirectory: true)
-            .appendingPathComponent(sanitize(profileId), isDirectory: true)
+        let base = AppPaths.applicationSupport
+        return AppPaths.checked(base.appendingPathComponent("MemoryPalace/calendar", isDirectory: true)
+            .appendingPathComponent(sanitize(profileId), isDirectory: true))
     }
 
     init(root: URL) { self.root = root }
     init(profileId: String) { self.root = Self.defaultRoot(profileId: profileId) }
 
-    private var convsDir: URL { root.appendingPathComponent("convs", isDirectory: true) }
-    private var manifestURL: URL { root.appendingPathComponent("manifest.json") }
+    private var convsDir: URL { AppPaths.checked(root.appendingPathComponent("convs", isDirectory: true)) }
+    private var manifestURL: URL { AppPaths.checked(root.appendingPathComponent("manifest.json")) }
 
     static func sanitize(_ s: String) -> String {
         String(s.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "." ? $0 : "_" })
@@ -54,7 +54,7 @@ struct ActivityCacheStore: Sendable {
 
     // MARK: 逐对话
 
-    private func url(for convId: String) -> URL { convsDir.appendingPathComponent(Self.sanitize(convId) + ".json") }
+    private func url(for convId: String) -> URL { AppPaths.checked(convsDir.appendingPathComponent(Self.sanitize(convId) + ".json")) }
 
     func save(_ c: ConversationContribution) {
         ensureDirs()
@@ -70,7 +70,7 @@ struct ActivityCacheStore: Sendable {
         var out: [String: ConversationContribution] = [:]
         let decoder = JSONDecoder()
         for f in files where f.pathExtension == "json" {
-            if let data = try? Data(contentsOf: f), let c = try? decoder.decode(ConversationContribution.self, from: data) {
+            if let data = try? Data(contentsOf: AppPaths.checked(f)), let c = try? decoder.decode(ConversationContribution.self, from: data) {
                 out[c.convId] = c
             }
         }

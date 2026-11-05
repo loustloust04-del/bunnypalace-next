@@ -43,8 +43,26 @@ enum WebSearchToolService {
 
     // MARK: - system prompt（client-side 才用——教模型引用规范，带 assistantName）
 
-    static func systemPrompt(assistantName: String) -> String {
+    static func systemPrompt(assistantName: String, browse: Bool = true) -> String {
         let name = assistantName.isEmpty ? "你" : assistantName
+        guard browse else {
+            // browse_url 关着（粟粟 10-15：关了的工具不提）：只教搜和引用
+            return """
+            ## 联网搜索（search_web）
+
+            \(name)，你有联网工具 `search_web`，**永远不要说"我没联网/无法访问网络/无法查询实时信息"**：
+            - `search_web`：搜候选页面，返回标题 + URL + ≤100 字短摘要。摘要只是索引，信息不够就换关键词再搜；只凭摘要回答时告诉用户你看到的是搜索摘要。
+
+            ### 引用格式
+            搜索结果每项带 `index`（序号）和 `id`（唯一标识）。引用规则：
+            - 用到搜索结果时，紧跟相关内容输出 `[citation](index:id)`，**不要堆到末尾**
+              例：`今天北京晴，最高 28℃。[citation](1:a1b2c3) 明天有小雨。[citation](2:f4e5d6)`
+
+            ### 绝对不能做
+            - ❌ 说"我没联网/无法访问网络"——你**有 search_web**
+            - ❌ 查询范围太宽乱搜——先和用户确认主题
+            """
+        }
         return """
         ## 联网搜索（search_web + browse_url 双工具）
 

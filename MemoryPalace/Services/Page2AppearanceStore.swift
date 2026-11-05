@@ -13,7 +13,7 @@ final class Page2AppearanceStore {
         if ProcessInfo.processInfo.arguments.contains("page2-ui-test") {
             let requested = ProcessInfo.processInfo.environment["PAGE2_UI_LAYOUT_CASE"] ?? UUID().uuidString
             let caseID = requested.filter { $0.isLetter || $0.isNumber || $0 == "-" }
-            let store = Page2AppearanceStore(directory: FileManager.default.temporaryDirectory.appendingPathComponent("page2-appearance-ui-\(caseID)"))
+            let store = Page2AppearanceStore(directory: AppPaths.temporaryDirectory.appendingPathComponent("page2-appearance-ui-\(caseID)"))
             if ProcessInfo.processInfo.environment["PAGE2_UI_RENDERING"] == "standard" {
                 store.value.rendering = "standard"
                 store.value.luminosity = "light"
@@ -33,9 +33,9 @@ final class Page2AppearanceStore {
     let directory: URL
 
     init(directory: URL? = nil) {
-        self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MemoryPalace/Page2/Appearance")
-        let url = self.directory.appendingPathComponent("appearance.json")
+        self.directory = directory ?? AppPaths.checked(AppPaths.applicationSupport
+            .appendingPathComponent("MemoryPalace/Page2/Appearance"))
+        let url = AppPaths.checked(self.directory.appendingPathComponent("appearance.json"))
         if let data = try? Data(contentsOf: url) {
             do { value = try JSONDecoder().decode(Page2Appearance.self, from: data) }
             catch { errorMessage = "外观配置暂时无法读取，原文件已保留。" }
@@ -45,7 +45,7 @@ final class Page2AppearanceStore {
     func save(_ candidate: Page2Appearance) -> Bool {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try JSONEncoder().encode(candidate).write(to: directory.appendingPathComponent("appearance.json"), options: .atomic)
+            try JSONEncoder().encode(candidate).write(to: AppPaths.checked(directory.appendingPathComponent("appearance.json")), options: .atomic)
             value = candidate
             previewValue = nil
             errorMessage = nil
@@ -55,7 +55,7 @@ final class Page2AppearanceStore {
 
     func assetURL(_ name: String?) -> URL? {
         guard let name, name == URL(fileURLWithPath: name).lastPathComponent else { return nil }
-        let url = directory.appendingPathComponent(name)
+        let url = AppPaths.checked(directory.appendingPathComponent(name))
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 

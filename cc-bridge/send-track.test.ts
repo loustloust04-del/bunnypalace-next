@@ -23,6 +23,8 @@ interface Fake {
   setArea: (...seq: EditArea[]) => void
   gen: { v: number }
   legacy: string[]
+  /// requeue 收到的发送上下文
+  requeued: unknown[]
 }
 
 function fake(o: {
@@ -42,6 +44,7 @@ function fake(o: {
   let areas: EditArea[] = [EMPTY]
   const gen = { v: 1 }
   const legacy: string[] = []
+  const requeued: unknown[] = []
   const f = {} as Fake
   const deps: TrackDeps = {
     inject: async (text) => { calls.push("inject"); const n = o.inject?.shift(); return n ? n(text) : { committed: true, paste: false } },
@@ -57,13 +60,13 @@ function fake(o: {
     editArea: async () => (areas.length > 1 ? areas.shift()! : areas[0]),
     generation: () => gen.v,
     sessionGone: () => { calls.push("gone") },
-    requeue: () => { calls.push("requeue") },
+    requeue: (_s, _t, sc) => { calls.push("requeue"); requeued.push(sc) },
     legacyError: (_s, id, reason) => { legacy.push(`${id}:${reason}`) },
     sleep: (ms) => Bun.sleep(ms),
     now: Date.now,
   }
   Object.assign(f, {
-    tracker: new SendTracker(book, deps, { ...T, ...o.timings }), book, frames, calls, transcript, gen, legacy,
+    tracker: new SendTracker(book, deps, { ...T, ...o.timings }), book, frames, calls, transcript, gen, legacy, requeued,
     submitLine: (text: string) => appendFileSync(transcript, JSON.stringify({ type: "user", message: { content: text } }) + "\n"),
     setArea: (...seq: EditArea[]) => { areas = seq },
   })
@@ -247,8 +250,8 @@ test("审查 R1-9：重发时会话不在了 → 交回原有路径重新拉起�
 test("审查 R1-8：被接受的重发——注入前失败写回终态；一直没结果有看门狗", async () => {
   const f = fake()
   f.book.finish(f.book.begin("v", "c", "s", undefined, undefined)!, { status: "failed", retryable: true, reason: "x" })
-  f.book.acceptRetry("v", "c", "s", false)
-  f.tracker.abortRetry("v", "重发没发出去：附件落盘失败")
+  const first = f.book.acceptRetry("v", "c", "s", false)
+  if (first.accepted) f.tracker.abortRetry(first.op, "重发没发出去：附件落盘失败")
   expect(f.frames.at(-1)).toBe("v:failed:true")
   const r = f.book.acceptRetry("v", "c", "s", false)
   expect(r.accepted).toBe(true)
@@ -291,4 +294,32 @@ test("codex 空输入框显示的是灰字占位（`› Ask Codex to do anything
   // 换个占位文案也一样；输入框里真有这条就不放行（由上面 R1-2 的用例管）
   const other = locateEditArea(["› Find and fix a bug in @filename", "  status"].join("\n"), "codex")!
   expect(other.includes("cx")).toBe(false)
+})
+
+test("A1 R5 P1-d：同一毫秒（标签里 ts 一样、整段文字一样）的两次发送——身份走各自的上下文：旧那次核对的结果不发，新那次的结果带它自己的 attempt", async () => {
+  const f = fake({ inject: [async () => { throw uncertain() }, async () => { throw uncertain() }] })
+  const attempts: string[] = []
+  f.book.watch((fr) => attempts.push(`${fr.status}:${fr.attempt}`))
+  const same = tag("m", "2026-10-15T00:00:00.000Z")
+  f.book.attemptStarted("m", "send-1", false)
+  f.book.attemptStarted("m", "send-2", false)   // 两次都已登记（探测结束后集中 flush），第二次是最新
+  await f.tracker.send(same, "s", { key: "send-1", appAttempt: "a1" })
+  expect(attempts).toEqual([])   // 旧那次：不进账、不广播（R4 按 ts 判当前 → 当成当前、还贴上 a2）
+  await f.tracker.send(same, "s", { key: "send-2", appAttempt: "a2" })
+  expect(attempts).toEqual(["uncertain:a2", "failed:a2"])
+})
+
+test("A1 R5：重发途中会话没了 → 交回原有路径时把这一次的发送上下文一起带回去；别的发送不许顶替这次重发", async () => {
+  const f = fake()
+  f.book.attemptStarted("z", "send-1", false)
+  f.book.finish(f.book.begin("z", "c", "s", undefined, "send-1", "a1")!, { status: "failed", retryable: true, reason: "x" })
+  f.book.acceptRetry("z", "c", "s", false, "r1")
+  f.book.attemptStarted("z", "send-2", true)
+  const sc = { key: "send-2", appAttempt: "r1" }
+  await f.tracker.send(tag("z", "t0"), "s", { key: "send-0", appAttempt: "x" })   // 同 id 更早排着的别的发送
+  expect(f.book.active.get("z")?.started).toBe(false)
+  f.setArea({ kind: "gone", detail: "can't find session: s" })
+  await f.tracker.send(tag("z", "t2"), "s", sc)
+  expect(f.requeued).toEqual([sc])
+  expect(f.book.active.get("z")?.started).toBe(false)
 })

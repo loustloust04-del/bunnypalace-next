@@ -22,6 +22,9 @@ final class SyncEngine: NSObject {
 
     /// 幂等：楼层切换/开关重开直接重 start
     func start(profileId: String, container: ModelContainer) {
+        #if os(macOS)
+        if BenchIsolation.active { return }
+        #endif
         stop()
         guard !TestHostIsolation.active, NSClassFromString("XCTestCase") == nil else { return }
         guard SyncStore.isEnabled(profileId: profileId) else { return }
@@ -153,20 +156,27 @@ final class SyncEngine: NSObject {
         if !dirSuspended { dirSource?.suspend(); dirSuspended = true }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let context = ModelContext(container)
-            // [probe-5a] SyncEngine pump 之前 — 看 SyncEngine 启动时主位 nodeCount
-            let probe5aNodes = (try? context.fetchCount(FetchDescriptor<MessageNode>())) ?? -1
-            let probe5aConvs = (try? context.fetchCount(FetchDescriptor<Conversation>())) ?? -1
-            NSLog("[probe-5a] SyncEngine pump start (pid=\(pid)): nodes=\(probe5aNodes) convs=\(probe5aConvs) skipImport=\(skipImport)")
+            #if os(macOS)
+            let collectProbeCounts = !SyncStore.stanchEnabled
+            #else
+            let collectProbeCounts = true
+            #endif
+            if collectProbeCounts {
+                let probe5aNodes = (try? context.fetchCount(FetchDescriptor<MessageNode>())) ?? -1
+                let probe5aConvs = (try? context.fetchCount(FetchDescriptor<Conversation>())) ?? -1
+                NSLog("[probe-5a] SyncEngine pump start (pid=\(pid)): nodes=\(probe5aNodes) convs=\(probe5aConvs) skipImport=\(skipImport)")
+            }
 
             var imported = SyncStore.ImportResult()
             if !skipImport {
                 imported = SyncStore.importAll(profileId: pid, context: context)
             }
             let exported = SyncStore.exportChanged(profileId: pid, context: context)
-            // [probe-5b] SyncEngine pump 之后 — 看 import 是否反灌
-            let probe5bNodes = (try? context.fetchCount(FetchDescriptor<MessageNode>())) ?? -1
-            let probe5bConvs = (try? context.fetchCount(FetchDescriptor<Conversation>())) ?? -1
-            NSLog("[probe-5b] SyncEngine pump done (pid=\(pid)): nodes=\(probe5bNodes) convs=\(probe5bConvs) imp.nodes=\(imported.nodesInserted) imp.conv+=\(imported.conversationsCreated) imp.conv~=\(imported.conversationsUpdated) exp=\(exported.exported)")
+            if collectProbeCounts {
+                let probe5bNodes = (try? context.fetchCount(FetchDescriptor<MessageNode>())) ?? -1
+                let probe5bConvs = (try? context.fetchCount(FetchDescriptor<Conversation>())) ?? -1
+                NSLog("[probe-5b] SyncEngine pump done (pid=\(pid)): nodes=\(probe5bNodes) convs=\(probe5bConvs) imp.nodes=\(imported.nodesInserted) imp.conv+=\(imported.conversationsCreated) imp.conv~=\(imported.conversationsUpdated) exp=\(exported.exported)")
+            }
             let hadWork = exported.exported > 0
                 || imported.nodesInserted > 0
                 || imported.conversationsCreated > 0

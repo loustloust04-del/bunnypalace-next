@@ -21,22 +21,22 @@ enum StagingPaths {
     // MARK: - Roots
 
     static var applicationSupportRoot: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = base.appendingPathComponent("MemoryPalace", isDirectory: true)
+        let base = AppPaths.applicationSupport
+        let dir = AppPaths.checked(base.appendingPathComponent("MemoryPalace", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
     static var documentsRoot: URL {
-        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let dir = base.appendingPathComponent("记忆宫殿", isDirectory: true)
+        let base = AppPaths.documents
+        let dir = AppPaths.checked(base.appendingPathComponent("记忆宫殿", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
     static var cachesRoot: URL {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        let dir = base.appendingPathComponent("MemoryPalace", isDirectory: true)
+        let base = AppPaths.caches
+        let dir = AppPaths.checked(base.appendingPathComponent("MemoryPalace", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -45,15 +45,15 @@ enum StagingPaths {
 
     /// 一次性 workspace：Caches/MemoryPalace/import-workspace/<uuid>/
     static func freshWorkspace() -> URL {
-        let dir = cachesRoot
+        let dir = AppPaths.checked(cachesRoot
             .appendingPathComponent("import-workspace", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
     static func cleanupAllWorkspaces() {
-        let root = cachesRoot.appendingPathComponent("import-workspace", isDirectory: true)
+        let root = AppPaths.checked(cachesRoot.appendingPathComponent("import-workspace", isDirectory: true))
         try? FileManager.default.removeItem(at: root)
     }
 
@@ -61,7 +61,7 @@ enum StagingPaths {
 
     /// staging SwiftData store（跟主 store 同目录）
     static var stagingStoreURL: URL {
-        applicationSupportRoot.appendingPathComponent("unified-staging.store")
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("unified-staging.store"))
     }
 
     /// staging SwiftData externalStorage 目录（G-A.1.7 sentinel blob 法实测确认）
@@ -69,86 +69,96 @@ enum StagingPaths {
     /// macOS 实测：probe.store → .probe_SUPPORT/_EXTERNAL_DATA
     /// iOS 预期一致（SwiftData 同框架，但真机/模拟器需复跑一次探针确认）
     static var stagingStoreExternalURL: URL {
-        applicationSupportRoot.appendingPathComponent(".unified-staging_SUPPORT", isDirectory: true)
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent(".unified-staging_SUPPORT", isDirectory: true))
     }
 
     /// 主位 SwiftData store
     static var primaryStoreURL: URL {
-        applicationSupportRoot.appendingPathComponent("unified.store")
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("unified.store"))
     }
 
     /// 主位 SwiftData externalStorage 目录（G-A.1.7 实测确认）
     static var primaryStoreExternalURL: URL {
-        applicationSupportRoot.appendingPathComponent(".unified_SUPPORT", isDirectory: true)
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent(".unified_SUPPORT", isDirectory: true))
     }
 
     /// staging stickers 区
     static var stagingStickersRoot: URL {
-        applicationSupportRoot.appendingPathComponent("stickers-staging", isDirectory: true)
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("stickers-staging", isDirectory: true))
     }
 
     static var primaryStickersRoot: URL {
-        applicationSupportRoot.appendingPathComponent("stickers", isDirectory: true)
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("stickers", isDirectory: true))
     }
 
     /// staging audiobooks 区
     static var stagingAudiobooksRoot: URL {
-        applicationSupportRoot.appendingPathComponent("audiobooks-staging", isDirectory: true)
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("audiobooks-staging", isDirectory: true))
     }
 
     static var primaryAudiobooksRoot: URL {
-        applicationSupportRoot.appendingPathComponent("audiobooks", isDirectory: true)
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("audiobooks", isDirectory: true))
     }
 
     /// staging themes 区
     static var stagingThemesRoot: URL {
-        applicationSupportRoot.appendingPathComponent("themes-staging", isDirectory: true)
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("themes-staging", isDirectory: true))
     }
 
     static var primaryThemesRoot: URL {
-        applicationSupportRoot.appendingPathComponent("themes", isDirectory: true)
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("themes", isDirectory: true))
     }
 
     /// 卡库 ⑧c：身份库 / 导入来源 / 原件归档 / 未完成批次（CardLibraryStorage.defaultRoot）
     static var stagingCardLibraryRoot: URL {
-        applicationSupportRoot.appendingPathComponent("cardlibrary-staging", isDirectory: true)
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("cardlibrary-staging", isDirectory: true))
     }
 
     static var primaryCardLibraryRoot: URL {
-        applicationSupportRoot.appendingPathComponent("cardlibrary", isDirectory: true)
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("cardlibrary", isDirectory: true))
+    }
+
+    /// 小芽对话 + 账本（AssistantChatStore / AssistantLedger）：主位不在 MemoryPalace/ 下，是 Application Support/AssistantChat/；
+    /// staging 放 MemoryPalace/ 下，同在 Application Support，同 volume
+    static var stagingAssistantRoot: URL {
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("assistant-staging", isDirectory: true))
+    }
+
+    static var primaryAssistantRoot: URL {
+        AssistantChatStore.defaultURL.deletingLastPathComponent()
     }
 
     /// staging filelibrary 区（floors-staging/，本地路径；iCloud 路径走 FileLibraryStore 拿）
     static var stagingFilelibraryRoot: URL {
-        documentsRoot.appendingPathComponent("floors-staging", isDirectory: true)
+        AppPaths.checked(documentsRoot.appendingPathComponent("floors-staging", isDirectory: true))
     }
 
     static var primaryFilelibraryRoot: URL {
-        documentsRoot.appendingPathComponent("floors", isDirectory: true)
+        AppPaths.checked(documentsRoot.appendingPathComponent("floors", isDirectory: true))
     }
 
     /// UserDefaults staging snapshot（plist）
     static var stagingUserDefaultsURL: URL {
-        applicationSupportRoot.appendingPathComponent("staging-userdefaults.plist")
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("staging-userdefaults.plist"))
     }
 
     // MARK: - Pending Import State
 
     /// staging build 完成后落的 flag
     static var pendingImportFlagURL: URL {
-        applicationSupportRoot.appendingPathComponent(".pending-import.json")
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent(".pending-import.json"))
     }
 
     /// PendingImportApplier 的 marker（记录 phase + completedSteps）
     static var pendingImportMarkerURL: URL {
-        applicationSupportRoot.appendingPathComponent(".pending-import.marker.json")
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent(".pending-import.marker.json"))
     }
 
     // MARK: - Pre-Import Archive (Phase 1 把主位资产存这)
 
     /// pre-import-archive 根
     static var preImportArchiveRoot: URL {
-        applicationSupportRoot.appendingPathComponent("pre-import-archive", isDirectory: true)
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("pre-import-archive", isDirectory: true))
     }
 
     /// 新一次 archive 目录（用 ISO 时间戳）
@@ -156,7 +166,7 @@ enum StagingPaths {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let stamp = f.string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let dir = preImportArchiveRoot.appendingPathComponent(stamp, isDirectory: true)
+        let dir = AppPaths.checked(preImportArchiveRoot.appendingPathComponent(stamp, isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -167,11 +177,11 @@ enum StagingPaths {
     /// codex Round 4 抓的真 bug：旧代码用 `appendingPathExtension("wal")` 拼出 `.store.wal`，永远删不到真 sidecar。
     /// codex Round 5 #10：PendingImportApplier 也复用同一 helper 避免两处写法不一致。
     static func walSidecar(of store: URL) -> URL {
-        URL(fileURLWithPath: store.path + "-wal")
+        AppPaths.checked(URL(fileURLWithPath: store.path + "-wal"))
     }
 
     static func shmSidecar(of store: URL) -> URL {
-        URL(fileURLWithPath: store.path + "-shm")
+        AppPaths.checked(URL(fileURLWithPath: store.path + "-shm"))
     }
 
     // MARK: - Cleanup
@@ -188,6 +198,7 @@ enum StagingPaths {
         try? fm.removeItem(at: stagingAudiobooksRoot)
         try? fm.removeItem(at: stagingThemesRoot)
         try? fm.removeItem(at: stagingCardLibraryRoot)
+        try? fm.removeItem(at: stagingAssistantRoot)
         try? fm.removeItem(at: stagingFilelibraryRoot)
         try? fm.removeItem(at: stagingUserDefaultsURL)
         try? fm.removeItem(at: pendingImportFlagURL)

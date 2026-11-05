@@ -32,6 +32,19 @@ final class SettingsSearchTests: XCTestCase {
             XCTAssertFalse(tab.macSubtitle.isEmpty, "\(tab.rawValue) 缺页面说明")
         }
     }
+
+    /// C1/C2/C3：世界书 / 正则不进常驻目录（只在搜索时出现）；原「模块」组改叫「子应用」，右栏不算子应用
+    func testMacSidebarDirectoryLayout() {
+        let listed = MacSettingsSidebarGroup.all.filter { !$0.searchOnly }
+        let listedTabs = Set(listed.flatMap(\.tabs))
+        XCTAssertFalse(listedTabs.contains(.worldBook))
+        XCTAssertFalse(listedTabs.contains(.regex))
+        XCTAssertEqual(Set(MacSettingsSidebarGroup.all.filter(\.searchOnly).flatMap(\.tabs)), [.worldBook, .regex])
+        let subApps = listed.first { $0.title == "子应用" }?.tabs ?? []
+        XCTAssertTrue(subApps.contains(.sticker))
+        XCTAssertFalse(subApps.contains(.rightPanel))
+        XCTAssertNil(listed.first { $0.title == "模块" })
+    }
     #endif
 
     // MARK: 五档
@@ -80,6 +93,14 @@ final class SettingsSearchTests: XCTestCase {
     }
 
     // MARK: filtered
+
+    func testRetiredAvatarAndNicknameTogglesCannotBeSearchDestinations() {
+        let retired = Set(["leaf-appear-avatar", "leaf-appear-nickname"])
+        for query in ["显示头像", "显示昵称", "avatar", "nickname"] {
+            XCTAssertFalse(SettingsSearchEntry.filtered(for: query).contains { retired.contains($0.id) }, query)
+        }
+        XCTAssertEqual(SettingsSearchEntry.filtered(for: "时间戳").first?.id, "leaf-appear-timestamp")
+    }
 
     func testFilteredEmptyQueryReturnsSuggested() {
         XCTAssertEqual(SettingsSearchEntry.filtered(for: "  "), SettingsSearchEntry.suggested)
@@ -139,6 +160,67 @@ final class SettingsSearchTests: XCTestCase {
         XCTAssertEqual(SettingsSearchEntry.filtered(for: "每日复习上限").first?.tab, .vocab)
     }
 
+    /// C4：pro / lite 两套根目录、mac 侧栏、页面标题都叫「模型和API」
+    func testAPIPageNamedModelAndAPI() {
+        XCTAssertEqual(SettingsView.SettingsTab.api.rawValue, "模型和API")
+        let page = SettingsSearchEntry.pageEntries.first { $0.tab == .api }
+        XCTAssertEqual(page?.title, "模型和API")
+        for query in ["模型和API", "模型（API）", "API"] {
+            XCTAssertEqual(SettingsSearchEntry.filtered(for: query).first?.tab, .api, query)
+        }
+        for e in SettingsSearchEntry.leafEntries where e.tab == .api {
+            XCTAssertTrue(e.subtitle.hasPrefix("模型和API › "), "\(e.id) subtitle 还是旧叫法")
+        }
+    }
+
+    /// C2：世界书 / 正则的条目跳卡库对应页签（tab 留着当兜底）
+    func testWorldBookAndRegexRouteToCardLibrary() {
+        let worldBook = SettingsSearchEntry.filtered(for: "世界书").first
+        XCTAssertEqual(worldBook?.tab, .worldBook)
+        XCTAssertEqual(worldBook?.cardLibraryTarget, RightPanelNavigator.cardLibraryWorldBookTabTargetId)
+        let regex = SettingsSearchEntry.filtered(for: "正则").first
+        XCTAssertEqual(regex?.cardLibraryTarget, RightPanelNavigator.cardLibraryRegexTabTargetId)
+        for e in SettingsSearchEntry.all where e.tab == .worldBook || e.tab == .regex {
+            XCTAssertNotNil(e.cardLibraryTarget, "\(e.id) 还指向设置里的旧页")
+        }
+        XCTAssertTrue(RightPanelNavigator.cardLibraryTabTargetIds.isSuperset(of: [
+            RightPanelNavigator.cardLibrarySettingsTargetId,
+            RightPanelNavigator.cardLibraryWorldBookTabTargetId,
+            RightPanelNavigator.cardLibraryRegexTabTargetId,
+        ]))
+    }
+
+    /// C5：审查里搜不到地方的几个词
+    func testAuditQueriesLandOnRightPlace() {
+        let favorite = SettingsSearchEntry.filtered(for: "收藏").first
+        XCTAssertEqual(favorite?.id, "leaf-api-favorites")
+        XCTAssertEqual(favorite?.tab, .api)
+
+        for query in ["温度", "temperature"] {
+            let hit = SettingsSearchEntry.filtered(for: query).first
+            XCTAssertEqual(hit?.tab, .persona, query)
+            XCTAssertEqual(hit?.id, "leaf-persona-temperature", query)
+        }
+
+        let card = SettingsSearchEntry.filtered(for: "角色卡").first
+        XCTAssertEqual(card?.id, "leaf-cardlib-characters")
+        XCTAssertEqual(card?.cardLibraryTarget, "tab:characters")
+
+        let versions = SettingsSearchEntry.filtered(for: "版本历史").first
+        XCTAssertEqual(versions?.tab, .fileLibrary)
+        XCTAssertEqual(versions?.subtitle, "文件库")
+        XCTAssertEqual(versions?.anchor, "leaf-file-versions", "落到文件库页的「记录版本」开关")
+    }
+
+    /// #093：工具抽屉在 Prompt 页，带锚点
+    func testToolDrawerQueryLandsOnPromptPage() {
+        for query in ["工具抽屉", "抽屉", "tools"] {
+            let hit = SettingsSearchEntry.filtered(for: query).first
+            XCTAssertEqual(hit?.tab, .persona, query)
+            XCTAssertEqual(hit?.anchor, "leaf-persona-tool-drawer", query)
+        }
+    }
+
     /// #046 T3：配对 / 干活目录 / 局域网都落到「我的电脑」（Mac 上叫「让手机连这台 Mac」）
     func testMyComputerQueriesLandOnItsPage() {
         for query in ["配对", "我的电脑", "工作目录", "局域网直连", "依赖检查"] {
@@ -153,17 +235,20 @@ final class SettingsSearchTests: XCTestCase {
     func testFoldGroupMapping() {
         XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .terminal), "settingsFold.devTools")
         XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .mcp), "settingsFold.aiExt")
+        // C3：「模块」折叠组并进「子应用」页，这些页不再挂折叠组
         #if PERSONAL_APPS
-        XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .trading), "settingsFold.modules")
+        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .trading))
         #endif
+        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .sticker))
+        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .groupChat))
         XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .sandbox), "settingsFold.storage")
         XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .general))
         XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .worldBook))
     }
 
-    /// 折叠组 key 必须跟根列表 SettingsFoldRow 的四个 storageKey 一致
+    /// 折叠组 key 必须跟根列表 SettingsFoldRow 的三个 storageKey 一致
     func testFoldGroupKeysAreKnown() {
-        let known: Set<String> = ["settingsFold.aiExt", "settingsFold.devTools", "settingsFold.modules", "settingsFold.storage"]
+        let known: Set<String> = ["settingsFold.aiExt", "settingsFold.devTools", "settingsFold.storage"]
         for tab in SettingsView.SettingsTab.allCases {
             if let key = SettingsSearchEntry.foldStorageKey(for: tab) {
                 XCTAssertTrue(known.contains(key), "\(tab.rawValue) 映射到未知折叠组 \(key)")

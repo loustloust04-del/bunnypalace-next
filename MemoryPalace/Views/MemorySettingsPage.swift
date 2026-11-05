@@ -3,64 +3,124 @@ import SwiftData
 
 // MARK: - macOS Memory Settings Tab
 
-/// 刀1（plan-memory-usable）：提取/做梦生死状态行——供水断了要能一眼看见（此前静默死 11 天）。
-/// macOS 设置-记忆 与 iOS 记忆页共用。
+/// 状态卡（v5 §二）：iOS 原样几行平铺——记新东西（C2）/ 写上下文摘要（A2）/ 写窗口总结（A3）/ 写时间轴（A4）。
+/// 右上 ⓘ → 记忆日志；每一行点了 → 日志里这一项最近那条。关着灰字「关着，没在写」不红、计数不清（0.1）；
+/// 写入预算用完灰字「写入预算用完，下周一再写」。macOS 设置-记忆 与 iOS 记忆页 / 记忆 app 设置格共用。
 struct MemoryHealthStatusView: View {
     let profileId: String
     @Environment(\.settingsMetrics) private var m
-    @State private var extractStatus: MemoryHealthStore.Status = .init(lastOK: nil, lastError: nil, lastErrorMessage: nil, failStreak: 0, modelName: nil)
-    @State private var dreamStatus: MemoryHealthStore.Status = .init(lastOK: nil, lastError: nil, lastErrorMessage: nil, failStreak: 0, modelName: nil)
-    @State private var summaryStatus: MemoryHealthStore.Status = .init(lastOK: nil, lastError: nil, lastErrorMessage: nil, failStreak: 0, modelName: nil)
-    @State private var contextStatus: MemoryHealthStore.Status = .init(lastOK: nil, lastError: nil, lastErrorMessage: nil, failStreak: 0, modelName: nil)
-    @State private var timelineStatus: MemoryHealthStore.Status = .init(lastOK: nil, lastError: nil, lastErrorMessage: nil, failStreak: 0, modelName: nil)
+    @State private var statuses: [MemoryHealthStore.Kind: MemoryHealthStore.Status] = [:]
+    /// 这一项开没开（总开关 && 这一项）；关着灰字、不红
+    @State private var on: [MemoryHealthStore.Kind: Bool] = [:]
+    @State private var masterOn = true
+    @State private var budgetPaused = false
+    @State private var logFocus: LogTarget?
+
+    private struct LogTarget: Identifiable {
+        let writer: MemoryWriterID?
+        var id: String { writer?.rawValue ?? "all" }
+    }
+
+    /// 四行：（种类，编号，标签，红字）
+    static let lines: [(MemoryHealthStore.Kind, String, String)] = [
+        (.extract, "记新东西", "最近记不住新东西了"),
+        (.context, "写上下文摘要", "最近写不成上下文摘要"),
+        (.summary, "写窗口总结", "最近写不成窗口总结"),
+        (.timeline, "写时间轴", "最近写不成时间轴"),
+    ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            healthLine(label: "记新东西", failing: "最近记不住新东西了，去看看模型设置", status: extractStatus)
-            healthLine(label: "写画像", failing: "最近写不成画像，去看看模型设置", status: dreamStatus)
-            // 第三刀：跑过或在失败才显示（不再多一行「还没跑过」）；v4-1 分三行（Q8）
-            if contextStatus.lastOK != nil || contextStatus.needsAttention {
-                healthLine(label: "写上下文摘要", failing: "最近写不成上下文摘要，去看看模型设置", status: contextStatus)
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                if !masterOn {
+                    Text("总开关关着 · 都暂停了")
+                        .foregroundColor(Theme.textMuted)
+                } else {
+                    ForEach(Self.lines, id: \.1) { kind, label, failing in
+                        // 第三刀：A2 / A3 / A4 跑过、在失败或关着才显示（不再多一行「还没跑过」）
+                        let s = statuses[kind] ?? .init(lastOK: nil, lastError: nil, lastErrorMessage: nil, failStreak: 0, modelName: nil)
+                        if kind == .extract || s.lastOK != nil || s.needsAttention || on[kind] == false {
+                            healthLine(kind, label: label, failing: failing, status: s)
+                        }
+                    }
+                }
             }
-            if summaryStatus.lastOK != nil || summaryStatus.needsAttention {
-                healthLine(label: "写窗口总结", failing: "最近写不成窗口总结，去看看模型设置", status: summaryStatus)
+            .font(m.caption)
+            Spacer(minLength: 0)
+            Button { logFocus = LogTarget(writer: nil) } label: {
+                Image(systemName: "info.circle")
+                    .font(m.body)
+                    .foregroundColor(Theme.textMuted)
             }
-            if timelineStatus.lastOK != nil || timelineStatus.needsAttention {
-                healthLine(label: "写时间轴", failing: "最近写不成时间轴，去看看模型设置", status: timelineStatus)
-            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("记忆日志")
+        }
+        .sheet(item: $logFocus) { target in
+            MemoryWriteLogSheet(profileId: profileId, focus: target.writer)
         }
         .onAppear(perform: reload)
         .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in reload() }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification).receive(on: RunLoop.main)) { _ in reloadOn() }
     }
 
     private func reload() {
-        extractStatus = MemoryHealthStore.status(.extract, profileId: profileId)
-        dreamStatus = MemoryHealthStore.status(.dream, profileId: profileId)
-        summaryStatus = MemoryHealthStore.status(.summary, profileId: profileId)
-        contextStatus = MemoryHealthStore.status(.context, profileId: profileId)
-        timelineStatus = MemoryHealthStore.status(.timeline, profileId: profileId)
+        var s: [MemoryHealthStore.Kind: MemoryHealthStore.Status] = [:]
+        for (kind, _, _) in Self.lines { s[kind] = MemoryHealthStore.status(kind, profileId: profileId) }
+        statuses = s
+        reloadOn()
+        Task {
+            let over = await Task.detached(priority: .utility) { WriteBudgetStore.exceeded() }.value
+            if over != budgetPaused { budgetPaused = over }
+        }
+    }
+
+    private func reloadOn() {
+        let now = Dictionary(uniqueKeysWithValues: Self.lines.map { ($0.0, MemoryHealthStore.isOn($0.0)) })
+        if now != on { on = now }
+        if MemoryFlags.masterEnabled != masterOn { masterOn = MemoryFlags.masterEnabled }
     }
 
     @ViewBuilder
-    private func healthLine(label: String, failing: String, status: MemoryHealthStore.Status) -> some View {
-        HStack(spacing: 5) {
-            if status.needsAttention {
-                Circle().fill(Theme.danger).frame(width: 6, height: 6)
-                Text(failing)
-                    .foregroundColor(Theme.danger)
-            } else if let ok = status.lastOK {
-                Text("上次\(label)：\(Self.relative(ok))")
-                    .foregroundColor(Theme.textMuted)
-            } else {
-                Text("上次\(label)：还没有")
-                    .foregroundColor(Theme.textMuted)
+    private func healthLine(_ kind: MemoryHealthStore.Kind, label: String, failing: String, status: MemoryHealthStore.Status) -> some View {
+        let off = on[kind] == false
+        // C2 是本机 $0 / 也算写入预算（云上那条）；B1 / B4 不在状态卡
+        let paused = budgetPaused && !off
+        Button { logFocus = LogTarget(writer: MemoryWriterID(health: kind)) } label: {
+            HStack(spacing: 5) {
+                if off {
+                    Text("\(label)：关着，没在写")
+                        .foregroundColor(Theme.textMuted)
+                } else if paused {
+                    Text("\(label)：\(WriteBudgetStore.pausedText(period: WriteBudgetStore.shared.period))")
+                        .foregroundColor(Theme.textMuted)
+                } else if status.needsAttention {
+                    Circle().fill(Theme.danger).frame(width: 6, height: 6)
+                    Text("\(failing) · 连续 \(status.failStreak) 次")
+                        .foregroundColor(Theme.danger)
+                } else if let ok = status.lastOK {
+                    Text("上次\(label)：\(Self.relative(ok))")
+                        .foregroundColor(Theme.textMuted)
+                } else {
+                    Text("上次\(label)：还没有")
+                        .foregroundColor(Theme.textMuted)
+                }
+                Spacer(minLength: 0)
             }
+            .lineLimit(2)
+            .contentShape(Rectangle())
         }
-        .font(m.caption)
-        .lineLimit(2)
+        .buttonStyle(.plain)
     }
 
-    private static func relative(_ date: Date) -> String {
+    /// 红的时候的原因 / 连续几次 / 模型 / 时间（编号页状态行用；都是早就存了的）
+    static func failureDetail(_ s: MemoryHealthStore.Status) -> String {
+        var parts = ["原因：\(s.lastErrorMessage ?? "没记下")", "连续 \(s.failStreak) 次"]
+        if let model = s.modelName, !model.isEmpty { parts.append("用的 \(model)") }
+        if let at = s.lastError { parts.append(relative(at)) }
+        return parts.joined(separator: " · ")
+    }
+
+    static func relative(_ date: Date) -> String {
         let f = RelativeDateTimeFormatter()
         f.locale = Locale(identifier: "zh_CN")
         f.unitsStyle = .short
@@ -343,7 +403,7 @@ struct MemoryPage: View {
 
                 if memoryExplanationExpanded {
                     VStack(alignment: .leading, spacing: 6) {
-                        explanationLine("每聊几轮（默认 3 轮），后台用副模型从最近的对话里提取值得记住的事实")
+                        explanationLine("每聊几轮（默认 3 轮），后台用提取模型（也可以换本机模型）把最近对话里值得记住的事填成一张张碎片（C2）")
                         explanationLine("钉住的、关系类、偏好类：每次都会想起")
                         explanationLine("其余的看「检索」区：全量就全带上；关键词 / 按意思找就聊到相关才带上")
                         explanationLine("你或{{char}}删掉的记忆会进「已删除」，可以恢复".expandingMacros(profile: profileManager?.currentProfile))

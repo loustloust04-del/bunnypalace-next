@@ -161,8 +161,8 @@ enum BuiltinMusic {
     nonisolated static let sampleRate = 32_000
 
     nonisolated static var cacheDirectory: URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MemoryPalace/music", isDirectory: true)
+        AppPaths.checked(AppPaths.caches
+            .appendingPathComponent("MemoryPalace/music", isDirectory: true))
     }
 
     nonisolated static func fileName(for track: BuiltinTrack) -> String {
@@ -210,7 +210,7 @@ enum BuiltinMusic {
                             case .slowTide: return SlowTide.render(sampleRate: BuiltinMusic.sampleRate)
                             }
                         }) async -> URL? {
-        let url = directory.appendingPathComponent(fileName(for: track))
+        let url = AppPaths.checked(directory.appendingPathComponent(fileName(for: track)))
         if FileManager.default.fileExists(atPath: url.path) { return url }
         if let running = inFlight[url] { return await running.value }
         let task = Task.detached(priority: .userInitiated) { () -> URL? in

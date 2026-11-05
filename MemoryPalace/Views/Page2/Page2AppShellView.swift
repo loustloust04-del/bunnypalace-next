@@ -320,6 +320,7 @@ struct Page2AppShellView: View {
             if phase != .active { shell.cancelMotion(); shell.setStrip(open: false, animated: false) }
         }
         .onDisappear { shell.cancelMotion(); shell.setStrip(open: false, animated: false) }
+        .modifier(GardenHelloTrigger(atDesk: selectedToolId == "home" && !shell.showsSwitcher && shell.motion == nil))
     }
 
     private var switcherOpacity: CGFloat {

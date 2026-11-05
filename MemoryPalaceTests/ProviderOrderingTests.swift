@@ -40,9 +40,7 @@ final class ProviderOrderingTests: XCTestCase {
         return OpenAICompatibleProvider.buildRequestBody(
             ordered: ordered, model: s.model, samplingParams: s.preset.sampling,
             tools: s.tools, toolTurns: s.toolTurns,
-            orCacheControl: OpenAICompatibleProvider.wantsORCacheControl(baseURL: s.baseURL, model: s.model, samplingParams: s.preset.sampling),
-            orProviderOrder: OpenAICompatibleProvider.orPreferredProviderOrder(baseURL: s.baseURL, model: s.model, samplingParams: s.preset.sampling),
-            interleavedSystem: OpenAICompatibleProvider.supportsInterleavedSystem(baseURL: s.baseURL, model: s.model))
+            compat: ProviderOrderingScenarios.wireCompat(baseURL: s.baseURL, model: s.model, sampling: s.preset.sampling))
     }
 
     private func scenario(_ name: String, anthropic: Bool = false, baseURL: String = "https://api.deepseek.com/v1",
@@ -252,8 +250,11 @@ final class ProviderOrderingTests: XCTestCase {
     // MARK: - 能力标记与 cacheFriendly
 
     func testInterleavedSystemCapabilityIsExplicitAllowList() {
-        XCTAssertTrue(OpenAICompatibleProvider.supportsInterleavedSystem(baseURL: "https://api.openai.com/v1", model: "gpt-4o"))
-        XCTAssertTrue(OpenAICompatibleProvider.supportsInterleavedSystem(baseURL: "https://openrouter.ai/api/v1", model: "openai/gpt-4o"))
+        func interleaved(_ url: String, _ model: String) -> Bool {
+            ResolvedCompat.resolve(providerType: .openaiCompatible, baseURL: url, modelId: model, sampling: nil, store: nil).interleavedSystem
+        }
+        XCTAssertTrue(interleaved("https://api.openai.com/v1", "gpt-4o"))
+        XCTAssertTrue(interleaved("https://openrouter.ai/api/v1", "openai/gpt-4o"))
         for (url, model) in [("https://openrouter.ai/api/v1", "anthropic/claude-sonnet-4.5"),
                              ("https://openrouter.ai/api/v1", "deepseek/deepseek-chat"),
                              ("https://api.deepseek.com/v1", "deepseek-chat"),
@@ -261,7 +262,7 @@ final class ProviderOrderingTests: XCTestCase {
                              ("https://api.moonshot.cn/v1", "kimi-k2"),
                              ("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-pro"),
                              ("https://relay.example.com/v1", "gpt-4o")] {
-            XCTAssertFalse(OpenAICompatibleProvider.supportsInterleavedSystem(baseURL: url, model: model), "\(url) \(model) 未核实，默认降级")
+            XCTAssertFalse(interleaved(url, model), "\(url) \(model) 未核实，默认降级")
         }
     }
 
@@ -277,17 +278,75 @@ final class ProviderOrderingTests: XCTestCase {
         XCTAssertTrue(text(msgs.last ?? [:]).contains("<system_note>\n尾部系统注入\n</system_note>"))
     }
 
+    /// thinking 回传 §6：当轮回传夹具（思考 + 正文 + 进度更新思考 + tool_use，审批卡改过 input）——
+    /// 只有这一条 assistant 变成原样块（只换 input、BP4 挂在 tool_use），其余和老夹具逐字节相同
+    func testAnthropicToolTurnEchoesThisTurnsBlocksVerbatim() throws {
+        let base = try XCTUnwrap(ProviderOrderingScenarios.all().first { $0.name == "anthropic-cache-tools" })
+        let legacyTurn = ProviderOrderingScenarios.toolTurn
+        let content: [[String: Any]] = [
+            ["type": "thinking", "thinking": "先想", "signature": "sig-0"],
+            ["type": "text", "text": "我读一下"],
+            ["type": "thinking", "thinking": "", "signature": "sig-progress"],
+            ["type": "tool_use", "id": "call_1", "name": "fs_read", "input": ["path": "model-wrote.md"]],
+        ]
+        let s = ProviderOrderingScenario(name: "anthropic-thinking-echo", anthropic: true, baseURL: base.baseURL, model: base.model,
+                                         preset: base.preset, profile: base.profile, history: base.history, styleContent: base.styleContent,
+                                         fileLibrary: base.fileLibrary, folderInstructions: base.folderInstructions, volatileNote: base.volatileNote,
+                                         tools: base.tools,
+                                         toolTurns: [ToolTurn(calls: legacyTurn.calls, results: legacyTurn.results, assistantContent: content)])
+        var echoed = messages(body(s, ordered(s)))
+        let legacy = messages(body(base, ordered(base)))
+        let idx = try XCTUnwrap(echoed.lastIndex { ($0["role"] as? String) == "assistant" })
+        let blocks = try XCTUnwrap(echoed[idx]["content"] as? [[String: Any]])
+        XCTAssertEqual(blocks.map { $0["type"] as? String }, ["thinking", "text", "thinking", "tool_use"])
+        for i in 0..<3 {
+            XCTAssertTrue(NSDictionary(dictionary: blocks[i]).isEqual(to: content[i]), "第 \(i) 块原样")
+        }
+        XCTAssertEqual((blocks[3]["input"] as? [String: Any])?["path"] as? String, "a.md", "只换成发出去的 input")
+        XCTAssertNotNil(blocks[3]["cache_control"], "BP4 挂在最后一个非思考块")
+        XCTAssertEqual(blocks.filter { $0["cache_control"] != nil }.count, 1)
+        echoed[idx] = legacy[idx]
+        XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(["m": echoed]), ProviderOrderingScenarios.canonicalJSON(["m": legacy]),
+                       "其余消息一个字节不变")
+    }
+
+    /// 模型兼容 P0 §5.4：DeepSeek host + 当轮有思考 + 开关开 → 工具那条 assistant 多一个 reasoning_content，其余和老夹具逐字节相同
+    func testOpenAIToolTurnReplaysReasoningOnlyOnThatMessage() throws {
+        let base = try XCTUnwrap(ProviderOrderingScenarios.all().first { $0.name == "oai-rich" })
+        var reasoning = ReasoningCapture()
+        reasoning.field = "reasoning_content"
+        reasoning.text = "先读文件再回答"
+        var turn = ProviderOrderingScenarios.toolTurn
+        turn.reasoning = reasoning
+        let s = ProviderOrderingScenario(name: "oai-reasoning-replay", anthropic: false, baseURL: base.baseURL, model: base.model,
+                                         preset: base.preset, profile: base.profile, history: base.history, styleContent: base.styleContent,
+                                         fileLibrary: base.fileLibrary, folderInstructions: base.folderInstructions, volatileNote: base.volatileNote,
+                                         tools: base.tools, toolTurns: [turn])
+        var compat = ProviderOrderingScenarios.wireCompat(baseURL: s.baseURL, model: s.model, sampling: s.preset.sampling)
+        compat.requiresReasoningContentForToolCalls = ResolvedCompat.resolve(providerType: .openaiCompatible, baseURL: s.baseURL, modelId: s.model,
+                                                                             sampling: s.preset.sampling, store: nil).requiresReasoningContentForToolCalls
+        XCTAssertTrue(compat.requiresReasoningContentForToolCalls)
+        var replayed = OpenAICompatibleProvider.buildRequestBody(ordered: ordered(s), model: s.model, samplingParams: s.preset.sampling,
+                                                                 tools: s.tools, toolTurns: s.toolTurns, compat: compat)
+        var msgs = messages(replayed)
+        let idx = try XCTUnwrap(msgs.firstIndex { $0["tool_calls"] != nil })
+        XCTAssertEqual(msgs[idx].removeValue(forKey: "reasoning_content") as? String, "先读文件再回答")
+        replayed["messages"] = msgs
+        XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(replayed), Self.preChangeFixtures["oai-rich"], "去掉回传字段后和老夹具逐字节相同")
+    }
+
     // MARK: - 改码前旧管线落盘的请求体（sortedKeys 序列化；metadata.user_id 换占位）
     // 10-01 输出上限（plan-output-token-cap）：OpenAI 兼容一律显式发 max_tokens；Anthropic thinking 预算加在上限之上（8000 + 中档 4096）。除这两处外逐字节未动
+    // 10-14 claude-sonnet-4-5 temperature 和 top_p 只收一个：anthropic-plain / anthropic-first-turn 去掉 top_p（只这一处）
     static let preChangeFixtures: [String: String] = [
         "oai-plain": ##"{"max_tokens":4096,"messages":[{"content":"你是小岚，陪禾禾聊天。\n\n[角色设定]\n温柔的角色\n\n\n[当前场景]\n傍晚的花园","role":"system"},{"content":"你好 小岚","role":"user"},{"content":"在呢，禾禾。","role":"assistant"},{"content":"今天好累","role":"user"}],"model":"deepseek-chat","stream":true,"stream_options":{"include_usage":true},"temperature":0.69999999999999996,"top_p":0.94999999999999996}"##,
         "oai-rich": ##"{"max_tokens":2000,"messages":[{"content":"你是小岚，陪禾禾聊天。\n\n[角色设定]\n温柔的角色\n\n\n[文件夹说明]\n文件夹：日常\n\n[当前场景]\n傍晚的花园\n\n[文件库] 禾禾 的文件在这里","role":"system"},{"content":"（禾禾的补充设定）","role":"user"},{"content":[{"text":"看这张图","type":"text"},{"image_url":{"url":"data:image\/jpeg;base64,\/9gKAQI="},"type":"image_url"}],"role":"user"},{"content":"好看！","role":"assistant"},{"content":[{"text":"再看这张和文件\n<style>简洁一点<\/style>","type":"text"},{"image_url":{"url":"data:image\/jpeg;base64,\/9gLAQI="},"type":"image_url"}],"role":"user"},{"content":"","role":"assistant","tool_calls":[{"function":{"arguments":"{\"path\":\"a.md\"}","name":"fs_read"},"id":"call_1","type":"function"}]},{"content":"文件内容","role":"tool","tool_call_id":"call_1"}],"model":"deepseek-chat","stream":true,"stream_options":{"include_usage":true},"temperature":0.90000000000000002,"tools":[{"function":{"description":"读文件","name":"fs_read","parameters":{"properties":{},"type":"object"}},"type":"function"}],"top_p":0.94999999999999996}"##,
         "oai-official": ##"{"max_tokens":4096,"messages":[{"content":"你是小岚，陪禾禾聊天。\n\n[角色设定]\n温柔的角色\n\n\n[当前场景]\n傍晚的花园\n\n[文件库] 说明","role":"system"},{"content":"（禾禾的补充设定）","role":"user"},{"content":[{"text":"看这张图","type":"text"},{"image_url":{"url":"data:image\/jpeg;base64,\/9gKAQI="},"type":"image_url"}],"role":"user"},{"content":"好看！","role":"assistant"},{"content":[{"text":"再看这张和文件\n<style>简洁一点<\/style>","type":"text"},{"image_url":{"url":"data:image\/jpeg;base64,\/9gLAQI="},"type":"image_url"}],"role":"user"}],"model":"gpt-4o","stream":true,"stream_options":{"include_usage":true},"temperature":0.69999999999999996,"top_p":0.94999999999999996}"##,
         "or-claude-cache": ##"{"max_tokens":4096,"messages":[{"content":[{"cache_control":{"ttl":"1h","type":"ephemeral"},"text":"你是小岚，陪禾禾聊天。\n\n[角色设定]\n温柔的角色\n\n\n[当前场景]\n傍晚的花园","type":"text"}],"role":"system"},{"content":[{"text":"看这张图","type":"text"},{"image_url":{"url":"data:image\/jpeg;base64,\/9gKAQI="},"type":"image_url"}],"role":"user"},{"content":[{"cache_control":{"ttl":"1h","type":"ephemeral"},"text":"好看！","type":"text"}],"role":"assistant"},{"content":"[动态上下文｜仅供参考，不要复述]\n今天的日记","role":"user"},{"content":[{"text":"再看这张和文件\n<style>简洁一点<\/style>","type":"text"},{"image_url":{"url":"data:image\/jpeg;base64,\/9gLAQI="},"type":"image_url"}],"role":"user"}],"model":"anthropic\/claude-sonnet-4.5","stream":true,"stream_options":{"include_usage":true},"temperature":0.69999999999999996,"top_p":0.94999999999999996}"##,
         "or-deepseek-cache": ##"{"max_tokens":4096,"messages":[{"content":"你是小岚，陪禾禾聊天。\n\n[角色设定]\n温柔的角色\n\n\n[当前场景]\n傍晚的花园","role":"system"},{"content":"你好 小岚","role":"user"},{"content":"在呢，禾禾。","role":"assistant"},{"content":"[动态上下文｜仅供参考，不要复述]\n今天的日记","role":"user"},{"content":"今天好累","role":"user"}],"model":"deepseek\/deepseek-chat","provider":{"allow_fallbacks":true,"order":["deepseek"]},"stream":true,"stream_options":{"include_usage":true},"temperature":0.69999999999999996,"top_p":0.94999999999999996}"##,
-        "anthropic-plain": ##"{"max_tokens":4096,"messages":[{"content":"（禾禾的补充设定）","role":"user"},{"content":[{"text":"看这张图","type":"text"},{"source":{"data":"\/9gKAQI=","media_type":"image\/jpeg","type":"base64"},"type":"image"}],"role":"user"},{"content":"好看！","role":"assistant"},{"content":[{"text":"再看这张和文件\n<style>简洁一点<\/style>","type":"text"},{"source":{"data":"\/9gLAQI=","media_type":"image\/jpeg","type":"base64"},"type":"image"}],"role":"user"}],"model":"claude-sonnet-4-5","stream":true,"system":"你是小岚，陪禾禾聊天。\n\n[角色设定]\n温柔的角色\n\n\n[文件夹说明]\n文件夹：日常\n\n[当前场景]\n傍晚的花园\n\n[文件库] 说明","temperature":0.69999999999999996,"top_p":0.94999999999999996}"##,
-        "anthropic-cache-tools": ##"{"max_tokens":12096,"messages":[{"content":"你好 小岚","role":"user"},{"content":"在呢，禾禾。","role":"assistant"},{"content":"[动态上下文｜仅供参考，不要复述]\n今天的日记","role":"user"},{"content":"今天好累\n<style>简洁一点<\/style>","role":"user"},{"content":[{"cache_control":{"type":"ephemeral"},"id":"call_1","input":{"path":"a.md"},"name":"fs_read","type":"tool_use"}],"role":"assistant"},{"content":[{"content":"文件内容","tool_use_id":"call_1","type":"tool_result"}],"role":"user"}],"metadata":{"user_id":"{{CACHE_USER_ID}}"},"model":"claude-sonnet-4-5","stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"你是小岚，陪禾禾聊天。\n\n[角色设定]\n温柔的角色\n\n\n[当前场景]\n傍晚的花园","type":"text"}],"thinking":{"budget_tokens":4096,"type":"enabled"},"tools":[{"function":{"description":"读文件","name":"fs_read","parameters":{"properties":{},"type":"object"}},"type":"function"}],"top_p":0.94999999999999996}"##,
-        "anthropic-first-turn": ##"{"max_tokens":4096,"messages":[{"content":[{"text":"第一句\n<style>简洁一点<\/style>","type":"text"},{"source":{"data":"\/9gNAQI=","media_type":"image\/jpeg","type":"base64"},"type":"image"}],"role":"user"}],"model":"claude-sonnet-4-5","stream":true,"system":"你是小岚，陪禾禾聊天。\n\n[角色设定]\n温柔的角色\n\n\n[当前场景]\n傍晚的花园","temperature":0.69999999999999996,"top_p":0.94999999999999996}"##,
+        "anthropic-plain": ##"{"max_tokens":4096,"messages":[{"content":"（禾禾的补充设定）","role":"user"},{"content":[{"text":"看这张图","type":"text"},{"source":{"data":"\/9gKAQI=","media_type":"image\/jpeg","type":"base64"},"type":"image"}],"role":"user"},{"content":"好看！","role":"assistant"},{"content":[{"text":"再看这张和文件\n<style>简洁一点<\/style>","type":"text"},{"source":{"data":"\/9gLAQI=","media_type":"image\/jpeg","type":"base64"},"type":"image"}],"role":"user"}],"model":"claude-sonnet-4-5","stream":true,"system":"你是小岚，陪禾禾聊天。\n\n[角色设定]\n温柔的角色\n\n\n[文件夹说明]\n文件夹：日常\n\n[当前场景]\n傍晚的花园\n\n[文件库] 说明","temperature":0.69999999999999996}"##,
+        "anthropic-cache-tools": ##"{"max_tokens":12096,"messages":[{"content":"你好 小岚","role":"user"},{"content":"在呢，禾禾。","role":"assistant"},{"content":"[动态上下文｜仅供参考，不要复述]\n今天的日记","role":"user"},{"content":"今天好累\n<style>简洁一点<\/style>","role":"user"},{"content":[{"cache_control":{"ttl":"1h","type":"ephemeral"},"id":"call_1","input":{"path":"a.md"},"name":"fs_read","type":"tool_use"}],"role":"assistant"},{"content":[{"content":"文件内容","tool_use_id":"call_1","type":"tool_result"}],"role":"user"}],"metadata":{"user_id":"{{CACHE_USER_ID}}"},"model":"claude-sonnet-4-5","stream":true,"system":[{"cache_control":{"ttl":"1h","type":"ephemeral"},"text":"你是小岚，陪禾禾聊天。\n\n[角色设定]\n温柔的角色\n\n\n[当前场景]\n傍晚的花园","type":"text"}],"thinking":{"budget_tokens":4096,"type":"enabled"},"tools":[{"description":"读文件","input_schema":{"properties":{},"type":"object"},"name":"fs_read"}],"top_p":0.94999999999999996}"##,
+        "anthropic-first-turn": ##"{"max_tokens":4096,"messages":[{"content":[{"text":"第一句\n<style>简洁一点<\/style>","type":"text"},{"source":{"data":"\/9gNAQI=","media_type":"image\/jpeg","type":"base64"},"type":"image"}],"role":"user"}],"model":"claude-sonnet-4-5","stream":true,"system":"你是小岚，陪禾禾聊天。\n\n[角色设定]\n温柔的角色\n\n\n[当前场景]\n傍晚的花园","temperature":0.69999999999999996}"##,
     ]
 }
 
@@ -315,6 +374,14 @@ struct ProviderOrderingScenario {
 }
 
 enum ProviderOrderingScenarios {
+    /// 夹具口径：采样层全发（.permissive），只取 host 判断那几项（OR 挂标 / 路由、序列内 system）
+    static func wireCompat(baseURL: String, model: String, sampling: SamplingParams?) -> ResolvedCompat {
+        let resolved = ResolvedCompat.resolve(providerType: .openaiCompatible, baseURL: baseURL, modelId: model,
+                                              sampling: sampling, store: nil)
+        return ResolvedCompat(interleavedSystem: resolved.interleavedSystem, orCacheControl: resolved.orCacheControl,
+                              orProviderOrder: resolved.orProviderOrder)
+    }
+
     static func image(_ name: String, _ byte: UInt8) -> PendingChatAttachment {
         var att = try! PendingChatAttachment.image(name: name, typeDescription: "图片", mimeType: "image/jpeg",
                                                    data: Data([0xFF, 0xD8, byte, 0x01, 0x02]))

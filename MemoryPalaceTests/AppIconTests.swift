@@ -28,9 +28,9 @@ final class AppIconTests: XCTestCase {
     /// 17 家预设一个不漏：要么有品牌图，要么有非空 monogram。
     func testEveryPresetResolvesToIconOrMonogram() {
         #if PERSONAL_APPS
-        XCTAssertEqual(APIProvider.presets.count, 19, "预设数量变了，映射表要跟着核一遍（测试跑 Debug，含 kimi-p；mac 上含本机模型）")
+        XCTAssertEqual(APIProvider.presets.count, 30, "预设数量变了，映射表要跟着核一遍（测试跑 Debug，含 kimi-p；mac 上含本机模型）")
         #else
-        XCTAssertEqual(APIProvider.presets.count, 18, "预设数量变了，映射表要跟着核一遍（mac 上含本机模型）")
+        XCTAssertEqual(APIProvider.presets.count, 29, "预设数量变了，映射表要跟着核一遍（mac 上含本机模型）")
         #endif
         for preset in APIProvider.presets {
             if let asset = ProviderIcon.assetName(presetId: preset.id) {
@@ -78,7 +78,7 @@ final class AppIconTests: XCTestCase {
         }
         XCTAssertEqual(ProviderIcon.monogram(presetId: "groq", fallbackName: ""), "G")
         XCTAssertEqual(ProviderIcon.monogram(presetId: "siliconflow", fallbackName: ""), "S")
-        XCTAssertEqual(ProviderIcon.monogram(presetId: "doubao", fallbackName: ""), "豆")
+        XCTAssertEqual(ProviderIcon.monogram(presetId: "doubao", fallbackName: ""), "火")
     }
 
     /// 预设的 monogram 认预设名，不认卡昵称——同一家不同昵称的卡不能出现不同字母

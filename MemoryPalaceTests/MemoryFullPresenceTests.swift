@@ -96,6 +96,39 @@ final class MemoryFullPresenceTests: XCTestCase {
         XCTAssertFalse(all.contains("最老的一条内容"), "超预算从最老端截断")
     }
 
+    /// 审计台卡片 ⧫6：全量兜底先按重要度（没定 = 3）高→低、同重要度新→旧——预算装不下先丢重要度低的
+    func testFallbackOrdersByImportanceThenNewest() {
+        let base = Date(timeIntervalSinceNow: -86400)
+        let low = seed("重要度一", createdAt: base.addingTimeInterval(300))
+        low.importance = 1
+        let high = seed("重要度五", createdAt: base)
+        high.importance = 5
+        seed("没定的新", createdAt: base.addingTimeInterval(200))
+        seed("没定的旧", createdAt: base.addingTimeInterval(100))
+        try! context.save()
+
+        let memories = store.listActive(profileId: pid, context: context)
+        let order = FullFallbackRetriever(excludePersistent: false).retrieve(memories, recent: []).map(\.memory.content)
+        XCTAssertEqual(order, ["重要度五", "没定的新", "没定的旧", "重要度一"])
+    }
+
+    func testBudgetDropsLowImportanceFirst() {
+        // 两条各自装得下（56 / 64 tok）、一起装不下（预算 80）：原来新的先装，现在没定（= 3）的先装
+        let low = seed(String(repeating: "不太要紧的一条", count: 4), createdAt: Date())        // 最新，但重要度 1
+        low.importance = 1
+        seed(String(repeating: "老的但没定的一条", count: 4), createdAt: Date(timeIntervalSinceNow: -86400 * 30))
+        try! context.save()
+
+        UserDefaults.standard.set(80, forKey: "mem_inject_budget")   // 逼截断
+        defer { UserDefaults.standard.removeObject(forKey: "mem_inject_budget") }
+
+        let memories = store.listActive(profileId: pid, context: context)
+        let (stable, volatilePart, _) = MemoryInjector.buildInjectionSplit(memories: memories, recentMessages: [])
+        let all = stable + volatilePart
+        XCTAssertTrue(all.contains("老的但没定的一条"), "没定（= 3）的比重要度 1 的先装")
+        XCTAssertFalse(all.contains("不太要紧的一条"), "装不下先丢重要度低的")
+    }
+
     // MARK: - 预算默认 + 迁移
 
     func testDefaultBudgetIs10000() {

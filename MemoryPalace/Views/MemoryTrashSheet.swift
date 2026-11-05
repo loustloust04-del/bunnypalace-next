@@ -42,7 +42,7 @@ private struct MemoryTrashList: View {
         let grouped = MemoryRevival.trash(archive: archive, assistant: assistant)
         List(selection: $selection) {
             ForEach(grouped.batches) { batch in
-                Section("\(MemoryDateText.short(batch.start))整理时合并掉的 · \(batch.memories.count)") {
+                Section("\(MemoryDateText.short(batch.start))一起删掉的 · \(batch.memories.count)") {
                     ForEach(batch.memories.map { MemoryRowItem($0) }) { row($0) }
                     Button("全部恢复 \(batch.memories.count) 条") {
                         restore(Set(batch.memories.map { MemoryRowID.archive($0.id) }))

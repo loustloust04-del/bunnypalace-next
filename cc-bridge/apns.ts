@@ -11,7 +11,25 @@ import { type CCActivityState, encodeContentState } from "./activity-state.ts"
 
 const KEY_PATH = process.env.MP_APNS_KEY_PATH || join(import.meta.dir, "secrets", "AuthKey_A2VBYSJK8V.p8")
 const KEY_ID = process.env.MP_APNS_KEY_ID || "A2VBYSJK8V"
-const TEAM_ID = process.env.MP_APNS_TEAM_ID || "GQN42B462A"
+/// 本机签名配置（#071，gitignore），hub 从主仓 cc-bridge/ 跑，往上一级就是它；worktree 里是软链主仓那份。
+export const SIGNING_LOCAL_PATH = join(import.meta.dir, "..", "Config", "Signing.local.xcconfig")
+
+/// APNs JWT 的 iss：MP_APNS_TEAM_ID → Signing.local.xcconfig 的 DEVELOPMENT_TEAM（同键后写的生效，跟 Xcode 一致）。
+/// 都没有 / 不是 10 位大写字母数字 → null，推送整体关掉，绝不拿错值去签。
+export function resolveTeamId(env: Record<string, string | undefined> = process.env, xcconfigPath = SIGNING_LOCAL_PATH): string | null {
+  const valid = (v: string | undefined) => (v && /^[A-Z0-9]{10}$/.test(v) ? v : null)
+  const fromEnv = env.MP_APNS_TEAM_ID?.trim()
+  if (fromEnv) return valid(fromEnv)
+  if (!existsSync(xcconfigPath)) return null
+  let team: string | undefined
+  for (const line of readFileSync(xcconfigPath, "utf8").split("\n")) {
+    const m = line.replace(/\/\/.*/, "").trim().match(/^DEVELOPMENT_TEAM\s*=\s*(.*)$/)
+    if (m) team = m[1].trim()
+  }
+  return valid(team)
+}
+
+let teamId = resolveTeamId()
 /// token 没带 topic（老 app / 老记录）时用的 topic。
 export const DEFAULT_TOPIC = process.env.MP_APNS_TOPIC || "com.susu.MemoryPalace.ios"
 // host 按 token 记录的 env 选；MP_APNS_HOST 显式设了则一律覆盖（调试口）。
@@ -23,9 +41,11 @@ export function hostFor(env: "sandbox" | "production"): string {
 
 // 启动时一次性检查 cert——避免每次 sendAPNs() 都 fs.statSync 拖性能。
 // 上架版用户机上 cert 永远不存在 → APNS_ENABLED=false → sendAPNs 直接返回 cert-missing。
-let apnsEnabled = existsSync(KEY_PATH)
-if (!apnsEnabled) {
+let apnsEnabled = existsSync(KEY_PATH) && teamId !== null
+if (!existsSync(KEY_PATH)) {
   console.log(`[apns] cert not found at ${KEY_PATH}, push disabled (上架版预期行为)`)
+} else if (teamId === null) {
+  console.warn(`[apns] ⚠️ 没有可用的 Team ID（MP_APNS_TEAM_ID 没设或格式不对，${SIGNING_LOCAL_PATH} 里也没有 DEVELOPMENT_TEAM），push disabled`)
 }
 
 // 测试缝（仅 *.test.ts 用）：把「传输」和「cert 读取」两处外部依赖抽成可替换的模块级 let。
@@ -37,9 +57,11 @@ export function __setAPNsTestHooks(h: {
   connect?: typeof http2.connect
   enabled?: boolean
   readKeyPem?: () => string
+  teamId?: string | null
 } = {}): void {
   connectImpl = h.connect ?? http2.connect
-  apnsEnabled = h.enabled ?? existsSync(KEY_PATH)
+  teamId = h.teamId !== undefined ? h.teamId : resolveTeamId()
+  apnsEnabled = h.enabled ?? (existsSync(KEY_PATH) && teamId !== null)
   readKeyPem = h.readKeyPem ?? (() => readFileSync(KEY_PATH, "utf8"))
   cachedKey = null
   cachedJWT = { token: "", iat: 0 }
@@ -64,7 +86,7 @@ async function makeJWT(): Promise<string> {
   if (cachedJWT.token && now - cachedJWT.iat < 3000) return cachedJWT.token  // <50min 复用（APNs 要求 < 1h）
   const enc = new TextEncoder()
   const header = b64url(enc.encode(JSON.stringify({ alg: "ES256", kid: KEY_ID })))
-  const payload = b64url(enc.encode(JSON.stringify({ iss: TEAM_ID, iat: now })))
+  const payload = b64url(enc.encode(JSON.stringify({ iss: teamId, iat: now })))
   const signingInput = `${header}.${payload}`
   const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, await importKey(), enc.encode(signingInput))
   cachedJWT = { token: `${signingInput}.${b64url(new Uint8Array(sig))}`, iat: now }

@@ -1,0 +1,7 @@
+{
+  "source": "未实测：按官方文档 / 公开 issue 里的报错形状还原，T9 拿到原文后替换",
+  "status": 400,
+  "headers": {},
+  "stream": false,
+  "body": "{\"error\":{\"message\":\"The response was filtered due to the prompt triggering Azure OpenAI's content management policy. Please modify your prompt and retry.\",\"type\":null,\"param\":\"prompt\",\"code\":\"content_filter\",\"status\":400}}"
+}

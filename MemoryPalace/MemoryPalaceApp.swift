@@ -93,10 +93,10 @@ struct Profile: Identifiable, Hashable, Codable {
     /// 只给 `UnifiedContainerMigration` 用（读老数据迁到 unified store）。
     /// 迁移完会 rename 成 `.backup-YYYY-MM-DD`。
     var legacyStoreURL: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("MemoryPalace", isDirectory: true)
+        let appSupport = AppPaths.applicationSupport
+        let dir = AppPaths.checked(appSupport.appendingPathComponent("MemoryPalace", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("\(id).store")
+        return AppPaths.checked(dir.appendingPathComponent("\(id).store"))
     }
 
     /// Legacy ghost-lily 用 SwiftData default store —— 没有 explicit URL，由 SwiftData
@@ -106,8 +106,8 @@ struct Profile: Identifiable, Hashable, Codable {
     /// Legacy default store URL（for ghost-lily）—— SwiftData 没有公开 API 返回它，
     /// 只能按它的约定路径构造。
     static var legacyDefaultStoreURL: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("default.store")
+        let appSupport = AppPaths.applicationSupport
+        return AppPaths.checked(appSupport.appendingPathComponent("default.store"))
     }
 
     // Seed profiles for first-launch migration
@@ -124,6 +124,9 @@ struct Profile: Identifiable, Hashable, Codable {
             createdAt: Date(timeIntervalSince1970: 0)
         ),
     ]
+
+    /// 10-16 改向（plan-onboarding-xiaoya-impl §10）：小芽不再有自己的楼层。这个 id 只用来认出 P2 版本自动种过的那层、启动时移除
+    static let xiaoyaId = "xiaoya"
 }
 
 // MARK: - Profile Manager
@@ -229,9 +232,9 @@ final class ProfileManager {
 
     /// 同一路径但不建目录（启动闸门用，BFU 时不能有任何写）
     static var unifiedStorePath: URL {
-        URL.applicationSupportDirectory
+        AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("unified.store")
+            .appendingPathComponent("unified.store"))
     }
 
     /// 构造 unified container。App.init 调用一次，app lifetime 内不再重建。
@@ -266,6 +269,9 @@ final class ProfileManager {
 
     func switchTo(_ profile: Profile) {
         guard profile.id != currentProfile.id else { return }
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.profileSwitch)
+        #endif
         // post .profileWillSwitch（ultrareview B19 / bug_005）：让 6 处 observer
         // （StickerVM / ConversationVM / Sidebar / MemoryPanel / MemoryPage×2）
         // 在 currentProfile 切换前同步清掉持有的 SwiftData stale ref。
@@ -325,6 +331,40 @@ final class ProfileManager {
         } catch { NSLog("楼层保存失败：%@", error.localizedDescription) }
     }
 
+    /// P2 版本留下的旧键（§10）：小芽楼层没了，这两个键也跟着清
+    static let legacyXiaoyaKeys = ["xiaoya.targetProfileId", "xiaoya.movedInV1"]
+
+    /// 10-16 改向（plan-onboarding-xiaoya-impl §10-2）：静默移除 P2 版本自动种入的小芽楼层（id `xiaoya`，本来没有对话；
+    /// 按 id 认，数据不删）。当前楼层是它就落到剩下的第一层并写 lastProfileId；移除后空了种回对话空间。
+    /// 列表读坏（只读）时什么都不动，下次启动再来
+    @discardableResult
+    func removeLegacyXiaoyaFloor() -> Bool {
+        guard !isReadOnly else { return false }
+        for key in Self.legacyXiaoyaKeys { defaults.removeObject(forKey: key) }
+        guard profiles.contains(where: { $0.id == Profile.xiaoyaId }) else { return false }
+        let kept = profiles.filter { $0.id != Profile.xiaoyaId }
+        let remaining = kept.isEmpty ? Profile.seedProfiles : kept
+        do { try writeProfiles(remaining) } catch {
+            NSLog("移除小芽楼层失败：%@", error.localizedDescription)
+            return false
+        }
+        profiles = remaining
+        if currentProfile.id == Profile.xiaoyaId {
+            currentProfile = remaining[0]
+            defaults.set(currentProfile.id, forKey: "lastProfileId")
+            defaults.set(currentProfile.userName, forKey: "userName")
+            defaults.set(currentProfile.assistantName, forKey: "assistantName")
+        }
+        if sideEffectsEnabled {
+            if kept.isEmpty { FileLibraryStore.prepareProfiles(remaining) }
+            #if os(iOS)
+            PushIdentityWriter.removeProfile(id: Profile.xiaoyaId)
+            if kept.isEmpty { remaining.forEach(PushIdentityWriter.upsertProfile) }
+            #endif
+        }
+        return true
+    }
+
     func updateProfile(_ profile: Profile) {
         // #037：只读时内存列表是 seed，改了也存不下；连内存和文件库目录都不动
         guard !isReadOnly else {
@@ -334,6 +374,21 @@ final class ProfileManager {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         profiles[index] = profile
         saveProfiles()
+        publishUpdated(profile)
+    }
+
+    /// 先落盘、写成了才改内存；写不下抛错（文件库「Prompt/楼层字段」保存不假报成功）
+    func updateProfileChecked(_ profile: Profile) throws {
+        try ensureWritable()
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { throw CocoaError(.fileNoSuchFile) }
+        var next = profiles
+        next[index] = profile
+        try writeProfiles(next)
+        profiles = next
+        publishUpdated(profile)
+    }
+
+    private func publishUpdated(_ profile: Profile) {
         if sideEffectsEnabled { FileLibraryStore.prepareProfile(profile) }
         if currentProfile.id == profile.id {
             currentProfile = profile
@@ -343,6 +398,19 @@ final class ProfileManager {
         #if os(iOS)
         if sideEffectsEnabled { PushIdentityWriter.upsertProfile(profile) }
         #endif
+    }
+
+    /// 设置 › 通用「我的名字 / AI 的名字」：写当前楼层（`{{user}}` / `{{char}}` 读的是楼层，`userName` / `assistantName` 两个键只是它的镜像，
+    /// 由 updateProfile 跟着写），你的名字同时记成默认称呼（H9）。空 = 不改。同页「你的头像 / AI 头像」也是写当前楼层
+    func renameCurrent(userName: String, assistantName: String) {
+        let user = userName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let assistant = assistantName.trimmingCharacters(in: .whitespacesAndNewlines)
+        DefaultUserName.set(user, defaults: defaults)
+        var profile = currentProfile
+        if !user.isEmpty { profile.userName = user }
+        if !assistant.isEmpty { profile.assistantName = assistant }
+        guard profile != currentProfile else { return }
+        updateProfile(profile)
     }
 
     /// 批量改楼层并同步落盘；落盘失败返回 false（语音服务迁移靠它决定是否落完成标记）
@@ -615,12 +683,19 @@ final class MPAppDelegate: NSObject, NSApplicationDelegate {
     /// Sparkle 自动更新：Release 构建启动后延迟 start（Debug 不自动查；更新源未配置时是 no-op）
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !TestHostIsolation.active, NSClassFromString("XCTestCase") == nil else { return }
+        #if DEBUG || PERF_BENCH
+        if BenchIsolation.active {
+            DispatchQueue.main.async { BenchIsolation.recordAfterLaunch(codeUUID: ConnectRuler.binaryUUID) }
+            return
+        }
+        #endif
         AppUpdater.shared.startAfterLaunch()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // 测试宿主也是这个 app（真正的护栏是测试不碰 .shared，这里只是保险，R-I8 I7）
         guard NSClassFromString("XCTestCase") == nil else { return .terminateNow }
+        if BenchIsolation.active { return .terminateNow }
         let store = LocalTerminalStore.shared
         store.refreshBadges()   // 判定别读上一秒的缓存（R-I8 I1）
         guard let text = LocalTerminalQuitPrompt.quit(store.quitItems) else { return .terminateNow }
@@ -671,10 +746,18 @@ enum ProtectedDataGate {
 @main
 enum AppEntry {
     static func main() {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        BenchIsolation.installIfRequested()
+        #endif
         LaunchMarks.mark("entry")   // 秒连尺子：启动分段锚点
-        // #035：mac 单测宿主核对改道 + 换偏好 / 钥匙串 / 闸，核不上直接退出（正常启动什么都不做）
+        // 测试宿主先隔离偏好 / 钥匙串 / 副作用；普通启动不做任何改道。
         TestHostIsolation.installIfTestHost()
         #if os(iOS)
+        if TestHostIsolation.active {
+            // 只交给 XCTest 一个真实窗口生命周期，不构造产品 App 的任何属性或初始化链。
+            MemoryPalaceIOSTestHostApp.main()
+            return
+        }
         // #024：BFU 被后台拉起时库、楼层列表、UserDefaults 都读不到；照常启动会崩在建容器，
         // 或把读空的状态写回盘。此刻用户看不见 app，在任何初始化之前退出，什么都不碰
         if ProfileManager.launchGatePaths.contains(where: ProtectedDataGate.isLocked) {
@@ -685,6 +768,25 @@ enum AppEntry {
         MemoryPalaceApp.main()
     }
 }
+
+#if os(iOS)
+@MainActor @Observable
+final class MemoryPalaceIOSTestScene {
+    static let shared = MemoryPalaceIOSTestScene()
+    var content = AnyView(Color.clear)
+}
+
+/// 截图测试自行将真实 ContentView 挂进此窗口；这里不加载库、推送代理或启动服务。
+private struct MemoryPalaceIOSTestHostApp: App {
+    @State private var scene = MemoryPalaceIOSTestScene.shared
+
+    var body: some Scene {
+        WindowGroup {
+            scene.content
+        }
+    }
+}
+#endif
 
 struct MemoryPalaceApp: App {
     private let connectRulerPropsMark: Void = LaunchMarks.mark("props")   // 秒连尺子：属性初始化开始
@@ -747,6 +849,9 @@ struct MemoryPalaceApp: App {
 
     init() {
         LaunchMarks.mark("initBegin")
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfHarnessMac.appInit()
+        #endif
         #if (DEBUG || PERF_BENCH) && os(iOS)
         LaunchTrace.event("appPropertiesEnd")
         PerfHarness.appInit()
@@ -762,7 +867,12 @@ struct MemoryPalaceApp: App {
         // 长期卡顿探针（plan-mac-hang-probe）：卡顿时记当时在哪
         HangProbe.context = {
             let layout = IPadPanelLayout.shared
-            return "code=\(CodingSessionLibrary.shared.isActive ? 1 : 0) tool=\(layout.selectedTool ?? "-") tools=\(layout.openTools.count)"
+            let library = CodingSessionLibrary.shared
+            let base = "code=\(library.isActive ? 1 : 0) tool=\(layout.selectedTool ?? "-") tools=\(layout.openTools.count)"
+            guard HangProbe.stanchEnabled else { return base }
+            let loaded: Bool
+            if case .loaded = library.detail { loaded = true } else { loaded = false }
+            return base + " detailLoaded=\(loaded ? 1 : 0) toolIds=\(layout.openTools.joined(separator: ",")) terminalBps=\(HangProbe.terminalBytesPerSecond())"
         }
         HangProbe.shared.start()
         #endif
@@ -874,6 +984,15 @@ struct MemoryPalaceApp: App {
         #else
         let pm = ProfileManager(container: container, profiles: profiles, currentProfile: current, loadError: loaded.error)
         #endif
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        Self.prepareBenchProfile(pm)
+        if BenchIsolation.configuration?.role == "seed",
+           ProcessInfo.processInfo.environment["MP_PERF_SEED"] == "bulk" {
+            MacPerfSeed.startIfRequested(context: ModelContext(container), profiles: pm)
+        }
+        #endif
+        // 小芽不再有自己的楼层（plan-onboarding-xiaoya-impl §10-2）：列表可信才移除 P2 版本种过的那层
+        if profilesTrusted { pm.removeLegacyXiaoyaFloor() }
         let cards = CharacterCardManager()
         cards.insertSampleCardIfNeeded()
         LaunchMarks.mark("cards")
@@ -903,6 +1022,14 @@ struct MemoryPalaceApp: App {
             #endif
         }
         self._presetManager = State(initialValue: psm)
+        // 小芽新引导（plan-onboarding-xiaoya-impl §5.1）：新装判定只判一次，判成新装就从开场白放起、一打开在小芽 app 里（要读 providerManager，得等 State 全部初始化完）
+        #if (DEBUG || PERF_BENCH) && os(iOS)
+        LaunchTrace.measure("onboarding.probe") {
+            Self.startOnboardingIfFresh(pm: pm, cards: cards, providers: providerManager, profilesTrusted: profilesTrusted)
+        }
+        #else
+        Self.startOnboardingIfFresh(pm: pm, cards: cards, providers: providerManager, profilesTrusted: profilesTrusted)
+        #endif
         #if (DEBUG || PERF_BENCH) && os(iOS)
         LaunchTrace.measure("fixup.notes") { Self.migrateMemoryNotesIfNeeded(container: pm.container) }
         #else
@@ -928,11 +1055,13 @@ struct MemoryPalaceApp: App {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         LaunchTrace.measure("fixup.memoryFlags") {
             MemoryFlags.migrateFullPresenceIfNeeded()
-            MemoryFlags.migrateProfileInjectionSplitIfNeeded()
+            MemoryFlags.migrateV5SplitIfNeeded()
+            MemoryAudit.recordCutoffIfNeeded()   // 审计台横条只算这一版装上之前 C2 写的（⧫6）
         }
         #else
         MemoryFlags.migrateFullPresenceIfNeeded()
-        MemoryFlags.migrateProfileInjectionSplitIfNeeded()
+        MemoryFlags.migrateV5SplitIfNeeded()
+        MemoryAudit.recordCutoffIfNeeded()   // 审计台横条只算这一版装上之前 C2 写的（⧫6）
         #endif
         // 权限 P1（plan-权限管理 §4）：旧 Bool 闸 → 三档；老装机无显式值按旧默认保行为，新装吃收紧后的默认
         #if (DEBUG || PERF_BENCH) && os(iOS)
@@ -1008,6 +1137,43 @@ struct MemoryPalaceApp: App {
         SandboxProbe.runIfRequested()
         #endif
         LaunchMarks.mark("initEnd")
+    }
+
+    #if (DEBUG || PERF_BENCH) && os(macOS)
+    private static func prepareBenchProfile(_ pm: ProfileManager) {
+        guard let config = BenchIsolation.configuration else { return }
+        if config.role == "seed" {
+            if let existing = pm.profiles.first(where: { $0.id == BenchIsolation.profileID }) {
+                pm.switchTo(existing)
+            } else {
+                pm.addProfile(Profile(id: BenchIsolation.profileID, name: "[PERF] 隔离楼层", emoji: "",
+                    description: "mac性能合成数据", userName: "bench", assistantName: "assistant",
+                    systemPrompt: "", preferredModel: "", createdAt: Date()))
+            }
+        }
+        BenchIsolation.notePreparedProfile(pm.currentProfile.id)
+    }
+    #endif
+
+    /// 新装判定 + 接引导（§5.1）：判过就不再判；楼层列表 / 卡库读坏不判。对话数只在前几条都像新装时才数（一次 fetchCount）
+    private static func startOnboardingIfFresh(pm: ProfileManager, cards: CharacterCardManager, providers: ProviderManager,
+                                               profilesTrusted: Bool) {
+        // 测试宿主不判：临时家是空的会被判成新装，一启动就放剧本、开小芽，宿主自己的 shared 引擎写 history.json
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        #if os(macOS)
+        guard !BenchIsolation.active else { return }
+        #endif
+        // 恢复了别处走完引导的备份（script.json 已收尾）而本机还记着 started：先对齐成 done（sol #6）
+        XiaoyaScriptRunner.reconcileFinished(defaults: .standard) {
+            XiaoyaScriptStore(directory: AssistantChatStore.defaultURL.deletingLastPathComponent()).load()
+        }
+        let decision = FreshInstallProbe.runOnce(
+            defaults: .standard, profilesTrusted: profilesTrusted, profileIds: pm.profiles.map(\.id),
+            credentialIds: providers.credentials.map(\.id), cardIds: cards.cards.map(\.id), cardsTrusted: !cards.loadFailed,
+            conversationCount: { try? ModelContext(pm.container).fetchCount(FetchDescriptor<Conversation>()) })
+        if decision == .started { AssistantEngine.shared.script.start() }
+        // 小芽就是 page2 的小芽 app（§10-4）：引导在走（刚判成新装 / 上次没走完）就一打开在 app 里
+        XiaoyaApp.noteLaunch(onboardingStarted: UserDefaults.standard.string(forKey: XiaoyaScriptRunner.onboardingKey) == "started")
     }
 
     /// 启动期 pending import 结果处理（G-C.2 + plan v2 R-4 失败恢复路径）。
@@ -1309,6 +1475,13 @@ struct MemoryPalaceApp: App {
                     // 第三刀：窗口收尾巡检拿 manager 不经发消息那条路（cc-bridge 楼层也能收尾）
                     SessionCloseoutTrigger.shared.attach(profileManager: profileManager, providerManager: providerManager)
                     SessionCloseoutTrigger.shared.request()
+                    // C3 整理编目：每天过了 05:00 第一次在前台跑一次（mac 开着到点也跑）
+                    CatalogRunner.shared.attach(profileManager: profileManager, providerManager: providerManager)
+                    CatalogRunner.shared.attach(presetManager: presetManager)
+                    CatalogRunner.shared.dailyTick()
+                    // 审计台试写台：跑到一半被杀的标成中断（做完的格子留着）、清 30 天前的完整日志和原始输出
+                    let benchFloors = profileManager.profiles.map(\.id)
+                    Task.detached(priority: .utility) { MemoryBenchRunner.maintain(profileIds: benchFloors) }
                     // M1 一次性迁移：ProviderManager 初始化时已重写 UserDefaults 里的复合 id；
                     // SwiftData Conversation.selectedModelId 需要 ModelContext，在这里补做。
                     let remap = providerManager.consumePendingConversationRemap()
@@ -1369,6 +1542,7 @@ struct MemoryPalaceApp: App {
                         SyncEngine.shared.start(profileId: pid, container: profileManager.container)
                         SearchIndexer.shared.requestReconcile(profileIds: profileManager.profiles.map(\.id))
                         SessionCloseoutTrigger.shared.request()
+                        CatalogRunner.shared.dailyTick()
                         #if os(iOS)
                         ShakeMonitor.shared.start()
                         CCLiveActivityManager.shared.recheck()
@@ -1498,7 +1672,10 @@ struct MemoryPalaceApp: App {
 
         #if os(macOS)
         // 菜单栏快看（research-magpie §2.6）：设置 › 工作区「在菜单栏显示」开关（默认开）
-        MenuBarExtra(isInserted: Bindable(workspacePreferences).showMenuBarExtra) {
+        MenuBarExtra(isInserted: Binding(
+            get: { !BenchIsolation.active && workspacePreferences.showMenuBarExtra },
+            set: { if !BenchIsolation.active { workspacePreferences.showMenuBarExtra = $0 } }
+        )) {
             MacMenuBarQuickLook()
                 .preferredColorScheme(themeManager.preferredColorScheme)
         } label: {
@@ -1805,6 +1982,12 @@ struct ProfileEditorSheet: View {
     @State private var importAfterSave = false
     @FocusState private var nameFieldFocused: Bool
 
+    /// 编辑已有楼层才有稳定 id（新建的不记版本 / 位置）
+    private var editingProfileId: String? {
+        if case .edit(let profile) = mode { return profile.id }
+        return nil
+    }
+
     enum Mode: Identifiable {
         case create
         case edit(Profile)
@@ -1834,6 +2017,15 @@ struct ProfileEditorSheet: View {
     @State private var showFileImporter = false
     @State private var importError: String?
     @State private var cardImportSummary: String?
+    /// 打开时表单的样子；和现在不一样 = 有没保存的改动（A3 防误关）
+    @State private var baseline: [String]?
+    @State private var confirmingDiscard = false
+
+    private var formSnapshot: [String] {
+        [name, emoji, description, userName, assistantName, systemPrompt, characterTimeZone]
+    }
+
+    private var isDirty: Bool { baseline.map { $0 != formSnapshot } ?? false }
 
     private var isValid: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1910,6 +2102,8 @@ struct ProfileEditorSheet: View {
                 if emoji.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     emoji = "🌸"
                 }
+                // 默认称呼（H9，plan-onboarding-xiaoya-impl §4.4）：新楼层预填，空才「你」
+                if !DefaultUserName.value().isEmpty { userName = DefaultUserName.value() }
             case .edit(let profile):
                 name = profile.name
                 emoji = profile.emoji
@@ -1925,7 +2119,9 @@ struct ProfileEditorSheet: View {
                 preferredModel = profile.preferredModel
                 characterTimeZone = profile.characterTimeZone ?? ""
             }
+            baseline = formSnapshot
         }
+        .discardChangesGuard(isDirty: isDirty, confirming: $confirmingDiscard, onDiscard: { dismiss() })
     }
 
     #if os(iOS)
@@ -2012,21 +2208,20 @@ struct ProfileEditorSheet: View {
 
                 // 「默认模型」一节已撤（#092 / 粟粟 10-14 拍 K4）：profile.preferredModel 从来没有地方读，
                 // 选项还是内置预设不是用户的卡。字段留着保兼容，保存时原样写回。
-                Section("系统提示词") {
+                Section("系统指令") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("这里会作为当前楼层默认的系统提示词。")
+                        Text("这个楼层的系统指令，和 设置 → Prompt 里的「系统指令」是同一份。")
                             .font(.system(size: Theme.F.caption))
                             .foregroundColor(Theme.textMuted)
 
-                        TextEditor(text: $systemPrompt)
-                            .font(.system(size: Theme.F.body))
-                            .frame(minHeight: 120)
+                        LongTextField(title: "系统指令", text: $systemPrompt,
+                                      editorTitle: "楼层 · 系统指令", showsTitle: false,
+                                      versionKey: editingProfileId.map { .floorSystemPrompt(profileId: $0) })
                             .padding(8)
                             .background(
                                 RoundedRectangle(cornerRadius: 10)
                                     .fill(Theme.sidebarBg)
                             )
-                            .scrollContentBackground(.hidden)
                     }
                 }
                 .listRowBackground(Theme.mainBg)
@@ -2045,7 +2240,7 @@ struct ProfileEditorSheet: View {
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button("取消") { if isDirty { confirmingDiscard = true } else { dismiss() } }
                         .foregroundColor(Theme.textMuted)
                 }
                 ToolbarItem(placement: .confirmationAction) {
@@ -2176,6 +2371,8 @@ struct ProfileEditorSheet: View {
                 postInstructions: postInstructions
             )
             profile.characterTimeZone = normalizedTimeZone
+            // 默认头像（§11-7）：同默认称呼，新楼层带上
+            profile.userAvatarData = DefaultUserAvatar.live.load()
             profileManager.addProfile(profile)
             instantiatePreset(for: &profile)
 

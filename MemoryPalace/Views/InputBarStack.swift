@@ -2,6 +2,12 @@
 import SwiftUI
 import SwiftData
 
+// 手写 Binding 穿过 equatable 子树时必须观察同一引用，不能捕获父 View 的 @State 值快照。
+@Observable
+private final class InputBarDraftText {
+    var text = ""
+}
+
 /// B2（plan-keyboard-layoutguide）：输入条栈独立容器——inputBarHost（UIKit 层
 /// UIHostingController，底边约束 keyboardLayoutGuide）的 rootView。
 ///
@@ -11,6 +17,8 @@ import SwiftData
 /// ⚠️ 缺一个 manager 输入条静默不渲染——DEBUG 空环境断言探针在 body 兜底。
 struct InputBarStack: View {
     var stickerVM: StickerViewModel
+    /// 草稿对话（还没落库）里没发的字：进后台写进 ContentView 的 SceneStorage，被系统回收后冷启动填回（plan-bg-keepalive §2.2）
+    @Binding var newChatText: String
 
     @Environment(ConversationViewModel.self) private var viewModelEnv: ConversationViewModel?
     @Environment(\.modelContext) private var modelContext
@@ -19,7 +27,8 @@ struct InputBarStack: View {
     @Environment(PresetManager.self) private var presetManager: PresetManager?
 
     @ObservedObject private var keyboardBridge = KeyboardInsetBridge.shared
-    @State private var draftText: String = ""
+    @State private var draft = InputBarDraftText()
+    @State private var draftPersistence = InputBarDraftPersistence()
     /// 已加载草稿的对话（同 CardFlowView 老语义：防同对话重载空草稿冲掉正在打的字）
     @State private var loadedConvId: String? = nil
 
@@ -48,6 +57,12 @@ struct InputBarStack: View {
                                                      editingStickers: stickerVM.isEditingStickers), initial: true) { _, placeholder in
             KeyboardInsetBridge.shared.barIsPlaceholder = placeholder
         }
+        // 报错「去改」要开模型选择器：贴纸面板占着输入条的位置 → 先收起，输入条回来后自己接手请求
+        .onChange(of: viewModelEnv?.modelPickerRequested ?? false) { _, requested in
+            if requested, stickerVM.showStickerPanel {
+                withAnimation(.easeInOut(duration: 0.25)) { stickerVM.showStickerPanel = false }
+            }
+        }
         .onAppear {
             #if DEBUG
             // 空环境断言探针（injectPagingEnv 教训：child HC 缺注入 = 静默白屏，这里叫出来）
@@ -75,14 +90,29 @@ struct InputBarStack: View {
             } else if stickerVM.isEditingStickers {
                 Color.clear.frame(height: 60)
             } else if let pm = providerManager {
-                @Bindable var vmB = viewModel
                 VStack(spacing: 0) {
                     ChatInputBar(
                         viewModel: viewModel, modelContext: modelContext,
                         profileManager: profileManager, providerManager: pm, presetManager: presetManager,
                         // 附件同源：vm.selectedAttachments（贴纸面板/macOS 输入条同一份）
-                        selectedAttachments: $vmB.selectedAttachments,
-                        draftText: $draftText,
+                        selectedAttachments: Binding(
+                            get: { viewModel.selectedAttachments },
+                            set: { attachments in
+                                viewModel.selectedAttachments = attachments
+                                guard let conv = viewModel.selectedConversation, conv.id == loadedConvId,
+                                      !viewModel.isDraftConversation, viewModel.editingMessage == nil else { return }
+                                draftPersistence.persistAttachments(attachments, to: conv, context: modelContext)
+                            }
+                        ),
+                        draftText: Binding(
+                            get: { draft.text },
+                            set: { text in
+                                draft.text = text
+                                guard let conv = viewModel.selectedConversation, conv.id == loadedConvId,
+                                      !viewModel.isDraftConversation, viewModel.editingMessage == nil else { return }
+                                draftPersistence.persistText(text, to: conv, context: modelContext)
+                            }
+                        ),
                         onStickerTap: {
                             KBProbe.log("sticker → resign")
                             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -97,28 +127,17 @@ struct InputBarStack: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        // ── 草稿全套（B41：每键直写 + 显式 save；切换/后台 flush 兜底）——从 CardFlowView 原样搬迁
-        // input-jank C2：`draftText` 现在只在**提交点**变（coordinator 判定），这条自然成了
+        // ── 草稿全套（B41：提交点直写 + 显式 save；切换/后台 flush 兜底）
+        // input-jank C2：`draft.text` 现在只在**提交点**变（coordinator 判定），这条自然成了
         // 「去抖落盘」。kick 从这里拿掉（kimi J3）：高度变化已由 ChatInputBar 的
         // onGeometryChange(height) → kickBarLayout() 覆盖，每个提交点再踢一次是重复发送。
         // ⚠️ 键盘管线接收端零改动，这里只是少发。
-        .onChange(of: draftText) { _, newText in
-            #if DEBUG
-            let saveT0 = CACurrentMediaTime()
-            #endif
+        .onChange(of: draft.text) { _, newText in
             guard let conv = viewModel.selectedConversation, conv.id == loadedConvId,
                   !conv.isTrashed, !viewModel.isDraftConversation else { return }
             // 编辑旧消息中：框里是编辑文字不是草稿，盘上保留进入前那份（plan-edit-in-composer §5）
             guard viewModel.editingMessage == nil else { return }
-            conv.draftText = newText
-            #if DEBUG
-            let saveT1 = CACurrentMediaTime()
-            #endif
-            try? modelContext.save()
-            #if DEBUG
-            // input-jank F2 探针：每键落盘到底几毫秒（真机日志判 F2 值不值得做）
-            KBProbe.log(String(format: "[SAVE] draft assign=%.1fms save=%.1fms len=%d", (saveT1 - saveT0) * 1000, (CACurrentMediaTime() - saveT1) * 1000, newText.count))
-            #endif
+            draftPersistence.persistText(newText, to: conv, context: modelContext)
         }
         .onChange(of: viewModel.selectedConversation?.id) { _, _ in
             // 提交点 8（kimi B1）：flush 读的是 binding，切对话前先把 UITextView 的尾巴记下来。
@@ -126,6 +145,7 @@ struct InputBarStack: View {
             // 成文本再提交，旧会话的组字内容和新会话的草稿才各有 owner，两边都不丢。
             ChatInputHandle.shared.finalizeCompositionAndCommit()
             flushDraft(to: loadedConversation(), viewModel: viewModel)
+            newChatText = ""
             // 切对话 = 取消编辑（草稿已按 stash 落盘，新对话照常装载）
             viewModel.editingMessage = nil
             // 会话身份先换：loadDraft 的外部写若又被 marked 挡住，那条待重试要记成新会话的
@@ -140,11 +160,22 @@ struct InputBarStack: View {
                 loadedConvId = viewModel.selectedConversation?.id
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            // 赶在系统进后台存 session 前先写一份（不定稿组字，免得下拉通知中心打断输入法）；didEnterBackground 定稿后再写一次更准的
+            newChatText = isPlainDraft(viewModel) ? (ChatInputHandle.shared.liveText ?? draft.text) : ""
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
             // 提交点 8（kimi B1）+ codex A2：后台 flush 同理，先定稿组字再提交
             ChatInputHandle.shared.finalizeCompositionAndCommit()
             flushDraft(to: loadedConversation(), viewModel: viewModel)
+            newChatText = isPlainDraft(viewModel) ? (ChatInputHandle.shared.liveText ?? draft.text) : ""
         }
+    }
+
+    /// 普通新对话草稿。Codex / 学习等专用草稿带着文件夹、会话、模型或关了记忆，恢复成普通草稿会串，不存它的字
+    private func isPlainDraft(_ viewModel: ConversationViewModel) -> Bool {
+        guard viewModel.isDraftConversation, let conv = viewModel.selectedConversation else { return false }
+        return (conv.folderId ?? "").isEmpty && (conv.ccBridgeSessionName ?? "").isEmpty && conv.selectedModelId.isEmpty && conv.memoryEnabled
     }
 
     /// loadedConvId → 模型对象（flush 目标；对象已换库时返回 nil 安全跳过）
@@ -160,29 +191,26 @@ struct InputBarStack: View {
         if viewModel.isDraftConversation { return }
         // 编辑旧消息中：落盘的是进入前收起的那份，不是框里的编辑文字
         if let stash = viewModel.editingMessage?.stash {
-            conv.draftText = stash.text
-            conv.draftAttachmentsData = stash.attachments.isEmpty ? nil : (try? JSONEncoder().encode(stash.attachments))
-            conv.draftQuotePreview = stash.quotePreview ?? ""
-            conv.draftQuoteReplyTo = stash.quoteReplyTo ?? ""
-            try? modelContext.save()
+            draftPersistence.flush(
+                to: conv, text: stash.text, attachments: stash.attachments,
+                quotePreview: stash.quotePreview, quoteReplyTo: stash.quoteReplyTo, context: modelContext
+            )
             return
         }
-        // C2：真相在 UITextView（binding 是「提交后文本」）。调用方已 commitNow，这里再直读
-        // liveText 一次，不依赖「@State 写完同一轮读得到新值」
-        conv.draftText = ChatInputHandle.shared.liveText ?? draftText
-        conv.draftAttachmentsData = viewModel.selectedAttachments.isEmpty
-            ? nil
-            : (try? JSONEncoder().encode(viewModel.selectedAttachments))
-        conv.draftQuotePreview = viewModel.quotingPreview ?? ""
-        conv.draftQuoteReplyTo = viewModel.quotingReplyTo ?? ""
-        try? modelContext.save()
+        // C2：真相在 UITextView；只同步 UI 的变化，不覆盖 VM 在切换时恢复的草稿。
+        draftPersistence.flush(
+            to: conv, text: ChatInputHandle.shared.liveText ?? draft.text,
+            attachments: viewModel.selectedAttachments,
+            quotePreview: viewModel.quotingPreview, quoteReplyTo: viewModel.quotingReplyTo,
+            context: modelContext
+        )
     }
 
     private func loadDraft(from conv: Conversation?, viewModel: ConversationViewModel) {
-        draftText = conv?.draftText ?? ""
+        draft.text = LastLocationResume.takeNewChatText(for: conv?.id) ?? conv?.draftText ?? ""
         // 命令通道（plan-input-command-channel）：草稿装载显式落 tv（binding 只作镜像）。
         // 组字中会挂起，解除后按 session 校验重放/丢弃——旧会话组字不污染新会话。
-        ChatInputHandle.shared.issueText(draftText, session: conv?.id)
+        ChatInputHandle.shared.issueText(draft.text, session: conv?.id)
         if let data = conv?.draftAttachmentsData,
            let atts = try? JSONDecoder().decode([PendingChatAttachment].self, from: data) {
             viewModel.selectedAttachments = atts
@@ -191,6 +219,10 @@ struct InputBarStack: View {
         }
         viewModel.quotingPreview = (conv?.draftQuotePreview.isEmpty ?? true) ? nil : conv?.draftQuotePreview
         viewModel.quotingReplyTo = (conv?.draftQuoteReplyTo.isEmpty ?? true) ? nil : conv?.draftQuoteReplyTo
+        draftPersistence.load(
+            text: draft.text, attachments: viewModel.selectedAttachments,
+            quotePreview: viewModel.quotingPreview, quoteReplyTo: viewModel.quotingReplyTo
+        )
     }
 }
 #endif

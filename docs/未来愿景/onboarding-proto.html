@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>记忆花园 Onboarding 原型</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap');
+
+  :root {
+    --bg: #FBF8F3;
+    --card: #FFFFFF;
+    --text: #3D3633;
+    --text-muted: #8B8178;
+    --mint: #8EBD9F;
+    --mint-dark: #5A9E5A;
+    --mint-light: #E7EEEC;
+    --soil: #C4A882;
+    --pink: #E8A4B8;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  body {
+    background: #EAE4DA;
+    font-family: 'Nunito', 'PingFang SC', system-ui, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    color: var(--text);
+  }
+
+  /* 手机框 */
+  .phone {
+    width: 390px;
+    height: 780px;
+    background: var(--bg);
+    border-radius: 40px;
+    box-shadow: 0 20px 60px rgba(61,54,51,0.18), 0 0 0 10px #2E2A26;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .screen {
+    position: absolute;
+    inset: 0;
+    padding: 28px 24px;
+    display: none;
+    flex-direction: column;
+    animation: fadeSlide 0.35s ease;
+  }
+  .screen.active { display: flex; }
+
+  @keyframes fadeSlide {
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* 顶栏（Pillow 三件套）：返回 + 细进度条 + 计数 + 跳过 */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .back-arrow {
+    border: none;
+    background: #EFE9DF;
+    color: var(--text);
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    font-size: 15px;
+    cursor: pointer;
+    flex-shrink: 0;
+    font-family: inherit;
+  }
+  .bar {
+    flex: 1;
+    height: 4px;
+    background: #E5DDCF;
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    background: var(--mint-dark);
+    border-radius: 2px;
+    transition: width 0.35s ease;
+  }
+  .count { font-size: 12px; color: var(--text-muted); flex-shrink: 0; }
+  .skip {
+    font-size: 13px;
+    color: var(--text-muted);
+    cursor: pointer;
+    border: none;
+    background: none;
+    font-family: inherit;
+    flex-shrink: 0;
+  }
+  .skip:hover { color: var(--text); }
+
+  /* S1.5 称呼屏 */
+  .name-input {
+    border: none;
+    background: none;
+    outline: none;
+    font-family: inherit;
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--text);
+    text-align: center;
+    width: 100%;
+    border-bottom: 2px solid #DDD4C6;
+    padding: 8px 4px;
+    transition: border-color 0.2s;
+  }
+  .name-input:focus { border-color: var(--mint-dark); }
+  .name-input::placeholder { color: #CFC5B6; }
+  .fab-next {
+    width: 52px; height: 52px;
+    border-radius: 50%;
+    border: none;
+    background: var(--mint-dark);
+    color: #fff;
+    font-size: 20px;
+    cursor: pointer;
+    align-self: flex-end;
+    transition: opacity 0.2s, transform 0.15s;
+  }
+  .fab-next:disabled { opacity: 0.3; cursor: default; }
+  .fab-next:not(:disabled):hover { transform: scale(1.06); }
+
+  .sprout-mark {
+    text-align: center;
+    font-size: 15px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    letter-spacing: 0.1em;
+  }
+
+  h1 { font-size: 24px; font-weight: 800; margin: 8px 0 4px; }
+  h1.center { text-align: center; }
+  .sub { font-size: 14px; color: var(--text-muted); margin-bottom: 22px; }
+  .sub.center { text-align: center; }
+
+  /* 大按钮 */
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 14px;
+    border: none;
+    border-radius: 999px;
+    background: var(--mint);
+    color: #fff;
+    font-size: 16px;
+    font-weight: 700;
+    font-family: inherit;
+    cursor: pointer;
+    transition: transform 0.15s, background 0.2s;
+  }
+  .btn:hover { background: var(--mint-dark); transform: scale(1.02); }
+  .btn.ghost {
+    background: none;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .btn.ghost:hover { color: var(--text); transform: none; background: none; }
+
+  .spacer { flex: 1; }
+
+  /* 身份大卡 */
+  .id-card {
+    background: var(--card);
+    border-radius: 16px;
+    padding: 15px 16px;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: border 0.15s, transform 0.15s;
+  }
+  .id-card:hover { border-color: var(--mint); transform: translateX(4px); }
+  .id-card .emoji { font-size: 26px; }
+  .id-card .name { font-size: 16px; font-weight: 700; }
+  .id-card .desc { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+  .id-card .arrow { margin-left: auto; color: #CFC5B6; font-size: 15px; }
+
+  /* provider / model 卡 */
+  .p-card {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 13px 15px;
+    margin-bottom: 9px;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: border 0.15s;
+    font-size: 15px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .p-card:hover { border-color: var(--mint-light); }
+  .p-card.sel { border-color: var(--mint); }
+  .p-card .tag {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    background: var(--mint-light);
+    padding: 3px 8px;
+    border-radius: 999px;
+  }
+
+  .key-row {
+    display: flex;
+    gap: 8px;
+    margin: 4px 0 10px;
+  }
+  .key-input {
+    flex: 1;
+    padding: 12px 14px;
+    border-radius: 12px;
+    border: 1.5px solid #E5DDCF;
+    background: var(--card);
+    font-family: inherit;
+    font-size: 14px;
+    outline: none;
+  }
+  .key-input:focus { border-color: var(--mint); }
+  .mini-btn {
+    padding: 0 16px;
+    border: none;
+    border-radius: 12px;
+    background: var(--soil);
+    color: #fff;
+    font-family: inherit;
+    font-weight: 700;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .ping-ok { color: var(--mint-dark); font-size: 13px; font-weight: 700; margin-bottom: 12px; display: none; }
+
+  /* 教练叠卡 */
+  .q-card {
+    background: var(--card);
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 12px;
+  }
+  .q-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 15px;
+  }
+  .q-head .q-title { font-weight: 700; }
+  .q-card.open .q-head .q-title { font-size: 17px; }
+  .q-head .q-sum {
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--text);
+    max-width: 45%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .q-head .q-hint { margin-left: auto; font-size: 12.5px; color: #CFC5B6; }
+  .q-body { display: none; margin-top: 14px; }
+  .q-card.open .q-body { display: block; }
+  .q-card:not(.open) .q-head { color: var(--text-muted); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: var(--mint-light);
+    font-size: 13.5px;
+    cursor: pointer;
+    border: 1.5px solid transparent;
+    color: var(--text-muted);
+    font-weight: 600;
+    transition: all 0.15s;
+  }
+  .chip.sel {
+    background: var(--mint);
+    color: #fff;
+  }
+  .next-link {
+    display: block;
+    text-align: right;
+    margin-top: 10px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--mint-dark);
+    cursor: pointer;
+    background: none;
+    border: none;
+    font-family: inherit;
+  }
+
+  .coach-input {
+    width: 100%;
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: none;
+    background: var(--bg);
+    font-family: inherit;
+    font-size: 13.5px;
+    outline: none;
+  }
+
+  /* 像素点阵插画（十字绣风，墨绿圆点） */
+  .pix { display: flex; justify-content: center; }
+  .pix canvas { display: block; }
+  .pix-hero { margin: 76px 0 20px; }
+  .pix-head { margin: 6px 0 10px; justify-content: flex-start; }
+  .pix-row { display: flex; justify-content: center; gap: 26px; margin: 90px 0 18px; }
+  .pix-row canvas { animation: pop 0.6s cubic-bezier(0.2, 1.6, 0.4, 1) both; }
+  .pix-row canvas:nth-child(2) { animation-delay: 0.12s; }
+  .pix-row canvas:nth-child(3) { animation-delay: 0.24s; }
+  @keyframes pop {
+    from { transform: scale(0); }
+    to { transform: scale(1); }
+  }
+  .pix-id { flex-shrink: 0; }
+
+  /* 假主屏 */
+  .bubble {
+    background: var(--card);
+    border-radius: 18px 18px 18px 4px;
+    padding: 14px 16px;
+    max-width: 85%;
+    font-size: 14.5px;
+    line-height: 1.55;
+    box-shadow: 0 2px 8px rgba(61,54,51,0.06);
+  }
+  .bubble.ai { background: var(--mint-light); }
+  .chat-bar {
+    background: var(--card);
+    border-radius: 999px;
+    padding: 13px 18px;
+    color: #C9C0B2;
+    font-size: 14px;
+  }
+
+  .hint-line {
+    text-align: center;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 14px;
+  }
+</style>
+</head>
+<body>
+<div class="phone">
+
+  <!-- S0 欢迎 -->
+  <div class="screen active" id="s0">
+    <div class="pix pix-hero" data-motif="sprout" data-scale="8"></div>
+    <h1 class="center">欢迎来到记忆花园</h1>
+    <p class="sub center">三样东西就能开工：钥匙、模型、和一句"你是谁"</p>
+    <div class="spacer"></div>
+    <button class="btn" onclick="go(1)">开始</button>
+    <button class="btn ghost" onclick="finish('ghost')">随便看看 →</button>
+  </div>
+
+  <!-- S1 身份 -->
+  <div class="screen" id="s1">
+    <div class="topbar">
+      <button class="back-arrow" onclick="go(0)">←</button>
+      <div class="bar"><div class="bar-fill" style="width:16.6%"></div></div>
+      <span class="count">1/6</span>
+      <button class="skip" onclick="finish('skip')">跳过</button>
+    </div>
+    <h1>你是哪种园丁？</h1>
+    <p class="sub">按你的答案给你铺最短的路</p>
+    <div class="id-card" onclick="pickId('newbie')"><div class="pix pix-id" data-motif="sprout" data-scale="3.2"></div><div><div class="name">我是小白</div><div class="desc">先聊起来再说，别的慢慢懂</div></div><div class="arrow">›</div></div>
+    <div class="id-card" onclick="pickId('tavern')"><div class="pix pix-id" data-motif="card" data-scale="3.2"></div><div><div class="name">酒馆用户</div><div class="desc">我有角色卡，直接导入</div></div><div class="arrow">›</div></div>
+    <div class="id-card" onclick="pickId('companion')"><div class="pix pix-id" data-motif="heart" data-scale="3.2"></div><div><div class="name">长期陪伴</div><div class="desc">想要个记得我的长期搭子</div></div><div class="arrow">›</div></div>
+    <div class="id-card" onclick="pickId('tech')"><div class="pix pix-id" data-motif="gear" data-scale="3.2"></div><div><div class="name">技术用户</div><div class="desc">别废话，给我 key 框</div></div><div class="arrow">›</div></div>
+    <div class="id-card" onclick="pickId('ghost')"><div class="pix pix-id" data-motif="ghostie" data-scale="3.2"></div><div><div class="name">保持神秘</div><div class="desc">不定义我，直接进去</div></div><div class="arrow">›</div></div>
+  </div>
+
+  <!-- S1.5 称呼（Pillow 第一题同款） -->
+  <div class="screen" id="s15">
+    <div class="topbar">
+      <button class="back-arrow" onclick="go(1)">←</button>
+      <div class="bar"><div class="bar-fill" style="width:33%"></div></div>
+      <span class="count">2/6</span>
+      <button class="skip" onclick="go(2)">跳过</button>
+    </div>
+    <h1>小雾该怎么称呼你？</h1>
+    <p class="sub">之后聊天它就这么叫你</p>
+    <div class="spacer"></div>
+    <div class="pix" data-motif="heart" data-scale="6" style="margin-bottom:22px"></div>
+    <input class="name-input" id="name-input" placeholder="你的名字" oninput="nameChanged()">
+    <div class="spacer"></div>
+    <div class="spacer"></div>
+    <button class="fab-next" id="name-next" onclick="nameDone()" disabled>→</button>
+  </div>
+
+  <!-- S2 provider -->
+  <div class="screen" id="s2">
+    <div class="topbar">
+      <button class="back-arrow" onclick="go(15)">←</button>
+      <div class="bar"><div class="bar-fill" style="width:50%"></div></div>
+      <span class="count">3/6</span>
+      <button class="skip" onclick="go(4)">跳过</button>
+    </div>
+    <div class="pix pix-head" data-motif="key" data-scale="4"></div>
+    <h1 id="s2-title">先拿把钥匙</h1>
+    <p class="sub" id="s2-sub">选一个 AI 服务商，把 API key 贴进来</p>
+    <div class="p-card" onclick="selProvider(this, 'OpenAI')">OpenAI<span class="tag">gpt 系列</span></div>
+    <div class="p-card" onclick="selProvider(this, 'Anthropic')">Anthropic<span class="tag">claude 系列</span></div>
+    <div class="p-card" onclick="selProvider(this, 'Gemini')">Gemini<span class="tag">google</span></div>
+    <div class="p-card" onclick="selProvider(this, '自定义')">自定义（OpenAI 兼容）<span class="tag">baseURL</span></div>
+    <div id="key-area" style="display:none">
+      <div class="key-row">
+        <input class="key-input" type="password" placeholder="sk-..." id="key-input">
+        <button class="mini-btn" onclick="ping()">连一下试试</button>
+      </div>
+      <div class="ping-ok" id="ping-ok">✓ 连上了</div>
+    </div>
+    <div class="spacer"></div>
+    <button class="btn" onclick="go(3)">下一步</button>
+  </div>
+
+  <!-- S3 模型 -->
+  <div class="screen" id="s3">
+    <div class="topbar">
+      <button class="back-arrow" onclick="go(2)">←</button>
+      <div class="bar"><div class="bar-fill" style="width:66.6%"></div></div>
+      <span class="count">4/6</span>
+      <button class="skip" onclick="go(4)">跳过</button>
+    </div>
+    <div class="pix pix-head" data-motif="spark" data-scale="4"></div>
+    <h1 id="s3-title">挑个脑子</h1>
+    <p class="sub">随时能换，先选个顺手的</p>
+    <div class="p-card" onclick="selModel(this)">Claude Sonnet 4.5<span class="tag">中等 · 推荐</span></div>
+    <div class="p-card sel" onclick="selModel(this)">Claude Haiku 4.5<span class="tag">便宜 · 已预选</span></div>
+    <div class="p-card" onclick="selModel(this)">Claude Opus 4.6<span class="tag">旗舰</span></div>
+    <p class="hint-line">便宜的会自动兼差当后台小模型（记忆提取那些杂活）</p>
+    <div class="spacer"></div>
+    <button class="btn" onclick="go(4)">下一步</button>
+  </div>
+
+  <!-- S4 教练 -->
+  <div class="screen" id="s4">
+    <div class="topbar">
+      <button class="back-arrow" onclick="go(3)">←</button>
+      <div class="bar"><div class="bar-fill" style="width:83%"></div></div>
+      <span class="count">5/6</span>
+      <button class="skip" onclick="go(5)">跳过</button>
+    </div>
+    <div class="pix pix-head" data-motif="blossom" data-scale="4"></div>
+    <h1 id="s4-title">最后，它是谁？</h1>
+    <p class="sub" id="s4-sub">两小题，帮你写好设定（就是设置里的「帮我写」）</p>
+
+    <div class="q-card open" id="q0">
+      <div class="q-head" onclick="toggleQ(0)"><span class="q-title">你主要拿它做什么？</span><span class="q-hint">点我回答</span><span class="q-sum"></span></div>
+      <div class="q-body">
+        <div class="chips">
+          <div class="chip" onclick="togChip(this)">聊天陪伴</div>
+          <div class="chip" onclick="togChip(this)">学习</div>
+          <div class="chip" onclick="togChip(this)">写东西</div>
+          <div class="chip" onclick="togChip(this)">编程</div>
+          <div class="chip" onclick="togChip(this)">随便聊聊</div>
+        </div>
+        <input class="coach-input" placeholder="自己写：比如 学日语">
+        <button class="next-link" onclick="closeQ(0); openQ(1)">下一步</button>
+      </div>
+    </div>
+
+    <div class="q-card" id="q1">
+      <div class="q-head" onclick="toggleQ(1)"><span class="q-title">希望它说话什么感觉？</span><span class="q-hint">点我回答</span><span class="q-sum"></span></div>
+      <div class="q-body">
+        <div class="chips">
+          <div class="chip" onclick="selChip1(this)">简短直接</div>
+          <div class="chip" onclick="selChip1(this)">温柔耐心</div>
+          <div class="chip" onclick="selChip1(this)">活泼一点</div>
+          <div class="chip" onclick="selChip1(this)">像朋友那样</div>
+        </div>
+        <input class="coach-input" placeholder="自己写：比如 毒舌但靠谱">
+      </div>
+    </div>
+
+    <div class="spacer"></div>
+    <button class="btn" onclick="genDone()">✦ 生成并继续</button>
+  </div>
+
+  <!-- S5 完成 -->
+  <div class="screen" id="s5">
+    <div class="pix pix-row" data-motifs="sprout,spark,blossom" data-scale="5.5"></div>
+    <h1 class="center" id="s5-title">都准备好了</h1>
+    <p class="sub center" id="s5-sub">花园开工，去聊第一句吧</p>
+    <div class="spacer"></div>
+    <button class="btn" onclick="go(6)">开始对话</button>
+  </div>
+
+  <!-- S6 假主屏 -->
+  <div class="screen" id="s6">
+    <div class="spacer"></div>
+    <div class="bubble ai" id="main-hint">来啦？我是小雾。有什么想聊的，直接说～</div>
+    <div style="height:12px"></div>
+    <div class="chat-bar">说点什么…</div>
+    <p class="hint-line">（原型到此。设置 → 关于 →「重新走一遍引导」能回来）</p>
+  </div>
+
+</div>
+
+<script>
+  let identity = null;
+  let userName = '';
+
+  // ===== 像素点阵插画（与 Swift PixelMotif 同一组网格） =====
+  const PIX_MOTIFS = {
+    sprout: [
+      ".xxx....xxx..",
+      "x...x..x...x.",
+      "x....xx....x.",
+      "x...x..x...x.",
+      ".xxx....xxx..",
+      "......x......",
+      "......x......",
+      "......x......",
+      "..x...x...x..",
+      "...x.xxx.x...",
+      ".....xxx.....",
+    ],
+    key: [
+      ".x.....x.......",
+      "x.x...x.x......",
+      ".x...x...x.....",
+      "......x.x......",
+      ".......x.......",
+      "......x.x......",
+      ".xxx...x...xxx.",
+      "x...x.....x...x",
+      "x...x.....x...x",
+      "x...x.....x...x",
+      ".xxx...x...xxx.",
+      ".......x.......",
+      "......xxx......",
+      ".......x.......",
+      ".......x.......",
+      ".......x.......",
+      ".......xxxxx...",
+      ".......x...x...",
+      ".......x...x...",
+      ".......x...x...",
+      ".......xxx.x...",
+      ".......x....x..",
+      "...........x.x.",
+      "............x..",
+    ],
+    spark: [
+      ".....x.....",
+      ".....x.....",
+      "....x.x....",
+      ".....x.....",
+      "x..x...x..x",
+      ".x..x.x..x.",
+      "x..x...x..x",
+      ".....x.....",
+      "....x.x....",
+      ".....x.....",
+      ".....x.....",
+    ],
+    blossom: [
+      "....x.x.x....",
+      ".....x.x.....",
+      ".x.x.....x.x.",
+      "..x..xxx..x..",
+      "x....x.x....x",
+      "..x..xxx..x..",
+      ".x.x.....x.x.",
+      ".....x.x.....",
+      "....x.x.x....",
+      "......x......",
+      "..x...x...x..",
+      "...x..x..x...",
+      "....xxxxx....",
+    ],
+    heart: [
+      ".xxx...xxx.",
+      "x...x.x...x",
+      "x....x....x",
+      "x.........x",
+      ".x.......x.",
+      "..x.....x..",
+      "...x...x...",
+      "....x.x....",
+      ".....x.....",
+    ],
+    ghostie: [
+      "...xxxxxx...",
+      "..x......x..",
+      ".x........x.",
+      ".x..x..x..x.",
+      ".x........x.",
+      ".x........x.",
+      ".x........x.",
+      ".x..x..x..x.",
+      "..x.x..x.x..",
+    ],
+    gear: [
+      "..x.....x..",
+      "...x...x...",
+      ".x..xxx..x.",
+      "..x.x.x.x..",
+      "....xxx....",
+      "..x.x.x.x..",
+      ".x..xxx..x.",
+      "...x...x...",
+      "..x.....x..",
+    ],
+    card: [
+      ".xxxxxxxxxx.",
+      ".x........x.",
+      ".x..x..x..x.",
+      ".x........x.",
+      ".x...xx...x.",
+      ".x...xx...x.",
+      ".x........x.",
+      ".x..x..x..x.",
+      ".x........x.",
+      ".xxxxxxxxxx.",
+    ],
+    quill: [
+      "......xxx..",
+      ".....x..xx.",
+      "....x....x.",
+      "...x..x..x.",
+      "..x..x..x..",
+      "..x.x..x...",
+      ".x.x..x....",
+      ".x.x.x.....",
+      "..xx.......",
+      "..x........",
+      ".x.........",
+      "x..........",
+    ],
+    fork: [
+      ".x..x..x.",
+      ".x..x..x.",
+      ".x..x..x.",
+      ".x..x..x.",
+      "..x.x.x..",
+      "...xxx...",
+      "....x....",
+      "....x....",
+      "....x....",
+    ],
+  };
+  const PIX_COLOR = "#2E5233";
+
+  function pixCanvas(name, scale) {
+    const grid = PIX_MOTIFS[name];
+    const h = grid.length, w = Math.max(...grid.map(r => r.length));
+    const cv = document.createElement('canvas');
+    const dpr = window.devicePixelRatio || 2;
+    cv.width = w * scale * dpr; cv.height = h * scale * dpr;
+    cv.style.width = (w * scale) + 'px'; cv.style.height = (h * scale) + 'px';
+    const ctx = cv.getContext('2d');
+    ctx.scale(dpr, dpr);
+    ctx.fillStyle = PIX_COLOR;
+    grid.forEach((r, y) => [...r].forEach((ch, x) => {
+      if (ch !== 'x') return;
+      ctx.beginPath();
+      ctx.arc(x * scale + scale / 2, y * scale + scale / 2, scale * 0.27, 0, Math.PI * 2);
+      ctx.fill();
+    }));
+    return cv;
+  }
+
+  document.querySelectorAll('.pix[data-motif]').forEach(el => {
+    el.appendChild(pixCanvas(el.dataset.motif, parseFloat(el.dataset.scale || 5)));
+  });
+  document.querySelectorAll('.pix-row[data-motifs]').forEach(el => {
+    el.dataset.motifs.split(',').forEach(m => el.appendChild(pixCanvas(m.trim(), parseFloat(el.dataset.scale || 5))));
+  });
+  // ===== 像素点阵 END =====
+
+  function go(n) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById('s' + n).classList.add('active');
+  }
+
+  function pickId(id) {
+    identity = id;
+    if (id === 'ghost') { finish('ghost'); return; }
+    const sub = document.getElementById('s2-sub');
+    if (id === 'newbie') sub.textContent = 'key 在服务商官网的 API 页面拿，复制贴进来就行';
+    if (id === 'tech') sub.textContent = 'provider + key，你熟';
+    if (id === 'companion') document.getElementById('s4-title').textContent = '最后，它是你的谁？';
+    if (id === 'tavern') {
+      document.getElementById('s4-title').textContent = '带上你的角色卡？';
+      document.getElementById('s4-sub').textContent = '（此屏在真机里换成卡库导入；教练仍可从设置进）';
+    }
+    go(15);
+  }
+
+  function nameChanged() {
+    document.getElementById('name-next').disabled = !document.getElementById('name-input').value.trim();
+  }
+  function nameDone() {
+    userName = document.getElementById('name-input').value.trim();
+    if (userName) {
+      document.getElementById('s2-title').textContent = userName + '，先拿把钥匙';
+      document.getElementById('s3-title').textContent = userName + '，挑个脑子';
+      document.getElementById('s5-title').textContent = userName + '，都准备好了';
+    }
+    go(2);
+  }
+
+  function finish(kind) {
+    if (kind === 'ghost') {
+      document.getElementById('s5-title').textContent = '好，不问了';
+      document.getElementById('s5-sub').textContent = '右下角永远有个「?」，需要我时再叫';
+    }
+    go(5);
+  }
+
+  function selProvider(el, name) {
+    document.querySelectorAll('#s2 .p-card').forEach(c => c.classList.remove('sel'));
+    el.classList.add('sel');
+    document.getElementById('key-area').style.display = 'block';
+    document.getElementById('ping-ok').style.display = 'none';
+  }
+  function ping() {
+    document.getElementById('ping-ok').style.display = 'block';
+  }
+  function selModel(el) {
+    document.querySelectorAll('#s3 .p-card').forEach(c => c.classList.remove('sel'));
+    el.classList.add('sel');
+  }
+
+  // 教练叠卡
+  function openQ(i) {
+    document.getElementById('q' + i).classList.add('open');
+  }
+  function closeQ(i) {
+    const card = document.getElementById('q' + i);
+    card.classList.remove('open');
+    const sels = [...card.querySelectorAll('.chip.sel')].map(c => c.textContent);
+    const custom = card.querySelector('.coach-input')?.value.trim();
+    if (custom) sels.push(custom);
+    const sum = card.querySelector('.q-sum');
+    if (sels.length) { sum.textContent = sels.join('、'); card.querySelector('.q-hint').style.display = 'none'; }
+  }
+  function toggleQ(i) {
+    const card = document.getElementById('q' + i);
+    const wasOpen = card.classList.contains('open');
+    if (wasOpen) { closeQ(i); return; }
+    document.querySelectorAll('.q-card').forEach(c => closeQ(+c.id.slice(1)));
+    openQ(i);
+  }
+  function togChip(el) { el.classList.toggle('sel'); }
+  function selChip1(el) {
+    document.querySelectorAll('#q1 .chip').forEach(c => c.classList.remove('sel'));
+    el.classList.add('sel');
+    closeQ(1);
+  }
+  function genDone() {
+    closeQ(0); closeQ(1);
+    go(5);
+  }
+</script>
+</body>
+</html>

@@ -33,7 +33,7 @@ enum ReasoningEffort {
         switch providerType {
         case .anthropic: return needsAdaptive(modelId) ? .anthropicAdaptive : .anthropicBudget
         case .openaiCompatible:
-            return URL(string: baseURL.lowercased())?.host?.hasSuffix("openrouter.ai") == true ? .openRouter : .chatCompletions
+            return KnownHost.detect(baseURL) == .openrouter ? .openRouter : .chatCompletions
         case .chatgptOAuth: return .responses
         case .ccBridge: return credentialId == "codex-bridge" ? .codex : .claudeCode
         case .localMLX: return .local
@@ -41,10 +41,10 @@ enum ReasoningEffort {
         }
     }
 
-    /// Opus 4.7 起、Sonnet / Opus / Haiku 5 系、Fable、Mythos 只认 adaptive（官方 thinking troubleshooting 表）
+    /// Opus 4.7 起、Sonnet / Opus / Haiku 5 系、Fable、Mythos 只认 adaptive（官方 thinking troubleshooting 表）。
+    /// #094 起按血统认：`claude-opus-4.7`（点号）、`anthropic/claude-opus-4-7` 也认得出
     static func needsAdaptive(_ modelId: String) -> Bool {
-        let m = modelId.lowercased()
-        return ["opus-4-7", "opus-4-8", "opus-5", "sonnet-5", "haiku-5", "fable", "mythos"].contains { m.contains($0) }
+        ModelLineage.anthropicAdaptive(modelId)
     }
 
     /// 这个模型能选的档位（不含「默认」）。顺序：模型目录 → 小补表 → 不知道给通用三档；目录说不推理 → 空（只有默认）
@@ -160,12 +160,31 @@ enum ReasoningEffort {
         }
     }
 
-    static func anthropicThinking(route: Route, effort: String, visible: Int, limit: Int?) -> AnthropicWire {
+    /// 「思考过程」设置不是「隐藏」= 要思考摘要（plan-thinking Q3-A）；隐藏时不要（omitted 首字更快）
+    static var wantsThinkingSummary: Bool { DisclosureKind.thinking.mode != .hidden }
+
+    /// thinking 回传 §3.5：
+    /// - 「默认」档 + 默认就会想的模型（Q5-A）：显式写 `{type: adaptive}`（= 不写，不断缓存）、不发 output_config，按官方默认档留余量；其余模型「默认」照旧不发
+    /// - display 默认 omitted 的模型、要摘要时加 `display: summarized`；默认就是 summarized 的老模型不发这个字段
+    /// - thinkingAllowed = false（学到这个端点不收思考参数）：一个思考字段都不发；displayAllowed = false：不发 display
+    static func anthropicThinking(route: Route, effort: String, visible: Int, limit: Int?,
+                                  modelId: String? = nil, summarize: Bool = false,
+                                  thinkingAllowed: Bool = true, displayAllowed: Bool = true) -> AnthropicWire {
         let cap = limit ?? .max
+        guard thinkingAllowed else { return AnthropicWire(maxTokens: min(visible, cap)) }
+        func adaptive() -> [String: Any] {
+            var t: [String: Any] = ["type": "adaptive"]
+            if summarize, displayAllowed, let modelId, ModelLineage.displayDefaultOmitted(modelId) { t["display"] = "summarized" }
+            return t
+        }
+        if effort == auto, route == .anthropicAdaptive, let modelId, ModelLineage.thinksByDefault(modelId),
+           let tier = headroom(ModelLineage.defaultEffort(modelId)) {
+            return AnthropicWire(thinking: adaptive(), maxTokens: min(visible + tier, cap))
+        }
         guard let tier = headroom(effort) else { return AnthropicWire(maxTokens: min(visible, cap)) }
         let total = min(visible + tier, cap)
         if route == .anthropicAdaptive {
-            return AnthropicWire(thinking: ["type": "adaptive"], outputConfig: ["effort": effort], maxTokens: total)
+            return AnthropicWire(thinking: adaptive(), outputConfig: ["effort": effort], maxTokens: total)
         }
         let budget = min(tier, total - 1024)
         guard budget >= 1024 else { return AnthropicWire(maxTokens: min(visible, cap)) }

@@ -59,7 +59,8 @@ final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     static func speakableText(from node: MessageNode) -> String {
-        if let segments = node.segments, !segments.isEmpty {
+        // 只挂思考段 / 语音条的普通回复正文在 content（plan-thinking §3.2）
+        if let segments = node.segments, segments.hasRenderableSegments {
             return segments.compactMap { segment in
                 if case .text(let text) = segment {
                     return text

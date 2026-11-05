@@ -548,7 +548,7 @@ enum CodingCLI {
 
     static func home(_ environment: [String: String]) -> URL {
         if let custom = environment["MP_CODE_HOME"], !custom.isEmpty { return URL(fileURLWithPath: custom, isDirectory: true) }
-        return FileManager.default.homeDirectoryForCurrentUser
+        return AppPaths.home
     }
 
     static func stateURL(_ invocation: Invocation, _ environment: [String: String]) -> URL {

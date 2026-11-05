@@ -4,11 +4,13 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-/// 远程推送（APNs）：请求授权（老用户启动时 / 新用户引导完成页）+ 注册 → 拿 device token 发给 hub。
+/// 远程推送（APNs）：请求授权（老用户启动时 / 新用户小芽引导收尾时）+ 注册 → 拿 device token 发给 hub。
 /// hub 在「小克主动发消息/nudge 且你不在看」时经 APNs 推过来（即使 app 关着）。
 final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // 粟粟拍板：撤销只留编辑器浮条 / 硬件快捷键，摇一摇是全 App 开关。
+        application.applicationSupportsShakeToEdit = false
         LaunchSplash.install(fromPush: launchOptions?[.remoteNotification] != nil)
         LaunchMarks.note(launchOptions?[.remoteNotification] != nil ? "launch.push" : application.applicationState == .background ? "launch.bg" : "launch.fg")   // 秒连尺子：启动来源
         // #042：锁屏来电要读的钥匙串条目改成「首次解锁后可读」；锁着冷启动改不了，等解锁回调补跑
@@ -16,8 +18,8 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
         if Self.skipsAuthorization { return true }
         UNUserNotificationCenter.current().delegate = self
         NativeCallCoordinator.shared.configure()
-        // 首启不弹：还没走完引导的，授权挪到引导完成页（OnboardingFlowView.doneStep）再请求。
-        if UserDefaults.standard.bool(forKey: "onboardingCompletedV1") { Self.requestAuthorization() }
+        // 首启不弹：新装正在走小芽引导的，授权挪到剧本收尾（end / ghost）再请求（plan-onboarding-xiaoya-impl §5.2）。
+        if PushGate.requestsAtLaunch(.standard) { Self.requestAuthorization() }
         return true
     }
 

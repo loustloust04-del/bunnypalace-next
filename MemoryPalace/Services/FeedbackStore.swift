@@ -17,12 +17,12 @@ enum FeedbackStore {
 
     static var feedbackDirectory: URL {
         #if os(iOS)
-        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("feedback", isDirectory: true)
+        let base = AppPaths.checked(AppPaths.documents
+            .appendingPathComponent("feedback", isDirectory: true))
         #else
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let base = AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("feedback", isDirectory: true)
+            .appendingPathComponent("feedback", isDirectory: true))
         #endif
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
@@ -84,17 +84,17 @@ enum FeedbackStore {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd-HHmmss"
         let stem = f.string(from: Date())
-        let mdURL = feedbackDirectory.appendingPathComponent("\(stem).md")
+        let mdURL = AppPaths.checked(feedbackDirectory.appendingPathComponent("\(stem).md"))
 
         var imageLines: [String] = []
         if let screenshot {
-            let imgURL = feedbackDirectory.appendingPathComponent("\(stem).jpg")
+            let imgURL = AppPaths.checked(feedbackDirectory.appendingPathComponent("\(stem).jpg"))
             try screenshot.write(to: imgURL)
             imageLines.append("![截图](\(stem).jpg)")
         }
         for (i, img) in extraImages.enumerated() {
             let name = "\(stem)-\(i + 2).jpg"
-            try img.write(to: feedbackDirectory.appendingPathComponent(name))
+            try img.write(to: AppPaths.checked(feedbackDirectory.appendingPathComponent(name)))
             imageLines.append("![附图\(i + 2)](\(name))")
         }
         let imagesLine = imageLines.isEmpty ? "（无）" : imageLines.joined(separator: "\n")

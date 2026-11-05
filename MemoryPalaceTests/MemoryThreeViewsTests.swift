@@ -40,13 +40,13 @@ final class MemoryThreeViewsTests: XCTestCase {
         let a = summary("conv-a", title: "旧名 A", segs: [seg("1", .rolling, at: 0), seg("2", .closeout, at: 86_400)], updated: 100)
         let b = summary("conv-b", title: "B", segs: [seg("1", .closeout, at: 0)], updated: 500)
         let empty = summary("conv-c", title: "空", segs: [], updated: 900)
-        let rows = WindowSummaryListLayout.rows([a, b, empty], aliveTitles: ["conv-a": "新名 A"])
+        let rows = WindowSummaryListLayout.rows(windows: [b, empty], sessions: [a], aliveTitles: ["conv-a": "新名 A"])
         XCTAssertEqual(rows.map(\.conversationId), ["conv-b", "conv-a"], "一段都没有的不出；最近写过的在上")
         XCTAssertEqual(rows[1].title, "新名 A", "窗口还在：用现在的标题")
         XCTAssertFalse(rows[1].isGone)
         XCTAssertEqual(rows[0].title, "B", "窗口删了：用文件里的标题")
         XCTAssertTrue(rows[0].isGone)
-        XCTAssertEqual(rows[1].segmentCount, 2)
+        XCTAssertEqual(rows[1].segmentCount, 1, "数 A2 段数：老收尾段不算（三代搬迁 W2）")
         XCTAssertEqual(rows[1].first, t0)
         XCTAssertEqual(rows[1].last, t0.addingTimeInterval(86_400 + 600))
     }
@@ -208,12 +208,11 @@ final class MemoryThreeViewsTests: XCTestCase {
     }
 
 
-    /// v4-1 Q3：两个开关任一个开着就收尾
-    func testQueueNoteFollowsBothSwitches() {
-        XCTAssertEqual(WindowSummaryListLayout.queueNote(masterOn: false, summaryOn: true, timelineOn: true, queueEmpty: false), "记忆总开关关着，现在不记")
-        XCTAssertTrue(WindowSummaryListLayout.queueNote(masterOn: true, summaryOn: false, timelineOn: false, queueEmpty: false)?.contains("都关着") == true)
-        XCTAssertNil(WindowSummaryListLayout.queueNote(masterOn: true, summaryOn: false, timelineOn: true, queueEmpty: false), "只开时间轴也收尾")
-        XCTAssertNil(WindowSummaryListLayout.queueNote(masterOn: true, summaryOn: true, timelineOn: false, queueEmpty: false))
-        XCTAssertEqual(WindowSummaryListLayout.queueNote(masterOn: true, summaryOn: true, timelineOn: true, queueEmpty: true), "现在没有等着记的窗口")
+    /// c2c3-v2 第 7 段：收尾只看 A3；A4 一天一条另外按天拼，不在「正在记」队列里
+    func testQueueNoteFollowsA3Switch() {
+        XCTAssertEqual(WindowSummaryListLayout.queueNote(masterOn: false, a3On: true, queueEmpty: false), "记忆总开关关着，现在不记")
+        XCTAssertEqual(WindowSummaryListLayout.queueNote(masterOn: true, a3On: false, queueEmpty: false), "A3 窗口总结关着，窗口收尾不跑")
+        XCTAssertNil(WindowSummaryListLayout.queueNote(masterOn: true, a3On: true, queueEmpty: false))
+        XCTAssertEqual(WindowSummaryListLayout.queueNote(masterOn: true, a3On: true, queueEmpty: true), "现在没有等着记的窗口")
     }
 }

@@ -9,6 +9,7 @@ enum CodingParse {
 
     /// 逐行解析 JSONL：空白行跳过；解析不了 / 不是对象的行回调 nil（调用方计 unknown）
     static func forEachLine(_ url: URL, _ body: (JSON?) -> Void) throws {
+        let url = AppPaths.checked(url)
         let data: Data
         do {
             data = try Data(contentsOf: url, options: .alwaysMapped)
@@ -500,6 +501,7 @@ enum CodingParse {
 
     /// 非空 .jsonl，stem = native id
     static func defaultFileRef(_ agent: CodingAgent, _ url: URL) -> CodingSessionFileRef? {
+        let url = AppPaths.checked(url)
         let name = url.lastPathComponent
         guard !name.hasPrefix("."), name.hasSuffix(".jsonl") else { return nil }
         guard let values = try? url.resourceValues(forKeys: Set(refKeys)),
@@ -510,7 +512,7 @@ enum CodingParse {
 
     /// 递归枚举目录下非空 .jsonl
     static func listJSONLRefs(_ dir: URL, _ agent: CodingAgent, nativeId: (String) -> String) -> [CodingSessionFileRef] {
-        guard let enumerator = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: refKeys) else { return [] }
+        guard let enumerator = FileManager.default.enumerator(at: AppPaths.checked(dir), includingPropertiesForKeys: BenchIsolation.active ? nil : refKeys) else { return [] }
         var refs: [CodingSessionFileRef] = []
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
             if var ref = defaultFileRef(agent, url) {

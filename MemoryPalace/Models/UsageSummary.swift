@@ -95,10 +95,12 @@ struct UsageSummary: Equatable, Sendable {
     var series: [UsagePoint] = []
     var models: [UsageGroup] = []
     var providers: [UsageGroup] = []
+    /// 按用途（UsageKind.label）：对话、碎片池、整理编目、wiki 种子…
+    var kinds: [UsageGroup] = []
 }
 
 /// 仿 magpie `summarize()`：先铺空时间轴（今天按时、7 / 30 天按天、全部 ≤60 天按天否则按周），
-/// 再把记录落桶；同时出按模型 / 按 provider 两张榜。纯函数，时钟 / 日历 / 价目表都从参数进。
+/// 再把记录落桶；同时出按模型 / 按 provider / 按用途三张榜。纯函数，时钟 / 日历 / 价目表都从参数进。
 enum UsageSummarizer {
     static func summarize(
         _ period: UsagePeriod,
@@ -166,6 +168,7 @@ enum UsageSummarizer {
 
         var models: [String: UsageGroup] = [:]
         var providers: [String: UsageGroup] = [:]
+        var kinds: [String: UsageGroup] = [:]
         for r in records where r.time >= since {
             let c = cost(r)
             summary.totals.add(r, cost: c)
@@ -179,9 +182,11 @@ enum UsageSummarizer {
             models[r.model, default: UsageGroup(id: r.model, label: r.model)].totals.add(r, cost: c)
             providers[r.providerId, default: UsageGroup(id: r.providerId, label: r.providerName)].totals.add(r, cost: c)
             providers[r.providerId]?.label = r.providerName   // 记录升序 → 留下最近一次的名字
+            kinds[r.kind.rawValue, default: UsageGroup(id: r.kind.rawValue, label: r.kind.label)].totals.add(r, cost: c)
         }
         summary.models = ranked(models)
         summary.providers = ranked(providers)
+        summary.kinds = ranked(kinds)
         return summary
     }
 

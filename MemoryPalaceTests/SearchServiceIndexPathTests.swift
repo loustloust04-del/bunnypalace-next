@@ -194,6 +194,66 @@ final class SearchServiceIndexPathTests: XCTestCase {
         XCTAssertEqual(nodeIds(b.conversation), ["e1"])
     }
 
+    @MainActor
+    func testChineseCatalogAndSearchBoxKeepSubstringBoundaryAndTimeOrder() async throws {
+        conv("han-old", title: "虚构旧地图", current: "han-old-node", updated: 100)
+        node("han-old-node", "user", String(repeating: "云桥城", count: 8), parent: nil, children: [], conv: "han-old", at: day1)
+        conv("han-new", title: "虚构新地图", current: "han-new-node", updated: 999)
+        node("han-new-node", "user", "云桥城地图画好了", parent: nil, children: [], conv: "han-new", at: day2)
+        for (id, body) in [("han-cloud", "云"), ("han-bridge", "桥"), ("han-suffix", "桥城"),
+                           ("han-separated", "云 船 桥 船 城")] {
+            conv(id, title: "不相关窗口", current: id + "-node", updated: 2000)
+            node(id + "-node", "user", body, parent: nil, children: [], conv: id, at: day2)
+        }
+        try context.save()
+        let nodes = try context.fetch(FetchDescriptor<MessageNode>())
+        try store.apply(upserts: nodes.map {
+            SearchIndexDoc(nodeId: $0.id, conversationId: $0.conversationId, profileId: $0.profileId, role: $0.role,
+                           created: $0.createTime, trashed: false, body: $0.content, identifierKey: nil)
+        }, epoch: store.epoch)
+        for useIndex in [false, true] {
+            let catalog = await SearchService.catalogContent(terms: ["云桥城"], profileId: pid, container: container,
+                                                             index: useIndex ? store : nil)
+            XCTAssertEqual(Set(catalog.map(\.nodeId)), ["han-old-node", "han-new-node"])
+            let recent = try await run(filter(["云桥城"], sort: .recent), index: useIndex)
+            XCTAssertEqual(recent.conversation.map(\.convId), ["han-new", "han-old"], "搜索框仍按时间，不按正文相关度")
+            let oldest = try await run(filter(["云桥城"], sort: .oldest), index: useIndex)
+            XCTAssertEqual(oldest.conversation.map(\.convId), ["han-old", "han-new"])
+        }
+    }
+
+    @MainActor
+    func testCatalogFullHanPhrasesMatchIndexScanAndVisibleVerification() async throws {
+        conv("phrases", title: "虚构词面", current: "city", updated: 100)
+        for (id, body) in [
+            ("city", "云桥城"), ("partial-city", "桥城"),
+            ("name", "张小明"), ("partial-name", "小明"),
+            ("version", "v2"), ("use", "用"), ("swift", "Swift"), ("write", "写"),
+            ("thinking-city", "[thinking]云桥城[/thinking]桥城"),
+            ("thinking-name", "[thinking]张小明[/thinking]小明")
+        ] {
+            node(id, "assistant", body, parent: nil, children: [], conv: "phrases", at: day1)
+        }
+        try context.save()
+        let nodes = try context.fetch(FetchDescriptor<MessageNode>())
+        // 故意保留旧索引里的思考链全文：可见正文复核不能接受仅剩后缀的候选。
+        try store.apply(upserts: nodes.map {
+            SearchIndexDoc(nodeId: $0.id, conversationId: $0.conversationId, profileId: $0.profileId, role: $0.role,
+                           created: $0.createTime, trashed: false, body: $0.content, identifierKey: nil)
+        }, epoch: store.epoch)
+        let cases: [(String, Set<String>)] = [
+            ("云桥城", ["city"]), ("张小明", ["name"]), ("云", ["city"]),
+            ("云桥城v2", ["city", "version"]), ("用Swift写", ["use", "swift", "write"])
+        ]
+        for index in [store, nil] {
+            for (query, expected) in cases {
+                let result = await SearchService.catalogContent(terms: [query], profileId: pid,
+                                                                container: container, index: index)
+                XCTAssertEqual(Set(result.map(\.nodeId)), expected, query)
+            }
+        }
+    }
+
     func testRelevanceAndTitleSortsMatch() async throws {
         try seed()
         for sort in [SearchSort.relevance, .oldest, .titleAZ] {
@@ -220,6 +280,110 @@ final class SearchServiceIndexPathTests: XCTestCase {
         let viaScan = try await run(filter(["榴莲"]), index: false)
         XCTAssertTrue(viaIndex.conversation.isEmpty)
         XCTAssertEqual(nodeIds(viaScan.conversation), ["t1n"])
+    }
+
+    func testCatalogOriginalNodesPreserveAttributionAndExcludeIneligibleSources() async throws {
+        node("orphan", "user", "苹果", parent: nil, children: [], conv: "missing", at: day1)
+        node("tool-log", "tool", "苹果 工具日志", parent: nil, children: [], conv: "c1", at: day1)
+        let foreign = MessageNode(id: "foreign", role: "user", content: "苹果", contentType: "text",
+                                  createTime: day1, parentId: nil, childrenIds: [], conversationId: "c1", profileId: "other")
+        context.insert(foreign)
+        try seed()
+        for index in [store, nil] {
+            let result = await SearchService.catalogContent(terms: ["苹果", "香蕉"], profileId: pid,
+                                                            container: container, index: index)
+            XCTAssertEqual(Set(result.map(\.nodeId)), ["a1", "a2", "a3", "a4", "b1", "b2", "b3", "d1", "f1"])
+            let branch = try XCTUnwrap(result.first { $0.nodeId == "a4" })
+            XCTAssertEqual(branch.role, "assistant")
+            XCTAssertFalse(branch.onMain)
+            XCTAssertEqual(branch.profileId, pid)
+            XCTAssertEqual(branch.conversationId, "c1")
+            XCTAssertEqual(branch.title, "工作笔记")
+            XCTAssertEqual(branch.created, day2)
+            XCTAssertTrue(try XCTUnwrap(result.first { $0.nodeId == "a2" }).onMain)
+            let scoped = await SearchService.catalogContent(
+                terms: ["苹果", "香蕉"], profileId: pid, container: container,
+                interval: DateInterval(start: day1, end: day1.addingTimeInterval(1)), scope: ["c2"], index: index
+            )
+            XCTAssertEqual(Set(scoped.map(\.nodeId)), ["b1", "b2"], "范围和日期排除其他窗口及 nil 时间")
+        }
+    }
+
+    func testCatalogOnlyReturnsCleanVisibleBodyNotThinkingOrToolMetadata() async throws {
+        conv("visible", title: "虚构作品", current: "visible-node", updated: 100)
+        node("visible-node", "assistant", "[thinking]隐藏云桥城[/thinking]我答应画云桥城地图",
+             parent: nil, children: [], conv: "visible", at: day1)
+        node("thinking-only", "assistant", "[thinking]云桥城[/thinking]没有可见关键词",
+             parent: nil, children: [], conv: "visible", at: day1)
+        node("hidden-source", "user", "云桥城", parent: nil, children: [], conv: "visible", at: day1)
+        let nodes = try context.fetch(FetchDescriptor<MessageNode>())
+        let visible = try XCTUnwrap(nodes.first { $0.id == "visible-node" })
+        visible.ccThinking = "云桥城 私密思考"
+        visible.thinkingSummary = "云桥城 思考摘要"
+        visible.toolSummaries = ["test": "云桥城 工具摘要"]
+        visible.segmentsData = try JSONEncoder().encode([
+            MessageSegment.text("我答应画云桥城地图"),
+            .thinking(text: "云桥城 分段思考", signature: nil),
+            .toolUse(id: "call", name: "fs_search", inputJSON: "{\"query\":\"云桥城\"}",
+                     integrationName: nil, iconName: nil),
+            .toolResult(toolUseId: "call", text: "云桥城 工具日志", isError: false, integrationName: nil)
+        ])
+        try XCTUnwrap(nodes.first { $0.id == "hidden-source" }).sourceVisibility = "hidden"
+        try seed()
+        // 模拟已有索引里遗留的未剥思考链正文，不能仅因 FTS 命中就留下。
+        try store.apply(upserts: [
+            SearchIndexDoc(nodeId: "thinking-only", conversationId: "visible", profileId: pid, role: "assistant",
+                           created: day1, trashed: false,
+                           body: "[thinking]云桥城[/thinking]没有可见关键词", identifierKey: nil)
+        ], epoch: store.epoch)
+        for index in [store, nil] {
+            let results = await SearchService.catalogContent(terms: ["云桥城"], profileId: pid,
+                                                             container: container, index: index)
+            XCTAssertEqual(results.map(\.nodeId), ["visible-node"])
+            XCTAssertEqual(results.first?.body, "我答应画云桥城地图")
+            XCTAssertEqual(results.first?.role, "assistant")
+        }
+    }
+
+    func testCatalogNilAndUnindexableAndBrokenIndexUseRankedORScan() async throws {
+        conv("rank", title: "虚构作品", current: "recent", updated: 100)
+        node("strong", "user", "cloudbridge cloudbridge cloudbridge 🍎", parent: nil,
+             children: ["recent"], conv: "rank", at: day1)
+        node("recent", "assistant", "cloudbridge " + String(repeating: "filler ", count: 100),
+             parent: "strong", children: [], conv: "rank", at: day2)
+        node("or-only", "user", "lighthouse", parent: nil, children: [], conv: "rank", at: day1)
+        try seed()
+        let scan = await SearchService.catalogContent(terms: ["cloudbridge", "lighthouse"], profileId: pid,
+                                                      container: container, index: nil)
+        XCTAssertEqual(Set(scan.map(\.nodeId)), ["strong", "recent", "or-only"])
+        XCTAssertLessThan(try XCTUnwrap(scan.firstIndex { $0.nodeId == "strong" }),
+                          try XCTUnwrap(scan.firstIndex { $0.nodeId == "recent" }))
+        let unindexable = await SearchService.catalogContent(terms: ["🍎"], profileId: pid,
+                                                             container: container, index: store)
+        XCTAssertEqual(unindexable.map(\.nodeId), ["strong"])
+        let raw = try SQLiteDB(url: store.url)
+        try raw.exec("DROP TABLE fts")
+        let recovered = await SearchService.catalogContent(terms: ["cloudbridge", "lighthouse"], profileId: pid,
+                                                           container: container, index: store)
+        XCTAssertEqual(recovered, scan)
+    }
+
+    func testCatalogCompoundTitleExpandsSameORTermsForIndexAndFallback() async throws {
+        conv("compound", title: "虚构创作", current: "voyage", updated: 100)
+        node("paint", "user", "模型船涂装改用哑光配色", parent: nil, children: ["voyage"],
+             conv: "compound", at: day1)
+        node("voyage", "assistant", "云桥城的新航线沿海岸行进", parent: "paint", children: [],
+             conv: "compound", at: day2)
+        try seed()
+        let terms = ["模型船、配色；云桥城、航线"]
+        let indexed = await SearchService.catalogContent(terms: terms, profileId: pid, container: container, index: store)
+        let scanned = await SearchService.catalogContent(terms: terms, profileId: pid, container: container, index: nil)
+        XCTAssertEqual(Set(indexed.map(\.nodeId)), ["paint", "voyage"])
+        XCTAssertEqual(Set(scanned.map(\.nodeId)), ["paint", "voyage"])
+        let raw = try SQLiteDB(url: store.url)
+        try raw.exec("DROP TABLE fts")
+        let recovered = await SearchService.catalogContent(terms: terms, profileId: pid, container: container, index: store)
+        XCTAssertEqual(recovered, scanned)
     }
 }
 

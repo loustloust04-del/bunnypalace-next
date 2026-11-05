@@ -73,20 +73,20 @@ final class StorageMaintenanceTests: XCTestCase {
         XCTAssertNotNil(FileLibraryStore.absoluteURL(path, profileId: pid), "被引用文件不能被当孤儿删掉")
     }
 
-    func testCleanSystemCachesReportsBytes() throws {
+    func testCleanTemporaryFilesReportsBytesWithoutTouchingOtherNames() throws {
         let fm = FileManager.default
-        let tmpFile = fm.temporaryDirectory
-            .appendingPathComponent("storage-test-\(UUID().uuidString).bin")
+        let directory = fm.temporaryDirectory.appendingPathComponent("storage-clean-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: directory) }
+        let tmpFile = directory.appendingPathComponent("storage-test-owned.bin")
         try Data(count: 4096).write(to: tmpFile)
         // 非自有前缀的文件必须保留（macOS tmp 是用户级共享目录，整清是事故）
-        let stranger = fm.temporaryDirectory
-            .appendingPathComponent("not-ours-\(UUID().uuidString).bin")
+        let stranger = directory.appendingPathComponent("not-ours.bin")
         try Data(count: 16).write(to: stranger)
-        defer { try? fm.removeItem(at: stranger) }
 
-        let freed = StorageMaintenance.cleanSystemCaches()
+        let freed = StorageMaintenance.cleanTemporaryFiles(at: directory)
 
-        XCTAssertGreaterThanOrEqual(freed, 4096, "释放字节应至少包含刚写入的自有临时文件")
+        XCTAssertEqual(freed, 4096)
         XCTAssertFalse(fm.fileExists(atPath: tmpFile.path), "自有前缀临时件应被清")
         XCTAssertTrue(fm.fileExists(atPath: stranger.path), "非自有文件绝不能动")
     }

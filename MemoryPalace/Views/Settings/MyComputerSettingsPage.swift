@@ -216,7 +216,7 @@ struct MyComputerSettingsPage: View {
 
     /// GUI app PATH 不含 brew/npm 路径，手动 prepend（跟 CCHubProcess 同套路）
     private nonisolated static var augmentedEnvironment: [String: String] {
-        let home = NSHomeDirectory()
+        let home = AppPaths.home.path
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:\(home)/.bun/bin:\(home)/.local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
         return env

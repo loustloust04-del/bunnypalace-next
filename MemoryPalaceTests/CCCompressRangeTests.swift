@@ -57,7 +57,13 @@ final class CCCompressRangeTests: XCTestCase {
     func testSameWindowTwiceRunsOnce() async throws {
         let msgs = (0..<10).map { SessionSegmentWriter.Message(id: "n\($0)", role: $0 % 2 == 0 ? "user" : "assistant", content: "x", date: date(11, 10, $0)) }
         let pid = "xctest-cc-reentry"
-        defer { try? FileManager.default.removeItem(at: FileLibraryStore.memoryRoot(profileId: pid).deletingLastPathComponent()) }
+        // v5 · 0.1：compress 关着不跑——这里显式开着
+        let saved = ["mem_master", "mem_content_summary"].map { ($0, UserDefaults.standard.object(forKey: $0)) }
+        for (k, _) in saved { UserDefaults.standard.set(true, forKey: k) }
+        defer {
+            for (k, v) in saved { if let v { UserDefaults.standard.set(v, forKey: k) } else { UserDefaults.standard.removeObject(forKey: k) } }
+            try? FileManager.default.removeItem(at: FileLibraryStore.memoryRoot(profileId: pid).deletingLastPathComponent())
+        }
         let profile = Profile(id: pid, name: "T", emoji: "🧪", description: "", userName: "粟粟", assistantName: "小克")
         let ctx = SessionCloseout.Context(profile: profile, model: ProviderModel(credentialId: "x", modelId: "m", name: "m"))
         let gate = AsyncGate()

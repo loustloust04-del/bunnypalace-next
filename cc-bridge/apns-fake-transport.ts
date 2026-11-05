@@ -10,6 +10,9 @@ export const TEST_PEM = await (async () => {
   return `-----BEGIN PRIVATE KEY-----\n${pkcs8.toString("base64").replace(/(.{64})/g, "$1\n")}\n-----END PRIVATE KEY-----\n`
 })()
 
+/// 假 Team ID：测试不读本机 Signing.local.xcconfig。
+export const TEST_TEAM_ID = "TEST000001"
+
 export class FakeStream extends EventEmitter {
   payloads: string[] = []
   onEnd: (s: FakeStream) => void = () => {}
@@ -37,6 +40,7 @@ export function installTransport(drive: (c: FakeClient) => void): Transport {
   t.hooks = {
     enabled: true,
     readKeyPem: () => TEST_PEM,
+    teamId: TEST_TEAM_ID,
     connect: ((authority: string, options: { family?: number }) => {
       const c = new FakeClient()
       t.clients.push(c)

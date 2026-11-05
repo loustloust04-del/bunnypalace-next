@@ -18,7 +18,11 @@ struct PromptEditorPage: View {
     private var isDirty: Bool { edited != initial }
 
     private func save() {
-        UserDefaults.standard.set(edited, forKey: storageKey)
+        if storageKey == FragmentPool.customPromptKey && edited == defaultTemplate {
+            UserDefaults.standard.removeObject(forKey: storageKey)
+        } else {
+            UserDefaults.standard.set(edited, forKey: storageKey)
+        }
         initial = edited
         dismiss()
     }
@@ -102,22 +106,14 @@ struct PromptEditorPage: View {
 }
 
 extension PromptEditorPage {
-    /// 记忆页两个编辑入口的参数只写一份：iOS 推页（`MemoryPageContent`）与 mac 路由（`SettingsRoute.macDestination`）共用
+    /// C2 碎片池的提示词：iOS 推页（C2 二级页）与 mac 路由（`SettingsRoute.macDestination`）共用。
+    /// v5 起是填表提示词（新 key；老的 AUDN 自定义模板对不上这张表，不迁移）
     static var memoryExtract: PromptEditorPage {
         PromptEditorPage(
             title: "提取提示词",
-            storageKey: "customMemoryExtractionPrompt",
-            defaultTemplate: MemoryExtractor.extractionPrompt,
-            hint: "可用占位符：{{CHAR_NAME}}（AI 的名字）、{{USER_NAME}}（你的称呼）、{{SYSTEM_PROMPT}}（人设）、{{PROFILE}}、{{MEMORIES}}"
-        )
-    }
-
-    static var dream: PromptEditorPage {
-        PromptEditorPage(
-            title: "画像生成提示词",
-            storageKey: "customDreamPrompt",
-            defaultTemplate: DreamConsolidator.dreamPrompt,
-            hint: "做梦时用这个提示词把零散事实凝成画像"
+            storageKey: FragmentPool.customPromptKey,
+            defaultTemplate: FragmentPool.defaultTemplate,
+            hint: "可用占位符：{{CHAR_NAME}}（AI 的名字）、{{USER_NAME}}（你的称呼）、{{DATE}}（这截对话最后一天）。旧自定义模板原样保留，只有主动「用默认模板」并保存，才换新版并要求 subject / speaker；清空保存也使用新版默认。共同必填的 JSON 字段不能删。"
         )
     }
 }

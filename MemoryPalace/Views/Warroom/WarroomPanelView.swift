@@ -112,6 +112,9 @@ struct WarroomPanelView: View {
     private let refreshTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        let _ = PerfCountMac.hit(.warroomBody)
+        #endif
         ZStack(alignment: .bottomTrailing) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {

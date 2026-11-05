@@ -138,7 +138,6 @@ struct CardLibraryPanelView: View {
         .sheet(item: $editingCard) { card in
             CharacterCardEditor(card: card) { updated in
                 try cardManager?.update(updated)
-                editingCard = nil
             } onCancel: {
                 editingCard = nil
             }

@@ -17,6 +17,18 @@ final class SearchTextSegmenterTests: XCTestCase {
         XCTAssertEqual(SearchTextSegmenter.segment("ｶﾞ"), " ガ ")
     }
 
+    func testNormalizedSharesCompatibilityAndCaseFolding() {
+        XCTAssertEqual(SearchTextSegmenter.normalized("Swift V2"), "swift v2")
+        XCTAssertEqual(SearchTextSegmenter.normalized("ＡＢＣ１２３ｶﾞ"), "abc123ガ")
+        XCTAssertEqual(SearchTextSegmenter.normalized("㍿"), "株式会社")
+    }
+
+    func testCatalogTermsPreserveHanRunsAndStableDeduplication() {
+        XCTAssertEqual(SearchTextSegmenter.catalogTerms([" 云桥城，张小明 ", "云桥城", "云", "🍎", "  "]),
+                       ["云桥城", "张小明", "云", "🍎"])
+        XCTAssertEqual(SearchTextSegmenter.catalogTerms(["ＡＢＣ", "abc"]), ["abc"])
+    }
+
     func testQueryPhraseAndPrefix() {
         XCTAssertEqual(SearchTextSegmenter.ftsQuery(for: "小岚"), "\"小 岚\"*")
         XCTAssertEqual(SearchTextSegmenter.ftsQuery(for: "Swift"), "\"swift\"*")

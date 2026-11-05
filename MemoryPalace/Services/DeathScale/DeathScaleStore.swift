@@ -61,9 +61,9 @@ final class DeathScaleStore {
     static let shared = DeathScaleStore(root: DeathScaleStore.defaultRoot)
 
     nonisolated static var defaultRoot: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("DeathScale", isDirectory: true)
+            .appendingPathComponent("DeathScale", isDirectory: true))
     }
 
     private(set) var reasons: [DeathScale.Reason] = []
@@ -246,7 +246,7 @@ final class DeathScaleStore {
         DeathScaleTime.format(h.start) + " – " + (h.end.map(DeathScaleTime.format) ?? "…")
     }
 
-    private func url(_ name: String) -> URL { root.appendingPathComponent(name) }
+    private func url(_ name: String) -> URL { AppPaths.checked(root.appendingPathComponent(name)) }
 
     private var writeOptions: Data.WritingOptions {
         #if os(iOS)

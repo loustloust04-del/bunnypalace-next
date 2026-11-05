@@ -6,7 +6,8 @@ import Foundation
 /// Codable 用自定义 key "kind" 做 tag，保持向后兼容（新增 case 时老解码跳过即可）。
 enum MessageSegment: Codable, Hashable {
     case text(String)
-    case thinking(text: String, signature: String?)
+    /// redactedData：`redacted_thinking` 块的密文（plan-thinking Q6-A）。同一个 kind 多一个 key——老版本读成一段空思考，不会整组解码失败
+    case thinking(text: String, signature: String?, redactedData: String? = nil)
     case toolUse(
         id: String,
         name: String,
@@ -66,6 +67,7 @@ enum MessageSegment: Codable, Hashable {
         case path
         case duration
         case script
+        case redactedData
     }
 
     private enum Kind: String, Codable {
@@ -89,10 +91,11 @@ enum MessageSegment: Codable, Hashable {
         case .text(let s):
             try c.encode(Kind.text, forKey: .kind)
             try c.encode(s, forKey: .text)
-        case .thinking(let text, let sig):
+        case .thinking(let text, let sig, let redacted):
             try c.encode(Kind.thinking, forKey: .kind)
             try c.encode(text, forKey: .text)
             try c.encodeIfPresent(sig, forKey: .signature)
+            try c.encodeIfPresent(redacted, forKey: .redactedData)
         case .toolUse(let id, let name, let inputJSON, let integration, let icon):
             try c.encode(Kind.toolUse, forKey: .kind)
             try c.encode(id, forKey: .id)
@@ -161,7 +164,7 @@ enum MessageSegment: Codable, Hashable {
         case .thinking:
             let s = try c.decode(String.self, forKey: .text)
             let sig = try c.decodeIfPresent(String.self, forKey: .signature)
-            self = .thinking(text: s, signature: sig)
+            self = .thinking(text: s, signature: sig, redactedData: try c.decodeIfPresent(String.self, forKey: .redactedData))
         case .toolUse:
             self = .toolUse(
                 id: try c.decode(String.self, forKey: .id),
@@ -259,11 +262,42 @@ extension MessageSegment {
 extension Array where Element == MessageSegment {
     /// 气泡是否该走 segmented 渲染：audioRef 不算数——语音条在气泡外侧胶囊渲染，
     /// 只挂了语音条的消息正文仍走纯文本分支（否则挂 segment 瞬间正文蒸发）。
+    /// 普通回复挂原生思考（`isAttachedThinkingReply`）同理，正文照旧走纯文本分支
     var hasRenderableSegments: Bool {
-        contains { seg in
+        !isAttachedThinkingReply && contains { seg in
             if case .audioRef = seg { return false }
             return true
         }
+    }
+
+    /// thinking 回传 · astra #4：普通回复挂原生思考存成 `[.text(正文), .thinking…]`（之后可能再挂语音条）。
+    /// 正文段在最前、和 content 是同一份（老版本没有这条判断，照分段渲染也看得到正文）；新版本按 content 渲染，思考走「思考过程」行。
+    /// 导入的分段（思考在正文前、或只有思考）不是这个形状，照旧分段渲染
+    var isAttachedThinkingReply: Bool {
+        guard case .text? = first else { return false }
+        let rest = dropFirst()
+        return rest.contains { if case .thinking = $0 { return true } else { return false } }
+            && rest.allSatisfy { seg in
+                switch seg {
+                case .thinking, .audioRef: return true
+                default: return false
+                }
+            }
+    }
+
+    /// 普通回复挂的原生思考摘要（只认 `isAttachedThinkingReply` 这个形状，导入的思考不算）
+    var attachedThinkingText: String? {
+        isAttachedThinkingReply ? nativeThinkingText : nil
+    }
+
+    /// 原生思考段的文字（摘要；omitted / redacted 是空的不算），段间空一行；没有 = nil。普通回复的「思考过程」行读它
+    var nativeThinkingText: String? {
+        let texts = compactMap { seg -> String? in
+            guard case .thinking(let text, _, _) = seg else { return nil }
+            let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? nil : t
+        }
+        return texts.isEmpty ? nil : texts.joined(separator: "\n\n")
     }
 
     /// 她发的纯语音条（plan-voice-note M1）：有 audioRef、没有任何别的段。气泡不画文字（content 只是给 AI 看的那行），

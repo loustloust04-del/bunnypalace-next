@@ -43,18 +43,18 @@ enum AudiobookFileManager {
 
     /// 有声书根目录: ~/Library/Application Support/MemoryPalace/audiobooks/{profileId}/
     static func audiobookDirectory(profileId: String) -> URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport
+        let appSupport = AppPaths.applicationSupport
+        let dir = AppPaths.checked(appSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
             .appendingPathComponent("audiobooks", isDirectory: true)
-            .appendingPathComponent(profileId, isDirectory: true)
+            .appendingPathComponent(profileId, isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
     /// 已落盘文件的完整 URL（不验证存在）
     static func audioURL(fileName: String, profileId: String) -> URL {
-        audiobookDirectory(profileId: profileId).appendingPathComponent(fileName)
+        AppPaths.checked(audiobookDirectory(profileId: profileId).appendingPathComponent(fileName))
     }
 
     // MARK: Import
@@ -79,8 +79,8 @@ enum AudiobookFileManager {
 
         let dir = audiobookDirectory(profileId: profileId)
         let finalName = "\(UUID().uuidString).\(ext)"
-        let tempURL = dir.appendingPathComponent("\(UUID().uuidString).tmp")
-        let finalURL = dir.appendingPathComponent(finalName)
+        let tempURL = AppPaths.checked(dir.appendingPathComponent("\(UUID().uuidString).tmp"))
+        let finalURL = AppPaths.checked(dir.appendingPathComponent(finalName))
 
         // 1. 复制到临时文件
         do {

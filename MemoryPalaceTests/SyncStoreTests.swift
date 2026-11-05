@@ -139,6 +139,38 @@ final class SyncStoreTests: XCTestCase {
         XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 0, "无变化不重复导出")
     }
 
+    #if os(macOS)
+    @MainActor
+    func testIdleSyncKeepsStateFilesAndStillPersistsChanges() throws {
+        let conv = makeConversation(in: contextA, id: "state-noop", title: "before")
+        XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 1)
+        XCTAssertEqual(SyncStore.importAll(profileId: pid, context: contextB).nodesInserted, 3)
+        let stateRoot = URL.applicationSupportDirectory.appendingPathComponent("MemoryPalace/sync-state")
+        let urls = ["export", "import"].map { stateRoot.appendingPathComponent("\(pid).\($0).json") }
+        let marker = Date(timeIntervalSince1970: 946684800)
+        for url in urls {
+            try FileManager.default.setAttributes([.modificationDate: marker], ofItemAtPath: url.path)
+        }
+        XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 0)
+        XCTAssertEqual(SyncStore.importAll(profileId: pid, context: contextB).documentsScanned, 0)
+        for url in urls {
+            let modified = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+            XCTAssertEqual(modified, marker, "空转不重写本机账本")
+        }
+        conv.title = "after"
+        conv.updateTime = Date(timeIntervalSinceNow: 10)
+        try contextA.save()
+        XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 1)
+        XCTAssertEqual(SyncStore.importAll(profileId: pid, context: contextB).conversationsUpdated, 1)
+        XCTAssertEqual(try contextB.fetch(FetchDescriptor<Conversation>()).first?.title, "after")
+        for url in urls {
+            let modified = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+            XCTAssertNotEqual(modified, marker, "新状态仍持久化")
+        }
+        print("S1_SMOKE idle=unchanged changedTitle=after importUpdated=1 stateFiles=2")
+    }
+    #endif
+
     // MARK: - S4 删除传播
 
     @MainActor

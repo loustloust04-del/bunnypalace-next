@@ -72,6 +72,8 @@ final class CodingSessionLibrary {
 
     @ObservationIgnored let state: CodingSessionState
     @ObservationIgnored private let indexURL: URL
+    @ObservationIgnored private let stanchK1Dirty: Bool
+    @ObservationIgnored private let stanchK0Min: Bool
     @ObservationIgnored private var adapters: [CodingSessionAdapter]
     /// 位置配置出来的 roster 可以换代（N3-e）；测试注入的固定 roster 不参与
     @ObservationIgnored private let rosterSource: RosterSource
@@ -90,15 +92,31 @@ final class CodingSessionLibrary {
     }
     @ObservationIgnored private var reader: CodingSessionIndex?
     @ObservationIgnored private var detailGeneration = 0
+    @ObservationIgnored private var detailParseTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var detailReloadTask: Task<Void, Never>?
+    @ObservationIgnored private var detailReloadGeneration = 0
+    @ObservationIgnored private var detailReloadPending = false
+    @ObservationIgnored private var nextDetailRefreshAt: TimeInterval = 0
     @ObservationIgnored private var insightsGeneration = 0
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     @ObservationIgnored private var didScheduleStartupScan = false
     /// 全量与监听共用一个扫描器（一条写连接，扫描器内部的闸串行化）
     @ObservationIgnored private var scannerStorage: CodingSessionScanner?
     @ObservationIgnored private var watcher: CodingSessionWatcher?
+    #if DEBUG || PERF_BENCH
+    var perfWatcherRunning: Bool {
+        PerfHarnessMac.enabled && watcher?.perfIsRunning == true
+    }
+    var perfWatchedPaths: [String] { PerfHarnessMac.enabled ? watcher?.watchedPaths ?? [] : [] }
+    #endif
     @ObservationIgnored private let incrementalQueue = DispatchQueue(label: "mp.coding-sessions.incremental", qos: .utility)
     /// 挪废纸篓（测试换成直接删 tmp 文件，别把 fixture 挪进她真的废纸篓）
     @ObservationIgnored var recycle: ([URL], @escaping (Error?) -> Void) -> Void = { urls, done in
+        if let message = CodingSessionResume.handoffError {
+            done(NSError(domain: "CodingSessionRecycle", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: message]))
+            return
+        }
         NSWorkspace.shared.recycle(urls) { _, error in done(error) }
     }
 
@@ -106,11 +124,15 @@ final class CodingSessionLibrary {
     init(indexURL: URL = CodingSessionIndex.defaultURL,
          adapters: [CodingSessionAdapter]? = nil,
          state: CodingSessionState? = nil,
-         home: URL = FileManager.default.homeDirectoryForCurrentUser,
+         home: URL = AppPaths.home,
+         stanchK1Dirty: Bool = UserDefaults.standard.object(forKey: "mp.stanch.K1-dirty") as? Bool ?? true,
+         stanchK0Min: Bool = UserDefaults.standard.object(forKey: "mp.stanch.K0-min") as? Bool ?? true,
          environment: [String: String] = ProcessInfo.processInfo.environment) {
         let resolvedState = state ?? .shared
         self.indexURL = indexURL
         self.state = resolvedState
+        self.stanchK1Dirty = stanchK1Dirty
+        self.stanchK0Min = stanchK0Min
         if let adapters {
             self.adapters = adapters
             rosterSource = .fixed
@@ -138,8 +160,19 @@ final class CodingSessionLibrary {
     // MARK: - 激活 / 刷新
 
     func activate() {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.codingOpen)
+        #endif
         isActive = true
         reload()
+        if stanchK1Dirty {
+            let changed = pendingChangedPaths
+            pendingChangedPaths = []
+            incrementalDirty = false
+            if case .loaded(let box) = detail, changed.contains(box.transcript.meta.filePath) {
+                reloadDetail()
+            }
+        }
         refresh()
     }
 
@@ -266,6 +299,11 @@ final class CodingSessionLibrary {
     private func sharedScanner() -> CodingSessionScanner? {
         if let scannerStorage { return scannerStorage }
         do {
+            if BenchIsolation.requested {
+                for adapter in adapters {
+                    for root in adapter.dataRoots { _ = AppPaths.checked(root) }
+                }
+            }
             let scanner = CodingSessionScanner(index: try CodingSessionIndex(url: indexURL), adapters: adapters)
             scannerStorage = scanner
             return scanner
@@ -314,6 +352,9 @@ final class CodingSessionLibrary {
             }
         }
         let watcher = CodingSessionWatcher(adapters: adapters) { [weak self] batch in
+            #if (DEBUG || PERF_BENCH) && os(macOS)
+            PerfCountMac.hit(.watcherBatch)
+            #endif
             queue.async {
                 // roster 换代后旧监听晚到的批次：丢，别拿旧 roster 写库（已移除根的会话会被写回复活）
                 guard epoch.value == generation else { return }
@@ -334,12 +375,20 @@ final class CodingSessionLibrary {
     /// 窗口内的变化攒起来，最多每 2 秒刷一次
     static let incrementalInterval: TimeInterval = 2
     @ObservationIgnored private var pendingChangedPaths = Set<String>()
+    @ObservationIgnored private var incrementalDirty = false
     @ObservationIgnored private var incrementalScheduled = false
     @ObservationIgnored private var lastIncrementalAt = Date.distantPast
     /// 测试用：实际刷了几次
     @ObservationIgnored private(set) var incrementalFlushCount = 0
 
     private func applyIncremental(changedPaths: Set<String>) {
+        incrementalDirty = true
+        if stanchK1Dirty && !isActive {
+            if case .loaded(let box) = detail, changedPaths.contains(box.transcript.meta.filePath) {
+                pendingChangedPaths.insert(box.transcript.meta.filePath)
+            }
+            return
+        }
         pendingChangedPaths.formUnion(changedPaths)
         guard !incrementalScheduled else { return }
         incrementalScheduled = true
@@ -350,17 +399,49 @@ final class CodingSessionLibrary {
     }
 
     private func flushIncremental() {
-        incrementalScheduled = false
-        lastIncrementalAt = Date()
+        if !stanchK0Min { incrementalScheduled = false }
+        guard !stanchK1Dirty || (isActive && incrementalDirty) else {
+            incrementalScheduled = false
+            return
+        }
+        incrementalDirty = false
+        if !stanchK0Min { lastIncrementalAt = Date() }
         incrementalFlushCount += 1
         let changed = pendingChangedPaths
         pendingChangedPaths = []
         reload()
         recomputeInsightsIfPresented()
-        // 正看着的会话被写了（她在 CC 里还开着这条）→ 详情跟着更新
+        // 含详情的 flush 必须等异步结果落地，不能拿列表的第一次 idle 提前放行。
+        let detailRefresh: Task<Void, Never>?
         if case .loaded(let box) = detail, changed.contains(box.transcript.meta.filePath) {
             reloadDetail()
+            detailRefresh = detailReloadTask
+        } else {
+            detailRefresh = nil
         }
+        if stanchK0Min {
+            if let detailRefresh {
+                Task { [weak self] in
+                    await detailRefresh.value
+                    self?.finishIncrementalRender()
+                }
+            } else {
+                finishIncrementalRender()
+            }
+        }
+    }
+
+    private func finishIncrementalRender() {
+        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue,
+                                                         false, Int.max) { [weak self] _, _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.lastIncrementalAt = Date()
+                self.incrementalScheduled = false
+                if self.incrementalDirty { self.applyIncremental(changedPaths: []) }
+            }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
     }
 
     /// 测试入口：模拟监听送来一批变化
@@ -440,6 +521,9 @@ final class CodingSessionLibrary {
     /// 重读项目与已加载的分页（每段最多 reloadCap 条）
     /// 重查一遍。结果先算好、和现在一样就不赋——@Observable 赋同值也会通知，整个侧栏跟着重排（plan-mac-hang-probe §2）
     func reload() {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.codingReload)
+        #endif
         reloadProjects()
         var next: [String: CodingSessionStream] = [:]
         for (project, stream) in projectStreams {
@@ -636,6 +720,11 @@ final class CodingSessionLibrary {
         if let reader { return reader }
         do {
             reader = try CodingSessionIndex(url: indexURL)
+            #if (DEBUG || PERF_BENCH) && os(macOS)
+            if PerfHarnessMac.enabled, let root = BenchIsolation.root, BenchIsolation.Configuration.contains(indexURL, in: root) {
+                reader?.macPerfMainPrepare = { PerfCountMac.hit(.codingListSQL) }
+            }
+            #endif
         } catch {
             lastError = error.localizedDescription
         }
@@ -645,27 +734,79 @@ final class CodingSessionLibrary {
     // MARK: - 详情
 
     func select(_ key: String, focusSeq: Int? = nil) {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.codingSelect)
+        #endif
+        let sameSelection = stanchK0Min && selectedKey == key
         isInsightsPresented = false
         selectedKey = key
         self.focusSeq = focusSeq
         revealInTree(key)
+        if stanchK0Min {
+            if sameSelection { reloadDetail(); return }
+            detailReloadGeneration &+= 1
+            detailReloadTask?.cancel()
+            detailReloadTask = nil
+            detailReloadPending = false
+            detailParseTask?.cancel()
+            detailParseTask = nil
+            nextDetailRefreshAt = 0
+        }
         loadDetail(key)
     }
 
     func reloadDetail() {
-        if let selectedKey { loadDetail(selectedKey) }
+        guard let key = selectedKey else { return }
+        guard stanchK0Min else { loadDetail(key); return }
+        detailReloadPending = true
+        guard detailReloadTask == nil else { return }
+        let generation = detailReloadGeneration
+        detailReloadTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if generation == self.detailReloadGeneration { self.detailReloadTask = nil }
+            }
+            repeat {
+                guard !Task.isCancelled, self.selectedKey == key else { return }
+                if let parse = self.detailParseTask { await parse.value }
+                guard !Task.isCancelled, self.selectedKey == key else { return }
+                let wait = max(0, self.nextDetailRefreshAt - ProcessInfo.processInfo.systemUptime)
+                if wait > 0 {
+                    do { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
+                    catch { return }
+                }
+                guard !Task.isCancelled, self.selectedKey == key else { return }
+                if self.stanchK1Dirty && !self.isActive {
+                    self.incrementalDirty = true
+                    if case .loaded(let box) = self.detail {
+                        self.pendingChangedPaths.insert(box.transcript.meta.filePath)
+                    }
+                    return
+                }
+                self.detailReloadPending = false
+                self.loadDetail(key)
+                await self.detailParseTask?.value
+            } while self.detailReloadPending
+        }
     }
 
     private func loadDetail(_ key: String) {
+        let stanchK0Min = self.stanchK0Min
         detailGeneration += 1
         let generation = detailGeneration
         let retainingContent: Bool
-        if case .loaded(let box) = detail { retainingContent = box.transcript.meta.key == key }
-        else { retainingContent = false }
-        isRefreshingDetail = retainingContent
-        detailRefreshError = nil
+        let previous: CodingParsedTranscript?
+        if case .loaded(let box) = detail {
+            retainingContent = box.transcript.meta.key == key
+            previous = stanchK0Min && retainingContent ? box.transcript : nil
+        } else {
+            retainingContent = false
+            previous = nil
+        }
+        if !stanchK0Min { isRefreshingDetail = retainingContent }
+        if !stanchK0Min || detailRefreshError != nil { detailRefreshError = nil }
         func fail(_ message: String, path: String?) {
-            isRefreshingDetail = false
+            if !stanchK0Min { isRefreshingDetail = false }
             if retainingContent { detailRefreshError = message }
             else { detail = .failed(key: key, message: message, filePath: path) }
         }
@@ -680,28 +821,70 @@ final class CodingSessionLibrary {
             fail("没有能读 \(meta.agent.displayName) 会话的解析器（\(meta.filePath)）。", path: meta.filePath)
             return
         }
-        guard let ref = (adapter.fileRef(URL(fileURLWithPath: meta.filePath)) ?? CodingSessionFileRef.fromMeta(meta)) else {
+        let fileURL = AppPaths.checked(URL(fileURLWithPath: meta.filePath))
+        guard let ref = (adapter.fileRef(fileURL) ?? CodingSessionFileRef.fromMeta(meta)) else {
             fail("会话文件不见了或是空的：\(meta.filePath)", path: meta.filePath)
             return
         }
         if !retainingContent { detail = .loading(key: key) }
-        Task.detached(priority: .userInitiated) { [weak self] in
+        let task = Task.detached(priority: .userInitiated) { [weak self] in
+            guard !Task.isCancelled else { return }
+            let started = stanchK0Min ? ProcessInfo.processInfo.systemUptime : 0
+            #if (DEBUG || PERF_BENCH) && os(macOS)
+            PerfCountMac.hit(.codingDetailParse)
+            #endif
             let result = Result { try adapter.parseTranscript(ref) }
+            let cost = stanchK0Min ? ProcessInfo.processInfo.systemUptime - started : 0
+            let unchanged: Bool
+            if case .success(let transcript) = result, let previous {
+                unchanged = previous.meta == meta && previous.mainline == transcript.mainline
+                    && previous.sidechains == transcript.sidechains && previous.unknownLines == transcript.unknownLines
+            } else {
+                unchanged = false
+            }
+            guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
-                guard let self, generation == self.detailGeneration, self.selectedKey == key else { return }
-                self.isRefreshingDetail = false
+                guard let self, generation == self.detailGeneration else { return }
+                guard self.selectedKey == key else { return }
+                if !stanchK0Min { self.isRefreshingDetail = false }
                 switch result {
                 case .success(var transcript):
+                    if unchanged { return }
                     // 标题 / key 以索引为准（Codex 的 state DB 命名在扫描时已合并进索引）
                     transcript.meta = meta
                     self.detail = .loaded(CodingParsedTranscriptBox(transcript))
                     self.detailRevision &+= 1
+                    #if (DEBUG || PERF_BENCH) && os(macOS)
+                    PerfCountMac.hit(.codingDetailRevision)
+                    #endif
                 case .failure(let error):
                     let message = "解析失败：\(error.localizedDescription)"
                     if retainingContent { self.detailRefreshError = message }
                     else { self.detail = .failed(key: key, message: message, filePath: meta.filePath) }
                 }
             }
+            if stanchK0Min {
+                await self?.finishDetailRender(generation: generation, cost: cost)
+            }
+        }
+        if stanchK0Min { detailParseTask = task }
+    }
+
+    private func finishDetailRender(generation: Int, cost: TimeInterval) async {
+        guard generation == detailGeneration else { return }
+        // parse task 直到本代落地的布局/提交完成才收尾；切换选择的旧 observer 只能唤醒旧任务。
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue,
+                                                             false, Int.max) { [weak self] _, _ in
+                MainActor.assumeIsolated {
+                    if let self, generation == self.detailGeneration {
+                        self.nextDetailRefreshAt = ProcessInfo.processInfo.systemUptime + max(2, cost * 10)
+                        self.detailParseTask = nil
+                    }
+                    done.resume()
+                }
+            }
+            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
         }
     }
 
@@ -734,6 +917,7 @@ final class CodingSessionLibrary {
 
     /// 续跑：记住这次用的目标
     func resume(_ meta: CodingSessionMeta, target: CodingResumeTarget) -> String? {
+        if let error = CodingSessionResume.handoffError { return error }
         state.setTerminal(target.rawValue)
         if target == .memoryPalace {
             // 这条已经在某个 tab 里跑着就切过去，不再开第二个——两个 agent 写同一个 jsonl 会打架（阶段 B / R-B B1）
@@ -1040,6 +1224,7 @@ final class CodingSessionLibrary {
     /// 与扫描并行；收工：后台清孤儿缓存 → 回主线程写状态 → 起排队的 → 缓存里长出监听集之外的新根就重挂监听 → 补一轮增量
     @discardableResult
     func syncRemoteHosts(_ names: [String]? = nil) -> Task<Void, Never>? {
+        if BenchIsolation.active { return nil }
         guard case .configured(_, let environment) = rosterSource else { return nil }
         let targets = names ?? state.enabledRemoteHostNames
         guard !targets.isEmpty else { return remoteSyncTask }

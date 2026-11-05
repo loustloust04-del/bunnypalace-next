@@ -1,10 +1,57 @@
 import SwiftUI
 import SwiftData
 
+// MARK: - 设置 → 记忆 的骨架（v5，粟粟 10-15 拖好的顺序；app 里不做拖动）
+
+/// 节和行的顺序只写这一份：页面按它画，`SettingsSkeletonTests` 按它锁
+enum MemoryPageLayout {
+    enum Row: String, CaseIterable {
+        // 顶上（不带节标题）
+        case master, startDay, extractModel, writeBudget, complexity
+        // 写入 · 记什么（一个编号一行）
+        case writerA2, writerA3, writerA4, writerB1, writerB2, writerB3, writerB4, writerC, writerC2, writerC3
+        // 整理 · 怎么管
+        case audit, pending, trash
+        // 注入 · 塞什么进 prompt
+        case openWindow, catalog, recall, feedback, injectBudget
+        // 检索 · 怎么挑记忆（整节不动）
+        case injectFull, injectKeyword, injectVector, injectGraph, convHistory
+
+        var writer: MemoryWriterID? {
+            switch self {
+            case .writerA2: return .a2
+            case .writerA3: return .a3
+            case .writerA4: return .a4
+            case .writerB1: return .b1
+            case .writerB2: return .b2
+            case .writerB3: return .b3
+            case .writerB4: return .b4
+            case .writerC: return .c
+            case .writerC2: return .c2
+            case .writerC3: return .c3
+            default: return nil
+            }
+        }
+    }
+
+    struct Section: Equatable {
+        let title: String
+        let rows: [Row]
+    }
+
+    static let sections: [Section] = [
+        Section(title: "", rows: [.master, .startDay, .extractModel, .writeBudget, .complexity]),
+        Section(title: "写入 · 记什么", rows: [.writerA2, .writerA3, .writerA4, .writerB1, .writerB2, .writerB3, .writerB4,
+                                          .writerC, .writerC2, .writerC3]),
+        Section(title: "整理 · 怎么管", rows: [.audit, .pending, .trash]),
+        Section(title: "注入 · 塞什么进 prompt", rows: [.openWindow, .catalog, .recall, .feedback, .injectBudget]),
+        Section(title: "检索 · 怎么挑记忆（可叠加）", rows: [.injectFull, .injectKeyword, .injectVector, .injectGraph, .convHistory]),
+    ]
+}
+
 // MARK: - Memory Page Content（共用核：设置-记忆 / 记忆 app「设置」分段）
 //
-// 按 cc-rp 六组分组（感知 / 提取 / 整理 / 注入 / 检索 / 基建）拼装 Section。
-// 单一来源 — 改一处两边生效。
+// 单一来源 — 改一处两边生效。节和行的顺序见 `MemoryPageLayout`。
 
 struct MemoryPageContent: View {
     @Environment(\.modelContext) private var modelContext
@@ -13,269 +60,362 @@ struct MemoryPageContent: View {
     /// B15：共用核搬进 mac 设置窗后，raw `Theme.F`（mac 表 11/9）比 J2 小一档 → 全部走 `m.*`（iOS 不变，mac 13/10）
     @Environment(\.settingsMetrics) private var m
 
-    // 记忆系统全集 AppStorage（六组）
     @AppStorage("memoryExtractModelId") private var memoryExtractModelId = ""
-    @AppStorage("customMemoryExtractionPrompt") private var customMemoryPrompt = ""
     @AppStorage("mem_master") private var memMaster = true
     /// 「记忆从哪天开始」：yyyy-MM-dd，空 = 不限（MemoryStartDay）
     @AppStorage(MemoryStartDay.key) private var memStartDay = ""
-    @AppStorage("mem_extract_interval") private var memExtractInterval = 3
     @AppStorage("mem_inject_full") private var memInjectFull = true
     @AppStorage("mem_inject_keyword") private var memInjectKeyword = false
     @AppStorage("mem_inject_vector") private var memInjectVector = false
     @AppStorage("mem_inject_graph") private var memInjectGraph = false
-    @AppStorage("mem_content_facts") private var memContentFacts = true
-    @AppStorage("mem_content_profile") private var memContentProfile = false
-    @AppStorage("mem_inject_profile") private var memInjectProfile = false
-    @AppStorage("mem_content_summary") private var memContentSummary = true
     @AppStorage("mem_content_convhistory") private var memContentConvHistory = true
     @AppStorage("mem_inject_catalog") private var memInjectCatalog = false
     @AppStorage(DisclosureKind.recall.key) private var recallModeRaw = DisclosureKind.recall.migratedDefault.rawValue
     @AppStorage("mem_recall_feedback") private var memRecallFeedback = true
-    @AppStorage("mem_content_timeline") private var memContentTimeline = true
-    @AppStorage("mem_content_heartvoice") private var memContentHeartvoice = false
-    @AppStorage("heartvoice_show_in_chat") private var heartvoiceShowInChat = false
     @AppStorage("mem_inject_budget") private var memInjectBudget = 10000
-    // 第二刀 C：AI 自己的记忆几个可调限制（默认值同 MemoryFlags）
-    @AppStorage("mem_self_recent_count") private var selfRecentCount = 5
-    @AppStorage("mem_self_daily_limit") private var selfDailyLimit = 12
-    @AppStorage("mem_self_budget_percent") private var selfBudgetPercent = 100
-    @AppStorage("mem_self_body_limit") private var selfBodyLimit = 800
-    @AppStorage("mem_session_full_segments") private var sessionFullSegments = 2
-    @AppStorage("mem_timeline_inject_count") private var timelineInjectCount = 8
-    @AppStorage("mem_timeline_inject_days") private var timelineInjectDays = 7
+    // 写入开关（行上的开关和二级页顶上的同一个键）；只为跟着刷新，读写都过 MemoryWriterSettings（A3 没写过跟老键）
+    @AppStorage("mem_content_summary") private var writeA2 = true
+    @AppStorage("mem_write_a3") private var writeA3 = true
+    @AppStorage("mem_content_timeline") private var writeA4 = true
+    @AppStorage("mem_content_heartvoice") private var writeB1 = false
+    @AppStorage("mem_write_b4") private var writeB4 = true
+    @AppStorage("mem_content_facts") private var writeC2 = true
+    @AppStorage("mem_write_c3") private var writeC3 = true
+    @AppStorage("mem_model_a2") private var modelA2 = ""
+    @AppStorage("mem_model_a3") private var modelA3 = ""
+    @AppStorage("mem_model_a4") private var modelA4 = ""
+    @AppStorage(FragmentModelRoute.key) private var modelC2 = ""
+    @AppStorage(CatalogModelRoute.key) private var modelC3 = ""
+    @AppStorage(MemoryOpenWindow.a2Key) private var openA2 = true
+    @AppStorage(MemoryOpenWindow.a4Key) private var openA4 = true
+    @AppStorage(MemoryOpenWindow.b4Key) private var openB4 = true
+    @AppStorage(MemoryOpenWindow.cKey) private var openC = false
 
-    @State private var profileDream: UserProfileDream? = nil
-    @State private var showProfile = false
-    @State private var showOrganize = false
+    @State private var writeBudget = WriteBudgetStore.shared
+    @State private var localModels = AssistantModelStore.shared
     @State private var showTrash = false
     @State private var deletedSelfCount = 0
     @State private var memoryStats = MemoryStats()
+    @State private var pending = PendingCounts()
 
     private struct MemoryStats {
         var total: Int = 0
         var superseded: Int = 0
+        var unreviewed: Int = 0
+    }
+
+    private struct PendingCounts: Equatable {
+        var open = 0
+        var faded = 0
+        /// 待续本子迁不好 / 读不全：照实说
+        var problem: String?
     }
 
     var body: some View {
         Group {
-            sectionPerception
-            sectionExtraction
-            sectionOrganize
-            sectionInjection
-            sectionRetrieval
-            sectionAdvanced
+            ForEach(MemoryPageLayout.sections, id: \.title) { section in
+                sectionView(section)
+            }
+            // v4-1 §九：按新规则重写 / 从备份恢复，只在 DEBUG 构建里（Q10）
+            #if DEBUG
+            MemoryRegenerationSection()
+            #endif
             sectionInfra
         }
         .sheet(isPresented: $showTrash, onDismiss: refresh) {
             MemoryTrashSheet(profileId: profileManager?.currentProfile.id ?? "")
         }
-        .sheet(isPresented: $showProfile) {
-            MemoryProfileSheet(profileId: profileManager?.currentProfile.id ?? "")
-        }
-        .sheet(isPresented: $showOrganize) {
-            MemoryOrganizeSheet(profileId: profileManager?.currentProfile.id ?? "")
-        }
         .onAppear { refresh() }
         .onReceive(NotificationCenter.default.publisher(for: .profileWillSwitch)) { _ in
-            profileDream = nil
             memoryStats = MemoryStats()
             deletedSelfCount = 0
-            showProfile = false
-            showOrganize = false
+            pending = PendingCounts()
         }
         .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in
             refresh()
         }
     }
 
-    // MARK: - Section ① 感知·记什么
+    // MARK: - 节
 
     @ViewBuilder
-    private var sectionPerception: some View {
-        Section("感知 · 记什么") {
-            Toggle(isOn: Binding(
-                get: { PermissionCenter.level(.memory) == .bypass },
-                set: { PermissionCenter.setLevel($0 ? .bypass : .notAllowed, for: .memory); memMaster = $0 }
-            )) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("记忆系统总开关")
-                        .font(m.rowTitle)
-                        .foregroundColor(Theme.textPrimary)
-                    Text("关 = 不注入、不提取、不强化；数据不动")
-                        .font(m.caption)
-                        .foregroundColor(Theme.textMuted)
-                }
+    private func sectionView(_ section: MemoryPageLayout.Section) -> some View {
+        let dim = !masterOn && !section.title.isEmpty
+        Section {
+            ForEach(section.rows, id: \.self) { row in
+                rowView(row)
             }
-            .tint(Theme.branchIndicator)
-            .searchAnchor("leaf-mem-master")
-            // 关 = 不限；开了下面出一行选日期（默认今天，不能选以后的）
-            memSwitchRow("记忆从哪天开始", "这天以前的聊天不写上下文摘要、窗口总结、时间轴；已经记下的不动",
-                         Binding(get: { !memStartDay.isEmpty },
-                                 set: { memStartDay = $0 ? MemoryStartDay.format(Date()) : "" }),
-                         true, tech: memStartDay.isEmpty ? "不限" : nil)
-                .searchAnchor("leaf-mem-startday")
-            if !memStartDay.isEmpty {
-                DatePicker(selection: Binding(get: { MemoryStartDay.parse(memStartDay) ?? Date() },
-                                              set: { memStartDay = MemoryStartDay.format($0) }),
-                           in: ...Date(), displayedComponents: .date) {
-                    Text("从这天开始")
-                        .font(m.body)
-                        .foregroundColor(Theme.textPrimary)
+        } header: {
+            if !section.title.isEmpty {
+                // section 级搜索锚点：注入 / 检索沿用老锚
+                switch section.rows.first {
+                case .some(.openWindow): Text(section.title).searchAnchor("leaf-mem-content")
+                case .some(.injectFull): Text(section.title).searchAnchor("leaf-mem-inject")
+                default: Text(section.title)
                 }
-                .datePickerStyle(.compact)
-                .environment(\.locale, Locale(identifier: "zh_CN"))
-                .tint(Theme.branchIndicator)
-            }
-            memSwitchRow("从聊天里记住的", "聊天时在后台把关于你的事记下来；关 = 不再记新的，已经记下的照常会想起", $memContentFacts, true, tech: "原子档案")
-                .searchAnchor("leaf-mem-facts")
-            memSwitchRow("心声", "\(assistantName)聊到触动处会写一小篇独白", $memContentHeartvoice, true)
-                .searchAnchor("leaf-mem-heartvoice")
-            if memContentHeartvoice {
-                memSwitchRow("心声进聊天流", "开 = 实时显示；关 = 只默默落盘，翻日历查看", $heartvoiceShowInChat, true)
             }
         }
         .panelRowBackground()
         .listRowSeparator(.hidden)
+        .disabled(dim)
+        .opacity(dim ? 0.5 : 1)
     }
 
-    // MARK: - Section ② 提取·怎么记
+    @ViewBuilder
+    private func rowView(_ row: MemoryPageLayout.Row) -> some View {
+        switch row {
+        case .master: masterRow
+        case .startDay: startDayRows
+        case .extractModel: extractModelRow
+        case .writeBudget: writeBudgetRow
+        case .complexity: complexityRow
+        case .pending: pendingRow
+        case .audit: auditRow
+        case .trash: trashRow
+        case .openWindow: openWindowRow
+        case .catalog:
+            memSwitchRow("目录式注入", "命中记忆只注一行目录，细节按需取回", $memInjectCatalog)
+                .searchAnchor("leaf-mem-catalog")
+        case .recall:
+            DisclosureModeRow(kind: .recall, fontSize: Theme.F.body, valueSize: Theme.F.secondary)
+        case .feedback:
+            if recallModeRaw != DisclosureMode.hidden.rawValue {
+                memSwitchRow("召回反馈", "卡片上显示点赞点踩，点了会调整这条记忆的权重", $memRecallFeedback)
+                    .searchAnchor("leaf-mem-feedback")
+            }
+        case .injectBudget: injectBudgetRow
+        case .injectFull:
+            memSwitchRow("全量注入", "不筛选，全部注入", $memInjectFull)
+                .searchAnchor("leaf-mem-injectfull")
+        case .injectKeyword:
+            memSwitchRow("关键词命中", "对话命中关键词时才注入", $memInjectKeyword)
+                .searchAnchor("leaf-mem-injectkeyword")
+        case .injectVector: vectorRows
+        case .injectGraph:
+            memSwitchRow("关联扩展", "命中一条顺带它的关联记忆", $memInjectGraph)
+                .searchAnchor("leaf-mem-injectgraph")
+        case .convHistory:
+            memSwitchRow("对话历史搜索", "\(assistantName)可以搜旧对话原话和记忆（带出处）", $memContentConvHistory)
+                .searchAnchor("leaf-mem-convhistory")
+        default:
+            if let id = row.writer { writerRow(id) }
+        }
+    }
+
+    // MARK: - 顶上
+
+    private var masterOn: Bool { memMaster && PermissionCenter.level(.memory) == .bypass }
+
+    private var masterRow: some View {
+        Toggle(isOn: Binding(
+            get: { PermissionCenter.level(.memory) == .bypass },
+            set: { PermissionCenter.setLevel($0 ? .bypass : .notAllowed, for: .memory); memMaster = $0 }
+        )) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("记忆系统总开关")
+                    .font(m.rowTitle)
+                    .foregroundColor(Theme.textPrimary)
+                Text("关 = 不注入、不提取、不强化；数据不动")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+            }
+        }
+        .tint(Theme.branchIndicator)
+        .searchAnchor("leaf-mem-master")
+    }
 
     @ViewBuilder
-    private var sectionExtraction: some View {
-        Section("提取 · 怎么记") {
-            // 和 API 设置模型池里的 🌛 写同一个 key（值 = ProviderModel.id「卡 ID/模型 ID」，空 = 自动），两边联动
-            // 排法同开关行：左边标题 + 说明，右边菜单。说明放进 Picker 的 label 时 iOS 会把选中值挤到下一行
+    private var startDayRows: some View {
+        // 关 = 不限；开了下面出一行选日期（默认今天，不能选以后的）
+        memSwitchRow("记忆从哪天开始", "这天以前的聊天不写上下文摘要、窗口总结、时间轴；已经记下的不动",
+                     Binding(get: { !memStartDay.isEmpty },
+                             set: { memStartDay = $0 ? MemoryStartDay.format(Date()) : "" }),
+                     tech: memStartDay.isEmpty ? "不限" : nil)
+            .searchAnchor("leaf-mem-startday")
+        if !memStartDay.isEmpty {
+            DatePicker(selection: Binding(get: { MemoryStartDay.parse(memStartDay) ?? Date() },
+                                          set: { memStartDay = MemoryStartDay.format($0) }),
+                       in: ...Date(), displayedComponents: .date) {
+                Text("从这天开始")
+                    .font(m.body)
+                    .foregroundColor(Theme.textPrimary)
+            }
+            .datePickerStyle(.compact)
+            .environment(\.locale, Locale(identifier: "zh_CN"))
+            .tint(Theme.branchIndicator)
+        }
+    }
+
+    /// 和 API 设置模型池里的 🌛 写同一个 key（值 = ProviderModel.id「卡 ID/模型 ID」，空 = 自动），两边联动。
+    /// 390 宽：模型名放副标题，右边只留一个小箭头（v5）
+    private var extractModelRow: some View {
+        Menu {
+            Picker(selection: $memoryExtractModelId) {
+                Text("自动（默认）").tag("")
+                if extractModelIsStale {
+                    Text("已停用的模型（现在按自动）").tag(memoryExtractModelId)
+                }
+                ForEach(extractModelChoices, id: \.id) { c in
+                    Section(c.name) {
+                        ForEach(c.models) { model in
+                            Text(model.name).tag(model.id)
+                        }
+                    }
+                }
+            } label: {
+                Text("提取模型")
+            }
+            .pickerStyle(.inline)
+        } label: {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("提取模型")
                         .font(m.body)
                         .foregroundColor(Theme.textPrimary)
-                    Text("记新东西、写画像、写上下文摘要和窗口总结都用这个模型。自动 = 主对话那家有内置的便宜款就用它，没有就和主对话用同一个")
+                    Text("没单独选的都用它 · \(extractModelLabel)")
+                        .font(m.caption)
+                        .foregroundColor(Theme.textMuted)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("提取模型：\(extractModelLabel)")
+        .searchAnchor("leaf-mem-extractmodel")
+    }
+
+    private var writeBudgetRow: some View {
+        SettingsNavRow(.memoryWriteBudget) {
+            WriteBudgetPage()
+        } label: {
+            rowLabel("写入预算", writeBudget.summary())
+        }
+        .searchAnchor("leaf-mem-writebudget")
+        .task { await writeBudget.refreshSpent() }
+    }
+
+    /// 复杂度滑条（plan §五）：不存值；拖一档 = 改一组写入开关；对不上显示「自定义」
+    private var complexityRow: some View {
+        let _ = (writeA2, writeA3, writeA4, writeB1, writeB4, writeC2)
+        let level = MemoryComplexity.current()
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("复杂度")
+                        .font(m.body)
+                        .foregroundColor(Theme.textPrimary)
+                    Text(MemoryComplexity.summary())
                         .font(m.caption)
                         .foregroundColor(Theme.textMuted)
                 }
                 Spacer(minLength: 0)
-                Menu {
-                    Picker(selection: $memoryExtractModelId) {
-                        Text("自动（默认）").tag("")
-                        if extractModelIsStale {
-                            Text("已停用的模型（现在按自动）").tag(memoryExtractModelId)
-                        }
-                        ForEach(extractModelChoices, id: \.id) { c in
-                            Section(c.name) {
-                                ForEach(c.models) { model in
-                                    Text(model.name).tag(model.id)
-                                }
-                            }
-                        }
-                    } label: {
-                        Text("提取模型")
-                    }
-                    .pickerStyle(.inline)
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(extractModelLabel)
-                            .lineLimit(1)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(m.caption)
-                    }
-                    .font(m.body)
-                    .foregroundColor(Theme.branchIndicator)
-                }
-                .fixedSize()
-                .accessibilityLabel("提取模型：\(extractModelLabel)")
             }
-            .searchAnchor("leaf-mem-extractmodel")
-
-            SettingsNavRow(.memoryExtractPrompt) {
-                PromptEditorPage.memoryExtract
-            } label: {
-                HStack {
-                    Text("提取提示词")
-                        .font(m.body)
-                        .foregroundColor(Theme.textPrimary)
-                    Spacer()
-                    Text(customMemoryPrompt.isEmpty ? "默认" : "自定义")
-                        .font(m.caption)
-                        .foregroundColor(Theme.textMuted)
+            Slider(value: Binding(
+                get: { Double(level ?? 2) },
+                set: { v in
+                    let target = Int(v.rounded())
+                    if target != level { MemoryComplexity.apply(target) }
+                }
+            ), in: 0...3, step: 1)
+            .tint(Theme.branchIndicator)
+            HStack {
+                ForEach(MemoryComplexity.names.indices, id: \.self) { i in
+                    Text(MemoryComplexity.names[i])
+                        .font(m.caption.weight(i == level ? .semibold : .regular))
+                        .foregroundColor(i == level ? Theme.textPrimary : Theme.textMuted)
+                    if i < MemoryComplexity.names.count - 1 { Spacer(minLength: 0) }
                 }
             }
-            .searchAnchor("leaf-mem-extractprompt")
-            if !customMemoryPrompt.isEmpty {
-                Text("你用的是自定义提示词；想换回默认的，进去点恢复默认")
-                    .font(m.caption)
-                    .foregroundColor(Theme.textMuted)
-            }
-
-            Stepper(value: $memExtractInterval, in: 1...10) {
-                HStack {
-                    Text("提取间隔")
-                        .font(m.body)
-                        .foregroundColor(Theme.textPrimary)
-                    Spacer()
-                    Text("每 \(memExtractInterval) 轮一次")
-                        .font(m.caption.monospaced())
-                        .foregroundColor(Theme.textMuted)
-                }
-            }
-
         }
-        .panelRowBackground()
-        .listRowSeparator(.hidden)
+        .searchAnchor("leaf-mem-complexity")
     }
 
-    // MARK: - Section ③ 整理·怎么管
+    // MARK: - 写入 · 记什么
 
     @ViewBuilder
-    private var sectionOrganize: some View {
-        Section("整理 · 怎么管") {
-            memSwitchRow("用户画像 · 做梦聚合", "定期把记忆凝成画像（每天一次）", $memContentProfile, true)
-                .searchAnchor("leaf-mem-userprofile")
-            profileRow
-            organizeRow
-            trashRow
-            organizeStatsRow
+    private func writerRow(_ id: MemoryWriterID) -> some View {
+        let title = "\(id.code) \(id.title(assistant: assistantName))"
+        if id.isTodo {
+            rowLabel(title, "还没做")
+                .opacity(0.5)
+                .searchAnchor("leaf-mem-w-\(id.rawValue)")
+        } else if let route = SettingsRoute.memoryWriter(id) {
+            SettingsNavRow(route) {
+                MemoryWriterPage(id: id)
+            } label: {
+                HStack(alignment: .center, spacing: 10) {
+                    rowLabel(title, writerSubtitle(id))
+                    if id.hasSwitch {
+                        Toggle("", isOn: Binding(get: { writerOn(id) }, set: { MemoryWriterSettings.set(id, $0) }))
+                            .labelsHidden()
+                            .tint(Theme.branchIndicator)
+                    }
+                }
+            }
+            .searchAnchor("leaf-mem-w-\(id.rawValue)")
         }
-        .panelRowBackground()
-        .listRowSeparator(.hidden)
     }
 
-    /// 画像入口：打开画像弹层（全文 / 编辑 / 重写画像 / 删除画像），和记忆 app 首屏画像卡同一个
-    private var profileRow: some View {
-        Button {
-            showProfile = true
-        } label: {
-            HStack {
-                Text(profileDream.map { "\(assistantName)眼里的你 · \($0.text.count) 字 · \(MemoryDateText.short($0.updatedAt))" }
-                     ?? "还没有画像。聊几天后\(assistantName)会自己写一份")
-                    .font(m.body)
-                    .foregroundColor(profileDream == nil ? Theme.textMuted : Theme.textPrimary)
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(m.caption)
-                    .foregroundColor(Theme.textMuted)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .searchAnchor("leaf-mem-dream")
+    /// 读键时顺手碰一下 AppStorage，开关一变整行跟着刷
+    private func writerOn(_ id: MemoryWriterID) -> Bool {
+        _ = (writeA2, writeA3, writeA4, writeB1, writeB4, writeC2, writeC3)
+        return MemoryWriterSettings.isOn(id)
     }
 
-    private var organizeRow: some View {
-        Button {
-            showOrganize = true
-        } label: {
-            HStack {
-                Text("整理记忆…")
-                    .font(m.body)
-                    .foregroundColor(Theme.branchIndicator)
-                Spacer()
-            }
-            .contentShape(Rectangle())
+    /// 一句话 + 用哪个模型（模型写在副标题后面，390 宽右边只放开关）
+    private func writerSubtitle(_ id: MemoryWriterID) -> String {
+        let base = id.subtitle(assistant: assistantName)
+        switch id {
+        case .a2, .a3: return "\(base) · \(writerModelLabel(id))"
+        case .a4: return "\(base) · \(localRouteLabel(TimelineModelRoute.choice(modelA4)))"
+        case .b1, .b4: return "\(base) · 对话模型"
+        case .c: return "\(base) · \(memoryStats.total) 条"
+        case .c2: return "\(base) · \(localRouteLabel(modelC2))"
+        case .c3: return "\(base) · \(localRouteLabel(modelC3))"
+        default: return base
         }
-        .buttonStyle(.plain)
-        .searchAnchor("leaf-mem-hygiene")
+    }
+
+    private func writerModelLabel(_ id: MemoryWriterID) -> String {
+        let choice = [MemoryWriterID.a2: modelA2, .a3: modelA3][id] ?? ""
+        guard !choice.isEmpty, let model = remoteModels.first(where: { $0.id == choice }) else { return extractModelLabel }
+        return model.name
+    }
+
+    /// A4 / C2 / C3 的模型：C2 / C3 默认跟提取模型、A4 默认本机轻巧款；选了本机没下写清楚这一轮先用谁
+    private func localRouteLabel(_ choice: String) -> String {
+        if let local = FragmentModelRoute.localModelId(choice: choice) {
+            let installed = localModels.state(AssistantLocalModel.catalog.first { $0.id == local } ?? .smart) == .installed
+            return installed ? FragmentModelRoute.localName(local) : "本机没下 · 先用\(extractModelLabel)"
+        }
+        if choice == FragmentModelRoute.extractChoice { return extractModelLabel }
+        return remoteModels.first { $0.id == choice }?.name ?? extractModelLabel
+    }
+
+    // MARK: - 整理 · 怎么管
+
+    private var pendingRow: some View {
+        SettingsNavRow(.memoryPending) {
+            PendingListPage()
+        } label: {
+            rowLabel("待续", pending.problem ?? "没做完 \(pending.open) · 淡了 \(pending.faded)")
+        }
+        .searchAnchor("leaf-mem-pending")
+    }
+
+    /// 审计台：顶掉老「整理记忆」（plan-memory-audit-desk 第五节）
+    private var auditRow: some View {
+        SettingsNavRow(.memoryAudit) {
+            MemoryAuditPage().memorySubpage("整理台")
+        } label: {
+            rowLabel("整理台", "没看过 \(memoryStats.unreviewed) 条")
+        }
+        .searchAnchor("leaf-mem-audit")
     }
 
     // 「已删除 · N ›」：两类记忆删掉的都算（有才出现），和记忆页列表底那行开同一个弹层
@@ -301,141 +441,54 @@ struct MemoryPageContent: View {
         }
     }
 
-    private var organizeStatsRow: some View {
-        HStack(spacing: 12) {
-            statBadge("从聊天里记住的", count: memoryStats.total, color: Theme.branchIndicator)
+    // MARK: - 注入 · 塞什么进 prompt
+
+    private var openWindowRow: some View {
+        let checked = [openA2, openA4, openB4, openC].filter { $0 }.count
+        return SettingsNavRow(.memoryOpenWindow) {
+            MemoryOpenWindowPage()
+        } label: {
+            rowLabel("开窗口带什么", "每一轮带进去的 · 勾了 \(checked) 项")
         }
+        .searchAnchor("leaf-mem-openwindow")
     }
 
-    // MARK: - Section ④ 注入·塞什么进 prompt
-
-    @ViewBuilder
-    private var sectionInjection: some View {
-        Section {
-            // 修复第一刀·刀3：画像注入独立 key（mem_inject_profile），与 ③ 做梦互不影响
-            memSwitchRow("画像注入", "把画像放进 system prompt", $memInjectProfile, true)
-            memSwitchRow("上下文摘要和窗口总结", "长对话挤出视野的部分一段段记下经过和原话；每个窗口聊完整理一份从头到尾的窗口总结", $memContentSummary, true)
-                .searchAnchor("leaf-mem-summary")
-            memSwitchRow("时间轴", "每个窗口每天一条：聊了什么、还欠着什么，新窗口能看到最近的", $memContentTimeline, true)
-                .searchAnchor("leaf-mem-timeline")
-            memSwitchRow("目录式注入", "命中记忆只注一行目录，细节按需取回", $memInjectCatalog, true)
-                .searchAnchor("leaf-mem-catalog")
-            DisclosureModeRow(kind: .recall, fontSize: Theme.F.body, valueSize: Theme.F.secondary)
-            if recallModeRaw != DisclosureMode.hidden.rawValue {
-                memSwitchRow("召回反馈", "卡片上显示点赞点踩，点了会调整这条记忆的权重", $memRecallFeedback, true)
-                    .searchAnchor("leaf-mem-feedback")
-            }
-
-            Stepper(value: $memInjectBudget, in: 500...20000, step: 500) {
-                HStack {
-                    Text("注入预算")
-                        .font(m.body)
-                        .foregroundColor(Theme.textPrimary)
-                    Spacer()
-                    Text("\(memInjectBudget) token")
-                        .font(m.caption.monospaced())
-                        .foregroundColor(Theme.textMuted)
-                }
-            }
-            .searchAnchor("leaf-mem-budget")
-        } header: {
-            // section 级条目「记忆内容 · 注入什么」的锚点
-            Text("注入 · 塞什么进 prompt").searchAnchor("leaf-mem-content")
-        }
-        .panelRowBackground()
-        .listRowSeparator(.hidden)
-    }
-
-    // MARK: - Section ⑤ 检索·怎么挑记忆（可叠加）
-
-    @ViewBuilder
-    private var sectionRetrieval: some View {
-        Section {
-            memSwitchRow("全量注入", "不筛选，全部注入", $memInjectFull, true)
-                .searchAnchor("leaf-mem-injectfull")
-            memSwitchRow("关键词命中", "对话命中关键词时才注入", $memInjectKeyword, true)
-                .searchAnchor("leaf-mem-injectkeyword")
-            memSwitchRow("按意思找记忆", "聊到意思相近的事也能想起来（第一次打开会下载本地模型）", $memInjectVector, true, tech: "向量检索")
-                .onChange(of: memInjectVector) { _, on in
-                    if on { AppleMemoryEmbedder.shared.requestAssetsIfNeeded() }
-                }
-                .searchAnchor("leaf-mem-injectvector")
-            memSwitchRow("关联扩展", "命中一条顺带它的关联记忆", $memInjectGraph, true)
-                .searchAnchor("leaf-mem-injectgraph")
-            memSwitchRow("对话历史搜索", "\(assistantName)可以搜旧对话原话和记忆（带出处）", $memContentConvHistory, true)
-                .searchAnchor("leaf-mem-convhistory")
-
-            if memInjectVector {
-                HStack(spacing: 8) {
-                    Text("向量模型")
-                        .font(m.caption)
-                        .foregroundColor(Theme.textMuted)
-                    if AppleMemoryEmbedder.shared.assetState == .downloading {
-                        ProgressView().controlSize(.small)
-                    }
-                    Text(AppleMemoryEmbedder.shared.assetState.rawValue)
-                        .font(m.caption.weight(.medium))
-                        .foregroundColor(AppleMemoryEmbedder.shared.assetState == .ready ? Theme.branchIndicator : Theme.textSecondary)
-                    Spacer()
-                }
-            }
-        } header: {
-            // section 级条目「注入策略 · 怎么挑记忆」的锚点
-            Text("检索 · 怎么挑记忆（可叠加）").searchAnchor("leaf-mem-inject")
-        }
-        .panelRowBackground()
-        .listRowSeparator(.hidden)
-    }
-
-    // MARK: - Section ⑥ 基建
-
-    @ViewBuilder
-    private var sectionAdvanced: some View {
-        Section {
-            limitStepper("每轮带全文的最近几条", "\(selfRecentCount) 条（重要度 5 的另算，全部带）", $selfRecentCount, 1...30, 1)
-            limitStepper("自己主动记的每日上限", "\(selfDailyLimit) 条（你让记的、你改的都不算）", $selfDailyLimit, 1...50, 1)
-            limitStepper("\(selfMemoryName)最多占注入预算", "\(selfBudgetPercent)%（剩下的给从聊天里记住的）", $selfBudgetPercent, 10...100, 10)
-            limitStepper("每条记忆正文上限", "\(selfBodyLimit) 字", $selfBodyLimit, 200...3000, 100)
-        } header: {
-            Text("高级 · \(selfMemoryName)").searchAnchor("leaf-mem-advanced")
-        }
-        .panelRowBackground()
-        .listRowSeparator(.hidden)
-
-        // 第三刀：窗口摘要 / 跨窗口时间轴注入多少（默认值同 SessionCloseout / TimelineStore）
-        Section {
-            limitStepper("上下文摘要带全文的最近几段", "\(sessionFullSegments) 段（更早的只带标题）", $sessionFullSegments, 1...4, 1)
-            limitStepper("时间轴最多带几条", "\(timelineInjectCount) 条", $timelineInjectCount, 1...30, 1)
-            limitStepper("时间轴最多往回看几天", "\(timelineInjectDays) 天", $timelineInjectDays, 1...30, 1)
-        } header: {
-            Text("高级 · 上下文摘要和时间轴").searchAnchor("leaf-mem-advanced-session")
-        }
-        .panelRowBackground()
-        .listRowSeparator(.hidden)
-
-        // v4-1 §九：按新规则重写 / 从备份恢复，只在 DEBUG 构建里（Q10）
-        #if DEBUG
-        MemoryRegenerationSection()
-        #endif
-    }
-
-    /// UI 名字用楼层变量，不写死
-    private var assistantName: String {
-        let n = profileManager?.currentProfile.assistantName ?? ""
-        return n.isEmpty ? "助手" : n
-    }
-
-    private var selfMemoryName: String { "\(assistantName)自己记下的" }
-
-    private func limitStepper(_ title: String, _ value: String, _ binding: Binding<Int>, _ range: ClosedRange<Int>, _ step: Int) -> some View {
-        Stepper(value: binding, in: range, step: step) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+    private var injectBudgetRow: some View {
+        Stepper(value: $memInjectBudget, in: 500...20000, step: 500) {
+            HStack {
+                Text("注入预算")
                     .font(m.body)
                     .foregroundColor(Theme.textPrimary)
-                Text(value)
+                Spacer()
+                Text("\(memInjectBudget) token")
                     .font(m.caption.monospaced())
                     .foregroundColor(Theme.textMuted)
+            }
+        }
+        .searchAnchor("leaf-mem-budget")
+    }
+
+    // MARK: - 检索 · 怎么挑记忆（可叠加）
+
+    @ViewBuilder
+    private var vectorRows: some View {
+        memSwitchRow("按意思找记忆", "聊到意思相近的事也能想起来（第一次打开会下载本地模型）", $memInjectVector, tech: "向量检索")
+            .onChange(of: memInjectVector) { _, on in
+                if on { AppleMemoryEmbedder.shared.requestAssetsIfNeeded() }
+            }
+            .searchAnchor("leaf-mem-injectvector")
+        if memInjectVector {
+            HStack(spacing: 8) {
+                Text("向量模型")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+                if AppleMemoryEmbedder.shared.assetState == .downloading {
+                    ProgressView().controlSize(.small)
+                }
+                Text(AppleMemoryEmbedder.shared.assetState.rawValue)
+                    .font(m.caption.weight(.medium))
+                    .foregroundColor(AppleMemoryEmbedder.shared.assetState == .ready ? Theme.branchIndicator : Theme.textSecondary)
+                Spacer()
             }
         }
     }
@@ -455,37 +508,45 @@ struct MemoryPageContent: View {
 
     // MARK: - Helpers
 
+    /// UI 名字用楼层变量，不写死
+    private var assistantName: String {
+        let n = profileManager?.currentProfile.assistantName ?? ""
+        return n.isEmpty ? "助手" : n
+    }
+
+    private func rowLabel(_ title: String, _ sub: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(m.body)
+                .foregroundColor(Theme.textPrimary)
+            Text(sub)
+                .font(m.caption)
+                .foregroundColor(Theme.textMuted)
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     @ViewBuilder
-    private func memSwitchRow(_ title: String, _ sub: String, _ isOn: Binding<Bool>, _ enabled: Bool, tech: String? = nil) -> some View {
+    private func memSwitchRow(_ title: String, _ sub: String, _ isOn: Binding<Bool>, tech: String? = nil) -> some View {
         Toggle(isOn: isOn) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(title)
                         .font(m.body)
-                        .foregroundColor(enabled ? Theme.textPrimary : Theme.textMuted)
+                        .foregroundColor(Theme.textPrimary)
                     if let tech {
                         Text(tech)
                             .font(m.caption)
                             .foregroundColor(Theme.textMuted)
                     }
                 }
-                Text(enabled ? sub : "\(sub) · 未实现")
+                Text(sub)
                     .font(m.caption)
-                    .foregroundColor(Theme.textMuted.opacity(enabled ? 1 : 0.55))
+                    .foregroundColor(Theme.textMuted)
             }
         }
         .tint(Theme.branchIndicator)
-        .disabled(!enabled)
-    }
-
-    @ViewBuilder
-    private func statBadge(_ label: String, count: Int, color: Color) -> some View {
-        HStack(spacing: 4) {
-            Circle().fill(color).frame(width: 6, height: 6)
-            Text("\(label) \(count)")
-                .font(m.secondary)
-                .foregroundColor(Theme.textSecondary)
-        }
     }
 
     /// 只列启用了的卡：运行时 `ConversationViewModel.memoryModel` 也只认启用卡里的模型
@@ -493,16 +554,20 @@ struct MemoryPageContent: View {
         (providerManager?.enabledProviders ?? []).filter { !$0.models.isEmpty }
     }
 
+    private var remoteModels: [ProviderModel] {
+        FragmentModelRoute.remoteCredentials(providerManager?.enabledProviders ?? []).flatMap(\.models)
+    }
+
     /// 存着的模型不在启用卡里（卡停用了 / 模型删了）：运行时按自动
     private var extractModelIsStale: Bool {
         !memoryExtractModelId.isEmpty && !extractModelChoices.contains { $0.models.contains { $0.id == memoryExtractModelId } }
     }
 
-    /// 菜单右边显示的当前值，和菜单里的选项文字一致
+    /// 当前值，和菜单里的选项文字一致
     private var extractModelLabel: String {
-        if memoryExtractModelId.isEmpty { return "自动（默认）" }
+        if memoryExtractModelId.isEmpty { return "自动" }
         if extractModelIsStale { return "已停用的模型（现在按自动）" }
-        return extractModelChoices.lazy.flatMap(\.models).first { $0.id == memoryExtractModelId }?.name ?? "自动（默认）"
+        return extractModelChoices.lazy.flatMap(\.models).first { $0.id == memoryExtractModelId }?.name ?? "自动"
     }
 
     // MARK: - Actions
@@ -513,16 +578,21 @@ struct MemoryPageContent: View {
         let active = all.filter { $0.supersededAt == nil }
         memoryStats = MemoryStats(
             total: active.count,
-            superseded: all.count - active.count
+            superseded: all.count - active.count,
+            unreviewed: active.filter { $0.reviewedAt == nil }.count
         )
         Task {
-            let (n, dream) = await Task.detached {
-                (SelfMemoryStore.list(profileId: profileId).filter { !$0.isActive }.count, ProfileFileStore.load(profileId: profileId))
+            let (n, items, problem) = await Task.detached { () -> (Int, [PendingItem]?, String?) in
+                // 待续单独存：第一次进来顺手迁移（先备份、严格读、补齐，时间轴条目不动）；迁不好照实说
+                var problem: String?
+                do { try TimelineDaily.preparePendingForEdit(profileId: profileId) } catch { problem = TimelineDaily.pendingProblem(error) }
+                return (SelfMemoryStore.list(profileId: profileId).filter { !$0.isActive }.count, PendingStore.load(profileId: profileId), problem)
             }.value
             guard profileId == profileManager?.currentProfile.id else { return }
             deletedSelfCount = n
-            profileDream = dream
+            let list = items ?? []
+            pending = PendingCounts(open: list.filter { $0.state == .open }.count, faded: list.filter { $0.state == .faded }.count,
+                                    problem: problem)
         }
     }
-
 }

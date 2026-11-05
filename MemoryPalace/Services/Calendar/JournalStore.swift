@@ -76,10 +76,10 @@ final class JournalStore: @unchecked Sendable {
     init(root: URL) { self.root = root }
 
     static func forProfile(_ profileId: String) -> JournalStore {
-        JournalStore(root: FileLibraryStore.libraryRoot(profileId: profileId).appendingPathComponent("journal", isDirectory: true))
+        JournalStore(root: AppPaths.checked(FileLibraryStore.libraryRoot(profileId: profileId).appendingPathComponent("journal", isDirectory: true)))
     }
 
-    func url(for date: String) -> URL { root.appendingPathComponent("\(date).md") }
+    func url(for date: String) -> URL { AppPaths.checked(root.appendingPathComponent("\(date).md")) }
 
     static func hash(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()

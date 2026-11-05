@@ -1,0 +1,9 @@
+{
+  "source": "未实测：按官方文档 / 公开 issue 里的报错形状还原，T9 拿到原文后替换",
+  "status": 429,
+  "headers": {
+    "retry-after": "3"
+  },
+  "stream": false,
+  "body": "{\"error\":{\"message\":\"Rate limit reached for gpt-4o in organization org-xxxx on requests per min (RPM): Limit 500, Used 500, Requested 1. Please try again in 120ms. Visit https://platform.openai.com/account/rate-limits to learn more.\",\"type\":\"requests\",\"param\":null,\"code\":\"rate_limit_exceeded\"}}"
+}

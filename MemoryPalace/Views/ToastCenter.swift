@@ -23,6 +23,20 @@ final class ToastCenter {
     }
 }
 
+/// 保存成功的反馈：iOS 轻触觉（mac 没有），要提示就再顶部 toast 一句
+enum SaveFeedback {
+    @MainActor static func saved(_ message: String) {
+        haptic()
+        ToastCenter.shared.show(message)
+    }
+
+    @MainActor static func haptic() {
+        #if os(iOS)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        #endif
+    }
+}
+
 /// 挂在 ContentView 根部的展示层（胶囊样式与原各处 toast 一致）。
 struct GlobalToastOverlay: View {
     var body: some View {

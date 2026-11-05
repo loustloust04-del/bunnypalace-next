@@ -47,9 +47,9 @@ enum VocabCorpusStore {
     /// iOS = 沙盒 Documents；macOS 没沙盒，Documents 是用户的「文稿」，#054 起写 Application Support（App 自己的目录）
     private static var liveDir: URL {
         #if os(macOS)
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let dir = AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("vocab-corpus-live", isDirectory: true)
+            .appendingPathComponent("vocab-corpus-live", isDirectory: true))
         #else
         let dir = documentsLiveDir
         #endif
@@ -58,8 +58,8 @@ enum VocabCorpusStore {
     }
 
     private static var documentsLiveDir: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("vocab-corpus-live", isDirectory: true)
+        AppPaths.checked(AppPaths.documents
+            .appendingPathComponent("vocab-corpus-live", isDirectory: true))
     }
 
     private static func fileName(for word: String) -> String {
@@ -70,13 +70,13 @@ enum VocabCorpusStore {
     }
 
     private static func liveURL(for word: String) -> URL {
-        liveDir.appendingPathComponent(fileName(for: word))
+        AppPaths.checked(liveDir.appendingPathComponent(fileName(for: word)))
     }
 
     /// 读：新目录优先；macOS 再看 #054 之前写在 ~/Documents 的旧篇（只读，不搬不删）
     private static func liveURLs(for word: String) -> [URL] {
         #if os(macOS)
-        [liveURL(for: word), documentsLiveDir.appendingPathComponent(fileName(for: word))]
+        [liveURL(for: word), AppPaths.checked(documentsLiveDir.appendingPathComponent(fileName(for: word)))]
         #else
         [liveURL(for: word)]
         #endif

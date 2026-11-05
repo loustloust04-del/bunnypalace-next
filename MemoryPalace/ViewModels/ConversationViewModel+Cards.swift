@@ -92,7 +92,8 @@ enum ChatCardIndex {
 
     /// 屏幕上看得到的正文：分段消息取全部 .text 段，否则 content（不扫工具结果 / 思考 / 附件）
     static func visibleText(content: String, segments: [MessageSegment]?) -> String {
-        guard let segments else { return content }
+        // 普通回复挂原生思考：正文以 content 为准（段里那份是给老版本看的副本，卡片脚本改正文只改 content）
+        guard let segments, !segments.isAttachedThinkingReply else { return content }
         let texts = segments.compactMap { seg -> String? in
             if case .text(let t) = seg { return t }
             return nil

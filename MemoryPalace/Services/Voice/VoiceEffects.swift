@@ -287,7 +287,7 @@ enum VoiceEffectAudio {
 
     static func decode(_ clip: AudioClip, maxDuration: Double = 180) async throws -> [Float] {
         guard clip.data.count <= 32 * 1024 * 1024 else { throw VoiceEffectError.tooLarge }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("voice-effects-\(UUID().uuidString).wav")
+        let url = AppPaths.temporaryDirectory.appendingPathComponent("voice-effects-\(UUID().uuidString).wav")
         try clip.playableData.write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
         return try await decode(url, maxDuration: maxDuration)

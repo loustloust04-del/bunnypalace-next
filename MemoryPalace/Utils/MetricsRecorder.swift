@@ -13,8 +13,8 @@ final class MetricsRecorder: NSObject, MXMetricManagerSubscriber {
     private let maxBytes = 20 * 1024 * 1024
 
     static var directory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MemoryPalace/Metrics", isDirectory: true)
+        AppPaths.checked(AppPaths.applicationSupport
+            .appendingPathComponent("MemoryPalace/Metrics", isDirectory: true))
     }
 
     func start() {
@@ -51,7 +51,7 @@ final class MetricsRecorder: NSObject, MXMetricManagerSubscriber {
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let name = "\(kind)-\(stamp)-\(hash.prefix(12)).json"
         do {
-            try data.write(to: dir.appendingPathComponent(name), options: .atomic)
+            try data.write(to: AppPaths.checked(dir.appendingPathComponent(name)), options: .atomic)
         } catch {
             NSLog("[MetricsRecorder] write failed: \(error)")
             return
@@ -64,7 +64,7 @@ final class MetricsRecorder: NSObject, MXMetricManagerSubscriber {
             "appBuild": info?["CFBundleVersion"] as? String ?? "",
         ]
         if let line = try? JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys]) {
-            let url = dir.appendingPathComponent("receipts.jsonl")
+            let url = AppPaths.checked(dir.appendingPathComponent("receipts.jsonl"))
             if let handle = try? FileHandle(forWritingTo: url) {
                 handle.seekToEndOfFile()
                 handle.write(line + Data("\n".utf8))

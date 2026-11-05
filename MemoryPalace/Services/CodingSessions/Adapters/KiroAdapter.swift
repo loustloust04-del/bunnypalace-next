@@ -74,7 +74,7 @@ struct KiroAdapter: CodingSessionAdapter {
 
     static func sidecar(_ jsonl: URL) -> Sidecar {
         var side = Sidecar()
-        guard let data = try? Data(contentsOf: jsonl.deletingPathExtension().appendingPathExtension("json")),
+        guard let data = try? Data(contentsOf: AppPaths.checked(jsonl.deletingPathExtension().appendingPathExtension("json"))),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? CodingParse.JSON else { return side }
         side.cwd = json["cwd"] as? String ?? ""
         side.title = json["title"] as? String ?? ""

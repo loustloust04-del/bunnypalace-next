@@ -37,9 +37,7 @@ final class PersonaRequestBodyTests: XCTestCase {
         } else {
             raw = OpenAICompatibleProvider.buildRequestBody(
                 ordered: ordered, model: s.model, samplingParams: preset.sampling, tools: s.tools, toolTurns: s.toolTurns,
-                orCacheControl: OpenAICompatibleProvider.wantsORCacheControl(baseURL: s.baseURL, model: s.model, samplingParams: preset.sampling),
-                orProviderOrder: OpenAICompatibleProvider.orPreferredProviderOrder(baseURL: s.baseURL, model: s.model, samplingParams: preset.sampling),
-                interleavedSystem: OpenAICompatibleProvider.supportsInterleavedSystem(baseURL: s.baseURL, model: s.model))
+                compat: ProviderOrderingScenarios.wireCompat(baseURL: s.baseURL, model: s.model, sampling: preset.sampling))
         }
         return ProviderOrderingScenarios.canonicalJSON(raw)
     }

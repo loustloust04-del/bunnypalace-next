@@ -43,12 +43,14 @@ final class AppUpdater: NSObject {
     var automaticallyChecksForUpdates: Bool {
         didSet {
             guard oldValue != automaticallyChecksForUpdates else { return }
+            guard !BenchIsolation.active else { return }
             controller.updater.automaticallyChecksForUpdates = automaticallyChecksForUpdates
         }
     }
     var automaticallyDownloadsUpdates: Bool {
         didSet {
             guard oldValue != automaticallyDownloadsUpdates else { return }
+            guard !BenchIsolation.active else { return }
             controller.updater.automaticallyDownloadsUpdates = automaticallyDownloadsUpdates
         }
     }
@@ -71,6 +73,7 @@ final class AppUpdater: NSObject {
         automaticallyChecksForUpdates = true
         automaticallyDownloadsUpdates = true
         super.init()
+        if BenchIsolation.active { return }
         controller = SPUStandardUpdaterController(startingUpdater: false,
                                                   updaterDelegate: delegateProxy,
                                                   userDriverDelegate: nil)
@@ -90,6 +93,7 @@ final class AppUpdater: NSObject {
 
     /// app 启动完调一次（MPAppDelegate）。Release 延迟后 start；Debug 不自动 start。
     func startAfterLaunch() {
+        if BenchIsolation.active { return }
         guard !launchScheduled, isConfigured, !Self.isDebugBuild else { return }
         launchScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.launchDelay) { [weak self] in
@@ -99,6 +103,7 @@ final class AppUpdater: NSObject {
 
     /// 菜单「检查更新…」/ 设置页按钮
     func checkForUpdates() {
+        if BenchIsolation.active { return }
         guard isConfigured else {
             presentNotConfiguredAlert()
             return
@@ -109,6 +114,7 @@ final class AppUpdater: NSObject {
 
     @discardableResult
     private func startIfNeeded() -> Bool {
+        if BenchIsolation.active { return false }
         if isStarted { return true }
         do {
             try controller.updater.start()
@@ -154,6 +160,10 @@ final class AppUpdater: NSObject {
 /// Sparkle 的 delegate 是非隔离 ObjC 协议，单独放一个小对象，不和 @MainActor 的 AppUpdater 搅在一起
 private final class UpdaterDelegateProxy: NSObject, SPUUpdaterDelegate {
     func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+        if BenchIsolation.active {
+            throw NSError(domain: "MemoryPalace.AppUpdater", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "性能测量包不可检查更新"])
+        }
         #if DEBUG
         // 开发版只允许手动检查：定时 / 启动后的后台检查一律拒，免得调试时乱弹
         if updateCheck == .updatesInBackground {

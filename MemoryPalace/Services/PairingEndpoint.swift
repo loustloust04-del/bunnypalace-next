@@ -36,6 +36,9 @@ enum PairingEndpoint: Equatable {
 enum ExternalHub {
     /// install-launchd.sh 装的 plist 名是 `<前缀>.cc-bridge-hub.plist`（同 `HubTokenStore.plistPath`）。只读目录列表，不碰 launchd。
     static func plistExists(inLaunchAgents dir: URL) -> Bool {
+        #if os(macOS)
+        if BenchIsolation.active { return false }
+        #endif
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
         return names.contains { $0.hasSuffix(".cc-bridge-hub.plist") }
     }
@@ -47,11 +50,12 @@ enum ExternalHub {
 
     #if os(macOS)
     static var userLaunchAgents: URL {
-        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        AppPaths.checked(AppPaths.home.appendingPathComponent("Library/LaunchAgents", isDirectory: true))
     }
 
     /// `GET http://127.0.0.1:7890/health`，拿到任何 HTTP 状态码就算有人在（同 WS client 探测口径），1.5 秒没回算没有。
     static func healthResponds() async -> Bool {
+        if BenchIsolation.active { return false }
         guard let url = URL(string: "http://127.0.0.1:\(PairingEndpoint.externalPort)/health") else { return false }
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 1.5

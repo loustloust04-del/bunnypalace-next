@@ -1,0 +1,7 @@
+{
+  "source": "未实测：按官方文档 / 公开 issue 里的报错形状还原，T9 拿到原文后替换",
+  "status": 429,
+  "headers": {},
+  "stream": false,
+  "body": "{\"error\":{\"message\":\"You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.\",\"type\":\"insufficient_quota\",\"param\":null,\"code\":\"insufficient_quota\"}}"
+}

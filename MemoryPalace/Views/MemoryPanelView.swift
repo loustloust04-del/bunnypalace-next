@@ -95,7 +95,8 @@ struct RightPanelToolContent: View {
         case "memory":
             MemoryPanelView(viewModel: viewModel)
         case "worldBook":
-            WorldBookPanelView()
+            // B8：世界书工具开卡库的世界书页签；旧 WorldBookPanelView 代码保留
+            CardLibraryWorkspaceView(initial: .worldBook)
         case "cardLibrary":
             CardLibraryWorkspaceView(initial: .characters)
         case "sticker":
@@ -168,19 +169,20 @@ struct RightPanelToolContent: View {
 
 // MARK: - Memory Panel（page2 主体）
 //
-// 首屏：画像卡 + 两组记忆；整理 / 关系图 / 下一轮会想起什么进「⋯」，设置在「设置」页签。
+// 首屏：出问题时一行提醒 + 常驻记忆一行 + 两组记忆（画像卡 v5 下线）；关系图进「⋯」，下一轮会想起什么在常驻记忆页，设置在每格左上角（弹 sheet）。
 // 多选删除 / 钉住：EditMode + List(selection:) + bottom toolbar；两组记忆一个行样式（MemoryRow），删掉的进「已删除」。
-// 四格「记忆 / 窗口总结 / 时间轴 / 设置」在底部（同日历 iOS 版）：iOS 系统 TabView，mac 浮动胶囊 `PanelFloatingTabBar`。
+// 四格「记忆 / 窗口总结 / 时间轴 / 审计台」在底部（同日历 iOS 版，规格 7¼）：iOS 系统 TabView，mac 浮动胶囊 `PanelFloatingTabBar`。
 
 enum MemoryPanelTab: PanelFloatingTab {
-    case memory, sessions, timeline, settings
+    /// 规格 7¼（粟粟 10-16）：审计台占原「设置」最右那格；设置挪到每格左上角，点开弹 sheet
+    case memory, sessions, timeline, audit
 
     var title: String {
         switch self {
         case .memory: "记忆"
         case .sessions: "窗口总结"
         case .timeline: "时间轴"
-        case .settings: "设置"
+        case .audit: "审计台"
         }
     }
 
@@ -189,7 +191,7 @@ enum MemoryPanelTab: PanelFloatingTab {
         case .memory: "leaf"
         case .sessions: "rectangle.stack"
         case .timeline: "calendar.day.timeline.left"
-        case .settings: "gearshape"
+        case .audit: "checklist"
         }
     }
 }
@@ -199,6 +201,7 @@ struct MemoryPanelView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(RightPanelNavigator.self) private var navigator: RightPanelNavigator?
+    @Environment(PresetManager.self) private var presetManager: PresetManager?
     @Environment(\.settingsMetrics) private var m
 
     @State private var memories: [Memory] = []
@@ -208,17 +211,23 @@ struct MemoryPanelView: View {
     @State private var showGraph = false
     @State private var timelineModel = MemoryTimelineModel()
     @State private var sessionsModel = MemorySessionsModel()
+    /// 审计台的状态段 / 筛选 / 展开（10-16 astra #8）：父级持有，mac 切格重建页面也不丢
+    @State private var auditState = MemoryAuditViewState()
     @State private var highlightedId: String? = nil
+    /// 常驻记忆（第八½节）：顶上那一行的 N / 灰的条数；跳过来的目标是常驻的就推常驻页并高亮它
+    @State private var resident = MemoryResident.Summary()
+    @State private var showResident = false
+    @State private var residentHighlight: MemoryResidentPage.Highlight? = nil
+    /// 顶上计数的刷新代次 + 注入设置快照（10-16 astra #3 / #7）
+    @State private var residentTicket = MemoryResident.LoadTicket()
+    @State private var residentSettings = MemoryResident.settingsStamp()
     @State private var selection: Set<MemoryRowID> = []
     @State private var showAddSheet = false
     @State private var showTrash = false
     @State private var editingMemory: Memory? = nil   // 刀2：单条编辑
-    @State private var aboutDream: UserProfileDream? = nil
     @State private var loaded = false
     @State private var healthWarning: String? = nil
-    @State private var showProfile = false
-    @State private var showOrganize = false
-    @State private var showInjectionPreview = false
+    @State private var showSettings = false
     @State private var searchText = ""
     @State private var pendingScrollId: String? = nil
     /// 时间轴格「⋯」里的暂停 / 继续；和时间轴顶上的开关、设置格「跨窗口时间轴」同一个 key
@@ -257,18 +266,11 @@ struct MemoryPanelView: View {
                 .sheet(isPresented: $showTrash, onDismiss: refreshMemories) {
                     MemoryTrashSheet(profileId: profileManager?.currentProfile.id ?? "")
                 }
-                .sheet(isPresented: $showInjectionPreview) {
-                    InjectionPreviewSheet(profileId: profileManager?.currentProfile.id ?? "",
-                                          conversationMemoryEnabled: viewModel.selectedConversation?.memoryEnabled ?? true)
-                }
                 .sheet(item: $editingSelfMemory) { m in
                     SelfMemoryEditSheet(profileId: profileManager?.currentProfile.id ?? "", slug: m.slug)
                 }
-                .sheet(isPresented: $showProfile) {
-                    MemoryProfileSheet(profileId: profileManager?.currentProfile.id ?? "")
-                }
-                .sheet(isPresented: $showOrganize) {
-                    MemoryOrganizeSheet(profileId: profileManager?.currentProfile.id ?? "")
+                .sheet(isPresented: $showSettings, onDismiss: refreshMemories) {
+                    settingsSheet
                 }
                 #if os(iOS)
                 .fullScreenCover(isPresented: $showGraph) {
@@ -285,8 +287,19 @@ struct MemoryPanelView: View {
                 .onChange(of: navigator?.pendingTarget) { _, _ in consumeDesktopMemory(proxy) }
                 .onChange(of: loaded) { _, isLoaded in if isLoaded { consumeDesktopMemory(proxy) } }
                 .onChange(of: searchText) { _, _ in
-                    if !selection.isEmpty { selection.formIntersection(visibleRowIds) }
+                    clipSelection()
                     consumePendingScroll(proxy)
+                }
+                // 常驻页开着时定位普通记忆：先退回主列表，退回来再滚（10-16 astra #9）
+                .onChange(of: showResident) { _, shown in if !shown { consumePendingScroll(proxy) } }
+                // 当前对话 / 它的记忆开关 / 注入设置 / 预设记忆插槽变了：顶上计数重算，常驻规则可能变 → 裁掉看不见的选择（10-16 astra #2 / #7）
+                .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification).receive(on: RunLoop.main)) { _ in
+                    let now = MemoryResident.settingsStamp()
+                    if now != residentSettings { residentSettings = now }
+                }
+                .onChange(of: residentKey) { _, _ in
+                    clipSelection()
+                    if loaded { reloadResident(selfMemories: selfMemories) }
                 }
                 .onChange(of: tab) { _, _ in
                     resetSelection()
@@ -297,16 +310,18 @@ struct MemoryPanelView: View {
                 .onReceive(NotificationCenter.default.publisher(for: .profileWillSwitch)) { _ in
                     memories = []
                     selfMemories = []
-                    aboutDream = nil
+                    _ = residentTicket.next()
+                    resident = MemoryResident.Summary()
+                    showResident = false
                     loaded = false
                     healthWarning = nil
                     selection = []
-                    showProfile = false
-                    showOrganize = false
+                    showSettings = false
                     showTrash = false
                     searchText = ""
                     timelineModel.clear()
                     sessionsModel.clear()
+                    auditState.clear()
                     #if os(iOS)
                     editMode?.wrappedValue = .inactive
                     #endif
@@ -356,14 +371,11 @@ struct MemoryPanelView: View {
                         }
                 }
             }
-            // 设置格也挂「⋯」：没有按钮时导航栏是空的，正文会顶到灵动岛底下，三格起点对不齐
-            Tab(MemoryPanelTab.settings.title, systemImage: MemoryPanelTab.settings.icon, value: MemoryPanelTab.settings) {
+            // 审计台格：方块首页（plan-memory-audit-home-trial 第二节），点一块推一个台；整理台自带「选择 / ⋯」
+            Tab(MemoryPanelTab.audit.title, systemImage: MemoryPanelTab.audit.icon, value: MemoryPanelTab.audit) {
                 tabPage {
-                    settingsList
-                        .contentMargins(.top, 4, for: .scrollContent)
-                        .toolbar {
-                            ToolbarItemGroup(placement: .primaryAction) { moreMenu }
-                        }
+                    MemoryAuditHome(viewState: auditState, viewModel: viewModel)
+                        .environment(viewModel)   // 「跳到这条」要拿聊天 VM
                 }
             }
         }
@@ -378,6 +390,12 @@ struct MemoryPanelView: View {
     private func tabPage<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         NavigationStack {
             content()
+                .toolbar {
+                    // 每格左上角「设置」：点开弹 sheet（粟粟 10-16：不内嵌）；多选时藏
+                    if editMode?.wrappedValue.isEditing != true {
+                        ToolbarItem(placement: .topBarLeading) { settingsButton }
+                    }
+                }
                 .navigationTitle("记忆")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarVisibility(keyboardUp || editMode?.wrappedValue.isEditing == true ? .hidden : .automatic, for: .tabBar)
@@ -396,8 +414,9 @@ struct MemoryPanelView: View {
                     MemorySessionsView(model: sessionsModel, viewModel: viewModel)
                 case .timeline:
                     MemoryTimelineView(model: timelineModel, viewModel: viewModel)
-                case .settings:
-                    settingsList
+                case .audit:
+                    MemoryAuditHome(viewState: auditState, viewModel: viewModel)
+                        .environment(viewModel)
                 }
             }
             // 切格只换正文，不带布局动画
@@ -415,14 +434,17 @@ struct MemoryPanelView: View {
     private func memoryList(_ proxy: ScrollViewProxy) -> some View {
         Group {
             if !loaded {
-                // 首帧：自记 / 画像还在后台读，整页先空着（只有搜索框），读齐了一次出来，不逐块插进来
+                // 首帧：自记还在后台读，整页先空着（只有搜索框），读齐了一次出来，不逐块插进来
                 Color.clear
             } else if pageIsEmpty {
                 emptyPage
             } else {
                 List(selection: $selection) {
+                    if searchText.panelSearchKeyword == nil, healthWarning != nil {
+                        warningSection
+                    }
                     if searchText.panelSearchKeyword == nil {
-                        profileCard
+                        residentSection
                     }
 
                     listSections
@@ -450,27 +472,92 @@ struct MemoryPanelView: View {
         .scrollDismissesKeyboard(.immediately)
         #endif
         .onAppear { consumePendingScroll(proxy) }
+        .navigationDestination(isPresented: $showResident) {
+            MemoryResidentPage(highlight: residentHighlight)
+        }
     }
 
-    /// 画像、两组记忆都空：整页一个原生空状态（搜索时不算）
+    // MARK: - 常驻记忆（第八½节）：最上面一组只有一行，点进去看每一轮都带的、为什么带
+
+    private var residentSection: some View {
+        Section {
+            Button {
+                residentHighlight = nil
+                showResident = true
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("常驻记忆 · \(resident.count) 条")
+                            .font(m.body)
+                            .foregroundColor(Theme.textPrimary)
+                        Text(resident.grayCount > 0 ? "其中 \(resident.grayCount) 条现在不带" : "每一轮都带的，点进去看为什么")
+                            .font(m.caption)
+                            .foregroundColor(Theme.textMuted)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(m.caption)
+                        .foregroundColor(Theme.textMuted)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .panelRowBackground()
+    }
+
+    /// 两组记忆都空：整页一个原生空状态（搜索时不算）。wiki 10-23 挪去审计台 wiki 台，不算在这里
     private var pageIsEmpty: Bool {
-        loaded && searchText.panelSearchKeyword == nil && (aboutDream?.text.isEmpty ?? true)
+        loaded && searchText.panelSearchKeyword == nil
             && !memories.contains { $0.supersededAt == nil } && !selfMemories.contains(where: \.isActive)
     }
 
     private var emptyPage: some View {
-        MemoryEmptyState(title: "还没有记忆",
-                         message: "和{{char}}聊天时会自动记下重要的事".expandingMacros(profile: profileManager?.currentProfile)) {
-            Button("加一条") { showAddSheet = true }
-                .buttonStyle(MemoryPrimaryButtonStyle())
-            if deletedCount > 0 {
-                Button("已删除 · \(deletedCount)") { showTrash = true }
-                    .buttonStyle(MemoryPrimaryButtonStyle())
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 32) {
+                    MemoryEmptyState(title: "还没有记忆",
+                                     message: "和{{char}}聊天时会自动记下重要的事".expandingMacros(profile: profileManager?.currentProfile)) {
+                        Button("加一条") { showAddSheet = true }
+                            .buttonStyle(MemoryPrimaryButtonStyle())
+                        if deletedCount > 0 {
+                            Button("已删除 · \(deletedCount)") { showTrash = true }
+                                .buttonStyle(MemoryPrimaryButtonStyle())
+                        }
+                    }
+                }
+                .padding(.vertical, 32)
+                .frame(minHeight: geometry.size.height)
             }
         }
     }
 
-    /// 「设置」分段：就是原来「更多设置」推进去的那页；运行状态放这里（首屏只在出问题时提醒一行）
+
+    /// 每格左上角「设置」（规格 7¼）：同顶栏图标的灰色细图标
+    private var settingsButton: some View {
+        Button { showSettings = true } label: { toolbarIcon("gearshape") }
+            .accessibilityLabel("记忆设置")
+    }
+
+    /// 「设置」弹 sheet：内容还是原来的记忆设置（运行状态 + `MemoryPageContent`）；里面的二级页在这个 NavigationStack 里推
+    private var settingsSheet: some View {
+        NavigationStack {
+            settingsList
+                .panelSheetTitle("记忆设置")
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成") { showSettings = false }
+                            .foregroundColor(Theme.branchIndicator)
+                    }
+                }
+        }
+        #if os(macOS)
+        .frame(width: 520, height: 640)
+        #endif
+    }
+
+    /// 原「设置」分段的内容：原来「更多设置」推进去的那页；运行状态放这里（首屏只在出问题时提醒一行）
     private var settingsList: some View {
         List {
             Section {
@@ -489,12 +576,22 @@ struct MemoryPanelView: View {
         // 首次读齐前列表还没上台：目标先留着，`loaded` 变 true 时再来
         guard loaded else { return }
         navigator?.pendingTarget = nil
-        guard memories.contains(where: { $0.id.uuidString == target.id && $0.supersededAt == nil }) else { return }
+        guard let mem = memories.first(where: { $0.id.uuidString == target.id && $0.supersededAt == nil }) else { return }
+        // 常驻的不在普通列表里：推常驻页，在那边亮一下；常驻页已经开着也换新请求（页面按请求再滚一次）
+        if let rule = MemoryResident.archiveRule(), rule(mem) {
+            searchText = ""
+            tab = .memory
+            residentHighlight = MemoryResidentPage.Highlight(id: mem.id)
+            showResident = true
+            return
+        }
         flash(target.id)
-        if searchText.isEmpty && tab == .memory {
+        if searchText.isEmpty && tab == .memory && !showResident {
             DispatchQueue.main.async { withAnimation { proxy.scrollTo(target.id, anchor: .center) } }
         } else {
-            // 目标可能被搜索词滤掉 / 列表不在台上：先清词、切回「记忆」，等列表重建完（onChange(searchText) 或列表 onAppear）再滚
+            // 目标可能被搜索词滤掉 / 列表不在台上 / 常驻页盖着（10-16 astra #9）：先退回主列表、清词、切回「记忆」，
+            // 等列表重建完（onChange(searchText / showResident) 或列表 onAppear）再滚
+            showResident = false
             pendingScrollId = target.id
             searchText = ""
             #if os(iOS)
@@ -519,50 +616,17 @@ struct MemoryPanelView: View {
         DispatchQueue.main.async { withAnimation { proxy.scrollTo(id, anchor: .center) } }
     }
 
-    // MARK: - 画像卡：3 行 + 看全文，点卡打开画像弹层；出问题时卡底一行提醒
+    // MARK: - 出问题时首屏一行提醒（画像卡 v5 Q4 下线，提醒留着，点了开「设置」）
 
-    @ViewBuilder
-    private var profileCard: some View {
+    private var warningSection: some View {
         Section {
-            Button {
-                showProfile = true
-            } label: {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("{{char}}眼里的你".expandingMacros(profile: profileManager?.currentProfile))
-                        .font(m.body.weight(.semibold))
-                        .foregroundColor(Theme.textPrimary)
-                    if let d = aboutDream, !d.text.isEmpty {
-                        Text(d.text)
-                            .font(m.body)
-                            .foregroundColor(Theme.textSecondary)
-                            .lineLimit(3)
-                        HStack {
-                            Text("\(MemoryDateText.short(d.updatedAt))更新")
-                                .foregroundColor(Theme.textMuted)
-                            Spacer()
-                            Text("看全文 ›")
-                                .foregroundColor(Theme.textSecondary)
-                        }
-                        .font(m.caption)
-                    } else if loaded {
-                        Text("还没有画像。聊几天后{{char}}会自己写一份".expandingMacros(profile: profileManager?.currentProfile))
-                            .font(m.caption)
-                            .foregroundColor(Theme.textMuted)
-                    }
-                }
-                .padding(.vertical, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
             if let warning = healthWarning {
                 Button {
-                    tab = .settings
+                    showSettings = true
                 } label: {
                     HStack(spacing: 5) {
                         Circle().fill(Theme.danger).frame(width: 6, height: 6)
-                        Text("\(warning)，去看看模型设置 ›")
+                        Text("\(warning)，去看看 ›")
                         Spacer(minLength: 0)
                     }
                     .font(m.caption)
@@ -771,17 +835,6 @@ struct MemoryPanelView: View {
             } label: {
                 Label("关系图", systemImage: "point.3.connected.trianglepath.dotted")
             }
-            Divider()
-            Button {
-                showOrganize = true
-            } label: {
-                Label("整理记忆…", systemImage: "sparkles")
-            }
-            Button {
-                showInjectionPreview = true
-            } label: {
-                Label("下一轮会想起什么", systemImage: "eye")
-            }
         } label: {
             toolbarIcon("ellipsis")
         }
@@ -832,6 +885,8 @@ struct MemoryPanelView: View {
     private var macPanelHeader: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
+                settingsButton
+                    .buttonStyle(.plain)
                 Spacer()
                 if tab == .memory {
                     addMemoryButton
@@ -948,14 +1003,22 @@ struct MemoryPanelView: View {
         refreshMemories()
     }
 
+    /// 批量动作只碰现在看得见的（10-16 astra #2：常驻规则变了，选中的可能已经挪去常驻页）
     private func pinSelected() {
-        pin(selectedLiveArchive)
+        pin(liveArchive(MemoryRowID.clip(selection, to: visibleRowIds)))
         resetSelection()
     }
 
     private func deleteSelected() {
-        moveToTrash(selection)
+        moveToTrash(MemoryRowID.clip(selection, to: visibleRowIds))
         resetSelection()
+    }
+
+    /// 看得见的行变了（搜索词 / 刷新 / 常驻规则）：选择里只留看得见的
+    private func clipSelection() {
+        guard !selection.isEmpty else { return }
+        let clipped = MemoryRowID.clip(selection, to: visibleRowIds)
+        if clipped != selection { selection = clipped }
     }
 
     /// 删除 = 移到「已删除」，可恢复，不确认；只碰活着的（按楼层 ID 读最新列表再按 id 找）
@@ -1003,17 +1066,19 @@ struct MemoryPanelView: View {
         }
     }
 
-    /// 第二刀 A1：档案不分冷热——活着的按创建时间新→旧（钉住在前）；已删除的不在主列表
+    /// 第二刀 A1：档案不分冷热——活着的按创建时间新→旧（钉住在前）；已删除的不在主列表。
+    /// 第八½节：不搜的时候常驻的（默认 = 钉住的）挪到顶上「常驻记忆」里，这组不再列；搜索时照旧全列（不然搜不到钉住的）
     private var activeMemories: [Memory] {
-        MemoryArchiveOrder.split(visibleMemories).active
+        MemoryResident.panelListed(MemoryArchiveOrder.split(visibleMemories).active, searching: searchText.panelSearchKeyword != nil,
+                                   rule: MemoryResident.archiveRule())
     }
 
     private var visibleRowIds: Set<MemoryRowID> {
         Set(activeMemories.map { MemoryRowID.archive($0.id) } + selfPanelRows.map { MemoryRowID.assistant($0.slug) })
     }
 
-    /// 读盘位置不变（档案主线程 fetch、自记 + 画像后台读）。首次读：档案先攥着，等后台那份到了一起上台，
-    /// 不然画像卡、自记组会在档案已经画出来之后再插进来（打开时「重排一下闪一下」）；之后的刷新档案照旧立刻换
+    /// 读盘位置不变（档案主线程 fetch、自记后台读）。首次读：档案先攥着，等后台那份到了一起上台，
+    /// 不然自记组会在档案已经画出来之后再插进来（打开时「重排一下闪一下」）；之后的刷新档案照旧立刻换
     private func refreshMemories() {
         let profileId = profileManager?.currentProfile.id ?? ""
         let archive = (try? store.listAll(profileId: profileId, context: modelContext)) ?? []
@@ -1022,10 +1087,11 @@ struct MemoryPanelView: View {
         if !firstLoad {
             memories = archive
             healthWarning = warning
+            clipSelection()
         }
         Task {
-            let (list, dream) = await Task.detached {
-                (SelfMemoryStore.list(profileId: profileId), ProfileFileStore.load(profileId: profileId))
+            let list = await Task.detached {
+                SelfMemoryStore.list(profileId: profileId)
             }.value
             guard profileId == profileManager?.currentProfile.id else { return }
             var t = Transaction()
@@ -1036,9 +1102,46 @@ struct MemoryPanelView: View {
                     healthWarning = warning
                 }
                 selfMemories = list
-                aboutDream = dream
                 loaded = true
             }
+            clipSelection()
+            reloadResident(selfMemories: list)
+        }
+    }
+
+    /// 刷新键（10-16 astra #7）：当前对话、它的记忆开关、注入设置快照、预设的记忆插槽
+    private struct ResidentKey: Equatable {
+        let conversationId: String?
+        let conversationMemoryOn: Bool
+        let settings: [String]
+        let slotOn: Bool
+    }
+
+    private var residentKey: ResidentKey {
+        let conv = viewModel.selectedConversation
+        return ResidentKey(conversationId: conv?.id, conversationMemoryOn: conv?.memoryEnabled ?? true, settings: residentSettings,
+                           slotOn: residentSlotOn)
+    }
+
+    /// 实发用的预设同聊天页：楼层绑的那份，找不到用内置
+    private var residentSlotOn: Bool {
+        MemoryResident.memorySlotOn(presetManager?.preset(byId: profileManager?.currentProfile.presetId ?? "") ?? Preset.balanced)
+    }
+
+    /// 顶上「常驻记忆 · N 条」：和常驻页同一套实发计算（预览 = 实发），在后台算；{助手}的记忆用刷新时读好的那份。
+    /// 只收最新一次的结果，交回来时按主线程这边的档案复核（10-16 astra #3）
+    private func reloadResident(selfMemories list: [SelfMemory]) {
+        guard let profile = profileManager?.currentProfile else { return }
+        let n = residentTicket.next()
+        let profileId = profile.id
+        let convOn = viewModel.selectedConversation?.memoryEnabled ?? true
+        let container = modelContext.container
+        let slotOn = residentSlotOn
+        Task {
+            let summary = await MemoryResident.loadSummary(profile: profile, conversationMemoryEnabled: convOn,
+                                                           container: container, selfMemories: list, slotOn: slotOn)
+            guard residentTicket.isLatest(n), profileId == profileManager?.currentProfile.id else { return }
+            resident = summary.revalidated(memories)
         }
     }
 }
@@ -1090,94 +1193,74 @@ enum MemoryDateText {
     }
 }
 
-/// 首屏画像卡底的一行提醒：连续失败才有，正常时不显示运行状态
+/// 首屏那一行提醒：连续失败才有，正常时不显示运行状态；关着的项不提醒（v5 · 0.1）
 enum MemoryHealthWarning {
     static func text(profileId: String) -> String? {
-        if MemoryHealthStore.status(.extract, profileId: profileId).needsAttention { return "最近记不住新东西了" }
-        if MemoryHealthStore.status(.dream, profileId: profileId).needsAttention { return "最近写不成画像" }
-        if MemoryHealthStore.status(.context, profileId: profileId).needsAttention { return "最近写不成上下文摘要" }
-        if MemoryHealthStore.status(.summary, profileId: profileId).needsAttention { return "最近写不成窗口总结" }
-        if MemoryHealthStore.status(.timeline, profileId: profileId).needsAttention { return "最近写不成时间轴" }
-        return nil
+        // 画像 v5 Q4 下线：「写不成画像」那行不再提醒
+        let lines: [(MemoryHealthStore.Kind, String)] = [
+            (.extract, "最近记不住新东西了"), (.context, "最近写不成上下文摘要"),
+            (.summary, "最近写不成窗口总结"), (.timeline, "最近写不成时间轴"),
+        ]
+        return lines.first { MemoryHealthStore.isOn($0.0) && MemoryHealthStore.status($0.0, profileId: profileId).needsAttention }?.1
     }
 }
 
 // MARK: - 刀3 注入预览（复用真实执行路径：MemoryInjector.roundInputs → PromptAssembler.memoryLayers，与 composePrompt 同源）
 
-struct InjectionPreviewSheet: View {
-    let profileId: String
-    /// 实发看当前对话的记忆开关（composePrompt 同口径）；没有对话 = 开
-    var conversationMemoryEnabled: Bool = true
-    @Environment(\.modelContext) private var modelContext
-    @Environment(\.dismiss) private var dismiss
-    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+/// 「下一轮会看见什么」的列表内容（原 ⋯「下一轮会想起什么」弹层的 List 内容）：常驻页下半直接放进自己的 List。
+/// 文字由调用方用同一次 roundInputs + memoryLayers 算好传进来（预览 = 实发），这里只摆
+struct InjectionPreviewSections: View {
+    let stable: String
+    let volatilePart: String
+    /// 总开关关着
+    let masterOff: Bool
+    /// 每一轮会带的条数（档案 + {助手}自己记下的）
+    let memoryCount: Int
+    let lastInjection: MemoryInjectionRecord?
+    let assistantName: String
     @Environment(\.settingsMetrics) private var m
 
-    @State private var stable = ""
-    @State private var volatilePart = ""
-    @State private var memoryCount = 0
-    @State private var masterOff = false
-    @State private var lastInjection: MemoryInjectionRecord? = nil
-
-    var body: some View {
-        NavigationStack {
-            List {
-                if masterOff {
-                    Section {
-                        Text("记忆总开关关着，下一轮不会想起任何记忆")
-                            .font(m.body)
-                            .foregroundColor(Theme.textMuted)
-                    }
-                    .panelRowBackground()
-                } else {
-                    layerSection("每次都会想起的", stable)
-                    layerSection("聊到相关话题才会想起的", volatilePart)
-                    if stable.isEmpty && volatilePart.isEmpty {
-                        Section {
-                            Text("下一轮不会想起任何记忆（还没有记忆，或相关开关都关着）")
-                                .font(m.body)
-                                .foregroundColor(Theme.textMuted)
-                        }
-                        .panelRowBackground()
-                    }
-                }
-                Section {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if !masterOff {
-                            Text("不管聊什么，每次都会带上这些：共 \(memoryCount) 条，大约占 \(stable.count + volatilePart.count) 字的位置")
-                            Text("按刚开始聊天的情形预览；聊到具体话题时，还会想起更多相关的")
-                        }
-                        if let r = lastInjection {
-                            Text(r.viaCCBridge == true
-                                 ? "上一轮走的是 CC，CC 不会带上这里的记忆"
-                                 : "上一轮带上了：\(assistantName)自己记下的 \(r.selfCount ?? 0) 条、关于你的 \(r.stableCount + r.hitCount) 条")
-                        }
-                    }
-                    .font(m.caption)
-                    .foregroundColor(Theme.textMuted)
-                    .listRowBackground(Color.clear)
-                }
-            }
-            .panelListStyle()
-            .scrollContentBackground(.hidden)
-            .toolPageBackground()
-            .panelSheetTitle("下一轮会想起什么")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
-                        .foregroundColor(Theme.branchIndicator)
-                }
-            }
-            #if os(macOS)
-            .frame(width: 520, height: 480)
-            #endif
-            .onAppear(perform: buildPreview)
-        }
+    /// ⧫7（10-16）：第二段标题按实际——没开关键词 / 按意思找时是全量注入，第二段预算内也每一轮都带
+    static func volatileTitle(_ retrievers: [MemoryRetriever] = MemoryInjector.activeRetrievers()) -> String {
+        retrievers.contains { $0 is KeywordRetriever || $0 is VectorRetriever } ? "聊到相关话题才会想起的" : "全量注入开着：预算内都带"
     }
 
-    private var assistantName: String {
-        let n = profileManager?.profiles.first { $0.id == profileId }?.assistantName ?? ""
-        return n.isEmpty ? "助手" : n
+    var body: some View {
+        if masterOff {
+            Section {
+                Text("记忆总开关关着，下一轮不会想起任何记忆")
+                    .font(m.body)
+                    .foregroundColor(Theme.textMuted)
+            }
+            .panelRowBackground()
+        } else {
+            layerSection("每次都会想起的", stable)
+            layerSection(Self.volatileTitle(), volatilePart)
+            if stable.isEmpty && volatilePart.isEmpty {
+                Section {
+                    Text("下一轮不会想起任何记忆（还没有记忆，或相关开关都关着）")
+                        .font(m.body)
+                        .foregroundColor(Theme.textMuted)
+                }
+                .panelRowBackground()
+            }
+        }
+        Section {
+            VStack(alignment: .leading, spacing: 4) {
+                if !masterOff {
+                    Text("不管聊什么，每次都会带上这些：共 \(memoryCount) 条，大约占 \(stable.count + volatilePart.count) 字的位置")
+                    Text("按刚开始聊天的情形预览；聊到具体话题时，还会想起更多相关的")
+                }
+                if let r = lastInjection {
+                    Text(r.viaCCBridge == true
+                         ? "上一轮走的是 CC，CC 不会带上这里的记忆"
+                         : "上一轮带上了：\(assistantName)自己记下的 \(r.selfCount ?? 0) 条、关于你的 \(r.stableCount + r.hitCount) 条")
+                }
+            }
+            .font(m.caption)
+            .foregroundColor(Theme.textMuted)
+            .listRowBackground(Color.clear)
+        }
     }
 
     /// 每条一行正常字体；「[关于…]」这类段标签画成小灰字
@@ -1201,23 +1284,6 @@ struct InjectionPreviewSheet: View {
             }
             .panelRowBackground()
         }
-    }
-
-    private func buildPreview() {
-        lastInjection = MemoryInjectionMeter.load(profileId: profileId)
-        masterOff = !MemoryFlags.masterEnabled
-        guard !masterOff,
-              let profile = profileManager?.profiles.first(where: { $0.id == profileId }) ?? profileManager?.currentProfile
-        else { return }
-        let inputs = MemoryInjector.roundInputs(profileId: profileId, conversationMemoryEnabled: conversationMemoryEnabled,
-                                                store: SwiftDataMemoryStore(), context: modelContext)
-        let selfCount = (inputs.selfMemory?.fullCount ?? 0) + (inputs.selfMemory?.indexCount ?? 0)
-        memoryCount = inputs.memories.count + selfCount
-        let layers = PromptAssembler.memoryLayers(profile: profile,
-                                                  selfMemory: (inputs.selfMemory?.text).flatMap { $0.isEmpty ? nil : $0 },
-                                                  memories: inputs.memories, recentMessages: [], budget: inputs.archiveBudget)
-        stable = layers.stable
-        volatilePart = layers.volatile
     }
 }
 
@@ -1365,13 +1431,3 @@ struct MemoryCardView: View {
     }
 
 }
-
-// MARK: - Profile Editing（FileEditorSheet 复用 + 独立提示词 sheet）
-
-/// 画像编辑 sheet 上下文（Identifiable 让 .sheet(item:) 触发）
-struct ProfileEditingContext: Identifiable {
-    let id = UUID()
-    let text: String
-    let modifiedAt: Date?
-}
-

@@ -19,6 +19,7 @@ struct BubblePopTunerPage: View {
 /// 预览区两个假泡无限重放 + 慢放滑条（0.1x 看清每一帧）+ 四参数滑条即调即看。
 /// 滑条直写 BubblePopTuning 的 @AppStorage 键——聊天里的行级/块级弹泡读同一组真值，调完即全局生效。
 struct BubblePopTunerView: View {
+    @AppStorage(BubblePopTuning.enabledKey) private var enabled = BubblePopTuning.defaultEnabled
     @AppStorage(BubblePopTuning.bounceKey) private var bounce = BubblePopTuning.defaultBounce
     @AppStorage(BubblePopTuning.durationKey) private var duration = BubblePopTuning.defaultDuration
     @AppStorage(BubblePopTuning.scaleFromKey) private var scaleFrom = BubblePopTuning.defaultScaleFrom
@@ -40,6 +41,9 @@ struct BubblePopTunerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            Toggle("启用弹泡", isOn: $enabled)
+                .tint(Theme.branchIndicator)
+
             // ── 预览区：假对话背景，重放无限看 ──
             VStack(alignment: .leading, spacing: 10) {
                 previewBubble(text: "我先弹一个给你看看手感", isUser: false, visible: showAssistant)
@@ -48,8 +52,8 @@ struct BubblePopTunerView: View {
             .frame(maxWidth: .infinity, minHeight: 130, alignment: .leading)
             .padding(14)
             .background(RoundedRectangle(cornerRadius: 14).fill(Theme.mainBg))
-            .animation(hiding ? nil : previewAnimation, value: showAssistant)
-            .animation(hiding ? nil : previewAnimation, value: showUser)
+            .animation(hiding || !enabled ? nil : previewAnimation, value: showAssistant)
+            .animation(hiding || !enabled ? nil : previewAnimation, value: showUser)
 
             HStack {
                 Button("▶︎ 重放") { replay() }
@@ -92,6 +96,7 @@ struct BubblePopTunerView: View {
 
             Button("恢复默认") {
                 BubblePopTuning.resetToDefaults()
+                enabled = BubblePopTuning.defaultEnabled
                 bounce = BubblePopTuning.defaultBounce
                 duration = BubblePopTuning.defaultDuration
                 scaleFrom = BubblePopTuning.defaultScaleFrom
@@ -107,6 +112,7 @@ struct BubblePopTunerView: View {
             .foregroundColor(Theme.textSecondary)
         }
         .onAppear { replay() }
+        .onChange(of: enabled) { _, _ in replay() }
         .onDisappear { replayTask?.cancel() }
     }
 
@@ -129,6 +135,12 @@ struct BubblePopTunerView: View {
 
     private func replay() {
         replayTask?.cancel()
+        guard enabled else {
+            hiding = false
+            showAssistant = true
+            showUser = true
+            return
+        }
         // 隐藏阶段关动画门：泡瞬时消失，插入才是每次全新的完整弹跳
         hiding = true
         showAssistant = false

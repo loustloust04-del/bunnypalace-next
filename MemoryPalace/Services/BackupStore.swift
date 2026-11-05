@@ -41,14 +41,17 @@ enum BackupStore {
     /// 时间机器自己拉 ubiquity URL: macOS 用 Mobile Documents 裸路径, iOS 用 ubiquity API。
     /// 后台线程调 url(forUbiquityContainerIdentifier:) 是文档允许的(主线程首调会卡才警告)。
     static func backupRoot() -> URL? {
+        #if os(macOS)
+        if BenchIsolation.active { return nil }
+        #endif
         if let overrideRoot {
             try? FileManager.default.createDirectory(at: overrideRoot, withIntermediateDirectories: true)
             return overrideRoot
         }
         let docs: URL?
         #if os(macOS)
-        docs = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Mobile Documents/iCloud~com~susu~MemoryPalace/Documents", isDirectory: true)
+        docs = AppPaths.checked(AppPaths.home
+            .appendingPathComponent("Library/Mobile Documents/iCloud~com~susu~MemoryPalace/Documents", isDirectory: true))
         #else
         // 优先用文件库的 cache (启动时若 prime 过更快), fallback 自己同步拉
         docs = FileLibraryStore.iCloudDocumentsRoot()
@@ -107,6 +110,9 @@ enum BackupStore {
     /// progress: (processed, total) — 回调在调用线程, 调用方自己 dispatch 主线程.
     /// force: true 时跳过 isEnabled 检查("立即备份"按钮场景, 用户没开自动也能手动跑).
     static func snapshotIfNeeded(context: ModelContext, force: Bool = false, progress: ((Int, Int) -> Void)? = nil) -> SnapshotResult {
+        #if os(macOS)
+        if BenchIsolation.active { return SnapshotResult(error: "unavailable in perf bench") }
+        #endif
         guard force || isEnabled else {
             print("[BackupStore] snapshotIfNeeded SKIP: disabled")
             return SnapshotResult(error: "disabled")
@@ -584,8 +590,8 @@ enum BackupStore {
     }
 
     private static func clearSyncExportFingerprint(pid: String) {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("MemoryPalace/sync-state", isDirectory: true)
+        let dir = AppPaths.checked(AppPaths.applicationSupport
+            .appendingPathComponent("MemoryPalace/sync-state", isDirectory: true))
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(pid).export.json"))
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(pid).import.json"))
     }
@@ -595,6 +601,9 @@ enum BackupStore {
     /// 7 天内每天保留 / 7-30 天每周保留 1 份 / >30 天删. pre-restore 独立 30 天.
     /// 跑在 snapshotIfNeeded 之后(轻量, 主要是 manifest 算+少量 removeItem).
     static func pruneOldBackups() {
+        #if os(macOS)
+        if BenchIsolation.active { return }
+        #endif
         guard isEnabled, opLock.try() else { return }
         defer { opLock.unlock() }
 

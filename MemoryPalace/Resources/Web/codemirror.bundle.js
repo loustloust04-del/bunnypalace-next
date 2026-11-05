@@ -21,30 +21,41 @@ var MPCodeMirror = (() => {
   var entry_exports = {};
   __export(entry_exports, {
     Decoration: () => Decoration,
+    EditorSelection: () => EditorSelection,
     EditorState: () => EditorState,
     EditorView: () => EditorView,
     HighlightStyle: () => HighlightStyle,
     RangeSetBuilder: () => RangeSetBuilder,
     SearchQuery: () => SearchQuery,
+    StateEffect: () => StateEffect,
     StateField: () => StateField,
+    Transaction: () => Transaction,
     ViewPlugin: () => ViewPlugin,
     WidgetType: () => WidgetType,
     basicSetup: () => basicSetup,
     bracketMatching: () => bracketMatching,
     defaultHighlightStyle: () => defaultHighlightStyle,
+    deleteCharBackward: () => deleteCharBackward,
+    deleteCharForward: () => deleteCharForward,
     foldGutter: () => foldGutter,
     foldKeymap: () => foldKeymap,
     indentOnInput: () => indentOnInput,
+    isolateHistory: () => isolateHistory,
     keymap: () => keymap,
     markdown: () => markdown,
     markdownLanguage: () => markdownLanguage,
     minimalSetup: () => minimalSetup,
+    redo: () => redo,
+    redoDepth: () => redoDepth,
     replaceAll: () => replaceAll,
     replaceNext: () => replaceNext,
+    runScopeHandlers: () => runScopeHandlers,
     searchExtensions: () => searchExtensions2,
     setSearchQuery: () => setSearchQuery,
     syntaxHighlighting: () => syntaxHighlighting,
-    tags: () => tags
+    tags: () => tags,
+    undo: () => undo,
+    undoDepth: () => undoDepth
   });
 
   // node_modules/@marijn/find-cluster-break/src/index.js
@@ -15456,7 +15467,7 @@ var MPCodeMirror = (() => {
     get node() {
       if (!this.buffer)
         return this._tree;
-      let cache2 = this.bufferNode, result = null, depth = 0;
+      let cache2 = this.bufferNode, result = null, depth2 = 0;
       if (cache2 && cache2.context == this.buffer) {
         scan: for (let index = this.index, d = this.stack.length; d >= 0; ) {
           for (let c = cache2; c; c = c._parent)
@@ -15464,13 +15475,13 @@ var MPCodeMirror = (() => {
               if (index == this.index)
                 return c;
               result = c;
-              depth = d + 1;
+              depth2 = d + 1;
               break scan;
             }
           index = this.stack[--d];
         }
       }
-      for (let i = depth; i < this.stack.length; i++)
+      for (let i = depth2; i < this.stack.length; i++)
         result = new BufferNode(this.buffer, result, this.stack[i]);
       return this.bufferNode = new BufferNode(this.buffer, result, this.index);
     }
@@ -15489,11 +15500,11 @@ var MPCodeMirror = (() => {
     skipped, and `leave` isn't called for it.
     */
     iterate(enter, leave) {
-      for (let depth = 0; ; ) {
+      for (let depth2 = 0; ; ) {
         let mustLeave = false;
         if (this.type.isAnonymous || enter(this) !== false) {
           if (this.firstChild()) {
-            depth++;
+            depth2++;
             continue;
           }
           if (!this.type.isAnonymous)
@@ -15503,12 +15514,12 @@ var MPCodeMirror = (() => {
           if (mustLeave && leave)
             leave(this);
           mustLeave = this.type.isAnonymous;
-          if (!depth)
+          if (!depth2)
             return;
           if (this.nextSibling())
             break;
           this.parent();
-          depth--;
+          depth2--;
           mustLeave = true;
         }
       }
@@ -15544,7 +15555,7 @@ var MPCodeMirror = (() => {
     let cursor = Array.isArray(buffer) ? new FlatBufferCursor(buffer, buffer.length) : buffer;
     let types2 = nodeSet.types;
     let contextHash = 0, lookAhead = 0;
-    function takeNode(parentStart, minPos, children2, positions2, inRepeat, depth) {
+    function takeNode(parentStart, minPos, children2, positions2, inRepeat, depth2) {
       let { id: id2, start, end, size } = cursor;
       let lookAheadAtStart = lookAhead, contextAtStart = contextHash;
       if (size < 0) {
@@ -15587,10 +15598,10 @@ var MPCodeMirror = (() => {
               lastEnd = cursor.end;
             }
             cursor.next();
-          } else if (depth > 2500) {
+          } else if (depth2 > 2500) {
             takeFlatNode(start, endPos, localChildren, localPositions);
           } else {
-            takeNode(start, endPos, localChildren, localPositions, localInRepeat, depth + 1);
+            takeNode(start, endPos, localChildren, localPositions, localInRepeat, depth2 + 1);
           }
         }
         if (localInRepeat >= 0 && lastGroup > 0 && lastGroup < localChildren.length)
@@ -18584,17 +18595,17 @@ var MPCodeMirror = (() => {
   }
   function matchMarkedBrackets(_state, _pos, dir, token, handle, matching, brackets) {
     let parent = token.parent, firstToken = { from: handle.from, to: handle.to };
-    let depth = 0, cursor = parent === null || parent === void 0 ? void 0 : parent.cursor();
+    let depth2 = 0, cursor = parent === null || parent === void 0 ? void 0 : parent.cursor();
     if (cursor && (dir < 0 ? cursor.childBefore(token.from) : cursor.childAfter(token.to)))
       do {
         if (dir < 0 ? cursor.to <= token.from : cursor.from >= token.to) {
-          if (depth == 0 && matching.indexOf(cursor.type.name) > -1 && cursor.from < cursor.to) {
+          if (depth2 == 0 && matching.indexOf(cursor.type.name) > -1 && cursor.from < cursor.to) {
             let endHandle = findHandle(cursor);
             return { start: firstToken, end: endHandle ? { from: endHandle.from, to: endHandle.to } : void 0, matched: true };
           } else if (matchingNodes(cursor.type, dir, brackets)) {
-            depth++;
+            depth2++;
           } else if (matchingNodes(cursor.type, -dir, brackets)) {
-            if (depth == 0) {
+            if (depth2 == 0) {
               let endHandle = findHandle(cursor);
               return {
                 start: firstToken,
@@ -18602,7 +18613,7 @@ var MPCodeMirror = (() => {
                 matched: false
               };
             }
-            depth--;
+            depth2--;
           }
         }
       } while (dir < 0 ? cursor.prevSibling() : cursor.nextSibling());
@@ -18616,7 +18627,7 @@ var MPCodeMirror = (() => {
     if (bracket2 < 0 || bracket2 % 2 == 0 != dir > 0)
       return null;
     let startToken = { from: dir < 0 ? pos - 1 : pos, to: dir > 0 ? pos + 1 : pos };
-    let iter = state.doc.iterRange(pos, dir > 0 ? state.doc.length : 0), depth = 0;
+    let iter = state.doc.iterRange(pos, dir > 0 ? state.doc.length : 0), depth2 = 0;
     for (let distance = 0; !iter.next().done && distance <= maxScanDistance; ) {
       let text = iter.value;
       if (dir < 0)
@@ -18627,11 +18638,11 @@ var MPCodeMirror = (() => {
         if (found < 0 || tree.resolveInner(basePos + pos2, 1).type != tokenType)
           continue;
         if (found % 2 == 0 == dir > 0) {
-          depth++;
-        } else if (depth == 1) {
+          depth2++;
+        } else if (depth2 == 1) {
           return { start: startToken, end: { from: basePos + pos2, to: basePos + pos2 + 1 }, matched: found >> 1 == bracket2 >> 1 };
         } else {
-          depth--;
+          depth2--;
         }
       }
       if (dir > 0)
@@ -18953,6 +18964,23 @@ var MPCodeMirror = (() => {
   var redo = /* @__PURE__ */ cmd(1, false);
   var undoSelection = /* @__PURE__ */ cmd(0, true);
   var redoSelection = /* @__PURE__ */ cmd(1, true);
+  function depth(side) {
+    return function(state) {
+      let histState = state.field(historyField_, false);
+      if (!histState)
+        return 0;
+      let branch = side == 0 ? histState.done : histState.undone;
+      return branch.length - (branch.length && !branch[0].changes ? 1 : 0);
+    };
+  }
+  var undoDepth = /* @__PURE__ */ depth(
+    0
+    /* BranchName.Done */
+  );
+  var redoDepth = /* @__PURE__ */ depth(
+    1
+    /* BranchName.Undone */
+  );
   var HistEvent = class _HistEvent {
     constructor(changes, effects, mapped, startSelection, selectionsAfter) {
       this.changes = changes;
@@ -24084,8 +24112,8 @@ var MPCodeMirror = (() => {
     Get the type of the parent block at the given depth. When no
     depth is passed, return the type of the innermost parent.
     */
-    parentType(depth = this.depth - 1) {
-      return this.parser.nodeSet.types[this.stack[depth].type];
+    parentType(depth2 = this.depth - 1) {
+      return this.parser.nodeSet.types[this.stack[depth2].type];
     }
     /**
     Move to the next input line. This should only be called by
@@ -24738,7 +24766,7 @@ var MPCodeMirror = (() => {
       }
       return null;
     } else {
-      let depth = 0, pos = start;
+      let depth2 = 0, pos = start;
       for (let escaped = false; pos < text.length; pos++) {
         let ch = text.charCodeAt(pos);
         if (space(ch)) {
@@ -24746,11 +24774,11 @@ var MPCodeMirror = (() => {
         } else if (escaped) {
           escaped = false;
         } else if (ch == 40) {
-          depth++;
+          depth2++;
         } else if (ch == 41) {
-          if (!depth)
+          if (!depth2)
             break;
-          depth--;
+          depth2--;
         } else if (ch == 92) {
           escaped = true;
         }
@@ -25455,13 +25483,13 @@ var MPCodeMirror = (() => {
     */
     reduce(action) {
       var _a2;
-      let depth = action >> 19, type = action & 65535;
+      let depth2 = action >> 19, type = action & 65535;
       let { parser: parser5 } = this.p;
       let lookaheadRecord = this.reducePos < this.pos - 25 && this.setLookAhead(this.pos);
       let dPrec = parser5.dynamicPrecedence(type);
       if (dPrec)
         this.score += dPrec;
-      if (depth == 0) {
+      if (depth2 == 0) {
         if (type < parser5.minRepeatTerm && this.reducePos < this.pos)
           this.reducePos = this.pos;
         this.pushState(parser5.getGoto(this.state, type, true), this.reducePos);
@@ -25470,7 +25498,7 @@ var MPCodeMirror = (() => {
         this.reduceContext(type, this.reducePos);
         return;
       }
-      let base2 = this.stack.length - (depth - 1) * 3 - (action & 262144 ? 6 : 0);
+      let base2 = this.stack.length - (depth2 - 1) * 3 - (action & 262144 ? 6 : 0);
       let start = base2 ? this.stack[base2 - 2] : this.p.ranges[0].from;
       if (type < parser5.minRepeatTerm && start == this.reducePos && this.reducePos < this.pos)
         this.reducePos = this.pos;
@@ -25713,8 +25741,8 @@ var MPCodeMirror = (() => {
       if ((reduce & 65536) == 0)
         return false;
       if (!parser5.validAction(this.state, reduce)) {
-        let depth = reduce >> 19, term = reduce & 65535;
-        let target = this.stack.length - depth * 3;
+        let depth2 = reduce >> 19, term = reduce & 65535;
+        let target = this.stack.length - depth2 * 3;
         if (target < 0 || parser5.getGoto(this.stack[target], term, false) < 0) {
           let backup = this.findForcedReduction();
           if (backup == null)
@@ -25735,21 +25763,21 @@ var MPCodeMirror = (() => {
     */
     findForcedReduction() {
       let { parser: parser5 } = this.p, seen = [];
-      let explore = (state, depth) => {
+      let explore = (state, depth2) => {
         if (seen.includes(state))
           return;
         seen.push(state);
         return parser5.allActions(state, (action) => {
           if (action & (262144 | 131072)) ;
           else if (action & 65536) {
-            let rDepth = (action >> 19) - depth;
+            let rDepth = (action >> 19) - depth2;
             if (rDepth > 1) {
               let term = action & 65535, target = this.stack.length - rDepth * 3;
               if (target >= 0 && parser5.getGoto(this.stack[target], term, false) >= 0)
                 return rDepth << 19 | 65536 | term;
             }
           } else {
-            let found = explore(action, depth + 1);
+            let found = explore(action, depth2 + 1);
             if (found != null)
               return found;
           }
@@ -25893,14 +25921,14 @@ var MPCodeMirror = (() => {
       this.base = this.stack.length;
     }
     reduce(action) {
-      let term = action & 65535, depth = action >> 19;
-      if (depth == 0) {
+      let term = action & 65535, depth2 = action >> 19;
+      if (depth2 == 0) {
         if (this.stack == this.start.stack)
           this.stack = this.stack.slice();
         this.stack.push(this.state, 0, 0);
         this.base += 3;
       } else {
-        this.base -= (depth - 1) * 3;
+        this.base -= (depth2 - 1) * 3;
       }
       let goto = this.start.p.parser.getGoto(this.stack[this.base - 3], term, true);
       this.state = goto;

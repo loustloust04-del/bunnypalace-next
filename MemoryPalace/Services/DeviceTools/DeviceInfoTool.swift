@@ -33,7 +33,11 @@ enum DeviceInfoTool {
             return DeviceToolIO.fail("not_available", "macOS 不提供电量读取")
             #endif
         case "storage":
+            #if os(macOS)
+            let home = AppPaths.home
+            #else
             let home = URL(fileURLWithPath: NSHomeDirectory())
+            #endif
             guard let v = try? home.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey]) else {
                 return DeviceToolIO.fail("failed", "读取磁盘容量失败")
             }

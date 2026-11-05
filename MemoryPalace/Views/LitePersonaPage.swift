@@ -40,6 +40,15 @@ struct LitePersonaPage: View {
     var body: some View {
         List {
             Section {
+                if let profile = profileManager?.currentProfile {
+                    // B2：设定按楼层存，顶上写清在改哪个楼层 / 哪张卡（卡库开在设置后面，这里只显示不跳）
+                    PromptEditingContextRow(
+                        floorName: profile.name,
+                        cardName: CharacterFloorService.boundCard(profileId: profile.id,
+                                                                  cards: profileManager?.characterCardManager?.cards ?? [])?.name)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4))
+                }
                 Text("告诉 AI 它是谁、怎么跟你说话")
                     .font(.system(size: Theme.SettingsFont.body))
                     .foregroundColor(Theme.textSecondary)
@@ -86,9 +95,11 @@ struct LitePersonaPage: View {
             }
         }
         .fullScreenCover(item: $editingField) { field in
-            LiteSlotFullscreenEditor(title: field.title,
-                                     placeholder: field.placeholder,
-                                     text: slotBinding(field.slotId))
+            FileEditorSheet.text(title: field.title,
+                                 text: slotBinding(field.slotId).wrappedValue,
+                                 format: .markdown,
+                                 onSave: { slotBinding(field.slotId).wrappedValue = $0 },
+                                 onCancel: { editingField = nil })
         }
     }
 
@@ -96,11 +107,18 @@ struct LitePersonaPage: View {
 
     private func liteSlotBox(label: String, field: EditingField, height: CGFloat) -> some View {
         let text = slotBinding(field.slotId)
+        let preview = profileManager.flatMap { TavernSync.cardFieldPreview(slotId: field.slotId, profile: $0.currentProfile) }
         return VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(label)
                     .font(.system(size: Theme.SettingsFont.label, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
+                if let hint = preview?.hint {
+                    Text(hint)
+                        .font(.system(size: Theme.SettingsFont.caption))
+                        .foregroundColor(Theme.textMuted)
+                        .lineLimit(1)
+                }
                 Spacer()
                 Button { editingField = field } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -119,9 +137,10 @@ struct LitePersonaPage: View {
                     .padding(6)
                     .scrollContentBackground(.hidden)
                 if text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text(field.placeholder)
+                    Text(preview?.text ?? field.placeholder)
                         .font(.system(size: Theme.SettingsFont.body))
                         .foregroundColor(Theme.textMuted.opacity(0.5))
+                        .lineLimit(max(1, Int(height / 22)))
                         .padding(.leading, 10)
                         .padding(.top, 14)
                         .allowsHitTesting(false)
@@ -153,44 +172,4 @@ struct LitePersonaPage: View {
     }
 }
 
-// MARK: - 全屏编辑器
-
-/// 点小框后推上来的全屏编辑页：大 TextEditor + 左上关闭，自动弹键盘。
-private struct LiteSlotFullscreenEditor: View {
-    let title: String
-    let placeholder: String
-    @Binding var text: String
-    @Environment(\.dismiss) private var dismiss
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        NavigationStack {
-            ZStack(alignment: .topLeading) {
-                TextEditor(text: $text)
-                    .font(.system(size: Theme.SettingsFont.body))
-                    .padding(.horizontal, 12)
-                    .scrollContentBackground(.hidden)
-                    .focused($focused)
-                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text(placeholder)
-                        .font(.system(size: Theme.SettingsFont.body))
-                        .foregroundColor(Theme.textMuted.opacity(0.5))
-                        .padding(.leading, 17)
-                        .padding(.top, 8)
-                        .allowsHitTesting(false)
-                }
-            }
-            .background(Theme.mainBg)
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("完成") { dismiss() }
-                        .foregroundColor(Theme.branchIndicator)
-                }
-            }
-        }
-        .onAppear { focused = true }
-    }
-}
 #endif

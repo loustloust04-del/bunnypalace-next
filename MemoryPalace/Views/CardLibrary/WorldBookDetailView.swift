@@ -94,15 +94,13 @@ struct WorldBookDetailView: View {
         .sheet(item: $editing) { target in
             WorldBookEntryEditView(
                 entry: target.entry, bookName: item.name, isNew: target.isNew, readOnly: isForeign,
-                onSave: { entry in
-                    try save(entry, isNew: target.isNew)
-                    editing = nil
-                },
+                onSave: { entry in try save(entry, isNew: target.isNew) },
                 onDelete: target.isNew || isForeign ? nil : {
                     editing = nil
                     delete(target.entry)
                 },
-                onCancel: { editing = nil })
+                onCancel: { editing = nil },
+                versionKey: target.isNew ? nil : .worldBookEntry(bookId: item.bookId, entryId: target.entry.id))
         }
         .alert("重命名", isPresented: $renaming) {
             TextField("书名", text: $renameText)
@@ -349,11 +347,13 @@ struct WorldBookDetailView: View {
     private func save(_ entry: WorldBookEntry, isNew: Bool) throws {
         guard !isForeign else { return }
         var entries = try currentEntries()
-        if isNew {
+        // 新条目在正文全屏编辑器里已经存过一次 → 之后按更新走，不再追加第二条
+        if let index = entries.firstIndex(where: { $0.id == entry.id }) {
+            entries[index] = entry
+        } else if isNew {
             entries.append(entry)
         } else {
-            guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { throw WorldBookEntryEditView.Failure.entryMissing }
-            entries[index] = entry
+            throw WorldBookEntryEditView.Failure.entryMissing
         }
         try writer.setEntries(entries, of: item.id)
     }

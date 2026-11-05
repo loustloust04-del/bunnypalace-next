@@ -108,7 +108,8 @@ enum ChatSelectionText {
             }.joined(separator: " ")
             return (text.isEmpty ? "[语音]" : text) + others
         }
-        let segText = segs.compactMap { seg -> String? in
+        // 普通回复挂原生思考：段里的正文是 content 的副本，照旧取 content（thinking 回传 astra #4）
+        let segText = segs.isAttachedThinkingReply ? "" : segs.compactMap { seg -> String? in
             if case .text(let s) = seg { return s }
             return nil
         }.joined(separator: "\n\n")

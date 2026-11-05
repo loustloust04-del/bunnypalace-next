@@ -22,7 +22,7 @@ enum ProfileCardStore {
 
     private static func url(profileId: String, owner: Owner) -> URL {
         let name = owner == .assistant ? "profile-card.md" : "user-card.md"
-        return FileLibraryStore.memoryRoot(profileId: profileId).appendingPathComponent(name)
+        return AppPaths.checked(FileLibraryStore.memoryRoot(profileId: profileId).appendingPathComponent(name))
     }
 
     static func load(profileId: String, owner: Owner = .assistant) -> Card {

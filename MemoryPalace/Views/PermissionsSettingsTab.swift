@@ -150,6 +150,10 @@ struct PermissionsSettingsTab: View {
                     .searchAnchor("leaf-perm-twitter")
             } header: {
                 Text("AI 能做什么")
+            } footer: {
+                Text("单个工具的开关在 Prompt → 工具抽屉。")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
             }
             .listRowBackground(Theme.mainBg)
 

@@ -39,8 +39,10 @@ final class RecallViewerTests: XCTestCase {
         let m = try SwiftDataMemoryStore().add(content: "喜欢海边", category: "preference", keywords: ["海边"],
                                                profileId: "p", isUserExplicit: false, extractedBy: "x",
                                                sourceConversationId: "c", sourceQuote: "我喜欢海边", sourceNodeId: "n", context: ctx)
+        XCTAssertNil(m.userEditedAt)
         XCTAssertTrue(RecallActions.saveEdit(m, text: "  喜欢山里  ", context: ctx))
         XCTAssertEqual(m.content, "喜欢山里")
+        XCTAssertNotNil(m.userEditedAt, "store.update = 人手改的，记「你改过」")
         XCTAssertEqual(m.sourceNodeId, "n", "出处不丢")
         XCTAssertEqual(m.sourceQuote, "我喜欢海边")
         XCTAssertFalse(RecallActions.saveEdit(m, text: "   ", context: ctx), "空的不存")

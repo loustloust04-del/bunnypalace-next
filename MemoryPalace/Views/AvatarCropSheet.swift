@@ -286,6 +286,8 @@ struct AvatarSettingsRows: View {
         var p = pm.currentProfile
         if target == .user { p.userAvatarData = data } else { p.assistantAvatarData = data }
         pm.updateProfile(p)
+        // 默认头像（§11-7）：同「我的名字」写默认称呼，之后新建 / 导卡的楼层继承；移除不清默认
+        if target == .user { DefaultUserAvatar.live.save(data) }
     }
 
     #if os(iOS)

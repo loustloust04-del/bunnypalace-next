@@ -236,6 +236,21 @@ struct FullMemoryDocument: Codable {
     let embeddingRevision: Int?
     let relatedIds: [UUID]
     let parentId: UUID?
+    // v5 C2 碎片池（可选；老备份没有这几个键 = nil）
+    var occurredDay: String? = nil
+    var importance: Int? = nil
+    var emotion: Int? = nil
+    var resolved: Bool? = nil
+    // 审计台（可选；老备份没有这两个键 = nil）
+    var reviewedAt: Date? = nil
+    var userEditedAt: Date? = nil
+    // C3 整理编目（可选；老备份没有这三个键 = nil）
+    var organizedAt: Date? = nil
+    var organizedPage: String? = nil
+    var organizeRejectedAt: Date? = nil
+    // C2 归因（可选；旧备份缺键 = nil，不推断）
+    var subject: String? = nil
+    var speaker: String? = nil
 }
 
 // MARK: - WorldBook

@@ -74,6 +74,9 @@ enum MacLeftPanelGroup {
     }
 
     static func select(_ tab: MacLeftPanelTab) {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         let library = CodingSessionLibrary.shared
         switch tab {
         case .chats:

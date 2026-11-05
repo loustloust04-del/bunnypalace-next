@@ -29,7 +29,7 @@ struct ChatSkinSettingsPage: View {
                 ))
                 .tint(Theme.branchIndicator)
             } footer: {
-                Text("开了之后 Page2 桌面上会出现「聊天（css自定义）」。它和主聊天是同一批对话，只是换一套皮肤看。")
+                Text("开了之后 gardenOS 桌面上会出现「聊天（css自定义）」。它和主聊天是同一批对话，只是换一套皮肤看。")
             }
 
             Section {

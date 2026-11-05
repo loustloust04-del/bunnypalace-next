@@ -70,7 +70,10 @@ enum RecallTool {
         currentConversationId: String?,
         userName: String,
         assistantName: String,
-        container: ModelContainer
+        container: ModelContainer,
+        memoryRoot: URL? = nil,
+        embedder: MemoryEmbedding = AppleMemoryEmbedder.shared,
+        defaults: UserDefaults = .standard
     ) async -> ExecResult {
         let args = (try? JSONSerialization.jsonObject(with: Data(inputJSON.utf8))) as? [String: Any] ?? [:]
         let queryArg = (args["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -92,6 +95,7 @@ enum RecallTool {
                 : "只给 before 范围太宽：按日期翻对话请给 date 或 after。"
             return ExecResult(text: msg, isError: true, hitMemoryIds: [])
         }
+        let masterEnabled = (defaults.object(forKey: "mem_master") as? Bool) ?? true
 
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -139,11 +143,31 @@ enum RecallTool {
                 // L1 记忆并查：exact=只找原话时跳过；mem_master 关 = 只砍记忆半边，历史照查（已批边界）
                 var memoryLines: [String] = []
                 var hitIds: [UUID] = []
-                if !exact && MemoryFlags.masterEnabled {
-                    (memoryLines, hitIds) = searchL1(
+                if !exact && masterEnabled {
+                    let result = searchL1(
                         query: query, profileId: profileId, includeInvalid: includeInvalid,
-                        after: range.after, beforeExclusive: range.beforeExclusive, context: context
-                    )
+                        after: range.after, beforeExclusive: range.beforeExclusive, context: context, embedder: embedder)
+                    memoryLines = result.hits.map(memoryLine)
+                    hitIds = result.hits.filter { !$0.invalid }.map(\.id)
+                    if let query {
+                        let pid = profileId
+                        let descriptor = FetchDescriptor<Conversation>(
+                            predicate: #Predicate<Conversation> { $0.profileId == pid && $0.isTrashed == false })
+                        let conversations = (try? context.fetch(descriptor)) ?? []
+                        let visible = Set(conversations.filter {
+                            $0.id != excludeConvId && (resolvedConvId == nil || $0.id == resolvedConvId)
+                        }.map(\.id))
+                        let interval = (range.after != nil || range.beforeExclusive != nil)
+                            ? DateInterval(start: range.after ?? .distantPast, end: range.beforeExclusive ?? .distantFuture) : nil
+                        let aline = searchALine(terms: [query], in: interval,
+                                                memoryRoot: memoryRoot ?? FileLibraryStore.memoryRoot(profileId: profileId),
+                                                conversationIds: visible)
+                        memoryLines += aline.hits.prefix(max(0, maxL1Hits - memoryLines.count)).map { hit in
+                            let segment = hit.segment.map { " · 段\($0)" } ?? ""
+                            let window = hit.conversationId.map { " · \(hit.title) conv:\($0.prefix(8))" } ?? ""
+                            return "- [\(hit.day) · \(hit.layer.rawValue)\(window)\(segment)] \(String(hit.text.prefix(snippetLimit)))"
+                        }
+                    }
                 }
 
                 let text = composeResult(memoryLines: memoryLines, windows: windows, totalLimit: totalTextLimit,
@@ -191,14 +215,15 @@ enum RecallTool {
 
     /// conversation_id 解析：全量 id 或结果行里的前 8 位前缀；楼层归属校验
     /// 只给 conversation_id：那个窗口的窗口总结（读 windows/，没有就退回 sessions/：段标题 + 最近两段全文）
-    /// + 时间轴上这个窗口最新一条的待续（Q12）；都还没有就说清楚，指路按 query 搜
+    /// + 这个窗口还没做完的待续（Q12）；都还没有就说清楚，指路按 query 搜
     private static func windowSummaryText(conversationId: String, profileId: String, context: ModelContext) -> String {
         let cid = conversationId
         let title = (try? context.fetch(FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> { $0.id == cid })).first?.title) ?? ""
         let s = WindowSummaryStore.load(conversationId: cid, profileId: profileId)
             ?? SessionSummaryStore.loadOrSeed(conversationId: cid, profileId: profileId, title: title)
-        let latest = TimelineStore.latest(conversationId: cid, in: TimelineStore.dir(profileId: profileId))
-        let pending = latest.map { TimelineStore.pendingItems($0.pending) } ?? []
+        // v5 §八：待续单独存了就读它（没做完的）；没迁移的楼层照读老时间轴条目里的老字段
+        let pending = PendingStore.openByConversation(profileId: profileId).map { $0[cid] ?? [] }
+            ?? TimelineStore.latest(conversationId: cid, in: TimelineStore.dir(profileId: profileId)).map { TimelineStore.pendingItems($0.pending) } ?? []
         guard !s.segments.isEmpty || !pending.isEmpty else {
             return "《\(title)》conv \(cid.prefix(8)) 还没有窗口总结（聊得不长，或还没收尾）。要找具体说过的话，带上 query 再搜这个 conversation_id。"
         }
@@ -206,8 +231,8 @@ enum RecallTool {
             ? "《\(title)》conv \(cid.prefix(8)) 还没有窗口总结"
             : SessionSummaryStore.recallText(SessionSummary(conversationId: cid, title: title, compressedCount: s.compressedCount,
                                                             segments: s.segments, updatedAt: s.updatedAt))
-        if let latest, !pending.isEmpty {
-            text += "\n\n时间轴上这个窗口最近一条（\(latest.dayKey)）还没做完的：\n" + pending.map { "- \($0)" }.joined(separator: "\n")
+        if !pending.isEmpty {
+            text += "\n\n这个窗口还没做完的待续：\n" + pending.map { "- \($0)" }.joined(separator: "\n")
         }
         if text.count > totalTextLimit { text = String(text.prefix(totalTextLimit)) + "…（太长截断了）" }
         return text
@@ -370,40 +395,85 @@ enum RecallTool {
     /// 刀6：不再借注入检索器的候选口径（它们排除常驻层 → 关系/偏好/钉住永远搜不到）；
     /// 同一套 BM25 / 向量打分，候选 = 全部活着的记忆（include_invalid 时连已失效一起）。
     /// 无 query（按日期翻）时列出区间内新记的记忆。
-    private static func searchL1(
+    struct MemoryHit: Sendable {
+        let id: UUID
+        let content: String
+        let category: String
+        let createdAt: Date
+        let sourceQuote: String?
+        let invalid: Bool
+        let priority: Int
+    }
+
+    struct L1Result: Sendable {
+        let hits: [MemoryHit]
+        let vectorStatus: String?
+    }
+
+    static func searchL1(
         query: String?, profileId: String, includeInvalid: Bool,
-        after: Date?, beforeExclusive: Date?, context: ModelContext
-    ) -> (lines: [String], ids: [UUID]) {
+        after: Date?, beforeExclusive: Date?, context: ModelContext,
+        embedder: MemoryEmbedding = AppleMemoryEmbedder.shared
+    ) -> L1Result {
         let store = SwiftDataMemoryStore()
         let pool = includeInvalid
             ? store.listAll(profileId: profileId, context: context)
             : store.listActive(profileId: profileId, context: context)
-        guard !pool.isEmpty else { return ([], []) }
-        var ranked: [Memory]
+        let snapshots = pool.map { memory in
+            (document: MemoryRetrievalDocument(memory),
+             hit: MemoryHit(id: memory.id, content: memory.content, category: memory.category,
+                            createdAt: memory.createdAt, sourceQuote: memory.sourceQuote,
+                            invalid: memory.supersededAt != nil, priority: memory.recallPriority))
+        }
+        var ranked: [MemoryHit]
+        var vectorStatus: String?
         if let query {
-            let kw = KeywordRetriever(excludePersistent: false).retrieve(pool, recent: [query])
-            let vec = VectorRetriever(excludePersistent: false).retrieve(pool, recent: [query])
-            if kw.isEmpty { ranked = vec.map(\.memory) }
-            else if vec.isEmpty { ranked = kw.map(\.memory) }
-            else { ranked = MemoryInjector.rrfFuse([kw, vec]) }
+            let result = MemoryRetrieval.search(query: query, documents: snapshots.map(\.document), embedder: embedder)
+            var lookup: [UUID: MemoryHit] = [:]
+            for snapshot in snapshots where lookup[snapshot.hit.id] == nil { lookup[snapshot.hit.id] = snapshot.hit }
+            let hits = result.ids.compactMap { lookup[$0] }
+            ranked = priorityOrder(hits.map(\.priority)).map { hits[$0] }
+            vectorStatus = result.vectorStatus
         } else {
-            ranked = pool.sorted { $0.createdAt > $1.createdAt }
+            ranked = snapshots.map(\.hit).sorted { $0.createdAt > $1.createdAt }
         }
         if after != nil || beforeExclusive != nil {
             ranked = ranked.filter { inRange($0.createdAt, after: after, beforeExclusive: beforeExclusive) }
         }
-        let top = Array(ranked.prefix(maxL1Hits))
-        let lines = top.map { m in
-            var line = "- [\(dayString(m.createdAt)) · 记忆·\(categoryLabel(m.category))] \(String(m.content.prefix(snippetLimit)))"
-            // SC-B2 出处：有 quote 锚的记忆带上原话证据
-            if let quote = m.sourceQuote {
-                line += "（出处:「\(String(quote.prefix(40)))」）"
-            }
-            if m.supersededAt != nil { line += "（已失效）" }
-            return line
+        return L1Result(hits: Array(ranked.prefix(maxL1Hits)), vectorStatus: vectorStatus)
+    }
+
+    static func searchALine(terms: [String], in range: DateInterval? = nil, memoryRoot: URL,
+                           conversationIds: Set<String>? = nil, cancel: CatalogCancel? = nil) -> CatalogALineReader.Result {
+        let terms = terms.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !terms.isEmpty, cancel?.isCancelled != true else { return .init(terms: [], hits: [], found: [:], truncated: false) }
+        let candidates = CatalogALineReader.candidates(in: range, memoryRoot: memoryRoot, conversationIds: conversationIds, cancel: cancel).filter {
+            conversationIds == nil || $0.conversationId.map { conversationIds!.contains($0) } ?? true
         }
-        // 已失效的不算"想起来"（不强化）
-        return (lines, top.filter { $0.supersededAt == nil }.map(\.id))
+        var documents: [[String]] = []
+        for candidate in candidates {
+            guard cancel?.isCancelled != true else { return .init(terms: terms, hits: [], found: [:]) }
+            documents.append(MemoryBM25.document(content: candidate.title + "\n" + candidate.text, keywords: []))
+        }
+        let scores = MemoryBM25.scores(documents: documents, query: terms.joined(separator: "\n"), cancel: cancel)
+        guard cancel?.isCancelled != true else { return .init(terms: terms, hits: [], found: [:]) }
+        let indices = candidates.indices.filter { scores[$0] > 0 }.sorted {
+            scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1
+        }
+        let hits = indices.map { candidates[$0] }
+        var found: [CatalogALineReader.Layer: Int] = [:]
+        for hit in hits {
+            guard cancel?.isCancelled != true else { return .init(terms: terms, hits: [], found: [:]) }
+            found[hit.layer, default: 0] += 1
+        }
+        return .init(terms: terms, hits: hits, found: found, truncated: false)
+    }
+
+    private static func memoryLine(_ memory: MemoryHit) -> String {
+        var line = "- [\(dayString(memory.createdAt)) · 记忆·\(categoryLabel(memory.category))] \(String(memory.content.prefix(snippetLimit)))"
+        if let quote = memory.sourceQuote { line += "（出处:「\(String(quote.prefix(40)))」）" }
+        if memory.invalid { line += "（已失效）" }
+        return line
     }
 
     private static func categoryLabel(_ c: String) -> String {
@@ -411,6 +481,19 @@ enum RecallTool {
     }
 
     // MARK: - 纯函数层（XCTest 直测，不碰 SwiftData）
+
+    /// 召回优先级（审计台卡片 plan 2.9，⧫6）：在关键词 / 向量排好的名次上按重要度加权再排——
+    /// 分 = 1/(61+名次) × (1 + 0.1 × (重要度 − 3))，没定的按 3（不加不减）；全是 3 时名次一点不变，同分保持原名次
+    static func weightByPriority(_ ranked: [Memory]) -> [Memory] {
+        priorityOrder(ranked.map(\.recallPriority)).map { ranked[$0] }
+    }
+
+    private static func priorityOrder(_ priorities: [Int]) -> [Int] {
+        let scores = priorities.enumerated().map { rank, priority in
+            (1 + 0.1 * Double(priority - 3)) / Double(61 + rank)
+        }
+        return priorities.indices.sorted { scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1 }
+    }
 
     struct RecallMessage {
         let id: String

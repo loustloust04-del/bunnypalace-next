@@ -28,7 +28,7 @@ struct SettingsView: View {
         case tts = "朗读"
         case attachment = "附件"
         case data = "数据与备份"
-        case api = "API"
+        case api = "模型和API"
         /// 统一用量页（research-magpie 2.1）：逐次调用账本 + 汇总
         case usage = "用量"
         case mcp = "MCP"
@@ -60,7 +60,7 @@ struct SettingsView: View {
         case groupChat = "群聊"
         case appearance = "外观"
         #if os(iOS)
-        /// Page2 子应用各自的设置（先只有「聊天（css自定义）」；ChatSkin 整套 iOS-only）
+        /// Page2 子应用设置目录（聊天 css 那页的 ChatSkin 整套 iOS-only）
         case subApps = "子应用"
         #endif
         case theme = "主题"
@@ -84,8 +84,10 @@ struct SettingsView: View {
         // 各页局部 .tint(Theme.textSecondary) 的下拉仍各自生效
         #if os(iOS)
         iOSSettingsBody.tint(Theme.branchIndicator)
+            .settingsJumpTabs($selectedSettingsTab, forceFullPersona: $jumpFullPersona)
         #else
         macOSSettingsBody.tint(Theme.branchIndicator)
+            .settingsJumpTabs($selectedTab)
         #endif
     }
 
@@ -97,13 +99,13 @@ struct SettingsView: View {
     @AppStorage("settings.proMode") private var settingsProMode = false
     /// 搜索框「?」弹的玻璃选项单：新手引导 / App 文档（未写，占位）
     @State private var showHelpMenu = false
-    /// 重走一遍 onboarding 引导（设计 docs/未来愿景/design-onboarding.md）
-    @State private var showOnboarding = false
     /// 底部搜索胶囊实测高度，喂给 safeAreaInset 当列表底部留白。
     /// 原来写死 46 —— 那个数隐含「底下还有 home indicator 安全区补一截」，
     /// iPad 上设置是居中 form sheet（底边就是 sheet 边、没有额外安全区），
     /// 46 不够，胶囊压住最后一行（「关于记忆花园」被切半行）。初值仍是 46，测到有效值就换。
     @State private var searchBarHeight: CGFloat = 46
+    /// 报错「去改」跳 Prompt 页某一行：简洁版没有那几行，这一次走完整页（SettingsJump）
+    @State private var jumpFullPersona = false
     #endif
 
     #if os(iOS)
@@ -134,7 +136,7 @@ struct SettingsView: View {
                         settingsButton(icon: "brain.head.profile", title: "记忆", color: Theme.textSecondary, tab: .memory)
                     }
                     Section {
-                        settingsButton(icon: "network", title: "API", color: Theme.textSecondary, tab: .api)
+                        settingsButton(icon: "network", title: "模型和API", color: Theme.textSecondary, tab: .api)
                         settingsButton(icon: "chart.bar.xaxis", title: "用量", color: Theme.textSecondary, tab: .usage)
                         SettingsFoldRow(icon: "puzzlepiece.extension", title: "AI 连接与拓展", storageKey: "settingsFold.aiExt") {
                             settingsButton(icon: "speaker.wave.2", title: "语音", color: Theme.textSecondary, tab: .tts, guide: .middle)
@@ -155,17 +157,6 @@ struct SettingsView: View {
                     }
                     Section {
                         settingsButton(icon: "sidebar.right", title: "右栏", color: Theme.textSecondary, tab: .rightPanel)
-                        SettingsFoldRow(icon: "square.grid.2x2", title: "模块", storageKey: "settingsFold.modules") {
-                            settingsButton(icon: "ri-emoji-sticker", title: "贴纸", color: Theme.textSecondary, tab: .sticker, guide: .middle)
-                            settingsButton(icon: "heart.text.square", title: "健康", color: Theme.textSecondary, tab: .health, guide: .middle)
-                            settingsButton(icon: "calendar", title: "日历", color: Theme.textSecondary, tab: .calendar, guide: .middle)
-                            #if PERSONAL_APPS
-                            settingsButton(icon: "chart.line.uptrend.xyaxis", title: "交易", color: Theme.textSecondary, tab: .trading, guide: .middle)
-                            #endif
-                            settingsButton(icon: "books.vertical", title: "书房", color: Theme.textSecondary, tab: .reading, guide: .middle)
-                            settingsButton(icon: "abc", title: "单词", color: Theme.textSecondary, tab: .vocab, guide: .middle)
-                            settingsButton(icon: "person.2", title: "群聊", color: Theme.textSecondary, tab: .groupChat, guide: .last)
-                        }
                     }
                     Section {
                         SettingsFoldRow(icon: "externaldrive", title: "储存与文件", storageKey: "settingsFold.storage") {
@@ -195,7 +186,7 @@ struct SettingsView: View {
                         settingsButton(icon: "brain.head.profile", title: "记忆", color: Theme.textSecondary, tab: .memory)
                     }
                     Section {
-                        settingsButton(icon: "network", title: "模型（API）", color: Theme.textSecondary, tab: .api)
+                        settingsButton(icon: "network", title: "模型和API", color: Theme.textSecondary, tab: .api)
                         settingsButton(icon: "chart.bar.xaxis", title: "用量", color: Theme.textSecondary, tab: .usage)
                     }
                 }
@@ -223,7 +214,7 @@ struct SettingsView: View {
                 case .theme: ThemeLibraryPage()
                 case .persona:
                     // lite 走简化「AI 性格」页，pro 走完整 Prompt 页；同一份插槽数据
-                    if settingsProMode { PersonaSettingsTab() } else { LitePersonaPage() }
+                    if settingsProMode || jumpFullPersona { PersonaSettingsTab() } else { LitePersonaPage() }
                 case .api: APISettingsTab()
                 case .usage: UsageSettingsPage()
                 case .xiaoya: XiaoyaSettingsTab()
@@ -306,9 +297,8 @@ struct SettingsView: View {
                 SettingsSearchPanel(isPresented: $showSearchPanel, onSelect: jumpToSearchResult)
             }
             .overlay {
-                SettingsHelpMenu(isPresented: $showHelpMenu, onOnboarding: { showOnboarding = true }, onManual: { selectedSettingsTab = .manual })
+                SettingsHelpMenu(isPresented: $showHelpMenu, onOnboarding: replayOnboarding, onManual: { selectedSettingsTab = .manual })
             }
-            .fullScreenCover(isPresented: $showOnboarding) { OnboardingFlowView() }
             .scrollDismissesKeyboard(.interactively)
             // 点外面收键盘：window 层挂 cancelsTouchesInView=false 的识别器，不拦点击、不打架
             .background(KeyboardDismissInstaller())
@@ -317,6 +307,15 @@ struct SettingsView: View {
         .background(Theme.sidebarBg.ignoresSafeArea())
         .toolbarBackground(.hidden, for: .navigationBar)
         .onAppear { BreadcrumbLog.shared.add("⚙️", "打开设置") }
+    }
+    #endif
+
+    #if os(iOS)
+    /// 新手引导（plan-onboarding-xiaoya-impl §10-6）：关设置、打开小芽 app、从分流卡重走
+    private func replayOnboarding() {
+        AssistantEngine.shared.script.replay()
+        dismiss()
+        XiaoyaApp.open()
     }
     #endif
 
@@ -427,16 +426,30 @@ struct SettingsView: View {
             MacSettingsPage(tab: selectedTab) { macTabContent(selectedTab) }
                 .navigationTitle(selectedTab.rawValue)   // 页名在 unified toolbar 里，紧挨 ‹ ›
                 .transaction { $0.animation = nil }
+                #if DEBUG || PERF_BENCH
+                .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "settings:\(selectedTab.rawValue)") } }
+                .onAppear { PerfCountMac.hit(.settingsAppear) }
+                .onAppear { PerfHarnessMacDriver.appeared(selectedTab.rawValue) }
+                .id(PerfHarnessMac.enabled ? selectedTab.rawValue : "ordinary-settings-page")
+                #endif
         }
         .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         .frame(minWidth: 780, minHeight: 560)
         .onAppear {
+            #if DEBUG || PERF_BENCH
+            if PerfHarnessMac.enabled { PerfHarnessMacDriver.settingsTabs = macTabs.map(\.rawValue) }
+            #endif
             BreadcrumbLog.shared.add("⚙️", "打开设置")
             consumeWorkspaceRequest()
+            if let tab = Self.pendingMacTab {
+                Self.pendingMacTab = nil
+                if macTabs.contains(tab) { selectedTab = tab }
+            }
         }
         .onChange(of: workspacePreferences.settingsRequested) { _, _ in consumeWorkspaceRequest() }
         // 页面里的跳转行（Claude Code 页「去『让手机连这台 Mac』」）：object = 目标 tab 的 rawValue
         .onReceive(NotificationCenter.default.publisher(for: .settingsOpenTab)) { note in
+            Self.pendingMacTab = nil
             guard let raw = note.object as? String, let tab = SettingsTab(rawValue: raw), macTabs.contains(tab) else { return }
             macSearchText = ""
             selectedTab = tab
@@ -450,7 +463,18 @@ struct SettingsView: View {
         #endif
         .background(ShellStyle.windowBackground)
         .background(MacSettingsWindowStyle())
+        #if DEBUG || PERF_BENCH
+        .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "settingsRoot") } }
+        #endif
         .background(MacScrollbars())
+    }
+
+    /// 设置窗口外要开到某一页（编辑器「版本历史」→ 去设置开启）：窗口已开走通知，没开先存着、onAppear 取
+    @MainActor static var pendingMacTab: SettingsTab?
+
+    @MainActor static func requestMacTab(_ tab: SettingsTab) {
+        pendingMacTab = tab
+        NotificationCenter.default.post(name: .settingsOpenTab, object: tab.rawValue)
     }
 
     private func consumeWorkspaceRequest() {
@@ -464,13 +488,16 @@ struct SettingsView: View {
         let query = macSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         // A1：注册表 4 条 `.theme` 条目一字不动（动了会改 iOS 路由），mac 这边把命中折算成 `.appearance`
         // ——主题库在 mac 是外观页的二级页，入口就在外观页前部
-        let matches = Set(SettingsSearchEntry.all.filter { !$0.opensCardLibrarySettings && $0.matchScore(for: query) != nil }
+        // 卡库页签的条目在 mac 只有世界书 / 正则能落回旧设置页（侧栏「内容」组，只在搜索时出现）
+        let macCardLibraryFallbacks: Set<String?> = [nil, RightPanelNavigator.cardLibraryWorldBookTabTargetId, RightPanelNavigator.cardLibraryRegexTabTargetId]
+        let matches = Set(SettingsSearchEntry.all.filter { macCardLibraryFallbacks.contains($0.cardLibraryTarget) && $0.matchScore(for: query) != nil }
             .compactMap(\.tab)
             .map { $0 == .theme ? SettingsTab.appearance : $0 })
         return MacSettingsSidebarGroup.all.compactMap { group in
+            if group.searchOnly && query.isEmpty { return nil }
             let tabs = group.tabs.filter { macTabs.contains($0) &&
                 (query.isEmpty || $0.rawValue.localizedCaseInsensitiveContains(query) || matches.contains($0)) }
-            return tabs.isEmpty ? nil : MacSettingsSidebarGroup(title: group.title, tabs: tabs)
+            return tabs.isEmpty ? nil : MacSettingsSidebarGroup(title: group.title, tabs: tabs, searchOnly: group.searchOnly)
         }
     }
 
@@ -584,9 +611,9 @@ struct SettingsView: View {
     /// 搜索结果跳转：先展开目标所在折叠组（否则返回根列表按钮「消失」），再赋值 push。
     /// 面板收起与 push 同帧会打架，延一拍（rootshell :1300-1306 同款做法）。
     private func jumpToSearchResult(_ entry: SettingsSearchEntry) {
-        // 卡库设置页签的行：关设置，交给 ContentView 打开卡库（⑥）
-        if entry.opensCardLibrarySettings, let rightPanelNavigator {
-            rightPanelNavigator.pendingTarget = .init(tool: "cardLibrary", id: RightPanelNavigator.cardLibrarySettingsTargetId)
+        // 卡库页签里的行（设置 / 世界书 / 正则）：关设置，交给 ContentView 打开卡库对应页签（⑥）
+        if let cardLibraryTarget = entry.cardLibraryTarget, let rightPanelNavigator {
+            rightPanelNavigator.pendingTarget = .init(tool: "cardLibrary", id: cardLibraryTarget)
             dismiss()
             return
         }

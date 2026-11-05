@@ -119,7 +119,7 @@ final class ClaudeExportDownloader {
     init(manifest: ClaudeExportManifest, only: Set<String>? = nil) {
         packages = manifest.packages.filter { $0.isNeeded && (only?.contains($0.filename) ?? true) }
         expiresAt = manifest.expiresAt
-        directory = FileManager.default.temporaryDirectory
+        directory = AppPaths.temporaryDirectory
             .appendingPathComponent("\(ExportPackageScanner.stagingPrefix)claude-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let configuration = WKWebViewConfiguration()

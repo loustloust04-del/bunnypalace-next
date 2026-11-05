@@ -80,11 +80,13 @@ struct TurnActivityCardView: View {
 struct TurnActivityHost: View {
     let viewModel: ConversationViewModel
     let conversationId: String
+    let spacingBefore: CGFloat
     let onStop: () -> Void
 
     var body: some View {
         if let activity = viewModel.turnActivity(for: conversationId) {
             TurnActivityCardView(activity: activity, blocked: blocked, onStop: onStop)
+                .padding(.top, spacingBefore)
         }
     }
 

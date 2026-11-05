@@ -18,8 +18,8 @@ struct CodexAdapter: CodingSessionAdapter {
         if let custom = environment["CODEX_HOME"], !custom.isEmpty {
             let url = URL(fileURLWithPath: custom, isDirectory: true)
             let fm = FileManager.default
-            if fm.fileExists(atPath: url.appendingPathComponent("sessions").path)
-                || fm.fileExists(atPath: url.appendingPathComponent("archived_sessions").path) {
+            if fm.fileExists(atPath: AppPaths.checkedPath(url.appendingPathComponent("sessions").path))
+                || fm.fileExists(atPath: AppPaths.checkedPath(url.appendingPathComponent("archived_sessions").path)) {
                 root = url
             }
         }
@@ -120,7 +120,7 @@ struct CodexAdapter: CodingSessionAdapter {
 
     /// 只读读 state DB（`CodingSQLiteReader` 三级：readonly 直开 + 探测 → 拷三件套 → 放弃）
     static func readThreads(_ db: URL) -> [ThreadRow]? {
-        guard FileManager.default.fileExists(atPath: db.path) else { return nil }
+        guard FileManager.default.fileExists(atPath: AppPaths.checkedPath(db.path)) else { return nil }
         var rows: [ThreadRow] = []
         let sql = """
             SELECT id, rollout_path, cwd, title, name, tokens_used, archived,
@@ -437,7 +437,7 @@ extension CodexAdapter {
     static func isRolloutStore(_ dir: URL) -> Bool {
         guard !CodingLocations.isDirectory(dir.appendingPathComponent("sessions")),
               !CodingLocations.isDirectory(dir.appendingPathComponent("archived_sessions")) else { return false }
-        return ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []).contains { entry in
+        return ((try? AppPaths.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []).contains { entry in
             let name = entry.lastPathComponent
             return (CodingLocations.isDirectory(entry) && name.count == 4 && name.allSatisfy { $0.isASCII && $0.isNumber })
                 || (name.hasPrefix("rollout-") && name.hasSuffix(".jsonl"))

@@ -90,20 +90,33 @@ struct AssistantAction: Identifiable, Equatable, Codable {
 
 /// 助手面板里的一条消息
 struct AssistantChatMessage: Identifiable, Equatable, Codable {
+    /// 这条是哪来的（plan-onboarding-xiaoya-impl §4.1）：nil = 普通对话（含旧数据）
+    enum Source: String, Codable {
+        case script     // 本地剧本说的 / 点卡片生成的「你」气泡：不进模型历史
+        case handoff    // 「钥匙接好了 · 从这里起小芽用 M 说话」分隔线：进 wire 时换成一句系统备注
+        case divider    // 「再走一遍」分隔线（设置重走引导，§7-5）：只画线，不进模型历史
+    }
+
     var id = UUID()
     var isUser: Bool
     var text: String
     var actions: [AssistantAction] = []   // 仅 assistant 消息：本轮产出的提案（v2 起处理完也留着，显示状态）
     var createdAt = Date()
+    var source: Source?
+    /// 引导卡 + 答案；text 里总写一句可读兜底（卡的问句 / 收起后的摘要），旧版 App 读到时显示成普通一句话
+    var card: XiaoyaCardState?
 
-    init(isUser: Bool, text: String, actions: [AssistantAction] = [], createdAt: Date = Date()) {
+    init(isUser: Bool, text: String, actions: [AssistantAction] = [], createdAt: Date = Date(),
+         source: Source? = nil, card: XiaoyaCardState? = nil) {
         self.isUser = isUser
         self.text = text
         self.actions = actions
         self.createdAt = createdAt
+        self.source = source
+        self.card = card
     }
 
-    private enum CodingKeys: String, CodingKey { case id, isUser, text, actions, createdAt }
+    private enum CodingKeys: String, CodingKey { case id, isUser, text, actions, createdAt, source, card }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -112,6 +125,9 @@ struct AssistantChatMessage: Identifiable, Equatable, Codable {
         text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
         actions = try c.decodeIfPresent([AssistantAction].self, forKey: .actions) ?? []
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        // 新版写的未知来源 / 坏卡不炸整份对话：来源不认识当普通话，卡解不开当没卡（text 兜底照显示）
+        source = (try? c.decodeIfPresent(String.self, forKey: .source)).flatMap(Source.init(rawValue:))
+        card = try? c.decodeIfPresent(XiaoyaCardState.self, forKey: .card)
     }
 }
 

@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>笔刷与便利贴</title>
+<link href="https://fonts.googleapis.com/css2?family=Long+Cang&family=Ma+Shan+Zheng&family=ZCOOL+KuaiLe&family=Zhi+Mang+Xing&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f6f1e7; --card:#fffdf8; --ink:#3b352d; --muted:#9a8f80; --line:#e6ddcd;
+  --mint:#a9d2ce; --mint-d:#6fa9a2; --accent:#b8866b;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,"PingFang SC",sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:14px 20px 0;max-width:1100px;margin:0 auto}
+header h1{font-size:17px;margin:0;font-weight:600}
+.tabs{display:flex;gap:4px;background:#ece4d6;border-radius:999px;padding:3px}
+.tabs button{border:0;background:transparent;padding:6px 16px;border-radius:999px;font:inherit;color:var(--muted);cursor:pointer}
+.tabs button.on{background:var(--card);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.hint{color:var(--muted);font-size:12px;max-width:1100px;margin:6px auto 0;padding:0 20px}
+main{max-width:1100px;margin:0 auto;padding:12px 20px 40px}
+.pane{display:none}.pane.on{display:block}
+
+/* ---------- 画画 ---------- */
+.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:10px 14px;margin-bottom:12px}
+.group{display:flex;align-items:center;gap:6px}
+.group > .lbl{font-size:11px;color:var(--muted);margin-right:2px}
+.tool{border:1px solid transparent;background:transparent;border-radius:12px;padding:5px 10px;font:inherit;cursor:pointer;color:var(--ink);display:flex;align-items:center;gap:6px}
+.tool.on{background:#eef6f4;border-color:var(--mint)}
+.tool svg{width:22px;height:22px}
+.sw{width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0;box-shadow:inset 0 0 0 1px rgba(0,0,0,.08)}
+.sw.on{border-color:var(--ink)}
+input[type=range]{width:90px;accent-color:var(--mint-d)}
+.sep{width:1px;height:24px;background:var(--line)}
+.stage{position:relative;border-radius:18px;overflow:hidden;box-shadow:0 2px 14px rgba(80,60,30,.10);touch-action:none;user-select:none;-webkit-user-select:none}
+.stage canvas{position:absolute;left:0;top:0;width:100%;height:100%}
+#paint{mix-blend-mode:multiply}
+.stage.magnet{border-radius:26px;padding:14px;background:linear-gradient(#cca8ba,#c39cb0)}
+.stage.magnet .screen{border-radius:12px;border:7px solid #a9d2ce}
+.screen{position:relative;width:100%;height:100%;overflow:hidden}
+.mini{font-size:11px;color:var(--muted)}
+
+/* ---------- 便利贴 ---------- */
+.desk{position:relative;background:var(--bg);border:1px solid var(--line);border-radius:18px;min-height:760px;padding:24px;overflow:hidden}
+.desk .bubble{max-width:58%;padding:10px 14px;border-radius:18px;margin:6px 0;font-size:14px}
+.desk .bubble.ai{background:#fffdf8}
+.desk .bubble.me{background:#dcefe9;margin-left:auto}
+.notes{display:flex;flex-wrap:wrap;gap:34px 30px;margin-top:20px;padding:10px 6px}
+.cell{position:relative;display:flex;flex-direction:column;align-items:center;gap:8px}
+.cell .name{font-size:11px;color:var(--muted)}
+.note{position:relative;z-index:1;width:176px;min-height:150px;transform:rotate(var(--rot,0deg));transition:transform .25s ease, box-shadow .25s;cursor:text;isolation:isolate;
+  --c:#fff3b8; color:#3b352d; font-size:15px; line-height:24px}
+.note .txt{outline:none;min-height:100%;white-space:pre-wrap;word-break:break-word}
+.note.editing{transform:rotate(0) scale(1.12);z-index:5}
+.note .txt:empty::before{content:'写点什么…';color:rgba(0,0,0,.28)}
+
+/* 方形便利贴：底角翘、上浅下深 */
+.s-sticky{background:linear-gradient(172deg,rgba(255,255,255,.45),rgba(255,255,255,0) 38%),linear-gradient(var(--c),var(--c));padding:20px 16px 18px;
+  box-shadow:0 1px 1px rgba(0,0,0,.06),10px 14px 12px -10px rgba(70,50,20,.38),-4px 8px 10px -10px rgba(70,50,20,.2);border-radius:2px 2px 18px 3px/2px 2px 6px 3px;
+  background-image:linear-gradient(172deg,rgba(255,255,255,.45),rgba(255,255,255,0) 38%),linear-gradient(315deg,rgba(120,90,40,.12),rgba(0,0,0,0) 22%),linear-gradient(var(--c),var(--c))}
+/* 横线纸 */
+.s-lined{background:linear-gradient(90deg,transparent 30px,rgba(214,120,110,.55) 30px,rgba(214,120,110,.55) 31px,transparent 31px),
+  repeating-linear-gradient(#fffdf6 0 23px,#c9dbe0 23px 24px);background-color:#fffdf6;padding:24px 14px 12px 40px;
+  box-shadow:0 1px 2px rgba(0,0,0,.1),0 8px 14px -8px rgba(70,50,20,.25)}
+/* 方格纸 */
+.s-grid{background:linear-gradient(rgba(150,180,170,.35) 1px,transparent 1px) 0 0/12px 12px,linear-gradient(90deg,rgba(150,180,170,.35) 1px,transparent 1px) 0 0/12px 12px,#fbfaf4;padding:18px 16px;
+  box-shadow:0 1px 2px rgba(0,0,0,.1),0 8px 14px -8px rgba(70,50,20,.25)}
+/* 牛皮纸 */
+.s-kraft{background-color:#c8a57a;color:#3d2c1a;padding:20px 16px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3CfeColorMatrix values='0 0 0 0 .35 0 0 0 0 .25 0 0 0 0 .12 0 0 0 .35 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  box-shadow:0 1px 2px rgba(0,0,0,.15),0 8px 14px -8px rgba(70,50,20,.35)}
+/* 索引卡 */
+.s-index{background:linear-gradient(transparent 38px,rgba(214,100,100,.6) 38px,rgba(214,100,100,.6) 39px,transparent 39px),repeating-linear-gradient(transparent 0 62px,transparent 62px),
+  repeating-linear-gradient(#fff 0 23px,#d6e3ea 23px 24px) 0 39px/100% calc(100% - 39px) no-repeat,#fff;padding:9px 14px 10px;
+  box-shadow:0 1px 2px rgba(0,0,0,.12),0 8px 14px -8px rgba(70,50,20,.25)}
+.s-index .txt{line-height:24px}
+.s-index .txt::first-line{font-weight:600}
+/* 拍立得 */
+.s-polaroid{background:#fffefb;padding:10px 10px 8px;box-shadow:0 1px 3px rgba(0,0,0,.14),0 10px 16px -8px rgba(70,50,20,.3);width:170px}
+.s-polaroid .photo{height:118px;background:linear-gradient(160deg,var(--c),#f4e9da);margin-bottom:6px;box-shadow:inset 0 0 0 1px rgba(0,0,0,.05)}
+.s-polaroid .txt{min-height:30px;text-align:center}
+/* 小票 */
+.s-receipt{background:#fffefa;font-family:"American Typewriter",ui-monospace,monospace;font-size:13px;line-height:20px;padding:16px 14px 24px;
+  -webkit-mask:linear-gradient(#000,#000) top/100% calc(100% - 8px) no-repeat,conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) bottom/12px 8px repeat-x;
+          mask:linear-gradient(#000,#000) top/100% calc(100% - 8px) no-repeat,conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) bottom/12px 8px repeat-x;
+  filter:drop-shadow(0 4px 6px rgba(70,50,20,.18))}
+/* 撕边纸条 */
+.s-torn{padding:16px 22px;min-height:96px;filter:drop-shadow(0 4px 6px rgba(70,50,20,.2))}
+.s-torn .tear{position:absolute;inset:0;background:var(--c);z-index:-1}
+/* 折角 */
+.s-fold{background:linear-gradient(225deg,transparent 22px,var(--c) 22px);padding:20px 16px;filter:drop-shadow(0 4px 6px rgba(70,50,20,.2))}
+.s-fold::before{content:'';position:absolute;top:0;right:0;width:31px;height:31px;background:linear-gradient(45deg,rgba(0,0,0,.12),rgba(0,0,0,.02) 45%,transparent 50%);clip-path:polygon(0 0,0 100%,100% 100%);
+  background-color:color-mix(in srgb,var(--c) 85%,#000 6%)}
+/* 和纸胶带 */
+.s-tape{background:#fffdf7;padding:24px 16px 16px;box-shadow:0 1px 2px rgba(0,0,0,.1),0 8px 14px -8px rgba(70,50,20,.25)}
+.s-tape::before,.s-tape::after{content:'';position:absolute;width:70px;height:20px;top:-9px;background:repeating-linear-gradient(45deg,color-mix(in srgb,var(--c) 85%,transparent) 0 6px,color-mix(in srgb,var(--c) 55%,transparent) 6px 12px);opacity:.9}
+.s-tape::before{left:-14px;transform:rotate(-28deg)}
+.s-tape::after{right:-14px;transform:rotate(28deg)}
+/* 线圈本撕页 */
+.s-spiral{background:radial-gradient(circle at 50% 9px,var(--bg) 4.5px,transparent 5px) 6px 0/18px 20px repeat-x,
+  repeating-linear-gradient(#fffdf6 0 23px,#d7e2dc 23px 24px) 0 26px/100% 100% no-repeat,#fffdf6;padding:26px 14px 12px;
+  box-shadow:0 1px 2px rgba(0,0,0,.1),0 8px 14px -8px rgba(70,50,20,.25)}
+/* 描图纸（替原「毛玻璃」：半透但字看得清） */
+.s-vellum{background:rgba(255,255,255,.62);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.8);padding:18px 16px;
+  box-shadow:0 6px 16px -8px rgba(70,50,20,.3)}
+.vellum-back{position:absolute;z-index:0;width:120px;height:120px;border-radius:50%;background:radial-gradient(#f2b7b3,#e9c98f);filter:blur(1px);z-index:-1}
+
+/* 编辑浮条 */
+.ebar{position:fixed;z-index:50;display:none;background:rgba(255,253,248,.96);border:1px solid var(--line);border-radius:16px;box-shadow:0 8px 24px rgba(60,40,20,.18);padding:8px 10px;gap:8px;flex-direction:column;-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+.ebar.on{display:flex}
+.ebar .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.ebar .st{width:30px;height:24px;border-radius:5px;border:2px solid transparent;cursor:pointer;font-size:10px;color:#5b5145;background:#f3ede2;padding:0}
+.ebar .st.on{border-color:var(--mint-d)}
+.ebar .ft{border:0;background:#f3ede2;border-radius:999px;padding:3px 10px;font-size:13px;cursor:pointer}
+.ebar .ft.on{background:#dcefe9}
+.addbtn{position:absolute;right:20px;top:20px;border:0;background:var(--mint);color:#fff;border-radius:999px;padding:8px 16px;font:inherit;font-weight:600;cursor:pointer;box-shadow:0 2px 8px rgba(80,140,130,.35)}
+</style>
+</head>
+<body>
+<header>
+  <h1>笔刷与便利贴 · 小样</h1>
+  <div class="tabs"><button data-tab="draw" class="on">画画</button><button data-tab="notes">便利贴</button></div>
+</header>
+<p class="hint" id="hint"></p>
+<main>
+  <!-- 画画 -->
+  <section class="pane on" id="pane-draw">
+    <div class="toolbar">
+      <div class="group" id="tools"></div>
+      <div class="sep"></div>
+      <div class="group" id="colors"></div>
+      <div class="sep"></div>
+      <div class="group"><span class="lbl">粗细</span><input type="range" id="size" min="2" max="60" value="22"></div>
+      <div class="group" id="g-water"><span class="lbl">水量</span><input type="range" id="water" min="0" max="100" value="60"></div>
+      <div class="group" id="g-angle"><span class="lbl">笔尖角</span><input type="range" id="angle" min="0" max="90" value="35"></div>
+      <div class="sep"></div>
+      <div class="group" id="papers"></div>
+      <div class="sep"></div>
+      <div class="group"><button class="tool" id="undo">撤销</button><button class="tool" id="clear">清空</button></div>
+    </div>
+    <div class="stage" id="stage"><div class="screen" id="screen">
+      <canvas id="paper"></canvas><canvas id="paint"></canvas><canvas id="live"></canvas>
+    </div></div>
+    <p class="mini">铅笔 / 马克笔 / 蜡笔等在 app 里走 PencilKit（叠在这一层上面），小样里只做自写的水彩和钢笔。有触控笔时吃压力，手指 / 鼠标按速度：慢 = 粗、浓。</p>
+  </section>
+
+  <!-- 便利贴 -->
+  <section class="pane" id="pane-notes">
+    <div class="desk" id="desk">
+      <button class="addbtn" id="add">＋ 贴一张</button>
+      <div class="bubble ai">今天的晚饭想吃什么？我可以帮你列个清单。</div>
+      <div class="bubble me">番茄牛腩！还要一点甜的</div>
+      <div class="notes" id="notes"></div>
+    </div>
+  </section>
+</main>
+<div class="ebar" id="ebar">
+  <div class="row" id="eb-styles"></div>
+  <div class="row" id="eb-colors"></div>
+  <div class="row" id="eb-fonts"></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const params = new URLSearchParams(location.search);
+
+/* ================= tabs ================= */
+const hints = {
+  draw: '直接在纸上画。水彩抬笔后会晕开、边缘积色、和下面的颜色叠深；钢笔有尖头 / 平头两种。换纸在工具栏右边。',
+  notes: '点任意一张直接改字，上面浮条切样式 / 颜色 / 字体，点空白处收起。「＋ 贴一张」新建后直接打字。'
+};
+function setTab(t){
+  document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===t));
+  document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('on',p.id==='pane-'+t));
+  $('#hint').textContent = hints[t];
+  if(t==='draw') resize();
+}
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
+
+/* ================= 画画 ================= */
+const dpr = Math.min(window.devicePixelRatio||1, 2);
+const paperCv=$('#paper'), paintCv=$('#paint'), liveCv=$('#live');
+const paperCtx=paperCv.getContext('2d'), paintCtx=paintCv.getContext('2d',{willReadFrequently:true}), liveCtx=liveCv.getContext('2d');
+let W=0,H=0, noise=null, low=null;
+
+const TOOLS = [
+  {id:'water', name:'水彩', icon:'<path d="M12 3c3 4.5 6 7.6 6 11a6 6 0 0 1-12 0c0-3.4 3-6.5 6-11z" fill="#9cc4d8" opacity=".8"/><path d="M9 15a3 3 0 0 0 3 3" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round"/>'},
+  {id:'pen', name:'钢笔·尖头', icon:'<path d="M5 19l3-1 9-9-2-2-9 9z" fill="#3b4a5e"/><path d="M15 7l2-2 2 2-2 2z" fill="#b8866b"/>'},
+  {id:'nib', name:'钢笔·平头', icon:'<path d="M4 20l5-2 9-9-3-3-9 9z" fill="#5a3a3a"/><rect x="14" y="3" width="6" height="4" rx="1" transform="rotate(45 17 5)" fill="#b8866b"/>'},
+  {id:'eraser', name:'橡皮', icon:'<rect x="5" y="9" width="14" height="8" rx="2" transform="rotate(-35 12 13)" fill="#f2c4c0"/><rect x="5" y="13" width="7" height="5" rx="1.5" transform="rotate(-35 12 13)" fill="#e09c96"/>'},
+];
+const WATER_COLORS = ['#c8505a','#e58a5c','#e9b949','#6f9a4c','#2f7f7a','#3a6fb0','#6a5aa8','#8a5a44','#4a5560'];
+const INK_COLORS = ['#22314a','#1c1c1c','#5a2b2b','#2c4a3a','#4a3a6a','#8a3b2e'];
+const PAPERS = [{id:'cream',name:'奶白'},{id:'cold',name:'水彩纸'},{id:'grid',name:'方格'},{id:'magnet',name:'磁性画板'}];
+const st = {tool:'water', color:WATER_COLORS[5], ink:INK_COLORS[0], paper:'cold'};
+
+function buildToolbar(){
+  $('#tools').innerHTML = TOOLS.map(t=>`<button class="tool ${st.tool===t.id?'on':''}" data-t="${t.id}"><svg viewBox="0 0 24 24">${t.icon}</svg>${t.name}</button>`).join('');
+  $('#tools').querySelectorAll('button').forEach(b=>b.onclick=()=>{st.tool=b.dataset.t; buildToolbar();});
+  const isWater = st.tool==='water';
+  const list = isWater ? WATER_COLORS : INK_COLORS;
+  const cur = isWater ? st.color : st.ink;
+  $('#colors').innerHTML = st.tool==='eraser' ? '<span class="mini">擦颜料层</span>' :
+    list.map(c=>`<button class="sw ${c===cur?'on':''}" style="background:${c}" data-c="${c}"></button>`).join('');
+  $('#colors').querySelectorAll('.sw').forEach(b=>b.onclick=()=>{ if(isWater) st.color=b.dataset.c; else st.ink=b.dataset.c; buildToolbar();});
+  $('#g-water').style.display = isWater?'flex':'none';
+  $('#g-angle').style.display = st.tool==='nib'?'flex':'none';
+  $('#papers').innerHTML = '<span class="lbl">纸</span>'+PAPERS.map(p=>`<button class="tool ${st.paper===p.id?'on':''}" data-p="${p.id}">${p.name}</button>`).join('');
+  $('#papers').querySelectorAll('button').forEach(b=>b.onclick=()=>{st.paper=b.dataset.p; buildToolbar(); drawPaper();});
+}
+
+function resize(){
+  const stage=$('#stage');
+  const w = stage.parentElement.clientWidth;
+  const h = Math.max(380, Math.min(640, window.innerHeight - 220));
+  stage.style.height = h+'px';
+  const scr=$('#screen').getBoundingClientRect();
+  const nw=Math.round(scr.width), nh=Math.round(scr.height);
+  if(nw===W && nh===H) return;
+  let keep=null;
+  if(W>0){ keep=document.createElement('canvas'); keep.width=paintCv.width; keep.height=paintCv.height; keep.getContext('2d').drawImage(paintCv,0,0); }
+  W=nw; H=nh;
+  for(const c of [paperCv,paintCv,liveCv]){ c.width=W*dpr; c.height=H*dpr; }
+  noise = makeNoise(W*dpr, H*dpr);
+  low = makeNoise(W*dpr, H*dpr, [18,46,110], [.25,.45,.3]);
+  if(keep) paintCtx.drawImage(keep,0,0);
+  drawPaper();
+}
+
+/* 值噪声（两层），给纸纹 / 水彩颗粒用 */
+function makeNoise(w,h,sc=[3,9,26],wt=[.5,.32,.18]){
+  const g = (s)=>{ const gw=Math.ceil(w/s)+2, gh=Math.ceil(h/s)+2, a=new Float32Array(gw*gh); for(let i=0;i<a.length;i++) a[i]=Math.random(); return {gw,a,s}; };
+  const L=sc.map(v=>g(v*dpr));
+  const out=new Float32Array(w*h);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    let v=0;
+    for(let k=0;k<L.length;k++){ const {gw,a,s}=L[k]; const fx=x/s, fy=y/s, ix=fx|0, iy=fy|0, tx=fx-ix, ty=fy-iy;
+      const sx=tx*tx*(3-2*tx), sy=ty*ty*(3-2*ty);
+      const i0=iy*gw+ix; const a0=a[i0]+(a[i0+1]-a[i0])*sx, a1=a[i0+gw]+(a[i0+gw+1]-a[i0+gw])*sx; v+=wt[k]*(a0+(a1-a0)*sy); }
+    out[y*w+x]=v;
+  }
+  return out;
+}
+
+function drawPaper(){
+  const stage=$('#stage');
+  stage.classList.toggle('magnet', st.paper==='magnet');
+  // 换纸会改屏幕尺寸（磁性画板多一圈壳）
+  const scr=$('#screen').getBoundingClientRect();
+  if(Math.round(scr.width)!==W || Math.round(scr.height)!==H){ W=0; resize(); return; }
+  const c=paperCtx, w=W*dpr, h=H*dpr;
+  c.setTransform(1,0,0,1,0,0);
+  const base = st.paper==='magnet' ? [224,227,215] : st.paper==='cold' ? [250,247,240] : [252,249,242];
+  const img=c.createImageData(w,h), d=img.data;
+  const amp = st.paper==='cold' ? 26 : st.paper==='magnet' ? 6 : 7;
+  for(let i=0,p=0;i<w*h;i++,p+=4){ const n=(noise[i]-.5)*amp; d[p]=base[0]+n; d[p+1]=base[1]+n; d[p+2]=base[2]+n*1.1; d[p+3]=255; }
+  c.putImageData(img,0,0);
+  c.setTransform(dpr,0,0,dpr,0,0);
+  if(st.paper==='grid'){ c.strokeStyle='rgba(140,175,168,.32)'; c.lineWidth=1/dpr*1.2; c.beginPath(); for(let x=16;x<W;x+=16){c.moveTo(x,0);c.lineTo(x,H);} for(let y=16;y<H;y+=16){c.moveTo(0,y);c.lineTo(W,y);} c.stroke(); }
+  if(st.paper==='magnet'){ c.fillStyle='#d1d4c7'; for(let x=5;x<W;x+=5) for(let y=5;y<H;y+=5){ c.fillRect(x-.6,y-.6,1.2,1.2);} }
+}
+
+/* ---------- 笔画几何 ---------- */
+function resample(raw, step){
+  // Catmull-Rom 插值 + 等距采样，带 w（半宽）/ v（速度）/ p（压力）
+  if(raw.length<2) return raw.map(p=>({...p}));
+  const out=[{...raw[0]}];
+  for(let i=0;i<raw.length-1;i++){
+    const p0=raw[Math.max(0,i-1)], p1=raw[i], p2=raw[i+1], p3=raw[Math.min(raw.length-1,i+2)];
+    const len=Math.hypot(p2.x-p1.x,p2.y-p1.y), n=Math.max(1,Math.ceil(len/step));
+    for(let k=1;k<=n;k++){ const t=k/n, t2=t*t, t3=t2*t;
+      const cr=(a,b,c,d)=>.5*((2*b)+(-a+c)*t+(2*a-5*b+4*c-d)*t2+(-a+3*b-3*c+d)*t3);
+      out.push({x:cr(p0.x,p1.x,p2.x,p3.x), y:cr(p0.y,p1.y,p2.y,p3.y), w:p1.w+(p2.w-p1.w)*t, v:p1.v+(p2.v-p1.v)*t}); }
+  }
+  return out;
+}
+function outline(pts){
+  if(pts.length===1){ const p=pts[0], r=[]; for(let a=0;a<Math.PI*2;a+=.3) r.push({x:p.x+Math.cos(a)*p.w,y:p.y+Math.sin(a)*p.w}); return r; }
+  const L=[],R=[];
+  for(let i=0;i<pts.length;i++){
+    const a=pts[Math.max(0,i-1)], b=pts[Math.min(pts.length-1,i+1)];
+    let dx=b.x-a.x, dy=b.y-a.y; const l=Math.hypot(dx,dy)||1; dx/=l; dy/=l;
+    const p=pts[i]; L.push({x:p.x-dy*p.w,y:p.y+dx*p.w}); R.push({x:p.x+dy*p.w,y:p.y-dx*p.w});
+  }
+  const cap=(p,from,to)=>{ const r=[]; let a0=Math.atan2(from.y-p.y,from.x-p.x), a1=Math.atan2(to.y-p.y,to.x-p.x); if(a1>a0) a1-=Math.PI*2; for(let a=a0-.35;a>a1;a-=.35) r.push({x:p.x+Math.cos(a)*p.w,y:p.y+Math.sin(a)*p.w}); return r; };
+  const e=pts[pts.length-1], s=pts[0];
+  return [...L, ...cap(e,L[L.length-1],R[R.length-1]), ...R.reverse(), ...cap(s,R[R.length-1]??R[0],L[0])];
+}
+function gauss(){ let u=0,v=0; while(!u)u=Math.random(); while(!v)v=Math.random(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); }
+function deform(poly, depth, varr){
+  // Hobbs 式递归变形：每条边插中点并沿随机方向推，方差逐层减半，边缘长出不规则的晕
+  let P=poly.map(p=>({x:p.x,y:p.y,v:p.v??varr}));
+  for(let d=0;d<depth;d++){
+    const N=[];
+    for(let i=0;i<P.length;i++){
+      const a=P[i], b=P[(i+1)%P.length]; N.push(a);
+      const vv=(a.v+b.v)/2, ang=Math.random()*Math.PI*2, m=gauss()*vv;
+      N.push({x:(a.x+b.x)/2+Math.cos(ang)*m, y:(a.y+b.y)/2+Math.sin(ang)*m, v:vv*(.4+Math.random()*.35)});
+    }
+    P=N;
+  }
+  return P;
+}
+function decimate(P, step){ const out=[P[0]]; let acc=0; for(let i=1;i<P.length;i++){ acc+=Math.hypot(P[i].x-P[i-1].x,P[i].y-P[i-1].y); if(acc>=step){ out.push(P[i]); acc=0; } } return out.length>=3?out:P; }
+function fillPoly(c,P){ c.beginPath(); c.moveTo(P[0].x,P[0].y); for(let i=1;i<P.length;i++) c.lineTo(P[i].x,P[i].y); c.closePath(); c.fill(); }
+function bbox(P,m){ let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9; for(const p of P){ if(p.x<x0)x0=p.x; if(p.y<y0)y0=p.y; if(p.x>x1)x1=p.x; if(p.y>y1)y1=p.y; }
+  x0=Math.floor(Math.max(0,x0-m)); y0=Math.floor(Math.max(0,y0-m)); x1=Math.ceil(Math.min(W,x1+m)); y1=Math.ceil(Math.min(H,y1+m)); return {x:x0,y:y0,w:Math.max(1,x1-x0),h:Math.max(1,y1-y0)}; }
+function hex(c){ return [1,3,5].map(i=>parseInt(c.slice(i,i+2),16)); }
+function offscreen(b){ const cv=document.createElement('canvas'); cv.width=Math.ceil(b.w*dpr); cv.height=Math.ceil(b.h*dpr); const c=cv.getContext('2d',{willReadFrequently:true}); c.setTransform(dpr,0,0,dpr,-b.x*dpr,-b.y*dpr); return {cv,c}; }
+function boxBlur(src,w,h,r){
+  const tmp=new Float32Array(w*h), out=new Float32Array(w*h); r=Math.max(1,r|0); const k=1/(2*r+1);
+  for(let pass=0;pass<2;pass++){
+    const a= pass===0?src:out;
+    for(let y=0;y<h;y++){ let acc=0; const row=y*w; for(let x=-r;x<=r;x++) acc+=a[row+Math.min(w-1,Math.max(0,x))];
+      for(let x=0;x<w;x++){ tmp[row+x]=acc*k; acc+=a[row+Math.min(w-1,x+r+1)]-a[row+Math.max(0,x-r)]; } }
+    for(let x=0;x<w;x++){ let acc=0; for(let y=-r;y<=r;y++) acc+=tmp[Math.min(h-1,Math.max(0,y))*w+x];
+      for(let y=0;y<h;y++){ out[y*w+x]=acc*k; acc+=tmp[Math.min(h-1,y+r+1)*w+x]-tmp[Math.max(0,y-r)*w+x]; } }
+  }
+  return out;
+}
+
+/* ---------- 水彩 ----------
+   思路：平滑笔形 → 低频噪声场扭一下边（水往纸纹里渗）→ 软阈值出边 → 边上一圈积色（干边）
+   → 中频噪声做颜料浓淡 → 高频纸纹做颗粒沉淀 → 水多时冲出水花。叠色走正片叠底（multiply）。 */
+function renderWatercolor(raw, color, size, water){
+  const pts=resample(raw, 3);
+  const ph=[Math.random()*6,Math.random()*6]; let s=0;
+  for(let i=0;i<pts.length;i++){ if(i) s+=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y);
+    pts[i].w*= .85+.18*Math.sin(s/size*.7+ph[0])+.08*Math.sin(s/size*1.9+ph[1]); }
+  const P=outline(pts);
+  const amp=size*(.22+.35*water);
+  const b=bbox(P, amp+size*.4+8);
+  const {cv,c}=offscreen(b);
+  c.fillStyle='#000'; fillPoly(c,P);
+  const w=cv.width, h=cv.height, img=c.getImageData(0,0,w,h), d=img.data;
+  const M=new Float32Array(w*h); for(let i=0;i<w*h;i++) M[i]=d[i*4+3]/255;
+  const S=boxBlur(M,w,h, Math.max(1.5, size*(.1+.12*water)*dpr));
+  const ox=Math.round(b.x*dpr), oy=Math.round(b.y*dpr), NW=W*dpr, NH=H*dpr;
+  const at=(F,x,y,ww,hh)=>F[Math.min(hh-1,Math.max(0,y))*ww+Math.min(ww-1,Math.max(0,x))];
+  const lw=(x,y)=>low[(((y%NH)+NH)%NH)*NW+(((x%NW)+NW)%NW)];
+  const seed=(Math.random()*400)|0, A=dpr*amp;
+  const soft=.06+.16*water;
+  const blooms=[];
+  if(water>.5 && pts.length>14){ const nb=water>.82?2:1; for(let q=0;q<nb;q++){ const p=pts[(pts.length*(.25+.5*Math.random()))|0];
+    blooms.push({x:(p.x-b.x)*dpr,y:(p.y-b.y)*dpr,r:p.w*(1.3+.5*Math.random())*dpr,o:(Math.random()*300)|0}); } }
+  const gran = st.paper==='cold' ? .55 : .22;
+  const [r,g,bl]=hex(color);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const gx=ox+x, gy=oy+y;
+    const u=(lw(gx+seed,gy)-.5)*2*A, v=(lw(gx,gy+seed)-.5)*2*A;
+    const m=at(S,(x+u)|0,(y+v)|0,w,h);
+    const i=y*w+x;
+    if(m<.02){ d[i*4+3]=0; continue; }
+    const t=Math.min(1,Math.max(0,(m-(.5-soft))/(2*soft))), a0=t*t*(3-2*t);
+    if(a0<=0){ d[i*4+3]=0; continue; }
+    // 干边：阈值附近一圈积色
+    const rim=Math.exp(-(((m-.5)/(soft*1.25+.04))**2));
+    const pig=lw(gx+seed*2,gy+seed);
+    let a=a0*(.42+.32*pig)+rim*a0*.42;
+    for(const bm of blooms){ const dx=x-bm.x, dy=y-bm.y; const re=bm.r*(.45+1.1*lw(gx*3+bm.o,gy*3)); const dist=Math.hypot(dx,dy);
+      if(dist<re) a*=.68+.3*(dist/re)**2; a+=.24*a0*Math.exp(-(((dist-re)/(1.4*dpr))**2)); }
+    const n=noise[Math.min(NH-1,gy)*NW+Math.min(NW-1,gx)] ?? .5;
+    a*=1-gran*(n-.45)*1.4;
+    d[i*4]=r; d[i*4+1]=g; d[i*4+2]=bl; d[i*4+3]=Math.min(.88,Math.max(0,a))*255;
+  }
+  c.putImageData(img,0,0);
+  return {cv,b};
+}
+
+/* ---------- 钢笔 ---------- */
+function renderPen(raw, color, size){
+  const pts=resample(raw, 1.2);
+  const n=pts.length;
+  for(let i=0;i<n;i++){ const t0=Math.min(1,i/8), t1=Math.min(1,(n-1-i)/14); pts[i].w *= (.35+.65*t0)*(.15+.85*Math.pow(t1,.7)); }
+  const P=outline(pts);
+  const b=bbox(P, size+8);
+  const {cv,c}=offscreen(b);
+  c.fillStyle=color; c.globalAlpha=1;
+  fillPoly(c,P);
+  // 积墨：起笔、慢处
+  c.globalAlpha=.55; c.beginPath(); c.arc(pts[0].x,pts[0].y,pts[0].w*1.25+.4,0,7); c.fill();
+  for(let i=4;i<n-4;i+=3){ if(pts[i].v<.08){ c.globalAlpha=.18; c.beginPath(); c.arc(pts[i].x,pts[i].y,pts[i].w*1.15,0,7); c.fill(); } }
+  inkTexture(c,cv,b,.12);
+  return {cv,b};
+}
+function renderNib(raw, color, size, angleDeg){
+  const pts=resample(raw, 1);
+  const th=angleDeg*Math.PI/180, nw=size*.62;
+  const all=[]; for(const p of pts){ const s=nw*(.82+.18*Math.min(1,.25/(p.v+.05))); all.push({x:p.x+Math.cos(th)*s,y:p.y-Math.sin(th)*s},{x:p.x-Math.cos(th)*s,y:p.y+Math.sin(th)*s}); }
+  const b=bbox(all, 8);
+  const {cv,c}=offscreen(b);
+  c.fillStyle=color; c.strokeStyle=color; c.lineWidth=.8;
+  for(let i=0;i<pts.length-1;i++){
+    const a=pts[i], q=pts[i+1];
+    const sa=nw*(.82+.18*Math.min(1,.25/(a.v+.05))), sq=nw*(.82+.18*Math.min(1,.25/(q.v+.05)));
+    const ca=Math.cos(th),sn=Math.sin(th);
+    c.beginPath(); c.moveTo(a.x+ca*sa,a.y-sn*sa); c.lineTo(q.x+ca*sq,q.y-sn*sq); c.lineTo(q.x-ca*sq,q.y+sn*sq); c.lineTo(a.x-ca*sa,a.y+sn*sa); c.closePath(); c.fill(); c.stroke();
+  }
+  if(pts.length===1){ const p=pts[0]; c.beginPath(); c.moveTo(p.x+Math.cos(th)*nw,p.y-Math.sin(th)*nw); c.lineTo(p.x-Math.cos(th)*nw,p.y+Math.sin(th)*nw); c.lineWidth=2; c.stroke(); }
+  inkTexture(c,cv,b,.16);
+  return {cv,b};
+}
+/* 墨色浓淡：按纸纹轻微起伏 + 边缘一点洇 */
+function inkTexture(c,cv,b,amt){
+  const w=cv.width,h=cv.height,img=c.getImageData(0,0,w,h),d=img.data;
+  const ox=Math.round(b.x*dpr), oy=Math.round(b.y*dpr), NW=W*dpr;
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){ const i=(y*w+x)*4; if(!d[i+3]) continue;
+    const n=noise[Math.min(H*dpr-1,oy+y)*NW+Math.min(NW-1,ox+x)] ?? .5;
+    d[i+3]=Math.min(255, d[i+3]*(1-amt*.6+amt*(n-.5)*2.2)); }
+  c.putImageData(img,0,0);
+}
+
+/* ---------- 输入 ---------- */
+let raw=[], drawing=false, lastT=0, history=[], fading=null;
+function snapshot(){ const cv=document.createElement('canvas'); cv.width=paintCv.width; cv.height=paintCv.height; cv.getContext('2d').drawImage(paintCv,0,0); history.push(cv); if(history.length>12) history.shift(); }
+function curSize(){ return +$('#size').value; }
+function pushPoint(e){
+  const r=liveCv.getBoundingClientRect(); const x=e.clientX-r.left, y=e.clientY-r.top, t=e.timeStamp||performance.now();
+  const last=raw[raw.length-1];
+  const dt=last?Math.max(1,t-last.t):16, v=last?Math.hypot(x-last.x,y-last.y)/dt:0;
+  const vs = last ? last.v*.7+v*.3 : 0;
+  const size=curSize();
+  const usePressure = e.pointerType==='pen' && e.pressure>0;
+  const k = usePressure ? Math.pow(e.pressure,.8)*1.15 : Math.max(.28, 1-Math.min(1,vs/1.6)*.72);
+  let w;
+  if(st.tool==='water') w=size*.5*(.55+.6*k);
+  else if(st.tool==='pen') w=Math.max(.45,size*.1*(.18+1.1*k*k));
+  else w=size*.5;
+  if(last) w=last.w*.6+w*.4;
+  raw.push({x,y,t,v:vs,w});
+}
+function drawLive(){
+  liveCtx.setTransform(dpr,0,0,dpr,0,0); liveCtx.clearRect(0,0,W,H);
+  if(fading) { liveCtx.globalAlpha=fading.a; liveCtx.drawImage(fading.cv,fading.b.x,fading.b.y,fading.b.w,fading.b.h); liveCtx.globalAlpha=1; }
+  if(!drawing||!raw.length) return;
+  if(st.tool==='water'){
+    // 湿笔迹：先薄薄一层颜色，抬笔再晕开
+    const pts=resample(raw,3); liveCtx.fillStyle=st.color; liveCtx.globalAlpha=.32; fillPoly(liveCtx, outline(pts)); liveCtx.globalAlpha=1;
+  } else if(st.tool==='pen'){ const {cv,b}=renderPen(raw,st.ink,curSize()); liveCtx.drawImage(cv,b.x,b.y,b.w,b.h); }
+  else if(st.tool==='nib'){ const {cv,b}=renderNib(raw,st.ink,curSize(),+$('#angle').value); liveCtx.drawImage(cv,b.x,b.y,b.w,b.h); }
+}
+function commit(r){ paintCtx.setTransform(dpr,0,0,dpr,0,0); paintCtx.globalCompositeOperation='multiply'; paintCtx.globalAlpha=1; paintCtx.drawImage(r.cv,r.b.x,r.b.y,r.b.w,r.b.h); paintCtx.globalCompositeOperation='source-over'; }
+function finishStroke(sync){
+  if(!raw.length) return;
+  if(st.tool==='eraser'){ raw=[]; return; }
+  let r;
+  if(st.tool==='water') r=renderWatercolor(raw, st.color, curSize(), +$('#water').value/100);
+  else if(st.tool==='pen') r=renderPen(raw, st.ink, curSize());
+  else r=renderNib(raw, st.ink, curSize(), +$('#angle').value);
+  raw=[];
+  if(st.tool!=='water' || sync){ commit(r); drawLive(); return; }
+  // 晕开：湿迹淡出、成品淡入 0.4s
+  const t0=performance.now();
+  const step=(now)=>{ const a=Math.min(1,(now-t0)/400); fading={...r,a:a*a*(3-2*a)}; drawLive(); if(a<1) requestAnimationFrame(step); else { fading=null; commit(r); drawLive(); } };
+  requestAnimationFrame(step);
+}
+function eraseTo(e){
+  const r=liveCv.getBoundingClientRect(); const x=e.clientX-r.left, y=e.clientY-r.top; const last=raw[raw.length-1];
+  paintCtx.setTransform(dpr,0,0,dpr,0,0); paintCtx.globalCompositeOperation='destination-out'; paintCtx.lineCap='round'; paintCtx.lineWidth=curSize();
+  paintCtx.beginPath(); paintCtx.moveTo(last?last.x:x, last?last.y:y); paintCtx.lineTo(x,y); paintCtx.stroke(); paintCtx.globalCompositeOperation='source-over';
+  raw.push({x,y});
+}
+liveCv.addEventListener('pointerdown',e=>{ e.preventDefault(); liveCv.setPointerCapture(e.pointerId); if(fading){ commit(fading); fading=null; } snapshot(); drawing=true; raw=[]; st.tool==='eraser'?eraseTo(e):pushPoint(e); drawLive(); });
+liveCv.addEventListener('pointermove',e=>{ if(!drawing) return; const evs=e.getCoalescedEvents?e.getCoalescedEvents():[e]; for(const ev of evs) st.tool==='eraser'?eraseTo(ev):pushPoint(ev); drawLive(); });
+const end=()=>{ if(!drawing) return; drawing=false; finishStroke(false); };
+liveCv.addEventListener('pointerup',end); liveCv.addEventListener('pointercancel',end);
+$('#undo').onclick=()=>{ const cv=history.pop(); if(!cv) return; paintCtx.setTransform(1,0,0,1,0,0); paintCtx.clearRect(0,0,paintCv.width,paintCv.height); paintCtx.drawImage(cv,0,0); };
+$('#clear').onclick=()=>{ snapshot(); paintCtx.setTransform(1,0,0,1,0,0); paintCtx.clearRect(0,0,paintCv.width,paintCv.height); };
+window.addEventListener('resize',()=>{ if($('#pane-draw').classList.contains('on')) resize(); });
+
+/* 演示笔画（?demo=1，同步画，不依赖 rAF） */
+function demo(){
+  const S=(tool,pts,opt={})=>{ const save={...st}; Object.assign(st,{tool},opt); raw=[]; let t=0;
+    for(const [x,y,sp] of pts){ t+=16; const last=raw[raw.length-1]; const v=sp??.5; const size=opt.size??curSize();
+      const k=Math.max(.28,1-Math.min(1,v/1.6)*.72);
+      let w= tool==='water'?size*.5*(.55+.6*k): tool==='pen'?Math.max(.45,size*.1*(.18+1.1*k*k)):size*.5;
+      if(last) w=last.w*.6+w*.4; raw.push({x,y,t,v,w}); }
+    const sv=$('#size').value; if(opt.size) $('#size').value=opt.size;
+    finishStroke(true); $('#size').value=sv; Object.assign(st,save); };
+  const wave=(x0,y0,len,amp,n,sp)=>Array.from({length:n},(_,i)=>[x0+len*i/(n-1), y0+Math.sin(i/(n-1)*Math.PI*2)*amp, sp]);
+  S('water', wave(60,120,320,26,24,.4), {color:'#3a6fb0', size:34});
+  S('water', wave(180,150,300,18,24,.6), {color:'#e9b949', size:30});
+  S('water', wave(120,210,260,30,24,.3), {color:'#c8505a', size:40});
+  S('water', Array.from({length:30},(_,i)=>[480+Math.cos(i/29*Math.PI*2)*50, 160+Math.sin(i/29*Math.PI*2)*50, .5]), {color:'#2f7f7a', size:26});
+  const sig=[]; for(let i=0;i<120;i++){ const t=i/119; sig.push([80+t*520, 330+Math.sin(t*Math.PI*6)*28*(1-t*.4)+t*10, .05+Math.abs(Math.cos(t*Math.PI*6))**2*2.2]); }
+  S('pen', sig, {ink:'#22314a', size:24});
+  const loops=[]; for(let i=0;i<140;i++){ const t=i/139*Math.PI*8; loops.push([110+i*2.2+Math.sin(t)*18, 440-Math.cos(t)*30+30, .35]); }
+  S('nib', loops, {ink:'#5a2b2b', size:20});
+}
+
+/* ================= 便利贴 ================= */
+const NSTYLES = [
+  {id:'sticky', name:'便利贴', colors:['#fff1a8','#ffd6dc','#d4efe4','#ffe2c4','#dde6f6','#efe3fb']},
+  {id:'lined', name:'横线纸'}, {id:'grid', name:'方格纸'}, {id:'kraft', name:'牛皮纸'},
+  {id:'index', name:'索引卡'}, {id:'polaroid', name:'拍立得', colors:['#f6d3c8','#cfe5df','#e6dcf3','#f3e3b9']},
+  {id:'receipt', name:'小票'}, {id:'torn', name:'撕边纸条', colors:['#fffaf0','#fff1a8','#d4efe4','#ffd6dc']},
+  {id:'fold', name:'折角', colors:['#fff1a8','#d4efe4','#ffd6dc','#ffe2c4']},
+  {id:'tape', name:'和纸胶带', colors:['#e6a7a1','#9fcfc4','#e9c77c','#b6a6d8']},
+  {id:'spiral', name:'线圈本'}, {id:'vellum', name:'描图纸'},
+];
+const FONTS = [
+  // 中文手写字体系统没带（手札 / 翩翩体要另下），app 里要内置开源字体；这里用 Google Fonts 上的 OFL 字体试样子
+  {id:'hand', name:'手写', css:'"Long Cang",cursive'},
+  {id:'cute', name:'可爱', css:'"ZCOOL KuaiLe",cursive'},
+  {id:'brush', name:'毛笔楷', css:'"Ma Shan Zheng",serif'},
+  {id:'cao', name:'行草', css:'"Zhi Mang Xing",cursive'},
+  {id:'marker', name:'马克笔', css:'"Marker Felt","ZCOOL KuaiLe",cursive'},
+  {id:'type', name:'打字机', css:'"American Typewriter","Courier New",monospace'},
+  {id:'sys', name:'系统', css:'-apple-system,"PingFang SC",sans-serif'},
+];
+const SAMPLE = {
+  sticky:'周六去买花\n· 洋桔梗\n· 尤加利', lined:'今天想对你说：\n晚饭真的很好吃', grid:'11/2  去看展\n记得带相机', kraft:'番茄牛腩\n要多放一点番茄',
+  index:'备忘\n周三交稿，周四复盘', polaroid:'海边那天', receipt:'番茄 ×3\n牛腩 500g\n——\n一起做饭 ∞', torn:'别忘了喝水', fold:'小雾的生日 🎂',
+  tape:'这一句我要贴起来', spiral:'读书摘抄：\n慢慢来，比较快', vellum:'透过去看得到下面',
+};
+let notes = NSTYLES.map((s,i)=>({style:s.id, color:s.colors?.[0], font: ['hand','cute','brush','sys'][i%4], text:SAMPLE[s.id], rot:(Math.random()*6-3).toFixed(1)}));
+let editing=-1;
+
+function tornClip(){ const L=[],R=[]; for(let y=0;y<=100;y+=4){ L.push(`${(Math.random()*6).toFixed(1)}% ${y}%`); R.push(`${(94+Math.random()*6).toFixed(1)}% ${100-y}%`);} return `polygon(${[...L,...R].join(',')})`; }
+function noteHTML(n,i){
+  const f=FONTS.find(f=>f.id===n.font)||FONTS[0];
+  const tear = n.style==='torn' ? `<div class="tear" style="clip-path:${n.clip||(n.clip=tornClip())}"></div>` : '';
+  const inner = tear + (n.style==='polaroid' ? `<div class="photo"></div><div class="txt" contenteditable="true" spellcheck="false"></div>` : `<div class="txt" contenteditable="true" spellcheck="false"></div>`);
+  const back = n.style==='vellum' ? '<div class="vellum-back" style="left:-30px;top:-20px"></div>' : '';
+  const name = NSTYLES.find(s=>s.id===n.style).name;
+  return `<div class="cell">${back}<div class="note s-${n.style} ${editing===i?'editing':''}" data-i="${i}" style="--rot:${n.rot}deg;${n.color?`--c:${n.color};`:''}font-family:${f.css};">${inner}</div><div class="name">${name}</div></div>`;
+}
+function renderNotes(){
+  $('#notes').innerHTML = notes.map(noteHTML).join('');
+  $('#notes').querySelectorAll('.note').forEach(el=>{
+    const i=+el.dataset.i, t=el.querySelector('.txt'); t.textContent=notes[i].text;
+    t.addEventListener('input',()=>notes[i].text=t.textContent);
+    t.addEventListener('focus',()=>startEdit(i));
+    el.addEventListener('pointerdown',e=>{ if(e.target===el){ e.preventDefault(); t.focus(); } });
+  });
+}
+function startEdit(i){
+  if(editing===i){ placeBar(); return; }
+  editing=i;
+  document.querySelectorAll('.note').forEach(n=>n.classList.toggle('editing', +n.dataset.i===i));
+  buildBar(); placeBar();
+}
+function placeBar(){
+  const el=document.querySelector(`.note[data-i="${editing}"]`); if(!el) return;
+  const bar=$('#ebar'); bar.classList.add('on');
+  const r=el.getBoundingClientRect(), bw=bar.offsetWidth, bh=bar.offsetHeight;
+  let x=Math.min(window.innerWidth-bw-10, Math.max(10, r.left+r.width/2-bw/2)), y=r.top-bh-14;
+  if(y<10) y=r.bottom+14;
+  bar.style.left=x+'px'; bar.style.top=y+'px';
+}
+function buildBar(){
+  const n=notes[editing], s=NSTYLES.find(s=>s.id===n.style);
+  $('#eb-styles').innerHTML = NSTYLES.map(x=>`<button class="st ${x.id===n.style?'on':''}" data-s="${x.id}" title="${x.name}">${x.name.slice(0,2)}</button>`).join('');
+  $('#eb-colors').innerHTML = s.colors ? s.colors.map(c=>`<button class="sw ${c===n.color?'on':''}" data-c="${c}" style="background:${c}"></button>`).join('') : '<span class="mini">这种纸没有配色</span>';
+  $('#eb-fonts').innerHTML = FONTS.map(f=>`<button class="ft ${f.id===n.font?'on':''}" data-f="${f.id}" style="font-family:${f.css}">${f.name}</button>`).join('');
+  const keep=fn=>e=>{ e.preventDefault(); fn(e.currentTarget); renderNotes(); buildBar(); refocus(); };
+  $('#ebar').querySelectorAll('[data-s]').forEach(b=>b.onpointerdown=keep(b=>{ n.style=b.dataset.s; const ns=NSTYLES.find(s=>s.id===n.style); n.color= ns.colors? (ns.colors.includes(n.color)?n.color:ns.colors[0]) : undefined; }));
+  $('#ebar').querySelectorAll('[data-c]').forEach(b=>b.onpointerdown=keep(b=>n.color=b.dataset.c));
+  $('#ebar').querySelectorAll('[data-f]').forEach(b=>b.onpointerdown=keep(b=>n.font=b.dataset.f));
+}
+function refocus(){ const t=document.querySelector(`.note[data-i="${editing}"] .txt`); if(!t) return; t.focus(); const r=document.createRange(); r.selectNodeContents(t); r.collapse(false); const s=getSelection(); s.removeAllRanges(); s.addRange(r); placeBar(); }
+document.addEventListener('pointerdown',e=>{ if(editing<0) return; if(e.target.closest('.note')||e.target.closest('#ebar')) return;
+  editing=-1; $('#ebar').classList.remove('on'); document.activeElement?.blur(); document.querySelectorAll('.note').forEach(n=>n.classList.remove('editing')); });
+window.addEventListener('scroll',()=>{ if(editing>=0) placeBar(); },{passive:true});
+$('#add').onclick=()=>{ notes.unshift({style:'sticky',color:'#d4efe4',font:'hand',text:'',rot:(Math.random()*6-3).toFixed(1)}); editing=-1; renderNotes(); editing=0; renderNotes(); buildBar(); refocus(); };
+
+/* ================= 启动 ================= */
+buildToolbar(); renderNotes();
+setTab(params.get('tab')==='notes'?'notes':'draw');
+if(params.get('demo')) demo();
+if(params.get('edit')!=null){ setTab('notes'); editing=+params.get('edit'); renderNotes(); buildBar(); placeBar(); }
+</script>
+</body>
+</html>

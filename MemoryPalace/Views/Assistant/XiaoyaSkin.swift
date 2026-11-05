@@ -12,6 +12,10 @@ struct XiaoyaSkin {
     var inkSoft: Color
     var inkMuted: Color
     var mint: Color
+    /// 引导卡（Views/Assistant/Onboarding）：结果条成功 / 失败色，输入框和选项的底
+    var ok: Color
+    var bad: Color
+    var field: Color
 
     static func current(_ scheme: ColorScheme) -> XiaoyaSkin {
         scheme == .dark ? .night : .cream
@@ -24,7 +28,10 @@ struct XiaoyaSkin {
         ink: Color(red: 0.118, green: 0.239, blue: 0.149),
         inkSoft: Color(red: 0.306, green: 0.388, blue: 0.322),
         inkMuted: Color(red: 0.541, green: 0.588, blue: 0.545),
-        mint: Color(red: 0.863, green: 0.906, blue: 0.875)
+        mint: Color(red: 0.863, green: 0.906, blue: 0.875),
+        ok: Color(red: 0.373, green: 0.561, blue: 0.455),
+        bad: Color(red: 0.753, green: 0.337, blue: 0.290),
+        field: .white
     )
 
     static let night = XiaoyaSkin(
@@ -34,6 +41,9 @@ struct XiaoyaSkin {
         ink: Color(red: 0.910, green: 0.886, blue: 0.816),
         inkSoft: Color(red: 0.725, green: 0.761, blue: 0.710),
         inkMuted: Color(red: 0.494, green: 0.545, blue: 0.502),
-        mint: Color(red: 0.180, green: 0.239, blue: 0.200)
+        mint: Color(red: 0.180, green: 0.239, blue: 0.200),
+        ok: Color(red: 0.420, green: 0.612, blue: 0.502),
+        bad: Color(red: 0.800, green: 0.408, blue: 0.361),
+        field: Color(red: 0.165, green: 0.192, blue: 0.173)
     )
 }

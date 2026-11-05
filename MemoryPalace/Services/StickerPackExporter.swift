@@ -78,7 +78,7 @@ enum StickerPackExporter {
         let manifest = PackManifest(exportDate: Date(), profileId: profileId, assets: assetRecords, placements: placementRecords)
 
         // 临时目录
-        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("stickerpack_\(UUID().uuidString)")
+        let tmpDir = AppPaths.temporaryDirectory.appendingPathComponent("stickerpack_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
@@ -104,7 +104,7 @@ enum StickerPackExporter {
         }
 
         // ZIPFoundation 打包（跨平台），shouldKeepParent: false 让 manifest.json 和 images/ 在 zip 根层
-        let zipURL = FileManager.default.temporaryDirectory.appendingPathComponent("贴纸包_\(UUID().uuidString).stickerpack")
+        let zipURL = AppPaths.temporaryDirectory.appendingPathComponent("贴纸包_\(UUID().uuidString).stickerpack")
         try FileManager.default.zipItem(at: tmpDir, to: zipURL, shouldKeepParent: false)
 
         return zipURL

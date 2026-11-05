@@ -82,7 +82,7 @@ enum TradingReportLanding {
               let b64 = filing["data"] as? String,
               let data = Data(base64Encoded: b64), !data.isEmpty else { return }
         var bookName = (filing["book_name"] as? String) ?? filename
-        let tmp = FileManager.default.temporaryDirectory
+        let tmp = AppPaths.temporaryDirectory
             .appendingPathComponent("filing-\(UUID().uuidString)")
             .appendingPathExtension(format == "pdf" ? "pdf" : "txt")
         do {

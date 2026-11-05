@@ -173,7 +173,7 @@ struct ReadingSettingsTab: View {
     }
 
     private var noCardsText: some View {
-        Text("没有可用的 API 卡（去 设置 → API 添加）")
+        Text("没有可用的 API 卡（去 设置 → 模型和API 添加）")
             .foregroundColor(Theme.textMuted)
             .font(m.caption)
     }

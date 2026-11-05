@@ -4,9 +4,9 @@ enum ThemeAssetStore {
     private static let directoryName = "ThemeAssets"
 
     private static var assetsDirectoryURL: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appSupport = AppPaths.applicationSupport
         let appDirectory = appSupport.appendingPathComponent("MemoryPalace", isDirectory: true)
-        let assetsDirectory = appDirectory.appendingPathComponent(directoryName, isDirectory: true)
+        let assetsDirectory = AppPaths.checked(appDirectory.appendingPathComponent(directoryName, isDirectory: true))
         try? FileManager.default.createDirectory(at: assetsDirectory, withIntermediateDirectories: true)
         return assetsDirectory
     }
@@ -27,7 +27,7 @@ enum ThemeAssetStore {
     ) throws -> String {
         let fileExtension = sanitizedExtension(preferredExtension)
         let fileName = "theme-\(themeId)-\(UUID().uuidString).\(fileExtension)"
-        let destination = assetsDirectoryURL.appendingPathComponent(fileName)
+        let destination = AppPaths.checked(assetsDirectoryURL.appendingPathComponent(fileName))
         try data.write(to: destination, options: .atomic)
         return fileName
     }
@@ -38,7 +38,7 @@ enum ThemeAssetStore {
         }
 
         let destinationFileName = "theme-\(themeId)-\(UUID().uuidString).\(sanitizedExtension(sourceURL.pathExtension))"
-        let destinationURL = assetsDirectoryURL.appendingPathComponent(destinationFileName)
+        let destinationURL = AppPaths.checked(assetsDirectoryURL.appendingPathComponent(destinationFileName))
         try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
         return destinationFileName
     }
@@ -49,7 +49,7 @@ enum ThemeAssetStore {
     }
 
     static func url(for fileName: String) -> URL? {
-        let candidate = assetsDirectoryURL.appendingPathComponent(fileName)
+        let candidate = AppPaths.checked(assetsDirectoryURL.appendingPathComponent(fileName))
         return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
     }
 

@@ -36,12 +36,20 @@ struct HTMLPreviewWebView: View {
     @State private var errorMessage: String?
     @State private var artifactErrors: [String] = []
 
+    private var benchOffline: Bool {
+        #if os(macOS) && (DEBUG || PERF_BENCH)
+        return BenchIsolation.active
+        #else
+        return false
+        #endif
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             // W1 联网渲染：本地模式关闭 → 放宽子资源 CSP 的 shell（fetch 仍封）；开 → 全封 shell。
             // 开关在 sheet 打开时生效（WebView 创建即定型，切开关重开预览即可）
             WebViewHost(
-                htmlResourceName: card != nil ? "html-preview-card" : (LocalMode.isOn ? "html-preview" : "html-preview-online"),
+                htmlResourceName: card != nil ? "html-preview-card" : ((LocalMode.isOn || benchOffline) ? "html-preview" : "html-preview-online"),
                 payload: payload,
                 servesCardLibrary: card != nil,
                 onMessage: handleMessage
@@ -85,7 +93,7 @@ struct HTMLPreviewWebView: View {
         if let card {
             p["content"] = CardWebLibrary.rewrite(content)    // 只改发给网页的副本，消息原文不动
             p["prelude"] = HTMLEmbedPolicy.nativeCardPrelude(mode: staticMode ? .staticView : .interactive,
-                                                             nonce: card.nonce, allowed: card.allowed)
+                                                             nonce: card.nonce, allowed: card.allowed && !benchOffline)
         }
         return p
     }
@@ -138,6 +146,7 @@ struct HTMLPreviewWebView: View {
             guard let onCardRequest, let reply = message.reply else { return }
             onCardRequest(message.raw, reply)
         case "openLink":
+            guard !benchOffline else { return }
             if let onOpenLink, !LocalMode.isOn,
                let href = message.href, let url = URL(string: href),
                ["http", "https"].contains(url.scheme?.lowercased() ?? "") {

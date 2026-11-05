@@ -99,20 +99,20 @@ enum BookRechapter {
         guard !preview.blocked else { throw RechapterError.blocked }
         guard var index = BookStore.loadIndex(safeName: safeName, profileId: profileId) else { throw RechapterError.unreadable }
         let dir = BookStore.bookDir(safeName: safeName, profileId: profileId)
-        let backupDir = FileLibraryStore.libraryRoot(profileId: profileId).appendingPathComponent("书房备份", isDirectory: true)
+        let backupDir = AppPaths.checked(FileLibraryStore.libraryRoot(profileId: profileId).appendingPathComponent("书房备份", isDirectory: true))
         let bookName = index.name
         try await Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             try backup(bookDir: dir, bookName: bookName, to: backupDir)
 
             // 新书目录先写在旁边：章节 / source / index 是新的，其余文件（封面、空的 notes / bookmarks）照搬
-            let staging = dir.deletingLastPathComponent().appendingPathComponent(".\(safeName).rechapter")
+            let staging = AppPaths.checked(dir.deletingLastPathComponent().appendingPathComponent(".\(safeName).rechapter"))
             try? fm.removeItem(at: staging)
             let metas = try BookStore.writeChapters(preview.result, into: staging)
             for item in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] {
                 let name = item.lastPathComponent
                 if name.hasPrefix("chapter_") || name == "index.json" || name == "source.txt" { continue }
-                try fm.copyItem(at: item, to: staging.appendingPathComponent(name))
+                try fm.copyItem(at: item, to: AppPaths.checked(staging.appendingPathComponent(name)))
             }
             let newNo = (preview.result.chapters.lastIndex { $0.start <= preview.readingOffset } ?? 0) + 1
             index.chapters = metas
@@ -160,7 +160,7 @@ enum BookRechapter {
     /// 旧章节 + index（+ source）打成 zip 放进「书房备份」（文件库里，不在 books/ 下，不会被当成书）
     nonisolated private static func backup(bookDir: URL, bookName: String, to backupDir: URL) throws {
         let fm = FileManager.default
-        let stage = fm.temporaryDirectory.appendingPathComponent("rechapter-\(UUID().uuidString)", isDirectory: true)
+        let stage = AppPaths.temporaryDirectory.appendingPathComponent("rechapter-\(UUID().uuidString)", isDirectory: true)
         let folder = stage.appendingPathComponent("book", isDirectory: true)
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: stage) }

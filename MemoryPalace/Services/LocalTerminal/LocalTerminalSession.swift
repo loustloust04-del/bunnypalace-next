@@ -273,6 +273,10 @@ final class MPLocalTerminalView: LocalProcessTerminalView {
 
     override func dataReceived(slice: ArraySlice<UInt8>) {
         lastOutput = Date()
+        if HangProbe.stanchEnabled { HangProbe.terminalOutputBytes &+= UInt64(slice.count) }
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.terminalFeedBytes, by: UInt64(slice.count))
+        #endif
         super.dataReceived(slice: slice)
     }
 

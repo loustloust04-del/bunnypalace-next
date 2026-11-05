@@ -53,14 +53,14 @@ enum CodingLocations {
     }
 
     /// `~` / `~/…` 展开成家目录（Wake `expand_tilde`）
-    static func expandTilde(_ path: String, home: String = FileManager.default.homeDirectoryForCurrentUser.path) -> String {
+    static func expandTilde(_ path: String, home: String = AppPaths.home.path) -> String {
         guard path.hasPrefix("~") else { return path }
         let rest = path.dropFirst()
         return rest.isEmpty || rest.hasPrefix("/") ? home + rest : path
     }
 
     /// 家目录前缀折成 `~`；边界落在分隔符上，同名前缀的兄弟目录不折（Wake `tilde_path`）
-    static func tildePath(_ path: String, home: String = FileManager.default.homeDirectoryForCurrentUser.path) -> String {
+    static func tildePath(_ path: String, home: String = AppPaths.home.path) -> String {
         guard path.hasPrefix(home) else { return path }
         let rest = path.dropFirst(home.count)
         return rest.isEmpty || rest.hasPrefix("/") ? "~" + rest : path
@@ -73,12 +73,12 @@ enum CodingLocations {
 
     static func isDirectory(_ url: URL) -> Bool {
         var isDir: ObjCBool = false
-        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+        return FileManager.default.fileExists(atPath: AppPaths.checkedPath(url.path), isDirectory: &isDir) && isDir.boolValue
     }
 
     static func isFile(_ url: URL) -> Bool {
         var isDir: ObjCBool = false
-        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && !isDir.boolValue
+        return FileManager.default.fileExists(atPath: AppPaths.checkedPath(url.path), isDirectory: &isDir) && !isDir.boolValue
     }
 }
 
@@ -91,14 +91,14 @@ extension CodingSessionRoster {
     /// 按位置配置构造 roster（Wake `create_adapter_roster_for`）：默认实例先压掉被移除的家 / 被单独移除的默认根，再追加自定义实例
     /// （用默认模板造，侧档相对自定义目录）；停用的根留在位置清单里、从 active 剔出——多根实例裁剪，裁不了就整实例停用，绝不能
     /// 继续扫她明确关掉的路径
-    static func configured(home: URL = FileManager.default.homeDirectoryForCurrentUser,
+    static func configured(home: URL = AppPaths.home,
                            environment: [String: String] = ProcessInfo.processInfo.environment,
                            overrides: CodingLocationOverrides,
                            remoteHosts: [String] = [], cacheRoot: URL? = nil) -> Configured {
         let base = adapters(home: home, environment: environment)
         let customs = overrides.customRoots.compactMap { entry -> CodingSessionAdapter? in
             guard let agent = CodingAgent(rawValue: entry.agent), let template = base.first(where: { $0.agent == agent }) else { return nil }
-            return template.withCustomRoot(URL(fileURLWithPath: entry.path))
+            return template.withCustomRoot(AppPaths.checked(URL(fileURLWithPath: entry.path)))
         }
         var configured: [CodingSessionAdapter] = []
         for adapter in base where !overrides.removedDefaults.contains(adapter.agent) {
@@ -117,6 +117,7 @@ extension CodingSessionRoster {
         var locations: [CodingLocation] = []
         for adapter in configured {
             let roots = adapter.dataRoots
+            if BenchIsolation.requested { for root in roots { _ = AppPaths.checked(root) } }
             let off = roots.filter { disabled.contains(CodingLocationEntry(agent: adapter.agent.rawValue, path: $0.path)) }
             locations += roots.map {
                 CodingLocation(agent: adapter.agent, path: $0.path, enabled: !off.contains($0),

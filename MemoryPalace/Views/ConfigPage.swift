@@ -373,7 +373,7 @@ struct ConfigPage: View {
 
     #if os(iOS)
     private func writeToTempFile(_ data: Data, filename: String) -> URL? {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        let url = AppPaths.temporaryDirectory.appendingPathComponent(filename)
         do {
             try data.write(to: url, options: .atomic)
             return url

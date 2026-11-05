@@ -4,7 +4,7 @@ import NaturalLanguage
 // MARK: - Memory Embedding（M2：向量语义检索的嵌入引擎）
 
 /// 嵌入引擎协议。A=Apple on-device 起步（粟粟拍板）；未来可加 API embedder 当"高质量向量"子开关。
-protocol MemoryEmbedding {
+protocol MemoryEmbedding: Sendable {
     var isReady: Bool { get }
     /// 模型版本。系统升级模型后旧向量与新查询不在同一空间，比对前必须核对。
     var revision: Int { get }
@@ -14,7 +14,7 @@ protocol MemoryEmbedding {
 /// Apple NLContextualEmbedding（BERT 类，on-device，多语言含中文）。
 /// 模型资产按需下载；未就绪时 embed 返回 nil，向量路静默退场（app 自包含铁律）。
 @Observable
-final class AppleMemoryEmbedder: MemoryEmbedding {
+final class AppleMemoryEmbedder: MemoryEmbedding, @unchecked Sendable {
     static let shared = AppleMemoryEmbedder()
 
     /// 模型资产状态——设置-记忆页直接显示（粟粟：开开关必须看得见在干嘛）

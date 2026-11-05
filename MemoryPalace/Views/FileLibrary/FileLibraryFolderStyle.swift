@@ -113,6 +113,8 @@ struct FileLibraryFolderLook: Codable, Equatable {
     var color: String
     var pattern: Pattern?
     var mark: Mark
+    /// A4-2 曾经的按文件夹「记录版本」：10-15 改成设置 → 文件库总开关，这里只为老表照旧能解、原样写回，不再读
+    var recordsVersions: Bool?
 
     init(color: String, pattern: Pattern? = nil, mark: Mark) {
         self.color = color
@@ -127,6 +129,7 @@ struct FileLibraryFolderLook: Codable, Equatable {
         self.color = FileLibraryFolderPalette.isValid(color) ? color : FileLibraryFolderPalette.cream.rawValue
         pattern = ((try? c.decodeIfPresent(String.self, forKey: .pattern)) ?? nil).flatMap(Pattern.init(rawValue:))
         mark = (try? c.decode(Mark.self, forKey: .mark)) ?? .mono
+        recordsVersions = (try? c.decodeIfPresent(Bool.self, forKey: .recordsVersions)) ?? nil
     }
 
     var paint: FileLibraryFolderPaint { FileLibraryFolderPaint(color: color) }

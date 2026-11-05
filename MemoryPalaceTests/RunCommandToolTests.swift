@@ -186,8 +186,8 @@ final class RunCommandToolTests: XCTestCase {
 
     func testRegisteredInDispatcher() {
         XCTAssertTrue(DeviceToolDispatcher.handles("run_command"))
-        XCTAssertTrue(DeviceToolDispatcher.systemHint.contains("run_command"))
-        XCTAssertFalse(DeviceToolDispatcher.systemHint.contains("沙箱"), "macOS 后端零隔离，文案不许叫沙箱")
+        XCTAssertTrue(DeviceToolDispatcher.systemHint(available: DeviceToolDispatcher.names).contains("run_command"))
+        XCTAssertFalse(DeviceToolDispatcher.systemHint(available: DeviceToolDispatcher.names).contains("沙箱"), "macOS 后端零隔离，文案不许叫沙箱")
         XCTAssertFalse(PermissionDomain.shell.summary.contains("沙箱"))
         XCTAssertFalse(RunCommandTool.definition.description.contains("沙箱"))
     }

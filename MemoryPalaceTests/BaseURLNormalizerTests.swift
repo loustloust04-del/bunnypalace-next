@@ -60,4 +60,19 @@ final class BaseURLNormalizerTests: XCTestCase {
         XCTAssertNil(BaseURLNormalizer.chatEndpoint(base: "", type: .openaiCompatible))
         XCTAssertNil(BaseURLNormalizer.chatEndpoint(base: "ws://x", type: .ccBridge))
     }
+
+    func testCacheBlacklistMatchesAcrossNormalization() {
+        let key = "anthropicCacheHostBlacklist"
+        let saved = UserDefaults.standard.object(forKey: key)
+        defer { UserDefaults.standard.set(saved, forKey: key) }
+
+        UserDefaults.standard.set(["https://relay.example.com/"], forKey: key)
+        XCTAssertTrue(AnthropicProvider.cacheBlacklistContains("https://relay.example.com/v1"))
+        XCTAssertFalse(AnthropicProvider.cacheBlacklistContains("https://other.example.com/v1"))
+
+        AnthropicProvider.addToCacheBlacklist("https://relay.example.com/v1")
+        XCTAssertEqual(UserDefaults.standard.stringArray(forKey: key)?.count, 1)
+        AnthropicProvider.addToCacheBlacklist("relay2.example.com/v1/messages")
+        XCTAssertEqual(UserDefaults.standard.stringArray(forKey: key)?.last, "https://relay2.example.com/v1")
+    }
 }

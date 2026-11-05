@@ -47,11 +47,11 @@ enum StickerFileManager {
 
     /// 贴纸根目录: ~/Library/Application Support/MemoryPalace/stickers/{profileId}/
     static func stickerDirectory(profileId: String) -> URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport
+        let appSupport = AppPaths.applicationSupport
+        let dir = AppPaths.checked(appSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
             .appendingPathComponent("stickers", isDirectory: true)
-            .appendingPathComponent(profileId, isDirectory: true)
+            .appendingPathComponent(profileId, isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -65,12 +65,12 @@ enum StickerFileManager {
         let thumbName = "\(id.uuidString)_thumb.png"
 
         // 写入原尺寸 PNG
-        let imageURL = dir.appendingPathComponent(imageName)
+        let imageURL = AppPaths.checked(dir.appendingPathComponent(imageName))
         try imageData.write(to: imageURL)
 
         // 生成缩略图（最大 200x200）
         let thumbData = generateThumbnail(from: imageData, maxSize: 200)
-        let thumbURL = dir.appendingPathComponent(thumbName)
+        let thumbURL = AppPaths.checked(dir.appendingPathComponent(thumbName))
         try (thumbData ?? imageData).write(to: thumbURL)
 
         return (imageName, thumbName)
@@ -80,7 +80,7 @@ enum StickerFileManager {
     static func saveOriginalImage(_ imageData: Data, id: UUID, profileId: String) throws -> String {
         let dir = stickerDirectory(profileId: profileId)
         let name = "\(id.uuidString)_original.png"
-        let url = dir.appendingPathComponent(name)
+        let url = AppPaths.checked(dir.appendingPathComponent(name))
         try imageData.write(to: url)
         return name
     }
@@ -89,19 +89,19 @@ enum StickerFileManager {
 
     /// 加载贴纸图片
     static func loadImage(path: String, profileId: String) -> Data? {
-        let url = stickerDirectory(profileId: profileId).appendingPathComponent(path)
+        let url = imageURL(path: path, profileId: profileId)
         return try? Data(contentsOf: url)
     }
 
     /// 贴纸图片完整 URL
     static func imageURL(path: String, profileId: String) -> URL {
-        stickerDirectory(profileId: profileId).appendingPathComponent(path)
+        AppPaths.checked(stickerDirectory(profileId: profileId).appendingPathComponent(path))
     }
 
     // MARK: - Drawing（画稿：有它 = 能「继续画」）
 
     static func drawingURL(id: UUID, profileId: String) -> URL {
-        stickerDirectory(profileId: profileId).appendingPathComponent("\(id.uuidString).mpdraw")
+        AppPaths.checked(stickerDirectory(profileId: profileId).appendingPathComponent("\(id.uuidString).mpdraw"))
     }
 
     static func hasDrawing(id: UUID, profileId: String) -> Bool {
@@ -124,7 +124,7 @@ enum StickerFileManager {
             "\(id.uuidString).mpdraw",
         ]
         for name in names {
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+            try? FileManager.default.removeItem(at: AppPaths.checked(dir.appendingPathComponent(name)))
         }
     }
 

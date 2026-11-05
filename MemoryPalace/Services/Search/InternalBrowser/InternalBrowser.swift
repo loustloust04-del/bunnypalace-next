@@ -32,7 +32,7 @@ final class InternalBrowser: NSObject, WKNavigationDelegate, WKUIDelegate {
             return .reject("仅支持 http/https，收到 \(scheme.isEmpty ? "无 scheme" : scheme)")
         }
         if WebSearchSettings.shared.isBlocked(host: url.host) {
-            return .reject("域名 \(url.host ?? "") 在黑名单（设置 → API → 联网搜索 → 黑名单）")
+            return .reject("域名 \(url.host ?? "") 在黑名单（设置 → 模型和API → 联网搜索 → 黑名单）")
         }
         return .ok
     }

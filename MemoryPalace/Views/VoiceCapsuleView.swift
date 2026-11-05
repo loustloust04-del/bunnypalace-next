@@ -285,7 +285,7 @@ enum VoiceNoteShare {
             return
         }
         // 每次一个新目录：同一分钟两条不撞名，分享面板还在读上一份时也不被覆盖
-        let dir = FileManager.default.temporaryDirectory
+        let dir = AppPaths.temporaryDirectory
             .appendingPathComponent("VoiceShare-\(UUID().uuidString)", isDirectory: true)
         let dst = dir.appendingPathComponent(fileName(speaker: speaker, date: date ?? Date(), ext: src.pathExtension))
         do {

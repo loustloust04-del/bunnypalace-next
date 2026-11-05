@@ -19,6 +19,7 @@ struct FileLibrarySettingsTab: View {
     @State private var ccMemoryStatus = ""
     @State private var showCCMemoryBrowser = false
     @AppStorage(AttachmentStore.compressImagesKey) private var compressImages = false
+    @AppStorage(FileVersionHistory.enabledKey) private var recordsVersions = true
     #if os(iOS)
     @AppStorage(FileEditorPreferences.keyboardBarStyleKey) private var editorBarStyle = FileEditorKeyboardBarStyle.defaultStyle.rawValue
     #endif
@@ -56,6 +57,21 @@ struct FileLibrarySettingsTab: View {
                 }
             }
             .searchAnchor("leaf-file-enable")
+
+            SettingsCard {
+                Toggle(isOn: $recordsVersions) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("记录版本")
+                            .font(m.rowTitle)
+                            .foregroundColor(Theme.textPrimary)
+                        Text("文件库的文件、角色卡和世界书的长文本每次保存存一份快照，编辑器「…」→ 版本历史里对比、恢复。")
+                            .font(m.caption)
+                            .foregroundColor(Theme.textMuted)
+                    }
+                }
+                .tint(Theme.branchIndicator)
+            }
+            .searchAnchor("leaf-file-versions")
 
             #if os(iOS)
             // 新设置放第二张卡，不追加到页面底部（mac 没有键盘浮条）

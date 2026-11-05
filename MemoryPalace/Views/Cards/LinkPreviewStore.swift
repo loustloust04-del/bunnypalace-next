@@ -29,10 +29,15 @@ protocol LinkMetadataFetching {
 @MainActor
 final class LinkPreviewStore {
     static let shared = LinkPreviewStore(
-        directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MemoryPalace/link-previews", isDirectory: true),
+        directory: AppPaths.checked(AppPaths.caches
+            .appendingPathComponent("MemoryPalace/link-previews", isDirectory: true)),
         fetcher: SystemLinkMetadataFetcher(),
-        isOffline: { LocalMode.isOn },
+        isOffline: {
+            #if os(macOS) && (DEBUG || PERF_BENCH)
+            if BenchIsolation.active { return true }
+            #endif
+            return LocalMode.isOn
+        },
         now: Date.init,
         maxConcurrent: 3)
 
@@ -102,8 +107,8 @@ final class LinkPreviewStore {
         SHA256.hash(data: Data(url.absoluteString.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func metaURL(_ key: String) -> URL { directory.appendingPathComponent("\(key).json") }
-    func imageURL(_ file: String) -> URL { directory.appendingPathComponent(file) }
+    private func metaURL(_ key: String) -> URL { AppPaths.checked(directory.appendingPathComponent("\(key).json")) }
+    func imageURL(_ file: String) -> URL { AppPaths.checked(directory.appendingPathComponent(file)) }
 
     private func simple(_ url: URL) -> LinkPreview {
         LinkPreview(title: nil, host: url.host ?? url.absoluteString, imageFile: nil, iconFile: nil, fetchedAt: now(), failed: true)
@@ -202,6 +207,9 @@ final class LinkPreviewStore {
 @MainActor
 struct SystemLinkMetadataFetcher: LinkMetadataFetching {
     func fetch(_ url: URL) async -> LinkPreviewFetchResult? {
+        #if os(macOS) && (DEBUG || PERF_BENCH)
+        guard !BenchIsolation.active else { return nil }
+        #endif
         let provider = LPMetadataProvider()
         provider.timeout = 10
         guard let metadata = try? await provider.startFetchingMetadata(for: url) else { return nil }

@@ -16,19 +16,11 @@ enum StorageMaintenance {
 
     /// 返回释放的字节数（自有 tmp 件 + html-thumbs + URLCache；WebKit 缓存异步清不计入）
     static func cleanSystemCaches() -> Int {
-        var freed = 0
+        var freed = cleanTemporaryFiles(at: AppPaths.temporaryDirectory)
         let fm = FileManager.default
 
-        let tmp = fm.temporaryDirectory
-        if let items = try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: [.fileSizeKey]) {
-            for item in items where ownedTmpPrefixes.contains(where: { item.lastPathComponent.hasPrefix($0) }) {
-                freed += directorySize(item) + ((try? item.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-                try? fm.removeItem(at: item)
-            }
-        }
-
-        let thumbs = fm.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("MemoryPalace/html-thumbs", isDirectory: true)
+        let thumbs = AppPaths.checked(AppPaths.caches
+            .appendingPathComponent("MemoryPalace/html-thumbs", isDirectory: true))
         freed += directorySize(thumbs)
         try? fm.removeItem(at: thumbs)
 
@@ -40,6 +32,18 @@ enum StorageMaintenance {
             modifiedSince: .distantPast
         ) {}
 
+        return freed
+    }
+
+    static func cleanTemporaryFiles(at directory: URL) -> Int {
+        var freed = 0
+        let fm = FileManager.default
+        if let items = try? AppPaths.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey]) {
+            for item in items where ownedTmpPrefixes.contains(where: { item.lastPathComponent.hasPrefix($0) }) {
+                freed += directorySize(item) + ((try? item.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                try? fm.removeItem(at: item)
+            }
+        }
         return freed
     }
 

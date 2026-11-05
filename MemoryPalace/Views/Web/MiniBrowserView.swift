@@ -19,10 +19,10 @@ enum BrowsingHistoryStore {
     private static let maxEntries = 500
 
     private static var fileURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("MemoryPalace", isDirectory: true)
+        let base = AppPaths.checked(AppPaths.applicationSupport
+            .appendingPathComponent("MemoryPalace", isDirectory: true))
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        return base.appendingPathComponent("browsing-history.json")
+        return AppPaths.checked(base.appendingPathComponent("browsing-history.json"))
     }
 
     static func load() -> [BrowsingHistoryEntry] {
@@ -65,10 +65,40 @@ final class MiniBrowserController: NSObject, ObservableObject, WKNavigationDeleg
         didSet { observeWebView() }
     }
 
-    func goBack() { webView?.goBack() }
-    func goForward() { webView?.goForward() }
-    func reload() { webView?.reload() }
-    func load(_ url: URL) { webView?.load(URLRequest(url: url)) }
+    func goBack() {
+        if showBenchOfflinePage() { return }
+        webView?.goBack()
+    }
+    func goForward() {
+        if showBenchOfflinePage() { return }
+        webView?.goForward()
+    }
+    func reload() {
+        if showBenchOfflinePage() { return }
+        webView?.reload()
+    }
+    func load(_ url: URL) {
+        if showBenchOfflinePage() { return }
+        webView?.load(URLRequest(url: url))
+    }
+
+    static var benchOffline: Bool {
+        #if os(macOS) && (DEBUG || PERF_BENCH)
+        return BenchIsolation.active
+        #else
+        return false
+        #endif
+    }
+
+    /// bench 不提交 URLRequest（包括 data: 内嵌的网络资源）；离线 HTML 预览仍由原有预览器处理。
+    private func showBenchOfflinePage() -> Bool {
+        guard Self.benchOffline else { return false }
+        webView?.loadHTMLString("""
+            <!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'">
+            <title>bench 离线</title></head><body>bench 禁止浏览器网络加载。</body></html>
+            """, baseURL: nil)
+        return true
+    }
 
     /// 状态走 KVO 直连，不依赖 delegate 回调时机（SPA/pushState 也能跟上）
     private func observeWebView() {
@@ -105,6 +135,10 @@ final class MiniBrowserController: NSObject, ObservableObject, WKNavigationDeleg
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
+        if Self.benchOffline {
+            decisionHandler(navigationAction.request.url?.absoluteString == "about:blank" ? .allow : .cancel)
+            return
+        }
         guard let url = navigationAction.request.url, let scheme = url.scheme?.lowercased() else {
             decisionHandler(.allow)
             return
@@ -126,7 +160,7 @@ final class MiniBrowserController: NSObject, ObservableObject, WKNavigationDeleg
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
         if let url = navigationAction.request.url {
-            webView.load(URLRequest(url: url))
+            load(url)
         }
         return nil
     }
@@ -144,6 +178,9 @@ struct BrowserWebView {
     func makeWebView() -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        #if os(macOS) && (DEBUG || PERF_BENCH)
+        if BenchIsolation.active { configuration.websiteDataStore = .nonPersistent() }
+        #endif
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = controller
         webView.uiDelegate = controller
@@ -157,7 +194,7 @@ struct BrowserWebView {
         webView.scrollView.keyboardDismissMode = .onDrag
         #endif
         controller.webView = webView
-        webView.load(URLRequest(url: initialURL))
+        controller.load(initialURL)
         return webView
     }
 }

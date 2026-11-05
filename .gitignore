@@ -98,3 +98,12 @@ docs/prompts/**/reports/*-run.log
 
 # 本机签名（#071）：Team ID / bundle 前缀，模板是 Config/Signing.local.xcconfig.example；worktree 里是 xcodegen 时软链主仓的那份
 Config/Signing.local.xcconfig
+
+# 过程截图 / 取证 / 运行日志可能带粟粟私人数据，不进 git（10-14）：放 ~/MemoryPalace-docs-media/<同路径>
+docs/shots/
+docs/evidence/
+docs/**/*.log
+# docs/prompts 只留 .md（10-14）：脚本 / json / txt / html 等一律不进 git，副本在 ~/MemoryPalace-docs-media/<同路径>
+docs/prompts/**
+!docs/prompts/**/
+!docs/prompts/**/*.md

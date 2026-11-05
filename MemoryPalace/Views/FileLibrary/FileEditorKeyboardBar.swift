@@ -14,7 +14,7 @@ struct FileEditorShareFile: Transferable {
 
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(exportedContentType: .plainText) { item in
-            let dir = FileManager.default.temporaryDirectory
+            let dir = AppPaths.temporaryDirectory
                 .appendingPathComponent("file-editor-share-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let url = dir.appendingPathComponent(item.name)
@@ -35,7 +35,12 @@ struct FileEditorFormatBar: View {
     @Binding var expanded: Bool
     /// 源码模式没有格式命令，只留「收键盘」
     var showsFormatKeys = true
+    /// 撤销 / 重做（两种模式都有；没得撤 / 重做时置灰）
+    var canUndo = false
+    var canRedo = false
     let onCommand: (String) -> Void
+    var onUndo: () -> Void = {}
+    var onRedo: () -> Void = {}
     let onDismissKeyboard: () -> Void
 
     /// 本地镜像：@AppStorage 的写入不吃 withAnimation 事务（10-02 实机「没有收起放出的弹性」），
@@ -48,13 +53,21 @@ struct FileEditorFormatBar: View {
         style: FileEditorKeyboardBarStyle,
         expanded: Binding<Bool>,
         showsFormatKeys: Bool = true,
+        canUndo: Bool = false,
+        canRedo: Bool = false,
         onCommand: @escaping (String) -> Void,
+        onUndo: @escaping () -> Void = {},
+        onRedo: @escaping () -> Void = {},
         onDismissKeyboard: @escaping () -> Void
     ) {
         self.style = style
         self._expanded = expanded
         self.showsFormatKeys = showsFormatKeys
+        self.canUndo = canUndo
+        self.canRedo = canRedo
         self.onCommand = onCommand
+        self.onUndo = onUndo
+        self.onRedo = onRedo
         self.onDismissKeyboard = onDismissKeyboard
         self._isExpanded = State(initialValue: expanded.wrappedValue)
     }
@@ -119,6 +132,7 @@ struct FileEditorFormatBar: View {
                     }
                     Spacer(minLength: 0)
                 }
+                historyKeys
                 collapsedKey(id: "dismiss", label: "收起键盘") {
                     Image(systemName: "keyboard.chevron.compact.down").font(.system(size: 15, weight: .semibold))
                 } action: {
@@ -175,6 +189,43 @@ struct FileEditorFormatBar: View {
             .buttonStyle(.plain)
             .accessibilityLabel(label)
         }
+    }
+
+    // MARK: 撤销 / 重做（收着、展开都在「收键盘」左边）
+
+    @ViewBuilder
+    private var historyKeys: some View {
+        let pair = HStack(spacing: style == .glass ? 2 : 6) {
+            historyKey(symbol: "arrow.uturn.backward", label: "撤销", enabled: canUndo, action: onUndo)
+            historyKey(symbol: "arrow.uturn.forward", label: "重做", enabled: canRedo, action: onRedo)
+        }
+        switch style {
+        case .glass:
+            pair
+                .padding(.horizontal, 4)
+                .frame(height: Self.barHeight)
+                .glassEffect(.regular.tint(Color.white.opacity(0.15)), in: .capsule)
+                .glassEffectID("history", in: glassNamespace)
+        case .keycap:
+            pair.frame(height: Self.barHeight)
+        }
+    }
+
+    /// 置灰时仍吃掉点按（不做事），免得点穿到下面
+    private func historyKey(symbol: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 15, weight: .medium))
+            .opacity(enabled ? 1 : 0.35)
+            .frame(width: style == .glass ? Self.keySize : Self.keycapSize, height: style == .glass ? Self.keySize : Self.keycapSize)
+            .background {
+                if style == .keycap { keycapBackground }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { if enabled { action() } }
+            .accessibilityElement()
+            .accessibilityLabel(label)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction(.default) { if enabled { action() } }
     }
 
     // MARK: 展开的一条
@@ -261,6 +312,26 @@ struct FileEditorFormatBar: View {
             LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
                 .frame(width: 26)
         }
+    }
+}
+
+/// 源码模式撤销 / 重做：找到当前第一响应者（TextEditor 底下的 UITextView），用它的 undoManager——
+/// 和系统摇一摇 / 三指撤销同一个，TextEditor 绑定照常跟着文字变化回写
+@MainActor
+enum FileEditorTextUndo {
+    fileprivate weak static var captured: UIResponder?
+
+    static func firstResponderUndoManager() -> UndoManager? {
+        captured = nil
+        UIApplication.shared.sendAction(#selector(UIResponder.fileEditorCaptureFirstResponder), to: nil, from: nil, for: nil)
+        defer { captured = nil }
+        return captured?.undoManager
+    }
+}
+
+private extension UIResponder {
+    @objc func fileEditorCaptureFirstResponder() {
+        FileEditorTextUndo.captured = self
     }
 }
 

@@ -67,10 +67,9 @@ struct GrokAdapter: CodingSessionAdapter {
 
     /// 两层：<cwd 组目录>/<会话目录>/updates.jsonl；根级 session_search.sqlite 等文件读目录自然失败跳过
     func listSessionFiles() -> [CodingSessionFileRef] {
-        let fm = FileManager.default
         var refs: [CodingSessionFileRef] = []
-        for cwdDir in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
-            for session in (try? fm.contentsOfDirectory(at: cwdDir, includingPropertiesForKeys: nil)) ?? [] {
+        for cwdDir in (try? AppPaths.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+            for session in (try? AppPaths.contentsOfDirectory(at: cwdDir, includingPropertiesForKeys: nil)) ?? [] {
                 if let ref = fileRef(session.appendingPathComponent("updates.jsonl")) { refs.append(ref) }
             }
         }
@@ -113,7 +112,7 @@ struct GrokAdapter: CodingSessionAdapter {
 
     static func summary(_ updates: URL) -> Summary {
         var s = Summary()
-        guard let data = try? Data(contentsOf: updates.deletingLastPathComponent().appendingPathComponent("summary.json")),
+        guard let data = try? Data(contentsOf: AppPaths.checked(updates.deletingLastPathComponent().appendingPathComponent("summary.json"))),
               let v = (try? JSONSerialization.jsonObject(with: data)) as? CodingParse.JSON else { return s }
         if let cwd = (v["info"] as? CodingParse.JSON)?["cwd"] as? String { s.cwd = cwd }
         // generated_title 与 session_summary 通常同值，前者更语义化

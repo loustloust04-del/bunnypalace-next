@@ -12,7 +12,7 @@ enum HubTokenStore {
     #if os(macOS)
     /// install-launchd.sh 装的 hub plist，label 前缀不固定（`<前缀>.cc-bridge-hub.plist`）
     private static var plistPath: String? {
-        let dir = "\(NSHomeDirectory())/Library/LaunchAgents"
+        let dir = AppPaths.checked(AppPaths.home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)).path
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
         return names.filter { $0.hasSuffix(".cc-bridge-hub.plist") }.sorted().first.map { "\(dir)/\($0)" }
     }

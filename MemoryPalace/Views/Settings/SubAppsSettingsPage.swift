@@ -1,7 +1,7 @@
 #if os(iOS)
 import SwiftUI
 
-/// 设置 →「子应用」：Page2 各子应用自己的设置。
+/// 设置 →「子应用」：Page2 各子应用的设置目录，每行打开该子应用自己的那一页设置。
 struct SubAppsSettingsPage: View {
     @Environment(RightPanelToolManager.self) private var tools: RightPanelToolManager?
     #if PERSONAL_APPS
@@ -14,7 +14,8 @@ struct SubAppsSettingsPage: View {
                 NavigationLink {
                     ChatSkinSettingsPage()
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 12) {
+                        subAppIcon("bubble.left.and.bubble.right")
                         Text("聊天（css自定义）")
                             .font(.system(size: Theme.F.body))
                             .foregroundColor(Theme.textPrimary)
@@ -26,6 +27,19 @@ struct SubAppsSettingsPage: View {
                 }
             } footer: {
                 Text("用 CSS 自己装修聊天界面，能直接导入 KakaoTalk 主题。")
+            }
+            .listRowBackground(Theme.mainBg)
+
+            Section {
+                subAppRow(icon: "ri-emoji-sticker", title: "贴纸") { StickerPage() }
+                subAppRow(icon: "heart.text.square", title: "健康") { HealthSettingsTab() }
+                subAppRow(icon: "calendar", title: "日历") { CalendarSettingsTab() }
+                #if PERSONAL_APPS
+                subAppRow(icon: "chart.line.uptrend.xyaxis", title: "交易") { TradingSettingsTab() }
+                #endif
+                subAppRow(icon: "books.vertical", title: "书房") { ReadingSettingsTab() }
+                subAppRow(icon: "abc", title: "单词") { VocabSettingsTab() }
+                subAppRow(icon: "person.2", title: "群聊") { GroupChatSettingsTab() }
             }
             .listRowBackground(Theme.mainBg)
 
@@ -49,6 +63,24 @@ struct SubAppsSettingsPage: View {
         .background(Theme.sidebarBg)
         .navigationTitle("子应用")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func subAppIcon(_ name: String) -> some View {
+        AppIconView(name: name, size: 16, tint: Theme.textSecondary)
+            .frame(width: 28)
+    }
+
+    private func subAppRow<Destination: View>(icon: String, title: String, @ViewBuilder destination: @escaping () -> Destination) -> some View {
+        NavigationLink {
+            destination()
+        } label: {
+            HStack(spacing: 12) {
+                subAppIcon(icon)
+                Text(title)
+                    .font(.system(size: Theme.F.body))
+                    .foregroundColor(Theme.textPrimary)
+            }
+        }
     }
 }
 #endif

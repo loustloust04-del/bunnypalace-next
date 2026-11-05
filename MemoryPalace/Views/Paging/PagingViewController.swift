@@ -931,8 +931,6 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         KBProbe.log("KB did \(kbState())")
     }
 
-    /// 输入条单行紧凑高度（容器只放输入字段时的高度）：容器超出它的部分 = 列表垫块要补的量
-    private static let compactBarHeight: CGFloat = 74
     /// 滚动逻辑**已经补偿过**的 extra（08-26）。P1 后桥里的 extra 在 layout 里先发布、键盘通知后到，
     /// 拿桥当基线算增量永远是 0（探针：`rise extra=312 deltaE=0 farAway=1` → 深翻弹键盘垫块长 312
     /// 没人钉 = 内容推 1/3 屏）。增量只能相对「上次 rise/hide 处理到哪」算。
@@ -989,7 +987,7 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         // C-slide：carrier 定高，容器 minY/height 不再是栈几何——真相 = carrier 底（平移分量，UIKit）
         // − 可见栈高（内容分量，SwiftUI 自报 barVisibleHeight）。
         let top = inputBarContainer.map { $0.frame.maxY - b.barVisibleHeight } ?? b.containerTop
-        let growth = max(0, b.barVisibleHeight - Self.compactBarHeight)
+        let growth = max(0, b.barVisibleHeight - b.compactBarHeight)
         guard abs(extra - b.extra) > 0.5 || abs(top - b.containerTop) > 0.5 || abs(growth - b.barGrowth) > 0.5 else { return }
         KBProbe.log(String(format: "publish extra %.0f→%.0f cTop %.0f→%.0f growth %.0f→%.0f container=%@",
                            b.extra, extra, b.containerTop, top, b.barGrowth, growth,
@@ -1077,7 +1075,7 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         guard abs(chatView.keyboardLayoutGuide.layoutFrame.minY - restTop) <= 0.5,
               abs(f.maxY - restTop) <= 0.5, abs(f.height - chatView.bounds.height) <= 0.5 else { return false }
         let top = f.maxY - b.barVisibleHeight
-        let growth = max(0, b.barVisibleHeight - Self.compactBarHeight)
+        let growth = max(0, b.barVisibleHeight - b.compactBarHeight)
         return abs(top - b.containerTop) <= 0.5 && abs(growth - b.barGrowth) <= 0.5
     }
 

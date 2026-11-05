@@ -30,11 +30,16 @@ final class BudgetGateTests: XCTestCase {
         private let queue = DispatchQueue(label: "BudgetGateTests.ToolLoopHTTPServer")
         private let lock = NSLock()
         private let responseBuilder: (Int, Data) -> Data
+        /// 第几次请求回什么状态码（默认都是 200；thinking 回传 astra #1 用它模拟思考块被拒）
+        private let status: (Int) -> Int
+        /// 回完不关连接、Content-Length 报大：客户端一直等后续字节（测「停止」用）
+        var holdOpen = false
         private(set) var requestBodies: [Data] = []
         private(set) var spentAtRequestStart: [Double] = []
 
-        init(responseBuilder: @escaping (Int, Data) -> Data) throws {
+        init(status: @escaping (Int) -> Int = { _ in 200 }, responseBuilder: @escaping (Int, Data) -> Data) throws {
             self.responseBuilder = responseBuilder
+            self.status = status
             listener = try NWListener(using: .tcp, on: .any)
         }
 
@@ -114,11 +119,15 @@ final class BudgetGateTests: XCTestCase {
             lock.unlock()
 
             let body = responseBuilder(index, requestBody)
-            let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+            let code = status(index)
+            let header = code == 200
+                ? "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: \(body.count + (holdOpen ? 1_000_000 : 0))\r\nConnection: close\r\n\r\n"
+                : "HTTP/1.1 \(code) Bad Request\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
             var response = Data(header.utf8)
             response.append(body)
+            let hold = holdOpen
             connection.send(content: response, completion: .contentProcessed { _ in
-                connection.cancel()
+                if !hold { connection.cancel() }
             })
         }
     }
@@ -169,18 +178,19 @@ final class BudgetGateTests: XCTestCase {
     }
 
     @MainActor
-    private func makeToolLoopFixture(baseURL: String, maxTokens: Int = 4096) throws -> ToolLoopFixture {
+    private func makeToolLoopFixture(baseURL: String, maxTokens: Int = 4096, type: ProviderType = .openaiCompatible,
+                                     modelId: String = "gpt-4o") throws -> ToolLoopFixture {
         let schema = ProfileManager.makeFullSchema()
         let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
         let container = try ModelContainer(for: schema, configurations: [config])
         let context = ModelContext(container)
         let credentialId = "xctest-tool-loop-\(UUID().uuidString)"
-        let model = ProviderModel(credentialId: credentialId, modelId: "gpt-4o", name: "Tool Loop Test")
+        let model = ProviderModel(credentialId: credentialId, modelId: modelId, name: "Tool Loop Test")
         let credential = APICredential(
             id: credentialId,
             name: "Tool Loop Test",
             emoji: "🧪",
-            type: .openaiCompatible,
+            type: type,
             baseURL: baseURL,
             models: [model],
             toolsSupported: true
@@ -1061,6 +1071,31 @@ extension BudgetGateTests {
         XCTAssertEqual(useNames, [DeviceInfoTool.toolName], "聊天卡片显示真工具")
     }
 
+    /// 中转兼容 R8（审查 #1）：中转往骰子调用里塞 `_call`——执行器收到过滤后的参数，聊天卡片 / 回给模型的调用记录照原样
+    @MainActor
+    func testRelayInjectedArgumentsNeverReachExecutor() async throws {
+        let budget = isolateBudget()
+        defer { restoreBudget(budget) }
+        var executed: [(name: String, args: String)] = []
+        ConversationViewModel.executionArgsTap = { executed.append(($0, $1)) }
+        defer { ConversationViewModel.executionArgsTap = nil }
+        let raw = #"{"dice":"1d6","_call":"relay-injected"}"#
+        let (server, node) = try await runOneToolRound(name: DiceTool.toolName, arguments: raw)
+        XCTAssertEqual(executed.map(\.name), [DiceTool.toolName])
+        let args = try XCTUnwrap(executed.first?.args)
+        XCTAssertFalse(args.contains("_call"), args)
+        XCTAssertTrue(args.contains("1d6"), args)
+        let history = (node.segments ?? []).compactMap { seg -> String? in
+            if case .toolUse(_, _, let input, _, _) = seg { return input }
+            return nil
+        }
+        XCTAssertEqual(history, [raw], "聊天卡片 / 历史照原样")
+        guard server.requestCount > 1 else { return XCTFail("没有第二轮") }
+        let (call, result) = try toolMessage(server)
+        XCTAssertEqual((call["function"] as? [String: Any])?["arguments"] as? String, raw, "回给模型的调用记录照原样")
+        XCTAssertTrue(result.contains("card-dice"), result)
+    }
+
     @MainActor
     func testInvokeWrappedWithNonObjectArgumentsIsRejected() async throws {
         let budget = isolateBudget()
@@ -1098,6 +1133,25 @@ extension BudgetGateTests {
         let firstTools = (try requestJSON(server, at: 0)["tools"] as? [[String: Any]] ?? [])
             .compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
         XCTAssertFalse(firstTools.contains(SelfMemoryTool.rememberName))
+    }
+
+    /// #093 工具抽屉里关了：直接叫 / 经 tool_invoke 包着叫都不执行，回「没开」；第一轮清单里没有它
+    @MainActor
+    func testDrawerOffBuiltinIsRefusedDirectAndWrapped() async throws {
+        let budget = isolateBudget()
+        defer { restoreBudget(budget) }
+        let saved = ToolDrawerStore.shared.state
+        defer { ToolDrawerStore.shared.update { $0 = saved } }
+        ToolDrawerStore.shared.update { $0 = .defaults; $0.set(.off, for: DiceTool.toolName, profileId: nil) }
+        for (name, args) in [(DiceTool.toolName, #"{"dice":"1d6"}"#),
+                             (MetaTools.invokeName, #"{"name":"roll_dice","arguments":{"dice":"1d6"}}"#)] {
+            let (server, _) = try await runOneToolRound(name: name, arguments: args)
+            guard server.requestCount > 1 else { return XCTFail("\(name)：没有第二轮") }
+            XCTAssertEqual(try toolMessage(server).result, ConversationViewModel.toolUnavailableMessage(name: DiceTool.toolName), name)
+            let firstTools = (try requestJSON(server, at: 0)["tools"] as? [[String: Any]] ?? [])
+                .compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
+            XCTAssertFalse(firstTools.contains(DiceTool.toolName), name)
+        }
     }
 
     /// 收起来的工具不进清单，〔更多工具〕段列出来；元工具在清单里；tool_search 搜得到收起来的内建
@@ -1151,5 +1205,340 @@ extension BudgetGateTests {
         XCTAssertNil(OfficialTokenCounter.request(from: request))
         request.url = URL(string: "https://api.anthropic.com/v1/messages")
         XCTAssertEqual(OfficialTokenCounter.request(from: request)?.url?.path, "/v1/messages/count_tokens")
+    }
+
+    // MARK: - thinking 回传（plan-thinking §3.2 / §3.3 / §3.9）：真走工具循环，假服务器回 Anthropic SSE
+
+    private typealias SSE = ThinkingStreamTests
+
+    private static func anthropicReply(_ blocks: [[String: Any]], stop: String) -> Data {
+        var out = SSE.event("message_start", ["message": ["usage": ["input_tokens": 50, "output_tokens": 0]]])
+        for (i, block) in blocks.enumerated() {
+            switch block["type"] as? String {
+            case "thinking":
+                out += SSE.start(i, ["type": "thinking", "thinking": "", "signature": ""])
+                if let t = block["thinking"] as? String, !t.isEmpty { out += SSE.delta(i, ["type": "thinking_delta", "thinking": t]) }
+                out += SSE.delta(i, ["type": "signature_delta", "signature": block["signature"] as? String ?? ""])
+            case "text":
+                out += SSE.start(i, ["type": "text", "text": ""]) + SSE.delta(i, ["type": "text_delta", "text": block["text"] as? String ?? ""])
+            case "tool_use":
+                out += SSE.start(i, ["type": "tool_use", "id": block["id"] ?? "", "name": block["name"] ?? "", "input": [String: Any]()])
+                let json = try! JSONSerialization.data(withJSONObject: block["input"] ?? [String: Any](), options: [.sortedKeys])
+                out += SSE.delta(i, ["type": "input_json_delta", "partial_json": String(decoding: json, as: UTF8.self)])
+            default:
+                out += SSE.start(i, block)
+            }
+            out += SSE.stop(i)
+        }
+        out += SSE.event("message_delta", ["delta": ["stop_reason": stop], "usage": ["output_tokens": 20]])
+        out += SSE.event("message_stop", [:])
+        return Data(out.utf8)
+    }
+
+    private static let firstTurnBlocks: [[String: Any]] = [
+        ["type": "thinking", "thinking": "先想", "signature": "sig-0"],
+        ["type": "text", "text": "我查一下"],
+        ["type": "thinking", "thinking": "", "signature": "sig-progress"],
+        ["type": "tool_use", "id": "toolu_1", "name": "fs_read", "input": ["path": "missing-thinking.txt"]],
+    ]
+
+    private func assistantBlocks(_ server: ToolLoopHTTPServer, at index: Int) throws -> [[String: Any]] {
+        let messages = try XCTUnwrap(requestJSON(server, at: index)["messages"] as? [[String: Any]])
+        return try XCTUnwrap(messages.last { ($0["role"] as? String) == "assistant" }?["content"] as? [[String: Any]])
+    }
+
+    @MainActor
+    func testAnthropicToolLoopEchoesThisTurnsBlocksVerbatim() async throws {
+        let budget = isolateBudget()
+        defer { restoreBudget(budget) }
+        let server = try ToolLoopHTTPServer { index, _ in
+            index == 0 ? Self.anthropicReply(Self.firstTurnBlocks, stop: "tool_use")
+                : Self.anthropicReply([["type": "thinking", "thinking": "收尾", "signature": "sig-1"], ["type": "text", "text": "好了"]], stop: "end_turn")
+        }
+        try server.start()
+        defer { server.stop() }
+        let fixture = try makeToolLoopFixture(baseURL: server.baseURL, type: .anthropic, modelId: "claude-opus-5-5")
+        defer { cleanUp(fixture) }
+
+        XCTAssertTrue(fixture.viewModel.sendMessage("读一下", model: fixture.model, profile: fixture.profile, preset: fixture.preset,
+                                                    providerManager: fixture.providerManager, context: fixture.context))
+        await waitForTurnToFinish(fixture.viewModel)
+
+        XCTAssertEqual(server.requestCount, 2)
+        guard server.requestCount == 2 else { return }
+        let echoed = try assistantBlocks(server, at: 1)
+        XCTAssertEqual(echoed.map { $0["type"] as? String }, ["thinking", "text", "thinking", "tool_use"], "这一次回复的块全部原样回传")
+        XCTAssertEqual(echoed.first?["thinking"] as? String, "先想")
+        XCTAssertEqual(echoed.first?["signature"] as? String, "sig-0")
+        XCTAssertEqual(echoed.dropFirst().first?["text"] as? String, "我查一下")
+        XCTAssertEqual(echoed.dropFirst(2).first?["signature"] as? String, "sig-progress")
+        XCTAssertEqual((echoed.last?["input"] as? [String: Any])?["path"] as? String, "missing-thinking.txt")
+        XCTAssertEqual((try requestJSON(server, at: 0)["thinking"] as? [String: Any])?["type"] as? String, "adaptive", "默认档显式 adaptive")
+
+        let node = try assistantNode(in: fixture)
+        let kinds = (node.segments ?? []).map { seg -> String in
+            switch seg {
+            case .thinking(let t, let sig, _): return "thinking:\(t):\(sig ?? "nil")"
+            case .text(let t): return "text:\(t)"
+            case .toolUse: return "toolUse"
+            case .toolResult: return "toolResult"
+            default: return "other"
+            }
+        }
+        XCTAssertEqual(kinds, ["thinking:先想:sig-0", "text:我查一下", "thinking::sig-progress", "toolUse", "toolResult",
+                               "thinking:收尾:sig-1", "text:好了"])
+        XCTAssertEqual(node.content, "好了")
+    }
+
+    @MainActor
+    func testAnthropicPlainReplyStoresThinkingOnlySegments() async throws {
+        let budget = isolateBudget()
+        defer { restoreBudget(budget) }
+        let server = try ToolLoopHTTPServer { _, _ in
+            Self.anthropicReply([["type": "thinking", "thinking": "想一下", "signature": "sig"], ["type": "text", "text": "正文"]], stop: "end_turn")
+        }
+        try server.start()
+        defer { server.stop() }
+        let fixture = try makeToolLoopFixture(baseURL: server.baseURL, type: .anthropic, modelId: "claude-opus-5-5")
+        defer { cleanUp(fixture) }
+
+        XCTAssertTrue(fixture.viewModel.sendMessage("你好", model: fixture.model, profile: fixture.profile, preset: fixture.preset,
+                                                    providerManager: fixture.providerManager, context: fixture.context))
+        await waitForTurnToFinish(fixture.viewModel)
+
+        let node = try assistantNode(in: fixture)
+        XCTAssertEqual(node.content, "正文")
+        XCTAssertEqual(node.contentType, "text", "普通回复不变成 segmented")
+        XCTAssertEqual(node.segments, [.text("正文"), .thinking(text: "想一下", signature: "sig")], "astra #4：正文段在前")
+        XCTAssertFalse(node.segments?.hasRenderableSegments ?? true)
+        XCTAssertEqual(ChatCardIndex.visibleText(content: node.content, segments: node.segments), "正文")
+    }
+
+    // MARK: - 模型兼容 P0 阶段 3 审查 #2：只有思考、没正文的回复也落库（[DONE] / EOF / 报错 / 停止）
+
+    private static let thinkingOnlyLine = "data: " + jsonLine(["choices": [["delta": ["reasoning_content": "想到一半"]]]])
+
+    @MainActor
+    private func runThinkingOnly(_ lines: [String], stop: Bool = false, check: (MessageNode) -> Void) async throws {
+        let budget = isolateBudget()
+        defer { restoreBudget(budget) }
+        let server = try ToolLoopHTTPServer { _, _ in Data((lines.joined(separator: "\n\n") + "\n\n").utf8) }
+        server.holdOpen = stop
+        try server.start()
+        defer { server.stop() }
+        let fixture = try makeToolLoopFixture(baseURL: server.baseURL)
+        defer { cleanUp(fixture) }
+
+        XCTAssertTrue(fixture.viewModel.sendMessage("你好", model: fixture.model, profile: fixture.profile, preset: fixture.preset,
+                                                    providerManager: fixture.providerManager, context: fixture.context))
+        if stop {
+            let deadline = Date().addingTimeInterval(5)
+            while fixture.viewModel.providerRouter.lastReasoning == nil, Date() < deadline {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertNotNil(fixture.viewModel.providerRouter.lastReasoning, "停止前已收到思考")
+            fixture.viewModel.cancelAssistantTurn(context: fixture.context)
+        }
+        await waitForTurnToFinish(fixture.viewModel)
+        check(try assistantNode(in: fixture))
+    }
+
+    @MainActor
+    func testThinkTagOnlyThenDoneStoresThinking() async throws {
+        let tag = "data: " + Self.jsonLine(["choices": [["delta": ["content": "<think>想到一半"]]]])
+        try await runThinkingOnly([tag, "data: [DONE]"]) { node in
+            XCTAssertEqual(node.content, "")
+            XCTAssertEqual(node.segments, [.text(""), .thinking(text: "想到一半", signature: nil)])
+            XCTAssertEqual(node.segments?.attachedThinkingText, "想到一半")
+        }
+    }
+
+    @MainActor
+    func testThinkingOnlyEOFStoresThinkingWithError() async throws {
+        try await runThinkingOnly([Self.thinkingOnlyLine]) { node in
+            XCTAssertTrue(node.content.hasPrefix("⚠️ "), node.content)
+            XCTAssertEqual(node.segments, [.text(node.content), .thinking(text: "想到一半", signature: nil)])
+        }
+    }
+
+    @MainActor
+    func testThinkingThenStreamErrorStoresThinkingWithError() async throws {
+        let error = "data: " + Self.jsonLine(["error": ["message": "上游炸了"]])
+        try await runThinkingOnly([Self.thinkingOnlyLine, error, "data: [DONE]"]) { node in
+            XCTAssertTrue(node.content.hasPrefix("⚠️ "), node.content)
+            XCTAssertEqual(node.segments, [.text(node.content), .thinking(text: "想到一半", signature: nil)])
+        }
+    }
+
+    @MainActor
+    func testThinkingOnlyThenStopStoresThinking() async throws {
+        try await runThinkingOnly([Self.thinkingOnlyLine], stop: true) { node in
+            XCTAssertEqual(node.content, "（已停止）")
+            XCTAssertEqual(node.segments, [.text("（已停止）"), .thinking(text: "想到一半", signature: nil)])
+        }
+    }
+
+    @MainActor
+    func testAskUserResumeCarriesThisTurnsBlocks() async throws {
+        let budget = isolateBudget()
+        defer { restoreBudget(budget) }
+        let ask: [String: Any] = ["questions": [["question": "选哪个？", "options": ["甲", "乙"]]]]
+        let server = try ToolLoopHTTPServer { index, _ in
+            index == 0
+                ? Self.anthropicReply([["type": "thinking", "thinking": "要问", "signature": "sig-ask"],
+                                       ["type": "tool_use", "id": "toolu_ask", "name": AskUserTool.toolName, "input": ask]], stop: "tool_use")
+                : Self.anthropicReply([["type": "text", "text": "收到"]], stop: "end_turn")
+        }
+        try server.start()
+        defer { server.stop() }
+        let fixture = try makeToolLoopFixture(baseURL: server.baseURL, type: .anthropic, modelId: "claude-opus-5-5")
+        defer { cleanUp(fixture) }
+
+        XCTAssertTrue(fixture.viewModel.sendMessage("问我", model: fixture.model, profile: fixture.profile, preset: fixture.preset,
+                                                    providerManager: fixture.providerManager, context: fixture.context))
+        let deadline = Date().addingTimeInterval(8)
+        while fixture.viewModel.pendingUserQuestion == nil, Date() < deadline { try? await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertNotNil(fixture.viewModel.pendingUserQuestion, "ask_user 暂停")
+        XCTAssertEqual(fixture.viewModel.pendingUserQuestion?.assistantContent?.first?["signature"] as? String, "sig-ask")
+        fixture.viewModel.recordUserAnswer(.options([0]), at: 0)
+        fixture.viewModel.completeActiveAskCard()
+        await waitForTurnToFinish(fixture.viewModel)
+
+        XCTAssertEqual(server.requestCount, 2)
+        guard server.requestCount == 2 else { return }
+        let echoed = try assistantBlocks(server, at: 1)
+        XCTAssertEqual(echoed.map { $0["type"] as? String }, ["thinking", "tool_use"], "恢复时拼上暂停那次回复的原样块")
+        XCTAssertEqual(echoed.first?["signature"] as? String, "sig-ask")
+    }
+
+    /// 保险闸：签名是密文不计字；开思考时期望输出 = 4096 + 这一档余量（Q9-A）
+    func testPreflightSkipsSignatureAndAddsThinkingHeadroom() throws {
+        func request(_ body: [String: Any]) throws -> URLRequest {
+            var r = URLRequest(url: URL(string: "http://127.0.0.1:9/v1/messages")!)
+            r.httpBody = try JSONSerialization.data(withJSONObject: body)
+            return r
+        }
+        func messages(signature: String) -> [[String: Any]] {
+            [["role": "user", "content": "hi"],
+             ["role": "assistant", "content": [["type": "thinking", "thinking": "想", "signature": signature],
+                                               ["type": "tool_use", "id": "t", "name": "fs_read", "input": ["path": "a"]]]],
+             ["role": "user", "content": [["type": "tool_result", "tool_use_id": "t", "content": "r"]]]]
+        }
+        let short = try XCTUnwrap(BudgetPreflight.estimate(try request(["model": "claude-opus-5-5", "max_tokens": 36864,
+                                                                        "messages": messages(signature: "s")])))
+        let long = try XCTUnwrap(BudgetPreflight.estimate(try request(["model": "claude-opus-5-5", "max_tokens": 36864,
+                                                                       "messages": messages(signature: String(repeating: "A", count: 20_000))])))
+        XCTAssertEqual(short.input, long.input, "签名长度不影响估算")
+        XCTAssertEqual(short.output, 4096, "没开思考照旧 4096")
+        let adaptive = try XCTUnwrap(BudgetPreflight.estimate(try request(["model": "claude-opus-5-5", "max_tokens": 36864,
+                                                                           "thinking": ["type": "adaptive"], "messages": messages(signature: "s")])))
+        XCTAssertEqual(adaptive.output, 4096 + 4096, "adaptive 没写档 = 官方默认档（opus 5.5 medium）")
+        let high = try XCTUnwrap(BudgetPreflight.estimate(try request(["model": "claude-opus-5-5", "max_tokens": 64000,
+                                                                       "thinking": ["type": "adaptive"], "output_config": ["effort": "high"],
+                                                                       "messages": messages(signature: "s")])))
+        XCTAssertEqual(high.output, 4096 + 10000)
+        let budget = try XCTUnwrap(BudgetPreflight.estimate(try request(["model": "claude-sonnet-4-5", "max_tokens": 5000,
+                                                                         "thinking": ["type": "enabled", "budget_tokens": 4096],
+                                                                         "messages": messages(signature: "s")])))
+        XCTAssertEqual(budget.output, 5000, "不超过 max_tokens")
+    }
+
+    // MARK: - thinking 回传 · astra 一轮
+
+    private func toolAssistantTypes(_ server: ToolLoopHTTPServer, at index: Int) throws -> [[String]] {
+        let messages = try XCTUnwrap(requestJSON(server, at: index)["messages"] as? [[String: Any]])
+        return messages.compactMap { msg -> [String]? in
+            guard msg["role"] as? String == "assistant", let blocks = msg["content"] as? [[String: Any]],
+                  blocks.contains(where: { $0["type"] as? String == "tool_use" }) else { return nil }
+            return blocks.compactMap { $0["type"] as? String }
+        }
+    }
+
+    /// astra #1：思考块被拒、去块重发成功后模型接着调工具——下一轮不能把被拒的块再带回来，新那一轮的思考照带
+    @MainActor
+    func testStrippedThinkingStaysStrippedForRestOfLoop() async throws {
+        let budget = isolateBudget()
+        defer { restoreBudget(budget) }
+        let rejected = Data(#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0: Invalid `signature` in `thinking` block"}}"#.utf8)
+        let server = try ToolLoopHTTPServer(status: { $0 == 1 ? 400 : 200 }) { index, _ in
+            switch index {
+            case 0: return Self.anthropicReply([["type": "thinking", "thinking": "A", "signature": "sig-A"],
+                                                ["type": "tool_use", "id": "toolu_1", "name": "fs_read", "input": ["path": "x1.txt"]]], stop: "tool_use")
+            case 1: return rejected
+            case 2: return Self.anthropicReply([["type": "thinking", "thinking": "B", "signature": "sig-B"],
+                                                ["type": "tool_use", "id": "toolu_2", "name": "fs_read", "input": ["path": "x2.txt"]]], stop: "tool_use")
+            default: return Self.anthropicReply([["type": "text", "text": "完"]], stop: "end_turn")
+            }
+        }
+        try server.start()
+        defer { server.stop() }
+        let fixture = try makeToolLoopFixture(baseURL: server.baseURL, type: .anthropic, modelId: "claude-opus-5-5")
+        defer { cleanUp(fixture) }
+
+        XCTAssertTrue(fixture.viewModel.sendMessage("读两个", model: fixture.model, profile: fixture.profile, preset: fixture.preset,
+                                                    providerManager: fixture.providerManager, context: fixture.context))
+        await waitForTurnToFinish(fixture.viewModel)
+
+        XCTAssertEqual(server.requestCount, 4)
+        guard server.requestCount == 4 else { return }
+        XCTAssertEqual(try toolAssistantTypes(server, at: 1), [["thinking", "tool_use"]], "第一次续轮原样带（被拒）")
+        XCTAssertEqual(try toolAssistantTypes(server, at: 2), [["tool_use"]], "去块重发")
+        XCTAssertEqual(try toolAssistantTypes(server, at: 3), [["tool_use"], ["thinking", "tool_use"]],
+                       "再下一轮：被拒的那轮一直不带，重发后新生成的思考照带")
+        let node = try assistantNode(in: fixture)
+        XCTAssertEqual(node.content, "完")
+    }
+
+    /// astra #3：回传的思考块按输入计——知道 thinking_tokens 直接加；不知道的能官方计数就强制计、不能就按签名字数保守估
+    @MainActor
+    func testPreflightCountsEchoedThinking() async throws {
+        let sig = String(repeating: "S", count: 4000)
+        let content: [[String: Any]] = [["type": "thinking", "thinking": "", "signature": sig],
+                                        ["type": "tool_use", "id": "t", "name": "fs_read", "input": ["path": "a"]]]
+        let calls = [ToolCallBlock(id: "t", name: "fs_read", argumentsJSON: #"{"path":"a"}"#)]
+        let results = [ToolResultBlock(toolUseId: "t", text: "r", isError: false)]
+        let known = BudgetPreflight.EchoedThinking([ToolTurn(calls: calls, results: results, assistantContent: content, thinkingTokens: 50_000)])
+        XCTAssertEqual(known, BudgetPreflight.EchoedThinking(knownTokens: 50_000))
+        let unknown = BudgetPreflight.EchoedThinking([ToolTurn(calls: calls, results: results, assistantContent: content)])
+        XCTAssertEqual(unknown, BudgetPreflight.EchoedThinking(unknownSignatureChars: 4000))
+        XCTAssertEqual(unknown.conservativeTokens, 1000)
+        XCTAssertEqual(BudgetPreflight.EchoedThinking([ToolTurn(calls: calls, results: results, assistantContent: content, thinkingTokens: 9)
+            .droppingThinking()]), BudgetPreflight.EchoedThinking(), "去了块就不算")
+
+        func request(_ url: String) -> URLRequest {
+            var r = URLRequest(url: URL(string: url)!)
+            r.httpBody = try! JSONSerialization.data(withJSONObject: [
+                "model": "claude-opus-5-5", "max_tokens": 1000,
+                "messages": [["role": "user", "content": "hi"], ["role": "assistant", "content": content],
+                             ["role": "user", "content": [["type": "tool_result", "tool_use_id": "t", "content": "r"]]]],
+            ] as [String: Any])
+            return r
+        }
+        let far = BudgetPreflight.State(enabled: true, isBudgetSet: true, budgetUSD: 1000, spentUSD: 0)
+        // 不支持官方计数的端点（中转）：已知 token 直接加、未知按签名字数保守估
+        let relay = request("https://relay.example.com/v1/messages")
+        let base = try XCTUnwrap(BudgetPreflight.immediateDecision(relay, state: { far })).estimatedCost
+        let withKnown = try XCTUnwrap(BudgetPreflight.immediateDecision(relay, echoed: known, state: { far })).estimatedCost
+        let withUnknown = try XCTUnwrap(BudgetPreflight.immediateDecision(relay, echoed: unknown, state: { far })).estimatedCost
+        XCTAssertGreaterThan(withKnown, base)
+        XCTAssertGreaterThan(withUnknown, base)
+        XCTAssertGreaterThan(withKnown, withUnknown)
+
+        // 官方端点：离额度很远也强制走 count_tokens（未知 token 时）
+        final class Calls: @unchecked Sendable { var n = 0; let lock = NSLock() }
+        let calls2 = Calls()
+        let counter = OfficialTokenCounter(fetch: { _ in
+            calls2.lock.withLock { calls2.n += 1 }
+            return Data(#"{"input_tokens":200000}"#.utf8)
+        })
+        let official = request("https://api.anthropic.com/v1/messages")
+        _ = await BudgetPreflight.decision(official, counter: counter, state: { far })
+        XCTAssertEqual(calls2.n, 0, "没回传思考、离额度远：照旧不计数")
+        let exact = await BudgetPreflight.decision(official, counter: counter, echoed: unknown, state: { far })
+        XCTAssertEqual(calls2.n, 1, "回传了不知道 token 数的思考：强制官方计数")
+        XCTAssertGreaterThan(exact.estimatedCost, base, "按官方计数的 200000 输入算")
+        let off = BudgetPreflight.State(enabled: false, isBudgetSet: true, budgetUSD: 1000, spentUSD: 0)
+        _ = await BudgetPreflight.decision(official, counter: counter, echoed: unknown, state: { off })
+        XCTAssertEqual(calls2.n, 1, "保险闸关着不多发计数请求")
     }
 }

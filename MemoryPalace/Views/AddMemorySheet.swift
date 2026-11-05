@@ -8,17 +8,22 @@ struct AddMemorySheet: View {
     var editing: Memory? = nil   // 刀2（plan-memory-usable）：非 nil = 编辑既有条目
     /// 编辑时「出处」节的「去原对话」；nil = 只显示原话
     var onJumpToSource: (() -> Void)? = nil
+    /// 审计台进来的改字传 false：不钉，只记「你改过」、算「留」（⧫1 / ⧫2）；记忆 app 的「编辑记忆」照旧钉
+    var pinsOnSave: Bool = true
     let onAdded: () -> Void
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 
     @State private var content: String
     @State private var category: String
+    @State private var saveError: String?
 
-    init(profileId: String, editing: Memory? = nil, onJumpToSource: (() -> Void)? = nil, onAdded: @escaping () -> Void) {
+    init(profileId: String, editing: Memory? = nil, onJumpToSource: (() -> Void)? = nil, pinsOnSave: Bool = true,
+         onAdded: @escaping () -> Void) {
         self.profileId = profileId
         self.editing = editing
         self.onJumpToSource = onJumpToSource
+        self.pinsOnSave = pinsOnSave
         self.onAdded = onAdded
         _content = State(initialValue: editing?.content ?? "")
         _category = State(initialValue: editing?.category ?? "fact")
@@ -63,9 +68,15 @@ struct AddMemorySheet: View {
                 } header: {
                     Text("分类")
                 } footer: {
-                    Text("加的、改过的记忆会被钉住，整理时不会动它")
+                    Text(pinsOnSave ? "加的、改过的记忆会被钉住，整理时不会动它" : "改过的会标上「你改过」，不会被钉住")
                 }
                 .listRowBackground(Theme.mainBg)
+
+                if let saveError {
+                    Text(saveError)
+                        .foregroundColor(Theme.danger)
+                        .listRowBackground(Theme.mainBg)
+                }
 
                 if let m = editing, m.sourceQuote?.isEmpty == false || onJumpToSource != nil {
                     Section("出处") {
@@ -121,7 +132,17 @@ struct AddMemorySheet: View {
 
     private func commit() {
         guard !trimmed.isEmpty else { return }
-        if let m = editing {
+        if let m = editing, !pinsOnSave {
+            if m.category != category { MemoryAudit.setCategory(m, category) }
+            if m.content != trimmed { MemoryAudit.editText(m, trimmed) }
+            // 审计台改字：存成了才关（10-16 astra #7）；存不成留着草稿、给一行红字
+            do {
+                try modelContext.save()
+            } catch {
+                saveError = "保存失败：\(error.localizedDescription)"
+                return
+            }
+        } else if let m = editing {
             // ⧫① 已批：人工编辑过的条目自动钉住——你亲手改的话，园丁（做梦/合并）不该再动它
             m.content = trimmed
             m.category = category
@@ -129,6 +150,7 @@ struct AddMemorySheet: View {
             m.decayWeight = 1.0
             m.embeddingData = nil   // 内容变了向量失效，MemoryEmbeddingBackfill 下轮自动重算
             m.updatedAt = Date()
+            m.userEditedAt = m.updatedAt
             try? modelContext.save()
         } else {
             let store = SwiftDataMemoryStore()

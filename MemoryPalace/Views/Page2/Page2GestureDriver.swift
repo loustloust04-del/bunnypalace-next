@@ -26,7 +26,7 @@ final class Page2GestureDriver: NSObject, UIGestureRecognizerDelegate {
     /// 长按失效排查（粟粟 10-14 Air）：按下那一刻把外层状态拼进 trace，只在 PAGE2_UI_TOUCH_TRACE 开着时求值
     var probeState: (() -> String)?
     private(set) var target: Page2DragTarget?
-    private weak var view: UIView?
+    private(set) weak var view: UIView?
     private weak var parentScroll: UIScrollView?
     private let primary = Page2PrimaryTouchRecognizer()
     private let search = UIPanGestureRecognizer()

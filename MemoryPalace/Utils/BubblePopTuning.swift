@@ -7,6 +7,8 @@ import SwiftUI
 /// v2（粟粟：还不够舒服，加参数）：换自定义 Animatable modifier 插值器——
 /// spring 过冲时 progress>1，缩放/位移/倾斜/形变全部自然反向过冲，真果冻。
 enum BubblePopTuning {
+    static let enabledKey = "popEnabled"
+    static let defaultEnabled = false
     static let bounceKey = "popBounce"
     static let durationKey = "popDuration"
     static let scaleFromKey = "popScaleFrom"
@@ -33,6 +35,7 @@ enum BubblePopTuning {
         UserDefaults.standard.object(forKey: key) as? Double ?? fallback
     }
 
+    static var enabled: Bool { UserDefaults.standard.bool(forKey: enabledKey) }
     static var bounce: Double { read(bounceKey, defaultBounce) }
     static var duration: Double { read(durationKey, defaultDuration) }
     static var scaleFrom: Double { read(scaleFromKey, defaultScaleFrom) }
@@ -59,7 +62,8 @@ enum BubblePopTuning {
     /// user=右下（输入框方向）出生，assistant=左下。removal 淡出不弹（删除/重生成别跳）。
     /// ⚠️ 反转列表：必须挂在 cell 翻回正之后的内容上（.flippedUpsideDown() 的内侧）。
     static func popTransition(isUser: Bool) -> AnyTransition {
-        .asymmetric(
+        guard enabled else { return .identity }
+        return .asymmetric(
             // ⚠️ 不要给 transition 绑 .animation(popAnimation) 自带动画：interpolatingSpring 是
             // additive（文档："adding the effects of each animation"）——自带动画与事务动画
             // 双驱动同一 progress 会叠加，冲劲 10 变 20，泡放大数倍飞出容器（录屏 f648 铁证，
@@ -74,7 +78,7 @@ enum BubblePopTuning {
 
     static func resetToDefaults() {
         let d = UserDefaults.standard
-        [bounceKey, durationKey, scaleFromKey, offsetYKey,
+        [enabledKey, bounceKey, durationKey, scaleFromKey, offsetYKey,
          velocityKey, jellyKey, tiltKey, offsetXKey, settleKey].forEach { d.removeObject(forKey: $0) }
     }
 }

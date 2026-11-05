@@ -103,21 +103,24 @@ enum ConfigImporter {
             }
         }
 
+        syncMemoryMaster(root, defaults: defaults)
+
         // 2) 结构化 JSON 存档：把嵌套 JSON 重新序列化成 Data 写回
         for entry in ConfigSchema.structuredKeys {
             guard let sectionDict = root[entry.section.rawValue] as? [String: Any] else { continue }
             guard var obj = sectionDict[entry.key] else { continue }
 
-            // credentials 特殊处理：导出时剥了 .models，导入时按 presetId 补默认 preset.models
-            // 让用户至少能看到几个预设模型（想全量再点「刷新模型」）
+            // credentials 特殊处理：导出时剥了 .models，导入时按 presetId 补种子模型
+            // （有 regionId 用那个区域的种子，没有用默认区域的），让用户至少能看到几个预设模型（想全量再点「刷新模型」）
             if entry.key == "credentials", let arr = obj as? [[String: Any]] {
                 let filled: [[String: Any]] = arr.map { dict in
                     var d = dict
                     if d["models"] == nil,
                        let presetId = d["presetId"] as? String,
-                       let preset = APIProvider.presets.first(where: { $0.id == presetId }) {
+                       let preset = APIProvider.preset(id: presetId) {
                         let cardId = (d["id"] as? String) ?? presetId
-                        d["models"] = preset.models.map { m in
+                        let region = preset.region(id: d["regionId"] as? String) ?? preset.defaultRegion
+                        d["models"] = preset.seedModels(in: region, credentialId: cardId).map { m in
                             ["credentialId": cardId, "modelId": m.modelId, "name": m.name]
                         }
                     } else if d["models"] == nil {
@@ -157,6 +160,21 @@ enum ConfigImporter {
         ThemeManager.shared.notifyThemeChange()
         NotificationCenter.default.post(name: .fileLibraryDidChange, object: nil)
         return result
+    }
+
+    /// 记忆总开关两份对齐（v5 · 0.2）：开关读 `perm.memory`，旧读点读 `mem_master`，导入时各写各的会「显示开、实际关」。
+    /// 文件里有 `perm.memory` 以它为准（同 `PermissionCenter.setLevel` 的投影）；只有 `mem_master` 时按它补 `perm.memory`
+    static func syncMemoryMaster(_ root: [String: Any], defaults: UserDefaults) {
+        let domain = PermissionDomain.memory
+        let perm = (root[ConfigSchema.Section.permissions.rawValue] as? [String: Any])?[domain.storageKey]
+        let master = (root[ConfigSchema.Section.memory.rawValue] as? [String: Any])?[domain.legacy.key]
+        if let raw = (perm as? Int) ?? (perm as? NSNumber)?.intValue, let level = PermissionLevel(rawValue: raw) {
+            defaults.set(level.rawValue, forKey: domain.storageKey)
+            defaults.set(level == .bypass, forKey: domain.legacy.key)
+        } else if let on = (master as? Bool) ?? (master as? NSNumber)?.boolValue {
+            defaults.set(on, forKey: domain.legacy.key)
+            defaults.set((on ? PermissionLevel.bypass : .notAllowed).rawValue, forKey: domain.storageKey)
+        }
     }
 
     /// 本机列表顺序在前（同 id 换成备份里的），备份里新的 id 按原顺序追加；按字典合并，不认识的字段原样保留

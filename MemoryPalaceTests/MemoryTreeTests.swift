@@ -156,4 +156,39 @@ final class MemoryTreeTests: XCTestCase {
         let search = FileLibraryTools.execute(name: "fs_search", inputJSON: #"{"keyword": "列表搜索双覆盖"}"#, profileId: pid)
         XCTAssertTrue(search.text.contains("memory/"), "fs_search 应命中记忆树: \(search.text)")
     }
+
+    /// C 档案里点开头的（历史 / 提案和原始输出 / 分组钩子）对助手隐藏：列表不出、搜不到、直接读也拒；页和 memory/ 别处照旧
+    func testFsToolsHideWikiInternals() throws {
+        SummaryFileStore.save(makeSummary("摘要也有暗号薄荷"), conversationId: convId, profileId: pid, conversationTitle: "t")
+        let wiki = FileLibraryStore.memoryRoot(profileId: pid).appendingPathComponent("wiki", isDirectory: true)
+        for (rel, text) in [("楼层/人/小慧.md", "# 小慧\n暗号薄荷"), (".history/楼层/人/小慧/20261018-050200.md", "暗号薄荷 旧版"),
+                            (".proposals/p.json", "{\"暗号薄荷\":1}"), (".proposals/drafts/run-原始.txt", "暗号薄荷 原始输出"),
+                            (".runs/20261018-050200-电影.md", "# 整理记录\n暗号薄荷 工具结果全文"),
+                            ("工程/.group.md", "暗号薄荷 钩子")] {
+            try WikiStore.writeAtomic(Data(text.utf8), to: wiki.appendingPathComponent(rel))
+        }
+
+        let list = FileLibraryTools.execute(name: "fs_list", inputJSON: "{}", profileId: pid).text
+        XCTAssertTrue(list.contains("memory/wiki/楼层/人/小慧.md"), list)
+        XCTAssertTrue(list.contains("memory/summaries/"), "memory/ 别处照旧: \(list)")
+        for hidden in [".history", ".proposals", ".runs", ".group.md"] { XCTAssertFalse(list.contains(hidden), "\(hidden) 不该列出: \(list)") }
+
+        let search = FileLibraryTools.execute(name: "fs_search", inputJSON: #"{"keyword": "暗号薄荷"}"#, profileId: pid).text
+        XCTAssertTrue(search.contains("memory/wiki/楼层/人/小慧.md"), search)
+        XCTAssertTrue(search.contains("memory/summaries/"), search)
+        for hidden in [".history", ".proposals", ".runs", ".group.md"] { XCTAssertFalse(search.contains(hidden), "\(hidden) 不该搜到: \(search)") }
+
+        for path in ["memory/wiki/.proposals/p.json", "memory/wiki/.proposals/drafts/run-原始.txt", "memory/wiki/工程/.group.md",
+                     "memory/wiki/.history/楼层/人/小慧/20261018-050200.md", "memory/wiki/楼层/../.proposals/p.json",
+                     "memory//wiki/./.proposals/p.json", "memory/wiki/.runs/20261018-050200-电影.md",
+                     "memory/wiki/楼层/../.runs/20261018-050200-电影.md",
+                     "memory//wiki/./.runs/20261018-050200-电影.md"] {
+            let r = FileLibraryTools.execute(name: "fs_read", inputJSON: #"{"path": "\#(path)"}"#, profileId: pid)
+            XCTAssertTrue(r.isError, "\(path) 直接读也要拒")
+            XCTAssertFalse(r.text.contains("暗号薄荷"), path)
+        }
+        let page = FileLibraryTools.execute(name: "fs_read", inputJSON: #"{"path": "memory/wiki/楼层/人/小慧.md"}"#, profileId: pid)
+        XCTAssertFalse(page.isError)
+        XCTAssertTrue(page.text.contains("暗号薄荷"))
+    }
 }

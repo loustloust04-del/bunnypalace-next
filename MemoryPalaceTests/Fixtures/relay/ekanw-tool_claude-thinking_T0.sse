@@ -1,0 +1,40 @@
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"content":"","role":"assistant"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"reasoning_content":"The"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"reasoning_content":" user is asking for"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"reasoning_content":" the current time and explicitly"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"reasoning_content":" requesting"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"reasoning_content":" that I call"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"reasoning_content":" the get_time tool"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"reasoning_content":" first."},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"content":""},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"content":"好"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"content":"的，我马"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"content":"上为"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"content":"您查"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"content":"询当前时间！"},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"tool_calls":[{"index":2,"id":"5e1aa032-01fd-4b47-9e6c-66cfaba58d00","type":"function","function":{"name":"get_time","arguments":""}}]},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{"tool_calls":[{"index":2,"type":"function","function":{"arguments":"{\"reason\":\"用户询问当前时间，需要调用工具获取准确时间。\"}"}}]},"logprobs":null,"finish_reason":null,"index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"claude-opus-4-6-thinking","system_fingerprint":null,"choices":[{"delta":{},"logprobs":null,"finish_reason":"tool_calls","index":0}],"usage":null}
+
+data: {"id":"chatcmpl-fixed","object":"chat.completion.chunk","created":1792134798,"model":"B-claude-opus-4-6-thinking","system_fingerprint":null,"choices":[],"usage":{"prompt_tokens":651,"completion_tokens":119,"total_tokens":770,"usage_semantic":"openai","usage_source":"anthropic","billing_usage":{"source":"claude_messages","semantic":"anthropic","claude_usage":{"input_tokens":651,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":119,"claude_cache_creation_5_m_tokens":0,"claude_cache_creation_1_h_tokens":0}},"prompt_tokens_details":{"cached_tokens":0,"text_tokens":0,"audio_tokens":0,"image_tokens":0},"completion_tokens_details":{"text_tokens":0,"audio_tokens":0,"image_tokens":0,"reasoning_tokens":0},"input_tokens":651,"output_tokens":0,"input_tokens_details":null,"claude_cache_creation_5_m_tokens":0,"claude_cache_creation_1_h_tokens":0}}
+
+data: [DONE]
+

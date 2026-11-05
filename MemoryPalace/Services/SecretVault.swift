@@ -33,6 +33,9 @@ enum SecretVault {
     /// 存一个新值，返回 id（`s-` + 8 位十六进制）；钥匙串写不进返回 nil。
     /// 先按 iCloud 同步写，失败（mac 缺 keychain-access-groups 权限）退成只存本机。
     static func save(_ value: String, label: String, conversationId: String?) -> String? {
+        #if os(macOS)
+        if BenchIsolation.active { return nil }
+        #endif
         let id = "s-" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8).lowercased()
         let meta = Meta(conv: conversationId ?? allConversations, created: Date().timeIntervalSince1970)
         guard let metaData = try? JSONEncoder().encode(meta), let metaText = String(data: metaData, encoding: .utf8) else { return nil }
@@ -78,6 +81,9 @@ enum SecretVault {
 
     /// 单条元数据（只取属性）
     static func entry(_ id: String) -> Entry? {
+        #if os(macOS)
+        if BenchIsolation.active { return nil }
+        #endif
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -94,6 +100,9 @@ enum SecretVault {
 
     /// 全部条目（本机 + iCloud），新的在前。只取属性。
     static func list() -> [Entry] {
+        #if os(macOS)
+        if BenchIsolation.active { return [] }
+        #endif
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

@@ -59,9 +59,6 @@ struct ContentView: View {
     // 当前 iOS page：0=list, 1=chat, 2=more。只由 PageSync 读（翻页命令 + 副作用）；
     // UIKit 手势翻页落定后经 PagingContainerView.onPageChanged 回写。
     @State private var iOSPage: Int = ProcessInfo.processInfo.arguments.contains("page2-ui-test") ? 2 : 1
-    /// 首启引导：未完成就盖 fullScreenCover（设计 docs/未来愿景/design-onboarding.md）；
-    /// 设置页搜索框「?」重走一遍时把 onboardingCompletedV1 置 false 也会回到这里。
-    @State private var showOnboarding = !UserDefaults.standard.bool(forKey: "onboardingCompletedV1")
     /// 宽屏悬浮面板形态（iPad 横屏等，判据见 Theme.landscapePanelThreshold）：
     /// 三页横滑收成固定聊天页，列表/更多改由左右浮层承载。
     @State private var isWidePanelMode = false
@@ -85,6 +82,10 @@ struct ContentView: View {
     /// page2 后台的应用和返回路径。Page2AppShell 在分页子 HC 里拿不到 SceneStorage，由这里恢复和写盘
     @SceneStorage("page2.openApps") private var page2OpenApps = ""
     @SceneStorage("page2.readingBook") private var page2ReadingBook = ""
+    /// 被系统回收后冷启动回到上次的页 / 对话 / 新对话里没发的字（plan-bg-keepalive §2.2）；她划掉 app 时随 session 作废
+    @SceneStorage("resume.page") private var resumePage = 1
+    @SceneStorage("resume.conversationId") private var resumeConversationId = ""
+    @SceneStorage("resume.newChatText") private var resumeNewChatText = ""
     #endif
     @State private var stickerVM = StickerViewModel()
     #if os(iOS)
@@ -147,10 +148,13 @@ struct ContentView: View {
         #endif
         let pid = profileManager?.currentProfile.id ?? ""
         guard !pid.isEmpty else { return }
-        viewModel.startDraftConversation(profileId: pid)
+        viewModel.startNewConversation(profileId: pid, cards: profileManager?.characterCardManager)
     }
 
     var body: some View {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        let _ = PerfCountMac.hit(.contentViewBody)
+        #endif
         #if DEBUG
         // SwiftUI 暗器 _logChanges() — 让 SwiftUI runtime 自己 print "因为 X 改变所以重 eval"
         // （走 unified logging os_log，subsystem 大致是 com.apple.SwiftUI）。Hermes Q2 推荐
@@ -245,7 +249,7 @@ struct ContentView: View {
                 .allowsHitTesting(false)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task { ensureDraftConversation() }
+        .task { resumeLastLocation(); ensureDraftConversation() }
         .onChange(of: viewModel.selectedConversation == nil) { _, isNil in
             if isNil { ensureDraftConversation() }
         }
@@ -607,6 +611,80 @@ struct ContentView: View {
                 .presentationBackground(Theme.mainBg)
                 #endif
         }
+        // 报错「去改」/ 冷启动回到没存完的 API 卡：从设置外面直达设置某处（plan-api-draft-and-fix-jump §3.1）
+        .modifier(SettingsJumpHost(openSettings: openSettingsEntry, resumeAllowed: { canResumeAPIDraft }))
+    }
+
+    /// 冷启动自动回到没存完的 API 卡编辑页的闸（同推送落点：冒烟 / 基准 / perf 启动不弹；引导盖着不弹；测试宿主不弹）
+    private var canResumeAPIDraft: Bool {
+        if TestHostIsolation.active || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return false }
+        // 推送 / 来电带着明确去处（还没被消费也算）
+        if UserDefaults.standard.string(forKey: "pendingPushChatId")?.isEmpty == false { return false }
+        // 新装正在走小芽引导（plan-onboarding-xiaoya-impl §5.1）
+        if UserDefaults.standard.string(forKey: XiaoyaScriptRunner.onboardingKey) == "started" { return false }
+        #if os(iOS)
+        if NativeCallCoordinator.shared.current != nil { return false }
+        #endif
+        #if DEBUG && os(iOS)
+        if StreamSmokeSeed.isActive || PerfBenchSeed.isActive { return false }
+        #endif
+        #if (DEBUG || PERF_BENCH) && os(iOS)
+        if PerfHarness.anyRole { return false }
+        #endif
+        return true
+    }
+
+    /// 冷启动回到上次的页 / 对话（plan-bg-keepalive §2.2）：外部入口和 API 草稿同一组闸；查不到 / 在回收站回落托底草稿
+    private func resumeLastLocation() {
+        #if os(iOS)
+        guard !LastLocationResume.attempted else {
+            // 切楼层 .id 重建：新树从页 1 起，存值跟上（对话 id 照现状写，别盖掉推送导航刚写的）
+            resumePage = iOSPage
+            resumeConversationId = viewModel.isDraftConversation ? "" : viewModel.selectedConversation?.id ?? ""
+            return
+        }
+        LastLocationResume.attempted = true
+        // 存值属于上一个进程：先取快照再对齐到现在，不恢复时不留过期值；真恢复时 onChange 会写回
+        let page = resumePage, convId = resumeConversationId, text = resumeNewChatText
+        resumePage = iOSPage
+        resumeConversationId = ""
+        resumeNewChatText = ""
+        guard canResumeAPIDraft, !NativeCallCoordinator.shared.readyToPresent,
+              !SettingsJump.shared.launchHasExternalTarget, !LaunchSplash.pushLaunch,
+              viewModel.selectedConversation == nil,
+              let pid = profileManager?.currentProfile.id, !pid.isEmpty else { return }
+        #if DEBUG || PERF_BENCH
+        if UIRegressionSeed.isActive || ProbeStickerSeed.shouldAutoSelectProbeConv
+            || ProcessInfo.processInfo.arguments.contains("page2-ui-test") { return }
+        #endif
+        #if DEBUG
+        if KeyboardProbeSeed.shouldAutoSelectProbeConv || ChatSampleSeed.isActive { return }
+        #endif
+        let staysOffChat = !isWidePanelMode && (page == 0 || page == 2)
+        if !convId.isEmpty {
+            var descriptor = FetchDescriptor<Conversation>(predicate: #Predicate { $0.id == convId && $0.profileId == pid })
+            descriptor.fetchLimit = 1
+            if let conversation = try? modelContext.fetch(descriptor).first, !conversation.isTrashed {
+                // 落在列表 / 更多页时她还没看这条对话：loadConversation 会清未读，写回去
+                let unread = conversation.unreadCount
+                viewModel.loadConversation(conversation, context: modelContext)
+                if staysOffChat { conversation.unreadCount = unread }
+            }
+        }
+        if viewModel.selectedConversation == nil {
+            ensureDraftConversation()
+            if !text.isEmpty, viewModel.isDraftConversation, let id = viewModel.selectedConversation?.id {
+                LastLocationResume.putNewChatText(text, for: id)
+            }
+        }
+        guard staysOffChat else { return }
+        if page == 0, let id = viewModel.selectedConversation?.id { LastLocationResume.holdListPageOnce(for: id) }
+        // 先无动画落到目标页，PageSync 随后那条带动画的命令就是 alreadyThere；还没布局时同样按无动画执行
+        if PagingSwitch.pageSync { PagingCommands.shared.scrollTo(page, animated: false, contentReady: nil) }
+        suppressPageEffects = true
+        iOSPage = page
+        DispatchQueue.main.async { suppressPageEffects = false }
+        #endif
     }
 
     /// 摇一摇（iOS）/ ⌘⇧D（macOS）→ 先截图（所见即所得）再弹反馈面板。
@@ -643,7 +721,7 @@ struct ContentView: View {
     private func handleNewConversationRequest() {
         guard let pid = profileManager?.currentProfile.id, !pid.isEmpty else { return }
         showNormalChat()
-        viewModel.startDraftConversation(profileId: pid)
+        viewModel.startNewConversation(profileId: pid, cards: profileManager?.characterCardManager)
         #if os(iOS)
         if iOSPage != 1 { withAnimation { iOSPage = 1 } }
         #endif
@@ -704,7 +782,7 @@ struct ContentView: View {
             chatPage: AnyView(injectPagingEnv(iOSChatPage)),
             dashPage: isWidePanelMode ? AnyView(EmptyView()) : AnyView(injectPagingEnv(iOSDashboardPage)),
             // B2：输入条栈独立 host（挂 chat HC + keyboardLayoutGuide），环境注入同 page 双层链
-            inputBar: AnyView(injectPagingEnv(InputBarStack(stickerVM: stickerVM))),
+            inputBar: AnyView(injectPagingEnv(InputBarStack(stickerVM: stickerVM, newChatText: $resumeNewChatText))),
             // 翻页解耦（plan-paging-decouple §3.2）：iOSPage 只由 PageSync 读；开关关时回原 binding 链（body 读 iOSPage）
             currentPage: PagingSwitch.pageSync ? nil : iOSPage,
             onPageChanged: { iOSPage = $0 },
@@ -715,7 +793,8 @@ struct ContentView: View {
             widePanelMode: isWidePanelMode,
             initialPage: ProcessInfo.processInfo.arguments.contains("page2-ui-test") ? 2 : 1,
             launchProfile: profileManager?.currentProfile.id ?? "",
-            launchRequired: !isWidePanelMode && !showOnboarding && !ProcessInfo.processInfo.arguments.contains("page2-ui-test"),
+            // 新装首启直接进 page2 的小芽 app（plan-onboarding-xiaoya-impl §10-4）：同 page2 UI 测试，开屏不等聊天输入框
+            launchRequired: !isWidePanelMode && !XiaoyaApp.launchedInApp && !ProcessInfo.processInfo.arguments.contains("page2-ui-test"),
             launchChatReady: { [weak viewModel, weak profileManager, launchConversationID = viewModel.selectedConversation?.id] in
                 guard let vm = viewModel, let conversation = vm.selectedConversation,
                       conversation.id == launchConversationID else { return false }
@@ -776,11 +855,11 @@ struct ContentView: View {
             if wide { iOSPage = 1 }
             DispatchQueue.main.async { suppressPageEffects = false }
         }
-        .fullScreenCover(isPresented: $showOnboarding) { OnboardingFlowView() }
         .onChange(of: stickerVM.isEditingStickers) { _, editing in
             setStickerEditScrollLock(editing)
         }
         .modifier(Page2AppShellPersistence(encoded: $page2OpenApps, readingBook: $page2ReadingBook, current: selectedToolId))
+        .modifier(LastLocationPersistence(page: $iOSPage, savedPage: $resumePage, savedConversationId: $resumeConversationId, viewModel: viewModel))
         .onChange(of: globalWBManager?.books.count) { _, _ in
             viewModel.globalWorldBookEntries = (globalWBManager?.enabledBooks ?? []).flatMap { $0.entries }
         }
@@ -792,7 +871,8 @@ struct ContentView: View {
             )
         }
         .onChange(of: viewModel.selectedConversation?.id) { _, newId in
-            if newId != nil && iOSPage == 0 {
+            let held = LastLocationResume.takeListPageHold(for: newId)
+            if newId != nil && iOSPage == 0 && !held {
                 withAnimation { iOSPage = 1 }
             }
             // 同页换会话也要重报焦点（切到 page 1 由上面 iOSPage onChange 兜）
@@ -823,12 +903,10 @@ struct ContentView: View {
         .task(id: profileManager?.currentProfile.id ?? "") {
             await activateAgoraIfNeeded()
         }
-        .onChange(of: destination) { _, dest in
-            #if os(iOS)
-            // 中庭房间页有自己的 composer，抑制常驻聊天输入条（双输入框叠层的修复）
-            KeyboardInsetBridge.shared.chatInputSuppressed = (dest == .agoraRoom)
-            #endif
-        }
+        .modifier(XiaoyaAppHooks(suppressChatInput: destination == .agoraRoom,
+                                 openApp: { openToolFromOutside(XiaoyaApp.toolId) },
+                                 leaveApp: { selectedToolId = "home"; iOSPage = 1 },
+                                 goDesktop: { selectedToolId = "home"; if iOSPage != 2 { iOSPage = 2 } }))
         .onChange(of: scenePhase) { _, phase in
             // 切后台 socket 死 → 回前台立即重连（不等 30s 退避）——07-19 群聊全哑修复的一半
             if phase == .active, AgoraFeatureGate.isEnabled { agoraViewModel.nudgeReconnectIfNeeded() }
@@ -864,6 +942,7 @@ struct ContentView: View {
         if PerfHarness.anyRole { return }
         #endif
         guard let chatId = UserDefaults.standard.string(forKey: "pendingPushChatId"), !chatId.isEmpty else { return }
+        SettingsJump.shared.noteExternalNavigation()   // 推送点进来的会话优先，这次启动不自动回草稿编辑页
         let resolution = PushTargetResolver.resolve(
             chatId: chatId,
             currentProfileId: profileManager?.currentProfile.id ?? "",
@@ -924,6 +1003,7 @@ struct ContentView: View {
     private func consumeNativeCallTarget() -> Bool {
         let coordinator = NativeCallCoordinator.shared
         guard coordinator.readyToPresent, let call = coordinator.current else { return false }
+        SettingsJump.shared.noteExternalNavigation()
         let id = call.chat_id
         do {
             let descriptor = FetchDescriptor<Conversation>(predicate: #Predicate { $0.id == id })
@@ -1014,7 +1094,7 @@ struct ContentView: View {
     /// 气泡模式不挂 PinBar（pin 单气泡是普通模式的事），这个替位。
     /// 头像素材 fallback：自选头像 → 角色卡封面 → 人像图标。
     private var bubbleModeAvatarCapsule: some View {
-        AvatarNameCapsule(name: profileManager?.currentProfile.assistantName ?? "助手") {
+        AvatarNameCapsule(name: profileManager?.currentProfile.assistantName ?? "助手", chevron: true, iMessageStyle: true) {
             Group {
                 // 自选头像和角色卡封面优先，未设置时显示人像图标。
                 if let data = profileManager?.currentProfile.assistantAvatarData,
@@ -1022,20 +1102,20 @@ struct ContentView: View {
                     Image(uiImage: img)
                         .resizable()
                         .scaledToFill()
-                        .frame(width: 54, height: 54)
+                        .frame(width: 60, height: 60)
                         .clipShape(Circle())
                 } else if let data = profileManager?.currentProfile.coverImageData,
                    let img = UIImage(data: data) {
                     Image(uiImage: img)
                         .resizable()
                         .scaledToFill()
-                        .frame(width: 54, height: 54)
+                        .frame(width: 60, height: 60)
                         .clipShape(Circle())
                 } else {
                     Image(systemName: "person.fill")
                         .font(.system(size: 26))
                         .foregroundStyle(Theme.textMuted)
-                        .frame(width: 54, height: 54)
+                        .frame(width: 60, height: 60)
                         .background(Circle().fill(Theme.accent.opacity(0.6)))
                 }
             }
@@ -1058,16 +1138,25 @@ struct ContentView: View {
     /// 浮窗模式下选中对话后收起左面板（它盖着正文；粟粟上轮裁「收」）；全屏模式它是侧栏，不收
     private func collapseLeftPanelAfterSelect() {
         guard panelLayout.mode == .floating else { return }
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) { panelLayout.leftShown = false }
     }
 
     /// 顶部悬浮条的左右钮在宽屏下：左 = 开关左面板，右 = 开关整条竖 dock（dock 收了卡片一起收）。
     /// 窄屏仍是翻页。
     private func toggleLeftPanel() {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) { panelLayout.leftShown.toggle() }
     }
 
     private func toggleDock() {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        PerfCountMac.hit(.panelChange)
+        #endif
         withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
             panelLayout.dockShown.toggle()
             #if os(macOS)
@@ -1184,6 +1273,8 @@ struct ContentView: View {
                 memorySheet = ConversationMemorySheetTarget(kind: .contextSummary, conversationId: conv.id,
                                                             profileId: conv.profileId, title: conv.title)
             } label: { Label("上下文摘要", systemImage: "text.append") }
+            // v5 §九：这个窗口开着的 A2 / A3 / A4 立刻写一遍（不看写入预算）；只有总开关关着时灰掉
+            WriteMemoryNowButton(viewModel: viewModel)
             // 卡库 ③-4：这个对话用哪个身份（身份库空时不出现）；写 Conversation.personaId，优先于楼层身份
             if !UserPersonaStore.shared.personas.isEmpty {
                 Menu {
@@ -1553,6 +1644,25 @@ struct ContentView: View {
                     .padding(.top, 6)
                     .frame(maxWidth: .infinity)
                     .transition(.opacity)
+            } else if chatBubbleMode, viewModel.selectedConversation != nil, !isWidePanelMode {
+                BubbleChatHeader(
+                    onBack: { withAnimation { iOSPage = 0 } },
+                    onProfile: { showAIProfile = true }
+                ) {
+                    bubbleModeAvatarCapsule
+                } actions: {
+                    conversationMenuItems
+                    Divider()
+                    Button { withAnimation { iOSPage = 2 } } label: {
+                        Label("更多页面", systemImage: "chevron.right")
+                    }
+                }
+                .sheet(isPresented: $showAIProfile) {
+                    AIProfileSheet()
+                        .presentationDetents([.medium, .large])
+                        .presentationDragIndicator(.visible)
+                        .presentationBackground(Theme.sidebarBg)
+                }
             } else if isWidePanelMode {
                 // 宽屏：悬浮条本体挂在 body overlay 上钉在屏幕正中（不跟聊天区一起被面板推来推去），
                 // 这里只留 PinBar 浮在它底下那一行的位置
@@ -1660,7 +1770,7 @@ struct ContentView: View {
             }
 
             // 气泡模式：中央头像胶囊（独立层做屏幕真居中，不受左右按钮宽度影响）。点开 AI 资料卡。
-            if chatBubbleMode, viewModel.selectedConversation != nil, !viewModel.inConvSearchActive,
+            if chatBubbleMode, isWidePanelMode, viewModel.selectedConversation != nil, !viewModel.inConvSearchActive,
                !viewModel.messageSelection.isActive {
                 Button(action: { showAIProfile = true }) {
                     bubbleModeAvatarCapsule
@@ -1930,7 +2040,7 @@ struct ContentView: View {
         macWorkspaceActions.search()
     }
 
-    /// 上次停在 Code tab → 启动回到 Code。单元测试宿主也会拉起整个 app：别顺手去扫她的真会话目录
+    /// 默认不自动回Code，mp.stanch.R-tab=NO才按上次选择恢复；测试宿主不扫真实目录。
     private func restoreLeftPanelTab() {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
               MacWorkspacePreferences.shared.restoredLeftPanelTab == .code,
@@ -1954,11 +2064,22 @@ struct ContentView: View {
             if !visible { CodingSessionLibrary.shared.deactivate() }
         }
         // 左栏面板组「对话 | Code」的选中 tab 派生自 isActive（⌘K 命中编程会话、终端「在编程会话里看」、点对话回聊天都会改它），
-        // 这里统一记下来；启动时按记的恢复
+        // 统一保存手动选择；启动是否恢复Code由止血开关决定，不覆盖这份记录
         .onChange(of: CodingSessionLibrary.shared.isActive) { _, active in
             MacWorkspacePreferences.shared.leftPanelTab = active ? .code : .chats
         }
         .task { restoreLeftPanelTab() }
+        #if DEBUG || PERF_BENCH
+        .onAppear {
+            guard PerfHarnessMac.enabled else { return }
+            PerfHarnessMacDriver.viewModel = viewModel
+            PerfHarnessMacDriver.context = modelContext
+            PerfHarnessMacDriver.profiles = profileManager
+            PerfHarnessMacDriver.tools = rightPanelToolManager
+            PerfHarnessMacDriver.openSettings = { openSettings() }
+        }
+        .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "main") } }
+        #endif
         .background(MacScrollbars().id(panelLayout.currentTab))
         .focusedSceneValue(\.macWorkspaceActions, macWorkspaceActions)
         // 子树（code 组侧栏的搜索钮）靠它开全局搜索并预选类型
@@ -2170,6 +2291,9 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        #if DEBUG || PERF_BENCH
+        .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "chatContent") } }
+        #endif
         // 全屏模式：正文（含输入条）装进一张卡，卡外是桌布；浮窗模式照旧铺满 + 给悬浮胶囊让 46
         .modifier(MacChatCard(layout: panelLayout,
                               imageURL: manager.currentBackgroundImageURL,
@@ -2189,6 +2313,35 @@ struct ContentView: View {
     #endif
 
 }
+
+#if os(iOS)
+/// 中庭房间页有自己的 composer → 藏常驻聊天输入条；小芽 app 的打开请求（新装首启 / 设置「新手引导」，plan-onboarding-xiaoya-impl §10）→ 翻到 page2 打开它；
+/// 出口卡「去找 X」→ page2 退回桌面、翻回 page1；Tip「带我去桌面」→ page2 退回桌面（§11）。
+/// 独立成 modifier：iOSLayout 这条链贴着类型检查预算（见 OnNotify 那段）
+private struct XiaoyaAppHooks: ViewModifier {
+    let suppressChatInput: Bool
+    let openApp: () -> Void
+    let leaveApp: () -> Void
+    let goDesktop: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            // 中庭房间页有自己的 composer，抑制常驻聊天输入条（双输入框叠层的修复）。
+            // initial：切楼层整树重建后，「变了才触发」的 onChange 不会再来一次
+            .onChange(of: suppressChatInput, initial: true) { _, suppressed in
+                KeyboardInsetBridge.shared.chatInputSuppressed = suppressed
+            }
+            .onAppear { if XiaoyaApp.takeLaunchOpen() { openApp() } }
+            .onReceive(NotificationCenter.default.publisher(for: .xiaoyaAppRequested)) { _ in
+                withAnimation(.easeInOut(duration: 0.2)) { openApp() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .xiaoyaAppLeaveRequested)) { _ in leaveApp() }
+            .onReceive(NotificationCenter.default.publisher(for: .xiaoyaDesktopRequested)) { _ in
+                withAnimation(.easeInOut(duration: 0.22)) { goDesktop() }
+            }
+    }
+}
+#endif
 
 // MARK: - Empty State
 

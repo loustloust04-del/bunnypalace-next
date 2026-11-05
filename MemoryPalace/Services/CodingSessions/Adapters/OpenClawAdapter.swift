@@ -22,7 +22,7 @@ struct OpenClawAdapter: CodingSessionAdapter {
 
     private static func isFile(_ url: URL) -> Bool {
         var isDir: ObjCBool = false
-        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && !isDir.boolValue
+        return FileManager.default.fileExists(atPath: AppPaths.checkedPath(url.path), isDirectory: &isDir) && !isDir.boolValue
     }
 
     /// OPENCLAW_STATE_DIR 只是候选：里面真有 agents/ 才采信；默认 ~/.openclaw，只装过老版本的机器（没有 .openclaw、有 .clawdbot）
@@ -32,12 +32,12 @@ struct OpenClawAdapter: CodingSessionAdapter {
         var isDir: ObjCBool = false
         let state: URL
         if let custom = environment["OPENCLAW_STATE_DIR"], !custom.isEmpty,
-           fm.fileExists(atPath: URL(fileURLWithPath: custom).appendingPathComponent("agents").path, isDirectory: &isDir), isDir.boolValue {
+           fm.fileExists(atPath: AppPaths.checkedPath(URL(fileURLWithPath: custom).appendingPathComponent("agents").path), isDirectory: &isDir), isDir.boolValue {
             state = URL(fileURLWithPath: custom, isDirectory: true)
         } else {
             let fresh = home.appendingPathComponent(".openclaw", isDirectory: true)
             let legacy = home.appendingPathComponent(".clawdbot", isDirectory: true)
-            state = !fm.fileExists(atPath: fresh.path) && fm.fileExists(atPath: legacy.path) ? legacy : fresh
+            state = !fm.fileExists(atPath: AppPaths.checkedPath(fresh.path)) && fm.fileExists(atPath: AppPaths.checkedPath(legacy.path)) ? legacy : fresh
         }
         return OpenClawAdapter(root: state.appendingPathComponent("agents", isDirectory: true))
     }
@@ -113,7 +113,7 @@ struct OpenClawAdapter: CodingSessionAdapter {
 
     /// `agents/<agentId>/` 目录（按名排序、跳过隐藏；缺根降级为空）
     private func agentDirs() -> [URL] {
-        ((try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? [])
+        ((try? AppPaths.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? [])
             .filter { !$0.lastPathComponent.hasPrefix(".") && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
             .sorted { $0.path < $1.path }
     }
@@ -135,7 +135,7 @@ struct OpenClawAdapter: CodingSessionAdapter {
                 }
             }
             let sessions = dir.appendingPathComponent("sessions", isDirectory: true)
-            guard let entries = try? FileManager.default.contentsOfDirectory(at: sessions, includingPropertiesForKeys: CodingParse.refKeys) else { continue }
+            guard let entries = try? AppPaths.contentsOfDirectory(at: sessions, includingPropertiesForKeys: CodingParse.refKeys) else { continue }
             let spawned = Set(legacyIndex(sessions).filter { ($0.value["spawnedBy"] as? String).map { !$0.isEmpty } ?? false }.keys)
             for entry in entries where Self.isLegacyTranscript(entry.lastPathComponent) {
                 let stem = String(entry.lastPathComponent.dropLast(6))
@@ -209,9 +209,9 @@ struct OpenClawAdapter: CodingSessionAdapter {
     /// 旧版 `sessions.json`：按 sessionId 重建索引（原文件按 session_key 键），按文件 mtime 缓存；读不了 = 空
     private func legacyIndex(_ sessionsDir: URL) -> [String: CodingParse.JSON] {
         let file = sessionsDir.appendingPathComponent("sessions.json")
-        let stamp = CodingParse.mtimeMs((try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date)
+        let stamp = CodingParse.mtimeMs((try? FileManager.default.attributesOfItem(atPath: AppPaths.checkedPath(file.path)))?[.modificationDate] as? Date)
         if let cached = caches.index(file.path, stamp) { return cached }
-        guard let data = try? Data(contentsOf: file), let map = (try? JSONSerialization.jsonObject(with: data)) as? CodingParse.JSON else { return [:] }
+        guard let data = try? Data(contentsOf: AppPaths.checked(file)), let map = (try? JSONSerialization.jsonObject(with: data)) as? CodingParse.JSON else { return [:] }
         var index: [String: CodingParse.JSON] = [:]
         for case let value as CodingParse.JSON in map.values {
             if let id = value["sessionId"] as? String { index[id] = value }
@@ -412,7 +412,7 @@ extension OpenClawAdapter {
 
     /// 目录里已经有 `<x>/sessions` 或 `<x>/agent/openclaw-agent.sqlite` 形态的子目录 → 它本身就是 agents 根（改名拷出来的情形）
     static func looksLikeAgents(_ dir: URL) -> Bool {
-        ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []).contains {
+        ((try? AppPaths.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []).contains {
             CodingLocations.isDirectory($0.appendingPathComponent("sessions"))
                 || CodingLocations.isFile($0.appendingPathComponent("agent").appendingPathComponent(dbName))
         }

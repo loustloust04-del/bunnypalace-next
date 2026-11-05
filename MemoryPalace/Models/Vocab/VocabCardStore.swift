@@ -48,9 +48,9 @@ struct VocabReviewLogEntry: Codable {
 /// cards.json 原子写 + review-log.jsonl append。`dir` 可注入（测试换 tmp 目录）。
 enum VocabCardStore {
     static var defaultDir: URL {
-        let dir = URL.applicationSupportDirectory
+        let dir = AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("vocab", isDirectory: true)
+            .appendingPathComponent("vocab", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -70,14 +70,14 @@ enum VocabCardStore {
 
     /// 缺文件 / 坏 JSON → []（复习是增强功能，存储坏了不炸 app）。
     static func load(dir: URL = defaultDir) -> [VocabCard] {
-        let url = dir.appendingPathComponent("cards.json")
+        let url = AppPaths.checked(dir.appendingPathComponent("cards.json"))
         guard let data = try? Data(contentsOf: url),
               let cards = try? decoder().decode([VocabCard].self, from: data) else { return [] }
         return cards
     }
 
     static func save(_ cards: [VocabCard], dir: URL = defaultDir) {
-        let url = dir.appendingPathComponent("cards.json")
+        let url = AppPaths.checked(dir.appendingPathComponent("cards.json"))
         guard let data = try? encoder().encode(cards) else { return }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try? data.write(to: url, options: .atomic)
@@ -99,7 +99,7 @@ enum VocabCardStore {
     /// 复习流水全量读（L2 vocab-status：今日 reviewed/wrongTop + streak 的原料）。
     /// 量级：一天 ≤ 日上限 50 行，10s 节流读一次可接受。
     static func loadLog(dir: URL = defaultDir) -> [VocabReviewLogEntry] {
-        let url = dir.appendingPathComponent("review-log.jsonl")
+        let url = AppPaths.checked(dir.appendingPathComponent("review-log.jsonl"))
         guard let content = try? String(contentsOf: url, encoding: .utf8) else { return [] }
         let d = JSONDecoder()
         d.dateDecodingStrategy = .iso8601
@@ -108,7 +108,7 @@ enum VocabCardStore {
     }
 
     static func appendLog(_ entry: VocabReviewLogEntry, dir: URL = defaultDir) {
-        let url = dir.appendingPathComponent("review-log.jsonl")
+        let url = AppPaths.checked(dir.appendingPathComponent("review-log.jsonl"))
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         guard var data = try? e.encode(entry) else { return }

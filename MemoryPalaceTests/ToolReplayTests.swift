@@ -182,6 +182,50 @@ final class ToolReplayTests: XCTestCase {
         XCTAssertEqual(out[4].content, "嗯")
     }
 
+    /// #093：抽屉 / 权限关掉的工具（这一轮调不到）那条退纯文字；收起的留着，交给 wireCall 包回 tool_invoke
+    func testOfferedOnlyFallsBackOnlyForToolsNotOfferedThisTurn() throws {
+        var off = PromptMessage(role: "assistant", content: "写了", source: .chatHistory, nodeId: "a1", pinnedToSystemPrefix: false)
+        off.toolRounds = ToolReplay.rounds(from: [use("a", "fs_write", #"{"path":"x.md"}"#), result("a", "ok")]) ?? []
+        var tucked = PromptMessage(role: "assistant", content: "掷了", source: .chatHistory, nodeId: "a2", pinnedToSystemPrefix: false)
+        tucked.toolRounds = ToolReplay.rounds(from: [use("b", "roll_dice"), result("b", "6")]) ?? []
+        let user = { (id: String) in PromptMessage(role: "user", content: "嗯", source: .chatHistory, nodeId: id, pinnedToSystemPrefix: false) }
+        let toolNames: Set<String> = ["fs_read", MetaTools.invokeName]
+        let offered = toolNames.union(["roll_dice"])
+        let out = ToolReplay.offeredOnly([user("u1"), off, user("u2"), tucked, user("u3")], offered: offered)
+        XCTAssertTrue(out[1].toolRounds.isEmpty, "关掉的不包成 tool_invoke")
+        XCTAssertEqual(out[1].content, "写了")
+        XCTAssertTrue(out[2].content.hasPrefix("〔系统记录"), out[2].content)
+        XCTAssertTrue(out[2].content.contains("fs_write"))
+        XCTAssertEqual(out[3].toolRounds.count, 1, "收起的不退")
+        XCTAssertEqual(out[4].content, "嗯")
+        let wired = ToolReplay.wireOrdered(out, toolNames: toolNames)
+        XCTAssertEqual(wired[3].toolRounds.count, 1)
+        XCTAssertEqual(ToolReplay.wireCall(wired[3].toolRounds[0].calls[0], toolNames: toolNames).name, MetaTools.invokeName)
+        // 以前（没有这一步）：关掉的 fs_write 会被包成 tool_invoke
+        XCTAssertEqual(ToolReplay.wireCall(off.toolRounds[0].calls[0], toolNames: toolNames).name, MetaTools.invokeName)
+        // 都调得到 / 没有工具回合 → 原样
+        let all = [user("u1"), off, user("u2")]
+        XCTAssertEqual(ToolReplay.offeredOnly(all, offered: ["fs_write"]).map(\.content), all.map(\.content))
+        XCTAssertEqual(ToolReplay.offeredOnly(all, offered: ["fs_write"])[1].toolRounds.count, 1)
+        XCTAssertEqual(ToolReplay.offeredOnly([user("u1")], offered: []).map(\.content), ["嗯"])
+    }
+
+    /// astra #2：MCP 经 tool_invoke 调的，节点里存的是外层 tool_invoke——看包着的 MCP 这一轮还在不在
+    func testOfferedOnlyLooksInsideStoredToolInvoke() {
+        var viaInvoke = PromptMessage(role: "assistant", content: "查了", source: .chatHistory, nodeId: "a1", pinnedToSystemPrefix: false)
+        viaInvoke.toolRounds = ToolReplay.rounds(from: [use("a", MetaTools.invokeName, #"{"name":"current_time","arguments":{}}"#), result("a", "12 点")]) ?? []
+        let user = PromptMessage(role: "user", content: "嗯", source: .chatHistory, nodeId: "u2", pinnedToSystemPrefix: false)
+        let gone = ToolReplay.offeredOnly([viaInvoke, user], offered: [MetaTools.invokeName, "ocr_image"])
+        XCTAssertTrue(gone[0].toolRounds.isEmpty, "MCP 关了（不在目录里）→ 退纯文字")
+        let kept = ToolReplay.offeredOnly([viaInvoke, user], offered: [MetaTools.invokeName, "current_time"])
+        XCTAssertEqual(kept[0].toolRounds.count, 1, "还在目录里 → 照旧回放 tool_invoke")
+        let decorated = ToolReplay.isOffered(ToolCallBlock(id: "b", name: MetaTools.invokeName, argumentsJSON: #"{"name":"mcp:时钟/current_time"}"#),
+                                             offered: [MetaTools.invokeName, "current_time"])
+        XCTAssertTrue(decorated, "名字带命名空间照 MetaTools.resolve 的容错认")
+        XCTAssertTrue(ToolReplay.isOffered(ToolCallBlock(id: "c", name: MetaTools.invokeName, argumentsJSON: "坏的"), offered: [MetaTools.invokeName]),
+                      "读不出名字的不动")
+    }
+
     func testNoClientToolsFallsBackToTextInBody() throws {
         var assistant = PromptMessage(role: "assistant", content: "给你", source: .chatHistory, nodeId: "a1", pinnedToSystemPrefix: false)
         assistant.toolRounds = ToolReplay.rounds(from: [use("a", "fs_read"), result("a", "x")]) ?? []

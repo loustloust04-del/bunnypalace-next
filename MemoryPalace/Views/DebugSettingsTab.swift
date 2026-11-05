@@ -7,6 +7,8 @@ import SwiftUI
 struct DebugPage: View {
     #if os(macOS)
     @Environment(\.openWindow) private var openWindow
+    @State private var hangSummary = HangProbe.Summary(groups: [], error: nil)
+    @State private var hangLoading = true
     #endif
     #if os(iOS) && DEBUG
     @AppStorage("debugOrbEnabled") private var debugOrbEnabled = false
@@ -16,6 +18,15 @@ struct DebugPage: View {
     @AppStorage("perfProbeOn") private var perfProbeOn = false
     #endif
     @Environment(\.settingsMetrics) private var m
+    #if os(macOS) && DEBUG
+    @State private var xiaoyaGalleryOpen = false
+    #endif
+    #if DEBUG
+    private func replayXiaoyaOnboarding() {
+        AssistantEngine.shared.script.start()
+        XiaoyaApp.open()
+    }
+    #endif
 
     var body: some View {
         SettingsSectionList(.list) {
@@ -44,19 +55,32 @@ struct DebugPage: View {
             .listRowBackground(Theme.mainBg)
             .listRowSeparator(.hidden)
 
-            // 长期卡顿探针（plan-mac-hang-probe）：最近 50 条，新的在上
+            // 分组和读盘只在进入页面时走后台，不随 body 重算同步读日志。
             Section {
-                let lines = HangProbe.recentLines()
-                if lines.isEmpty {
-                    Text("还没有记录")
+                if hangLoading {
+                    ProgressView()
+                } else if let error = hangSummary.error {
+                    Text("卡顿记录读取失败：\(error)")
+                        .font(m.body)
+                        .foregroundColor(Theme.textMuted)
+                } else if hangSummary.groups.isEmpty {
+                    Text("最近没有卡顿观测")
                         .font(m.body)
                         .foregroundColor(Theme.textMuted)
                 } else {
-                    Text(lines.joined(separator: "\n"))
+                    ForEach(hangSummary.groups) { group in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("\(group.kind.title) · \(group.context)")
+                            Text("\(group.count)条 · 最大\(String(format: "%.2fs", group.maximumSeconds)) · \(group.date)")
+                            Text(group.package)
+                                .foregroundColor(Theme.textMuted)
+                        }
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(Theme.textSecondary)
                         .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("mac-hang-group-\(group.kind.rawValue)")
+                    }
                 }
                 Button {
                     NSWorkspace.shared.open(HangProbe.directory)
@@ -68,12 +92,16 @@ struct DebugPage: View {
             } header: {
                 Text("卡顿记录")
             } footer: {
-                Text("主线程卡超过 0.25 秒记一条；卡超过 1 秒或 CPU 连续 10 秒占满，会自动存一份调用栈。只存在本机。")
+                Text("最近128KiB内最多50条完整日志，按包和上下文分组。心跳响应、采样下界与CPU窗口分开；后台响应含调度延迟，都不等同系统hang时长。只存在本机。")
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
             }
             .listRowBackground(Theme.mainBg)
             .listRowSeparator(.hidden)
+            .task {
+                hangSummary = await HangProbe.shared.recentSummary()
+                hangLoading = false
+            }
             #endif
 
             #if os(iOS)
@@ -132,6 +160,45 @@ struct DebugPage: View {
             }
             .listRowBackground(Theme.mainBg)
             .listRowSeparator(.hidden)
+
+            #if DEBUG
+            // 小芽新引导 P3（plan-onboarding-xiaoya-impl §3）：不接剧本，摆出每张引导卡的各状态对照小样；不进设置搜索
+            Section {
+                #if os(macOS)
+                Button("小芽卡片样张") { xiaoyaGalleryOpen = true }
+                    .font(m.body)
+                    .buttonStyle(.plain)
+                    .sheet(isPresented: $xiaoyaGalleryOpen) {
+                        NavigationStack { XiaoyaCardGalleryView() }
+                            .frame(minWidth: 480, minHeight: 720)
+                            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("关闭") { xiaoyaGalleryOpen = false } } }
+                    }
+                #else
+                NavigationLink(destination: XiaoyaCardGalleryView()) {
+                    Text("小芽卡片样张")
+                        .font(m.body)
+                }
+                #endif
+                // P4：剧本接在小芽对话后面从开场白放起，打开小芽 app。不碰新装判定
+                Button("从头放一遍引导") { replayXiaoyaOnboarding() }
+                    .font(m.body)
+                    .buttonStyle(.plain)
+                #if os(iOS)
+                // §11-5：开机 hello 占位只放一次，这里直接盖在当前画面上重放（不改「放过了」的标记）
+                Button("重放开机 hello") { GardenHello.replay() }
+                    .font(m.body)
+                    .buttonStyle(.plain)
+                #endif
+            } footer: {
+                Text("小芽引导里的每张卡片、每种状态摆在一页，深浅色可切。按钮能点，测试和保存都是假的。「从头放一遍引导」是真的：会写园丁类型、钥匙、新楼层，和新装走一遍一样。")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+            }
+            .listRowBackground(Theme.mainBg)
+            .listRowSeparator(.hidden)
+            #endif
+
+            ParamAdaptSection()
 
             #if os(iOS)
             // F2 输入框字号：iOS-only（第 2 类）
@@ -234,3 +301,60 @@ private struct InputFontSizeTuner: View {
     }
 }
 #endif
+
+/// 开发调试 → 参数自适配（#094 Q6）：400 自愈记下的「这个地址 + 模型不收哪些参数」，能看能清。
+/// 清掉后下次照常发，再被拒会再学一次；单条也能在 API 卡模型池那行清
+private struct ParamAdaptSection: View {
+    @Environment(\.settingsMetrics) private var m
+    private let store = ParamAdaptStore.shared
+
+    var body: some View {
+        Section {
+            let rows = store.all
+            if rows.isEmpty {
+                Text("还没有记下的——遇到接口拒收参数会自动记在这里")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+            } else {
+                ForEach(rows) { row in
+                    HStack(alignment: .top, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text([row.entry.host, row.entry.modelId, row.entry.typeLabel].filter { !$0.isEmpty }.joined(separator: " · "))
+                                .font(m.body)
+                                .foregroundColor(Theme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text("\(row.entry.summary) · \(row.entry.learnedAt.formatted(.dateTime.month(.twoDigits).day(.twoDigits)))")
+                                .font(m.caption)
+                                .foregroundColor(Theme.textSecondary)
+                            if !row.entry.rawError.isEmpty {
+                                Text(row.entry.rawError)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(Theme.textMuted)
+                                    .lineLimit(3)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        Spacer(minLength: 4)
+                        Button("清除") { store.remove(key: row.key) }
+                            .font(m.secondary)
+                            .foregroundColor(Theme.branchIndicator)
+                            .buttonStyle(.plain)
+                    }
+                }
+                Button("全部清空") { store.removeAll() }
+                    .font(m.secondary)
+                    .foregroundColor(Theme.branchIndicator)
+                    .buttonStyle(.plain)
+            }
+        } header: {
+            Text("参数自适配")
+        } footer: {
+            Text("接口拒收某个参数（比如 temperature）时自动去掉重发，并按「地址 + 模型」记住，以后直接不发。清掉后下次照常发。")
+                .font(m.caption)
+                .foregroundColor(Theme.textMuted)
+        }
+        .listRowBackground(Theme.mainBg)
+        .listRowSeparator(.hidden)
+    }
+}

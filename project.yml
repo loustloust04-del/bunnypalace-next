@@ -223,6 +223,8 @@ targets:
           - "CodingSessionResume.swift"
           - "CodingSessionTerminal.swift"
       - path: MemoryPalace/Services/Tools/ToolDefinition.swift
+      - path: MemoryPalace/Utils/AppPaths.swift
+      - path: MemoryPalace/Utils/BenchIsolation.swift
     dependencies:
       - package: zstd
         product: libzstd
@@ -477,6 +479,47 @@ targets:
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: YES
 
+  # 独立控制器只附着运行器自持的隔离包；不设 AUT、产品依赖或 TEST_TARGET_NAME。
+  MacRegressionUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    deploymentTarget:
+      macOS: "15.0"
+    sources:
+      - path: MacRegressionUITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(MP_BUNDLE_ID_BASE).mac-regression-uitests
+        PRODUCT_NAME: MacRegressionUITests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_APP_SANDBOX: NO
+
+  # 真实 iOS 窗口截图：仅编译专用 XCTest，不混入 mac 测试与观察器。
+  MemoryPalaceIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget:
+      iOS: "26.0"
+    sources:
+      - path: MemoryPalaceIOSTests
+    dependencies:
+      - target: MemoryPalaceIOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(MP_BUNDLE_ID_BASE).ios.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/记忆花园.app/记忆花园"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        # @testable 导入宿主会解析其 ish 桥接头；测试不重复编译/链接沙箱。
+        GCC_PREPROCESSOR_DEFINITIONS: "$(inherited) ISH_INTERNAL=1 GUEST_ARM64=1"
+        GCC_C_LANGUAGE_STANDARD: gnu17
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/deps/include
+          - $(SRCROOT)/deps/include/ish
+
   MemoryPalaceTests:
     type: bundle.unit-test
     platform: macOS
@@ -536,9 +579,11 @@ schemes:
       targets:
         MemoryPalace: all
         MemoryPalaceTests: all
+        MacRegressionUITests: [test]
     test:
       targets:
         - MemoryPalaceTests
+        - MacRegressionUITests
       # #035：测试宿主进程创建即改道到按工位分的临时家目录；AppEntry.main 第一行核对，核不上退出
       environmentVariables:
         CFFIXED_USER_HOME: "$(TARGET_TEMP_DIR)/xctest-home"
@@ -547,6 +592,20 @@ schemes:
     build:
       targets:
         MemoryPalaceIOS: all
+  MemoryPalaceIOSTests:
+    build:
+      targets:
+        MemoryPalaceIOS: all
+        MemoryPalaceIOSTests: all
+    test:
+      targets:
+        - MemoryPalaceIOSTests
+      commandLineArguments:
+        "--kb-probe-seed": true
+      environmentVariables:
+        MP_TEST_HOST: "1"
+        MP_SPLASH: "0"
+        MP_BUBBLE_SNAPSHOT_DIR: "/Users/susu/MemoryPalace-docs-media/docs/imessage-ref/ours"
   StickerProbeUITests:
     build:
       targets:

@@ -56,12 +56,12 @@ enum TopicBoxStore {
 
     /// 掉落账本默认位置：App Support/MemoryPalace/topicBox/{profileId}.json
     static func defaultLedgerURL(profileId: String) -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let dir = base
+        let base = AppPaths.applicationSupport
+        let dir = AppPaths.checked(base
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("topicBox", isDirectory: true)
+            .appendingPathComponent("topicBox", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("\(profileId).json")
+        return AppPaths.checked(dir.appendingPathComponent("\(profileId).json"))
     }
 
     static func todayString(_ date: Date = Date()) -> String {

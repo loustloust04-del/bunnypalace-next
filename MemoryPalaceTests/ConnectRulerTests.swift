@@ -111,7 +111,8 @@ final class ConnectRulerTests: XCTestCase {
         XCTAssertEqual(o["build"] as? String, "debug")
         XCTAssertEqual(o["run"] as? String, ConnectRuler.runId)
         XCTAssertEqual(o["dev"] as? String, "dev-1")
-        XCTAssertEqual(o["sw"] as? [String: String], [:])
+        XCTAssertEqual(o["sw"] as? [String: String], ConnectRuler.switches())
+        XCTAssertEqual(o["transport"] as? String, "main")
         XCTAssertEqual(o["bin"] as? String, ConnectRuler.binaryUUID)
         XCTAssertEqual(o["counts"] as? [String: Int], ["started": 2, "ok": 1, "replaced": 1, "report_failed": 0])
         XCTAssertEqual(o["launch_src"] as? String, "icon")
@@ -147,6 +148,32 @@ final class ConnectRulerTests: XCTestCase {
             XCTAssertNil(o[k], k)
         }
         XCTAssertEqual((o["candidates"] as? [Any])?.count, 0)
+    }
+
+    /// A1：didOpen 归属在 transport 上核、client_info 在 transport 上发（早于主线程进入）；主线程进入后补 ui 和忙段
+    func testA1SplitOpenClientInfoBeforeUI() {
+        var ep = ConnectRulerEpisode(entryNs: 1_000 * ms)
+        ep.transport = "a1"
+        let holder = NSObject()
+        let task = ObjectIdentifier(holder)
+        let wall = Date(timeIntervalSince1970: 100)
+        ep.noteWSResume(attempt: 1, gen: 2, via: "2.0", at: 1_060 * ms, wall: wall)
+        ep.noteUI(uiNs: 1_070 * ms, uiWall: wall, busy: nil)   // 没核过打开的主线程进入不认
+        XCTAssertTrue(ep.noteTransportOpen(task: task, lastTask: task, attempt: 1, currentGen: 2, wsOpenNs: 1_090 * ms, wsOpenWall: wall))
+        XCTAssertFalse(ep.noteTransportOpen(task: task, lastTask: task, attempt: 1, currentGen: 2, wsOpenNs: 1_095 * ms, wsOpenWall: wall))
+        ep.noteClientInfo(at: 1_092 * ms)
+        ep.noteUI(uiNs: 1_900 * ms, uiWall: wall, busy: BusySummary(ms: 800, blocks50: 1, maxMs: 800, capped: false, windowMs: 900))
+        ep.noteUI(uiNs: 1_950 * ms, uiWall: wall, busy: nil)   // 只认第一次
+        let o = ep.fields(finishNs: 1_093 * ms, deviceId: "d", launch: nil)
+        XCTAssertEqual(o["transport"] as? String, "a1")
+        XCTAssertEqual(o["ws_open_ms"] as? Int, 90)
+        XCTAssertEqual(o["client_info_ms"] as? Int, 92)
+        XCTAssertEqual(o["finish_ms"] as? Int, 93)
+        XCTAssertEqual(o["ui_ms"] as? Int, 900)
+        XCTAssertEqual(o["busy_ms"] as? Int, 800)
+        XCTAssertEqual(o["ws_invalid"] as? Int, 1)
+        XCTAssertEqual(ConnectRuler.switches()["A1"], CCBridgeWebSocketClient.a1TransportOffMain ? "1" : "0")
+        withExtendedLifetime(holder) {}
     }
 
     /// sol R1-4：旧 task 的 didOpen 在新一段探测期间过了 ===，归属对不上只计 invalid，不写时间戳

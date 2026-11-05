@@ -1,0 +1,1 @@
+{"error": {"message": "Provider returned error", "code": 400, "metadata": {"raw": "{\"type\": \"error\", \"error\": {\"type\": \"invalid_request_error\", \"message\": \"`temperature` is deprecated for this model.\"}}", "provider_name": "Anthropic"}}, "user_id": "user_xctest"}

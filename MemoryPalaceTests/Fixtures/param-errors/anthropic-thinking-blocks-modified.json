@@ -1,0 +1,1 @@
+{"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.0.thinking: thinking blocks cannot be modified. These blocks must remain as they were in the original response."}}

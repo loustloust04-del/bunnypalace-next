@@ -266,9 +266,7 @@ final class RegexPipelineTests: XCTestCase {
             json = OpenAICompatibleProvider.buildRequestBody(
                 ordered: ordered, model: s.model, samplingParams: s.preset.sampling,
                 tools: s.tools, toolTurns: s.toolTurns,
-                orCacheControl: OpenAICompatibleProvider.wantsORCacheControl(baseURL: s.baseURL, model: s.model, samplingParams: s.preset.sampling),
-                orProviderOrder: OpenAICompatibleProvider.orPreferredProviderOrder(baseURL: s.baseURL, model: s.model, samplingParams: s.preset.sampling),
-                interleavedSystem: OpenAICompatibleProvider.supportsInterleavedSystem(baseURL: s.baseURL, model: s.model))
+                compat: ProviderOrderingScenarios.wireCompat(baseURL: s.baseURL, model: s.model, sampling: s.preset.sampling))
         }
         return ProviderOrderingScenarios.canonicalJSON(json)
     }

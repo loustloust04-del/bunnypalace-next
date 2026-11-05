@@ -24,9 +24,8 @@ struct SentTurn: Codable, Equatable {
 @MainActor
 @Observable
 final class SentRequestStore {
-    static let shared = SentRequestStore(directory: FileManager.default
-        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("MemoryPalace/last-request", isDirectory: true))
+    static let shared = SentRequestStore(directory: AppPaths.checked(AppPaths.applicationSupport
+        .appendingPathComponent("MemoryPalace/last-request", isDirectory: true)))
 
     nonisolated static let keepConversations = 30
     nonisolated static let redactedKey = "<API key>"
@@ -92,7 +91,7 @@ final class SentRequestStore {
 
     private func fileURL(_ conversationId: String) -> URL {
         let safe = String(conversationId.map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "_" }.prefix(80))
-        return directory.appendingPathComponent("\(safe).json")
+        return AppPaths.checked(directory.appendingPathComponent("\(safe).json"))
     }
 
     nonisolated static func strippedURL(_ url: URL?) -> String {

@@ -399,7 +399,7 @@ struct SillyTavernImportFlowView: View {
     private nonisolated static func inventory(url: URL) async -> Result<SillyTavernPackagePlan, Error> {
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("sillytavern-staging", isDirectory: true)
+        let parent = AppPaths.temporaryDirectory.appendingPathComponent("sillytavern-staging", isDirectory: true)
         return Result {
             try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
             return try SillyTavernPackageImporter.inventory(source: url, stagingParent: parent)

@@ -24,7 +24,7 @@ final class CodingMessageSegmentsTests: XCTestCase {
     func testOrderThinkingThenTextThenTools() {
         let segs = CodingMessageSegments.segments(for: message(text: "正文", thinking: "想了想", calls: [call()]))
         XCTAssertEqual(segs.count, 4)
-        guard case .thinking(let t, let sig) = segs[0] else { return XCTFail("第一段应是 thinking") }
+        guard case .thinking(let t, let sig, _) = segs[0] else { return XCTFail("第一段应是 thinking") }
         XCTAssertEqual(t, "想了想")
         XCTAssertNil(sig)
         guard case .text(let body) = segs[1] else { return XCTFail("第二段应是正文") }

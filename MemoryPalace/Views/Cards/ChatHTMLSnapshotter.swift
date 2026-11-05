@@ -28,8 +28,8 @@ final class ChatHTMLSnapshotter: NSObject, WKNavigationDelegate {
     private var token = 0
 
     private static var cacheDir: URL {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MemoryPalace/chat-html-thumbs", isDirectory: true)
+        let dir = AppPaths.checked(AppPaths.caches
+            .appendingPathComponent("MemoryPalace/chat-html-thumbs", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -40,7 +40,7 @@ final class ChatHTMLSnapshotter: NSObject, WKNavigationDelegate {
     }
 
     static func cachedImage(key: String) -> URL? {
-        let url = cacheDir.appendingPathComponent("\(key).png")
+        let url = AppPaths.checked(cacheDir.appendingPathComponent("\(key).png"))
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
@@ -119,7 +119,7 @@ final class ChatHTMLSnapshotter: NSObject, WKNavigationDelegate {
             webView.takeSnapshot(with: config) { image, _ in
                 guard self.token == myToken, let job = self.current else { return }
                 guard let image, let data = Self.pngData(image) else { self.finish(.failed); return }
-                let url = Self.cacheDir.appendingPathComponent("\(job.key).png")
+                let url = AppPaths.checked(Self.cacheDir.appendingPathComponent("\(job.key).png"))
                 self.finish((try? data.write(to: url, options: .atomic)) != nil ? .image(url) : .failed)
             }
         }

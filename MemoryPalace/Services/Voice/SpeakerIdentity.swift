@@ -86,8 +86,8 @@ enum SpeakerIdentityError: LocalizedError {
 
 actor SpeakerIdentityStore {
     nonisolated static let enabledKey = "speakerIdentity.enabled.v1"
-    static let shared = SpeakerIdentityStore(root: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("MemoryPalace/speaker-identities", isDirectory: true))
+    static let shared = SpeakerIdentityStore(root: AppPaths.checked(AppPaths.applicationSupport
+        .appendingPathComponent("MemoryPalace/speaker-identities", isDirectory: true)))
     private let root: URL
     private var extractor: SherpaOnnxSpeakerEmbeddingExtractorWrapper?
     private var loadedHash: String?
@@ -99,8 +99,8 @@ actor SpeakerIdentityStore {
         var people: [SpeakerIdentity] = []
     }
     init(root: URL) { self.root = root.resolvingSymlinksInPath() }
-    private var index: URL { root.appendingPathComponent("identities.json") }
-    private var model: URL { root.appendingPathComponent("speaker.onnx") }
+    private var index: URL { AppPaths.checked(root.appendingPathComponent("identities.json")) }
+    private var model: URL { AppPaths.checked(root.appendingPathComponent("speaker.onnx")) }
     private func read() throws -> Database {
         guard FileManager.default.fileExists(atPath: index.path) else { return Database() }
         guard let values = try? index.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]),

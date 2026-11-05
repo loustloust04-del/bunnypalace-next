@@ -2,6 +2,7 @@ import SwiftUI
 
 // MARK: - Character Card Editor
 
+/// onSave 只管落盘（表单「保存」和长字段全屏编辑器的「保存」都走它）；关表单由编辑器在表单保存成功后调 onCancel
 struct CharacterCardEditor: View {
     let card: CharacterCard
     let onSave: (CharacterCard) throws -> Void
@@ -18,6 +19,9 @@ struct CharacterCardEditor: View {
     @State private var systemPrompt: String
     @State private var postHistoryInstructions: String
     @State private var creatorNotes: String
+    @State private var confirmingDiscard = false
+    /// 最近一次落盘的卡：全屏编辑器存过之后，表单「有没有改动」跟它比
+    @State private var savedCard: CharacterCard
 
     init(card: CharacterCard, onSave: @escaping (CharacterCard) throws -> Void, onCancel: @escaping () -> Void) {
         self.card = card
@@ -32,6 +36,7 @@ struct CharacterCardEditor: View {
         _systemPrompt = State(initialValue: card.systemPrompt)
         _postHistoryInstructions = State(initialValue: card.postHistoryInstructions)
         _creatorNotes = State(initialValue: card.creatorNotes)
+        _savedCard = State(initialValue: card)
     }
 
     var body: some View {
@@ -49,29 +54,30 @@ struct CharacterCardEditor: View {
                 }
                 .listRowBackground(Theme.mainBg)
 
-                Section("基本设定") {
-                    editorField("模板描述", text: $description)
-                    editorField("背景设定", text: $scenario)
+                Section("角色设定") {
+                    longField("描述", field: "description", text: $description)
+                    longField("性格", field: "personality", text: $personality)
+                    longField("场景", field: "scenario", text: $scenario)
                 }
                 .listRowBackground(Theme.mainBg)
                 .listRowSeparator(.hidden)
 
                 Section("对话") {
-                    editorField("第一条消息", text: $firstMes)
-                    editorField("对话示例", text: $mesExample)
+                    longField("开场白", field: "firstMes", text: $firstMes)
+                    longField("示例对话", field: "mesExample", text: $mesExample)
                 }
                 .listRowBackground(Theme.mainBg)
                 .listRowSeparator(.hidden)
 
                 Section("Prompt") {
-                    editorField("系统指令", text: $systemPrompt)
-                    editorField("后置提醒", text: $postHistoryInstructions)
+                    longField("系统提示词", field: "systemPrompt", text: $systemPrompt)
+                    longField("历史后指令", field: "postHistoryInstructions", text: $postHistoryInstructions)
                 }
                 .listRowBackground(Theme.mainBg)
                 .listRowSeparator(.hidden)
 
                 Section("备注") {
-                    editorField("创作者注释", text: $creatorNotes)
+                    longField("创作者注释", field: "creatorNotes", text: $creatorNotes)
                     Button("导出 JSON", systemImage: "square.and.arrow.up") { exportingCard = editedCard }
                 }
                 .listRowBackground(Theme.mainBg)
@@ -84,13 +90,13 @@ struct CharacterCardEditor: View {
             #endif
             .scrollContentBackground(.hidden)
             .background(Theme.sidebarBg)
-            .navigationTitle("编辑自定义助手模板")
+            .navigationTitle("编辑角色卡")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { onCancel() }
+                    Button("取消") { if isDirty { confirmingDiscard = true } else { onCancel() } }
                         .foregroundColor(Theme.textMuted)
                 }
                 ToolbarItem(placement: .confirmationAction) {
@@ -100,6 +106,7 @@ struct CharacterCardEditor: View {
             }
         }
         .modifier(CharacterCardJSONExporter(card: $exportingCard))
+        .discardChangesGuard(isDirty: isDirty, confirming: $confirmingDiscard, onDiscard: onCancel)
         .alert("保存失败", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
             Button("好的") { saveError = nil }
         } message: { Text(saveError ?? "") }
@@ -108,22 +115,27 @@ struct CharacterCardEditor: View {
         #endif
     }
 
-    @ViewBuilder
-    private func editorField(_ label: String, text: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.system(size: Theme.F.secondary))
-                .foregroundColor(Theme.textMuted)
-            TextEditor(text: text)
-                .font(.system(size: Theme.F.body))
-                .frame(minHeight: 60)
-                .scrollContentBackground(.hidden)
-        }
+    /// 全屏编辑器点保存 = 整张卡落盘（粟粟 10-15：原来要再回表单点一次保存）
+    private func longField(_ label: String, field: String, text: Binding<String>) -> some View {
+        LongTextField(title: label, text: text, editorTitle: "角色卡 · \(label)",
+                      versionKey: .cardField(cardId: card.id, field: field),
+                      onCommit: { _ in try persist() })
     }
 
+    private var isDirty: Bool { editedCard != savedCard }
+
     private func save() {
-        do { try onSave(editedCard) }
-        catch { saveError = error.localizedDescription }
+        do {
+            try persist()
+            onCancel()
+        } catch { saveError = error.localizedDescription }
+    }
+
+    private func persist() throws {
+        let updated = editedCard
+        try onSave(updated)
+        savedCard = updated
+        SaveFeedback.saved("已保存")
     }
 
     private var editedCard: CharacterCard {

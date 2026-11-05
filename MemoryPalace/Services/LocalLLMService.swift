@@ -69,7 +69,7 @@ final class LocalLLMService {
         onEvent(.failed("模拟器里跑不了本机模型"))
         #else
         guard let directory = AssistantModelStore.installedDirectory(modelId: modelId) else {
-            onEvent(.failed("本机模型还没下载——去「设置 › API › 本机模型」下载"))
+            onEvent(.failed("本机模型还没下载——去「设置 › 模型和API › 本机模型」下载"))
             return job
         }
         let previous = tail

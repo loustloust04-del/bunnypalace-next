@@ -70,6 +70,11 @@ struct SentRequestBodyView: View {
                     .font(m.caption.monospaced())
                     .foregroundColor(Theme.textMuted)
                     .lineLimit(1)
+                if let thinking = Self.thinkingLine(sent.body) {
+                    Text(thinking)
+                        .font(m.caption)
+                        .foregroundColor(Theme.textMuted)
+                }
             }
             Spacer()
             Button {
@@ -88,12 +93,68 @@ struct SentRequestBodyView: View {
         }
     }
 
-    /// 显示用：解得开就图片换占位 + 排版；解不开原样
+    /// 显示用：解得开就图片换占位、思考块签名 / redacted 密文缩成字数 + 排版；解不开原样（「复制」照旧复制原文）
     static func displayText(_ body: String) -> String {
         guard let obj = try? JSONSerialization.jsonObject(with: Data(body.utf8)),
-              let data = try? JSONSerialization.data(withJSONObject: PersonaSettingsTab.redactingImageData(obj),
+              let data = try? JSONSerialization.data(withJSONObject: PersonaSettingsTab.redactingImageData(redactingThinkingSecrets(obj)),
                                                      options: [.prettyPrinted, .sortedKeys]),
               let text = String(data: data, encoding: .utf8) else { return body }
         return text
+    }
+
+    /// thinking 回传 §3.7：思考块的 signature、redacted_thinking 的 data 换成 `<签名 1832 字>` / `<redacted 密文 N 字>`
+    static func redactingThinkingSecrets(_ value: Any) -> Any {
+        if var dict = value as? [String: Any] {
+            switch dict["type"] as? String {
+            case "thinking":
+                if let sig = dict["signature"] as? String { dict["signature"] = "<签名 \(sig.count) 字>" }
+                return dict
+            case "redacted_thinking":
+                if let data = dict["data"] as? String { dict["data"] = "<redacted 密文 \(data.count) 字>" }
+                return dict
+            default:
+                return dict.mapValues(redactingThinkingSecrets)
+            }
+        }
+        if let array = value as? [Any] { return array.map(redactingThinkingSecrets) }
+        return value
+    }
+
+    /// 头部一行：`思考：adaptive · 摘要 · effort 默认(medium) · max_tokens 36864`；带了当轮思考块（第 2 次及以后）再加「回传思考块 N 个」。
+    /// 没有思考参数也没回传块 = nil（OpenAI 兼容 / 老模型默认档）
+    static func thinkingLine(_ body: String) -> String? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any] else { return nil }
+        let messages = obj["messages"] as? [[String: Any]] ?? []
+        let echoed = messages.reduce(0) { n, msg in
+            n + ((msg["content"] as? [[String: Any]])?.filter(ReplyBlock.isThinking).count ?? 0)
+        }
+        let thinking = obj["thinking"] as? [String: Any]
+        guard thinking != nil || echoed > 0 else { return nil }
+        let model = obj["model"] as? String ?? ""
+        var parts: [String] = []
+        if let thinking {
+            let type = thinking["type"] as? String ?? "?"
+            parts.append(type)
+            if type == "adaptive" {
+                if thinking["display"] as? String == "summarized" {
+                    parts.append("摘要")
+                } else {
+                    parts.append(ModelLineage.displayDefaultOmitted(model) ? "不要摘要" : "摘要（模型默认）")
+                }
+                if let effort = (obj["output_config"] as? [String: Any])?["effort"] as? String {
+                    parts.append("effort \(effort)")
+                } else {
+                    parts.append("effort 默认(\(ModelLineage.defaultEffort(model)))")
+                }
+            } else if let budget = thinking["budget_tokens"] as? Int {
+                parts.append("budget_tokens \(budget)")
+            }
+        } else {
+            parts.append("不发")
+        }
+        if let max = obj["max_tokens"] as? Int { parts.append("max_tokens \(max)") }
+        var line = "思考：" + parts.joined(separator: " · ")
+        if echoed > 0 { line += " · 回传思考块 \(echoed) 个" }
+        return line
     }
 }

@@ -332,28 +332,75 @@ struct FolderEditSheet: View {
 struct AvatarNameCapsule<Avatar: View>: View {
     let name: String
     var chevron: Bool = false
+    var iMessageStyle: Bool = false
     @ViewBuilder let avatar: Avatar
 
     var body: some View {
-        VStack(spacing: -8) {
-            avatar
-            HStack(spacing: 3) {
+        VStack(spacing: iMessageStyle ? -5 : -8) {
+            avatar.zIndex(iMessageStyle ? 1 : 0)
+            HStack(spacing: iMessageStyle ? 6 : 3) {
                 Text(name)
                     .lineLimit(1)
                 if chevron {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(Theme.textMuted)
+                    Group {
+                        if iMessageStyle {
+                            Image(systemName: "chevron.right")
+                                .resizable()
+                                .font(.system(size: 12, weight: .semibold))
+                                .frame(width: 14.0 / 3, height: 12)
+                        } else {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                    }
+                    .foregroundColor(Theme.textMuted)
                 }
             }
-            .font(.system(size: 12, weight: .medium))
+            .font(.system(size: iMessageStyle ? 17 : 12, weight: iMessageStyle ? .bold : .medium))
             .foregroundColor(Theme.textPrimary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.leading, iMessageStyle ? 13 : 10)
+            .padding(.trailing, iMessageStyle ? 11 : 10)
+            .padding(.vertical, iMessageStyle ? 6 : 5)
             .glassEffect(.regular.tint(Color.white.opacity(0.15)), in: .capsule)
             // maxWidth 在 glass 外面：frame 贪婪撑宽但只是隐形容器，胶囊本体紧贴文字；超长名截断
             .frame(maxWidth: 170)
         }
+    }
+}
+
+struct BubbleChatHeader<Identity: View, Actions: View>: View {
+    let onBack: () -> Void
+    let onProfile: () -> Void
+    @ViewBuilder let identity: Identity
+    @ViewBuilder let actions: Actions
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Button(action: onProfile) { identity }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+            HStack {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: 44, height: 44)
+                        .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle)
+                }
+                .accessibilityLabel("返回对话列表")
+                Spacer(minLength: 0)
+                Menu { actions } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: 44, height: 44)
+                        .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle)
+                }
+                .accessibilityLabel("更多")
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
     }
 }
 #endif

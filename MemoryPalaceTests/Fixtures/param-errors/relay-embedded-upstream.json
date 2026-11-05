@@ -1,0 +1,1 @@
+{"error": {"message": "upstream error: {\"error\": {\"message\": \"Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.\", \"type\": \"invalid_request_error\", \"param\": \"temperature\", \"code\": \"unsupported_value\"}} (request id: 20261014xctest)", "type": "upstream_error"}}

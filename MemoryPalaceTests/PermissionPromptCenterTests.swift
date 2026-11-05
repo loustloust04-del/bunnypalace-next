@@ -73,6 +73,45 @@ final class PermissionPromptCenterTests: XCTestCase {
         XCTAssertEqual(d2, .denied)
         XCTAssertNil(center.pendingRequest)
     }
+
+    func testCancelledInjectionAskReleasesItsCard() async {
+        let returned = expectation(description: "取消等待中的注入询问")
+        var decision: PermissionPromptCenter.Decision?
+        let task = Task {
+            decision = await center.decide(.fileLibrary)
+            returned.fulfill()
+        }
+        await waitForPending({ self.center.pendingRequest != nil }, "注入询问挂起")
+        XCTAssertNil(center.pendingRequest?.approval)
+        task.cancel()
+        await fulfillment(of: [returned], timeout: 1)
+        XCTAssertEqual(decision, .timedOut)
+        XCTAssertNil(center.pendingRequest)
+        XCTAssertNil(center.presentedId)
+    }
+
+    func testCancelledQueuedAskLeavesCurrentCardAlone() async {
+        let first = Task { await center.decide(.shell, detail: "保留的询问") }
+        await waitForPending({ self.center.pendingRequest != nil }, "第一张卡挂起")
+        let firstId = center.pendingRequest!.id
+        let entered = expectation(description: "第二张进入排队")
+        let returned = expectation(description: "排队询问已取消")
+        var decision: PermissionPromptCenter.Decision?
+        let second = Task {
+            entered.fulfill()
+            decision = await center.decide(.fileLibrary)
+            returned.fulfill()
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        second.cancel()
+        await fulfillment(of: [returned], timeout: 1)
+        XCTAssertEqual(decision, .timedOut)
+        XCTAssertEqual(center.pendingRequest?.id, firstId)
+        center.respond(to: firstId, allowed: true)
+        let firstDecision = await first.value
+        XCTAssertEqual(firstDecision, .allowed)
+        XCTAssertNil(center.pendingRequest)
+    }
 }
 
 // MARK: - T6c ①：计时从卡片真的 present 才起

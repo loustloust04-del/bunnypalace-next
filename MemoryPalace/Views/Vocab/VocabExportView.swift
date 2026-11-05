@@ -146,7 +146,7 @@ struct VocabExportView: View {
 
     @MainActor
     private func saveOrShare(body: String, filename: String) {
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        let tmp = AppPaths.temporaryDirectory.appendingPathComponent(filename)
         do {
             try body.data(using: .utf8)?.write(to: tmp)
         } catch {

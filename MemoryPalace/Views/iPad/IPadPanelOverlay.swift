@@ -566,6 +566,9 @@ private struct FloatGroupContent: View {
         ZStack {
             ForEach(members.isEmpty ? [anchor] : members, id: \.self) { m in
                 RightPanelToolContent(toolId: m, selectedToolId: .constant(m), viewModel: viewModel, stickerVM: stickerVM)
+                    #if (DEBUG || PERF_BENCH) && os(macOS)
+                    .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "panel:\(m)") } }
+                    #endif
                     .opacity(m == current ? 1 : 0)
                     .allowsHitTesting(m == current)
                     #if os(macOS)

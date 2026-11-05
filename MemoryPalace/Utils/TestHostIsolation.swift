@@ -1,15 +1,16 @@
 import Foundation
 import Security
+import ObjectiveC
 
 #if os(macOS)
 import CryptoKit
-import ObjectiveC
 #endif
 
 /// #035：mac 单测宿主就是产品 app 本体（`TEST_HOST`），不隔离就是在粟粟的真库 / 真偏好 / 真钥匙串上跑完整启动链。
 /// 家目录由 scheme 测试环境变量 `CFFIXED_USER_HOME` 在进程创建时就改道到本工位 DerivedData 下（docs/plan-test-host-isolation.md）；
 /// 这里在 `AppEntry.main` 第一行只核对、清空本工位临时家、换偏好 suite、洗子进程环境，并打开适配层的闸。
-/// 任何一项核不上 → exit 78，绝不回落到真环境。iOS 不做（UI 测试本就在模拟器沙盒里）。
+/// 任何一项核不上 → exit 78，绝不回落到真环境。
+/// iOS 仅显式 XCTest 宿主启用：新建本次运行的临时目录和偏好 suite，不清理产品沙盒。
 enum TestHostIsolation {
     enum Gate: String, CaseIterable {
         case notifications, hub, mcp, ccHook, windowPrefs
@@ -27,9 +28,13 @@ enum TestHostIsolation {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var blocked: [Gate: Int] = [:]
 
-    /// 测试宿主下返回 true（调用方直接 return，不碰系统 / 网络）并计数
+    /// 测试宿主或mac bench拒绝外部副作用；active仍只表示测试宿主。
     static func blocks(_ gate: Gate) -> Bool {
+        #if os(macOS)
+        guard active || BenchIsolation.active else { return false }
+        #else
         guard active else { return false }
+        #endif
         lock.lock(); blocked[gate, default: 0] += 1; lock.unlock()
         return true
     }
@@ -97,6 +102,37 @@ enum TestHostIsolation {
         active = true
         NSLog("[test-host] home=%@ suite=%@ keychain=%@ xctestVisible=%d",
               tempHome.path, defaultsSuiteName, keychainSuffix, xcTestVisibleAtMain ? 1 : 0)
+        #elseif os(iOS)
+        let env = ProcessInfo.processInfo.environment
+        // 普通 iOS 启动（包括没有此标记的 UI 测试）保持原行为。
+        guard env["MP_TEST_HOST"] == "1" else { return }
+        // Xcode 26 的 iOS runner 把配置路径留空；会话 UUID 与内嵌测试 bundle 才是启动凭据。
+        guard let session = env["XCTestSessionIdentifier"], UUID(uuidString: session) != nil,
+              let bundle = env["XCTestBundlePath"], bundle.hasSuffix(".xctest"),
+              FileManager.default.isReadableFile(atPath: Bundle.main.bundleURL.appendingPathComponent(bundle).path) else {
+            fail("iOS 测试宿主缺少有效的 XCTest 会话或内嵌测试 bundle")
+        }
+        runTag = UUID().uuidString.lowercased()
+        let tempHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mp-xctest-\(runTag)", isDirectory: true)
+        do {
+            // UUID 目录只新建，绝不删除已有沙盒或上次测试目录。
+            try FileManager.default.createDirectory(at: tempHome, withIntermediateDirectories: false)
+            for sub in ["Library/Application Support", "Documents"] {
+                try FileManager.default.createDirectory(
+                    at: tempHome.appendingPathComponent(sub, isDirectory: true),
+                    withIntermediateDirectories: true)
+            }
+        } catch {
+            fail("iOS 临时家目录建不起来：\(error.localizedDescription)")
+        }
+        defaultsSuiteName = "com.susu.MemoryPalace.xctest.\(runTag)"
+        swapStandardDefaults(suiteName: defaultsSuiteName)
+        xcTestVisibleAtMain = NSClassFromString("XCTestCase") != nil
+        home = tempHome
+        active = true
+        NSLog("[test-host] home=%@ suite=%@ keychain=%@",
+              tempHome.path, defaultsSuiteName, keychainSuffix)
         #endif
     }
 
@@ -275,6 +311,7 @@ enum TestHostIsolation {
         guard SecKeychainCopyDefault(&keychain) == errSecSuccess, let keychain else { return nil }
         return path(of: keychain)
     }
+    #endif
 
     /// `+[NSUserDefaults standardUserDefaults]` 换成本工位专属 suite（`@AppStorage` 默认 store 跟着走）。
     /// 直接 CFPreferences + bundle id 的代码不受影响，那些在适配层单独闸
@@ -294,5 +331,4 @@ enum TestHostIsolation {
         NSLog("%@", line)
         exit(failureExitCode)
     }
-    #endif
 }

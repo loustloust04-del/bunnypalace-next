@@ -351,6 +351,8 @@ final class CharacterCardManager {
     /// ⑧c-4：卡原件目录（和 blobs/ 同级的 cardlibrary/cards/）
     @ObservationIgnored let originals: CardOriginalStore
     private var loadError: Error?
+    /// 卡库读坏了（cards 是空数组但不代表卡库空）：新装判定 / 首启种子据此不判
+    var loadFailed: Bool { loadError != nil }
     @ObservationIgnored private var floorService: CharacterFloorService?
     /// 第二批 B9：示例卡删过的标记写在这里
     @ObservationIgnored let defaults: UserDefaults

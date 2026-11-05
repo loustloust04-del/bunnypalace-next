@@ -38,8 +38,8 @@ public struct MarkdownRenderConfig: Hashable, Sendable {
   /// MP fork mac: optional block spacing override; only the macOS BlockView reads it.
   /// `nil` = 上游块距 30。iOS 的 BlockView 不读它（不订阅 config），恒为 30。
   public let blockSpacing: CGFloat?
-  /// MP fork mac: optional paragraph line spacing override; only the macOS SingleBlockView reads it.
-  /// `nil` = 上游段落行距 5。iOS 的 SingleBlockView 不读它，恒为 5。
+  /// 可选段落额外行距；两端 SingleBlockView 和合并文字段使用同一个值。
+  /// `nil` 保持默认5pt；气泡模式传0，使用字体自然行高。
   public let paragraphLineSpacing: CGFloat?
   /// MP fork: merge each run of consecutive paragraphs / headings into one text view so a selection can
   /// cross paragraphs (geometry kept identical to the block stack). `false` = upstream one-view-per-block.

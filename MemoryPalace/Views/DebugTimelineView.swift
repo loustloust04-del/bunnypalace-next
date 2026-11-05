@@ -266,7 +266,7 @@ struct DebugTimelineView: View {
         exportTotal = frames.count
         let safeName = clip.name.replacingOccurrences(of: ":", with: "-")
         let dirName = "debug-clip-\(safeName)"
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(dirName, isDirectory: true)
+        let dir = AppPaths.temporaryDirectory.appendingPathComponent(dirName, isDirectory: true)
 
         DispatchQueue.global(qos: .userInitiated).async {
             try? FileManager.default.removeItem(at: dir)

@@ -17,6 +17,10 @@ struct PromptScenario {
     var voiceHint = true
     /// v4-1：楼层里放一份时间轴 + 一份上下文摘要（金样夹具）；主线程读盘预算那套量的是没有记忆文件的路径，关掉
     var memoryFixtures = true
+    /// thinking 回传 G8：换模型（nil = openai 卡 gpt-4o / anthropic 卡 claude-sonnet-4-5）
+    var modelId: String? = nil
+    /// 「思考过程」显示设置（决定发不发 thinking.display），隔离本机设置
+    var thinkingDisplay: DisclosureMode = .inline
 }
 
 @MainActor
@@ -64,7 +68,7 @@ final class PromptRealPathHarness {
         let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
         let context = ModelContext(container)
         let credentialId = "xctest-prompt-golden-\(UUID().uuidString)"
-        let modelId = s.providerType == .anthropic ? "claude-sonnet-4-5" : "gpt-4o"
+        let modelId = s.modelId ?? (s.providerType == .anthropic ? "claude-sonnet-4-5" : "gpt-4o")
         let model = ProviderModel(credentialId: credentialId, modelId: modelId, name: "Prompt Golden")
         let providerManager = ProviderManager()
         var profile = Profile(id: s.profileId, name: "Test", emoji: "🧪", description: "",
@@ -133,6 +137,15 @@ final class PromptRealPathHarness {
         }
         setDefault("mem_master", true)
         setDefault("mem_content_summary", true)
+        // v5【开窗口】A2 / A4 / B4 + B4 写入：钉成没写过（= 今天的值），本机设置过也不影响金样
+        setDefault(MemoryOpenWindow.a2Key, nil)
+        setDefault(MemoryOpenWindow.a4Key, nil)
+        setDefault(MemoryOpenWindow.b4Key, nil)
+        // C 10-16 起没写过 = 不勾；金样代表「勾着 C 的老用户」，钉成 true（没写过 = 不带由 OpenWindowInjectionTests 锁）
+        setDefault(MemoryOpenWindow.cKey, true)
+        setDefault("mem_write_b4", nil)
+        // 时间轴（A4）开着：注入时间轴 + 下发 pending_notes（金样录的就是开着的样子，钉死不吃本机偏好）
+        setDefault("mem_content_timeline", true)
         setDefault("mem_inject_keyword", false)
         setDefault("mem_inject_vector", false)
         setDefault("mem_inject_full", true)
@@ -143,9 +156,16 @@ final class PromptRealPathHarness {
         setDefault("imageTranscriptionEnabled", nil)
         setDefault("fileLibraryInjectionTemplate", nil)
         setDefault(StreamingPreference.key, s.streamingMode.rawValue)
+        // thinking 回传：「思考过程」设置决定 thinking.display（本机设成隐藏的话 G8 会红）
+        setDefault(DisclosureKind.thinking.key, s.thinkingDisplay.rawValue)
+        // #093 工具抽屉：本机改过抽屉的话金样会红——清成默认，内存快照跟着刷新（tearDown 还原后再刷一次）
+        setDefault(ToolDrawerStore.defaultsKey, nil)
+        ToolDrawerStore.shared.reload()
         setDefault(CardLibraryPreferences.worldBookTokenBudgetKey, nil)
         setDefault(CardLibraryPreferences.worldBookMaxEntriesKey, nil)
-        setDefault("anthropicCacheHostBlacklist", s.anthropicBlacklisted ? [Self.baseURL] : nil)
+        // 卡上的 baseURL 读出来已过 BaseURLNormalizer（#092），黑名单按发出时的地址比
+        setDefault("anthropicCacheHostBlacklist",
+                   s.anthropicBlacklisted ? [BaseURLNormalizer.normalize(Self.baseURL, type: .anthropic)] : nil)
 
         savedVoiceEnabled = VoiceMessageWriter.proactiveEnabledProvider
         savedVoiceService = VoiceMessageWriter.serviceProvider
@@ -246,11 +266,14 @@ final class PromptRealPathHarness {
         credentialIds.forEach { providerManager.removeCredential(id: $0) }
         MemoryInjectionMeter.clear(profileId: profile.id)
         fixtureFiles.forEach { try? FileManager.default.removeItem(at: $0) }
+        // C 档案快照是进程级缓存：删了夹具的 wiki 要作废，不然下一个场景（同一个测试楼层）还拿着旧快照
+        WikiInjectionCache.shared.invalidate()
         MemoryClock.fixedForTests = nil
         if let tz = Self.savedTimeZone { NSTimeZone.default = tz }
         let d = UserDefaults.standard
         for (k, v) in savedDefaults { d.set(v, forKey: k) }
         for k in absentDefaults { d.removeObject(forKey: k) }
+        ToolDrawerStore.shared.reload()
         if let v = savedVoiceEnabled { VoiceMessageWriter.proactiveEnabledProvider = v }
         if let v = savedVoiceService { VoiceMessageWriter.serviceProvider = v }
         if let v = savedVoiceKey { VoiceMessageWriter.serviceKeyProvider = v }
@@ -308,6 +331,17 @@ final class PromptRealPathHarness {
             seg(.rolling, "和窗口原文重叠的一段（不该注入）", at(11, 9), u2.id),
         ], updatedAt: at(11, 10)), profileId: profile.id)
         fixtureFiles = [tl.appendingPathComponent("2026-10.md"), SessionSummaryStore.dir(root: root)]
+    }
+
+    /// C 档案夹具（C3 ②）：楼层 memory/wiki/ 下写几页 + 不触发的词，重建索引，等注入快照建好；tearDown 整个 wiki 删掉
+    func seedWiki(_ pages: [WikiPage], stopWords: [String] = []) async throws {
+        let pid = profile.id
+        let wiki = await Task.detached { WikiStore(profileId: pid) }.value
+        fixtureFiles.append(wiki.root)
+        for page in pages { try wiki.save(page) }
+        if !stopWords.isEmpty { try wiki.setStopWords(stopWords) }
+        try wiki.rebuildAllIndexes()
+        _ = try await WikiInjectionCache.shared.warm(pid, WikiInjectionCache.source(profileId: pid))
     }
 
     /// 排序键序列化；对话 id 前缀（文件库 hint 里附件目录名带它，每次运行随机）换成定值

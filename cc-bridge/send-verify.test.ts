@@ -3,7 +3,7 @@ import { expect, test } from "bun:test"
 import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { channelIds, findCodexRollout, hasMarker, locateEditArea, SendStatusBook, TranscriptScanner, transcriptCursor, userTextOfLine, withMarker } from "./send-verify"
+import { appAttemptOf, channelIds, findCodexRollout, hasMarker, locateEditArea, SendStatusBook, TranscriptScanner, transcriptCursor, userTextOfLine, withMarker } from "./send-verify"
 import { TmuxUncertainError, waitTmuxWriteSettled, type WriteSettle } from "./tmux-control"
 
 const TAG = `<channel source="memorypalace" chat_id="c-1" message_id="m-42" user="susu" ts="2026-10-11T00:00:00.000Z">你好 "q"</channel>`
@@ -169,4 +169,75 @@ test("waitTmuxWriteSettled：回执晚到 = executed / not-executed；客户端�
   expect(await waitTmuxWriteSettled(err({ kind: "abandoned" }), Date.now() + 5_000, async () => { probes++; return answers.shift()! })).toEqual({ kind: "settled" })
   expect(probes).toBe(4)
   expect(await waitTmuxWriteSettled(err({ kind: "abandoned" }), Date.now() + 300, async () => false)).toEqual({ kind: "timeout" })
+})
+
+test("A1 R4：app 带的 attempt 记在这一次发送上，uncertain / 终态 / 改原因 / 快照里原样带回；没带的帧里没有这个键", () => {
+  const book = new SendStatusBook(3_600_000, 10, 10)
+  const frames: Record<string, unknown>[] = []
+  book.watch((f) => frames.push({ ...f }))
+  book.attemptStarted("m", "k-1", false)
+  const op = book.begin("m", "c", "s", undefined, "k-1", "app-1")!
+  expect(op.appAttempt).toBe("app-1")
+  expect(book.snapshot()).toEqual([{ chat_id: "c", message_id: "m", session_name: "s", status: "uncertain", retryable: false, attempt: "app-1" }])
+  book.finish(op, { status: "failed", retryable: true, reason: "x" })
+  book.amend("m", "y")
+  expect(frames.map((f) => `${f.status}:${f.attempt}`)).toEqual(["uncertain:app-1", "failed:app-1", "failed:app-1"])
+  expect(book.snapshot()).toEqual([{ chat_id: "c", message_id: "m", session_name: "s", status: "failed", retryable: true, reason: "y", attempt: "app-1" }])
+  // 旧 app：不带 attempt → 帧 / 快照里没有 attempt 键（跟原来逐字相同）
+  book.attemptStarted("old", "k-2", false)
+  const o = book.begin("old", "c", "s", undefined, "k-2")!
+  book.finish(o, { status: "failed", retryable: true, reason: "z" })
+  expect("attempt" in frames[frames.length - 1]).toBe(false)
+  expect(book.snapshot().find((i) => i.message_id === "old")).not.toHaveProperty("attempt")
+})
+
+test("A1 R5 P1-d：同一个 message_id 两次发送的身份是各自的序号——旧那次进不了账；进了账的带的是自己的 attempt，不按最新那次反查", () => {
+  const book = new SendStatusBook(3_600_000, 10, 10)
+  const frames: Record<string, unknown>[] = []
+  book.watch((f) => frames.push({ ...f }))
+  book.attemptStarted("m", "k-1", false)
+  book.attemptStarted("m", "k-2", false)
+  expect(book.begin("m", "c", "s", undefined, "k-1", "a1")).toBeUndefined()   // 旧那次进不了账
+  const op = book.begin("m", "c", "s", undefined, "k-2", "a2")!
+  book.finish(op, { status: "failed", retryable: true, reason: "x" })
+  expect(frames.map((f) => `${f.status}:${f.attempt}`)).toEqual(["uncertain:a2", "failed:a2"])
+})
+
+test("A1 R5 P2：重发准入成功就把这次重发的 attempt 写进 op——attemptStarted 之前 abortRetry 的终态 / 历史 / 快照也带得上", () => {
+  const book = new SendStatusBook(3_600_000, 10, 10)
+  const frames: Record<string, unknown>[] = []
+  book.watch((f) => frames.push({ ...f }))
+  book.attemptStarted("m", "k-1", false)
+  book.finish(book.begin("m", "c", "s", undefined, "k-1", "a1")!, { status: "failed", retryable: true, reason: "x" })
+  const r = book.acceptRetry("m", "c", "s", false, "r1")
+  if (!r.accepted) throw new Error("应接受")
+  expect(r.op.appAttempt).toBe("r1")
+  expect(book.finish(r.op, { status: "failed", retryable: true, reason: "重发没发出去：组帧失败" })).toBe(true)   // 没走 attemptStarted
+  expect(frames[frames.length - 1]).toMatchObject({ message_id: "m", status: "failed", attempt: "r1" })
+  expect(book.snapshot().find((i) => i.message_id === "m")).toMatchObject({ status: "failed", attempt: "r1" })
+})
+
+test("A1 R5 P1-b：重发因「上一次还在跑」被拒——回帧带正在跑的那次的 active_attempt；请求没带 attempt（旧 app）的回帧跟原来逐字相同", () => {
+  const book = new SendStatusBook(3_600_000, 10, 10)
+  book.attemptStarted("m", "k-1", false)
+  book.finish(book.begin("m", "c", "s", undefined, "k-1", "a1")!, { status: "failed", retryable: true, reason: "x" })
+  const r1 = book.acceptRetry("m", "c", "s", false, "r1")
+  expect(r1.accepted).toBe(true)
+  book.attemptStarted("m", "k-2", true)
+  expect(book.acceptRetry("m", "c", "s", false, "r2")).toEqual({ accepted: false, frame: { status: "uncertain", retryable: false, reason: "这条还在核对 / 重发中", active_attempt: "r1" } })
+  expect(book.acceptRetry("m", "c", "s", false)).toEqual({ accepted: false, frame: { status: "uncertain", retryable: false, reason: "这条还在核对 / 重发中" } })
+  // 正在跑的是旧 app 的操作（没有 attempt）：不带 active_attempt
+  book.attemptStarted("n", "k-3", false)
+  book.begin("n", "c", "s", undefined, "k-3")
+  expect(book.acceptRetry("n", "c", "s", false, "r3")).toEqual({ accepted: false, frame: { status: "uncertain", retryable: false, reason: "这条还在核对 / 重发中" } })
+})
+
+test("A1 R4：appAttemptOf 只认非空字符串（≤64）或有限数字", () => {
+  expect(appAttemptOf("x.1")).toBe("x.1")
+  expect(appAttemptOf(7)).toBe("7")
+  expect(appAttemptOf("")).toBeUndefined()
+  expect(appAttemptOf("a".repeat(65))).toBeUndefined()
+  expect(appAttemptOf(Number.NaN)).toBeUndefined()
+  expect(appAttemptOf({})).toBeUndefined()
+  expect(appAttemptOf(undefined)).toBeUndefined()
 })

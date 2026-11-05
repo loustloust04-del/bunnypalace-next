@@ -1,7 +1,7 @@
 import XCTest
 @testable import 记忆花园
 
-/// #067 第 2 步：时间轴列表页的纯函数——月份枚举、按天分组（含跨天）、待续「无」不出
+/// #067 第 2 步：时间轴列表页的纯函数——月份枚举、按记忆日合组（新的一天一条 + 老条目）、待续「无」不出
 final class MemoryTimelineListTests: XCTestCase {
 
     let pid = "xctest-timeline-list"
@@ -29,11 +29,11 @@ final class MemoryTimelineListTests: XCTestCase {
     // MARK: - 月份枚举
 
     func testMonthsNewestFirstFromDisk() throws {
-        try TimelineStore.append(entry(date(2026, 8, 3, 10, 0), date(2026, 8, 3, 11, 0), "a"), profileId: pid)
-        try TimelineStore.append(entry(date(2026, 10, 15, 10, 0), date(2026, 10, 15, 11, 0), "b"), profileId: pid)
-        try TimelineStore.append(entry(date(2025, 12, 15, 10, 0), date(2025, 12, 15, 11, 0), "c"), profileId: pid)
-        try TimelineStore.append(entry(date(2026, 9, 9, 10, 0), date(2026, 9, 9, 11, 0), "d"), profileId: pid)
         let dir = FileLibraryStore.memoryRoot(profileId: pid).appendingPathComponent(TimelineStore.folder)
+        try TimelineStore.seedLegacy(entry(date(2026, 8, 3, 10, 0), date(2026, 8, 3, 11, 0), "a"), in: dir)
+        try TimelineStore.seedLegacy(entry(date(2026, 10, 15, 10, 0), date(2026, 10, 15, 11, 0), "b"), in: dir)
+        try TimelineStore.seedLegacy(entry(date(2025, 12, 15, 10, 0), date(2025, 12, 15, 11, 0), "c"), in: dir)
+        try TimelineStore.save(.init(days: [TimelineDayRecord(date: "2026-09-09", headline: "一句", items: [])]), month: "2026-09", in: dir)
         try Data("x".utf8).write(to: dir.appendingPathComponent("说明.md"))
         try Data("x".utf8).write(to: dir.appendingPathComponent("2026-07.txt"))
 
@@ -49,36 +49,25 @@ final class MemoryTimelineListTests: XCTestCase {
         XCTAssertEqual(TimelineStore.monthNames(names), ["2026-10", "2026-01", "2025-11"])
     }
 
-    // MARK: - 按天分组
+    // MARK: - 按记忆日合组
 
-    func testGroupByDayNewestFirstWithMidnightSpan() {
+    /// 新的一天一条和同一天的老条目并成一组（老条目标旧格式）；天新→旧，组内老条目新的在上
+    func testGroupMergesRecordsAndLegacyEntriesByMemoryDay() {
         let span = entry(date(2026, 10, 9, 23, 40), date(2026, 10, 10, 0, 30), "span")
-        let morning = entry(date(2026, 10, 10, 9, 10), date(2026, 10, 10, 9, 40), "morning")
-        let afternoon = entry(date(2026, 10, 10, 14, 20), date(2026, 10, 10, 15, 5), "afternoon")
-        let older = entry(date(2026, 10, 8, 16, 0), date(2026, 10, 8, 16, 20), "older")
-
-        let days = TimelineListLayout.groupByDay([morning, span, older, afternoon], calendar: cal)
-
-        XCTAssertEqual(days.map(\.day), [date(2026, 10, 10, 0, 0), date(2026, 10, 9, 0, 0), date(2026, 10, 8, 0, 0)])
-        XCTAssertEqual(days[0].entries.map(\.conversationId), ["afternoon", "morning"])
-        XCTAssertEqual(days[1].entries.map(\.conversationId), ["span"], "跨天的归开始那天")
-        XCTAssertEqual(days[2].entries.map(\.conversationId), ["older"])
-    }
-
-    /// v4-1：一天从 05:00 算——凌晨 03:00 那条归前一天；「今天」也按 05:00 算
-    func testGroupByDayUsesFiveOClockBoundary() {
-        let lateNight = entry(date(2026, 10, 11, 3, 0), date(2026, 10, 11, 4, 10), "lateNight")
-        let evening = entry(date(2026, 10, 10, 21, 0), date(2026, 10, 10, 22, 0), "evening")
-        let morning = entry(date(2026, 10, 11, 9, 0), date(2026, 10, 11, 9, 30), "morning")
-        let days = TimelineListLayout.groupByDay([lateNight, evening, morning], calendar: cal)
-        XCTAssertEqual(days.map(\.day), [date(2026, 10, 11, 0, 0), date(2026, 10, 10, 0, 0)])
-        XCTAssertEqual(days[1].entries.map(\.conversationId), ["lateNight", "evening"], "04:59 以前归前一天")
+        let lateNight = TimelineEntry(start: date(2026, 10, 11, 3, 0), end: date(2026, 10, 11, 4, 10), conversationId: "late", title: "late",
+                                      text: "- 熬夜", pending: "", day: "2026-10-10", lastNodeId: "x")
+        let r10 = TimelineDayRecord(date: "2026-10-10", headline: "白天修报错", items: [])
+        let r12 = TimelineDayRecord(date: "2026-10-12", headline: nil, items: [])
+        let groups = TimelineListLayout.group(records: [r10, r12], entries: [span, lateNight], calendar: cal)
+        XCTAssertEqual(groups.map(\.key), ["2026-10-12", "2026-10-10", "2026-10-09"])
+        XCTAssertEqual(groups[1].record?.headline, "白天修报错")
+        XCTAssertEqual(groups[1].entries.map(\.conversationId), ["late"], "凌晨 03:00 归前一天，和那天的一天一条并在一起")
+        XCTAssertNil(groups[2].record, "只有老条目的日子")
+        XCTAssertEqual(groups[2].entries.map(\.conversationId), ["span"], "老格式跨天的归开始那天")
+        XCTAssertEqual(groups[0].day, date(2026, 10, 12, 0, 0))
+        XCTAssertTrue(TimelineListLayout.group(records: [], entries: [], calendar: cal).isEmpty)
         XCTAssertEqual(TimelineListLayout.dayTitle(date(2026, 10, 10, 0, 0), now: date(2026, 10, 11, 4, 0), calendar: cal),
                        "今天 · 10月10日", "凌晨 4 点还算前一天")
-    }
-
-    func testGroupByDayEmpty() {
-        XCTAssertTrue(TimelineListLayout.groupByDay([], calendar: cal).isEmpty)
     }
 
     func testRangeText() {
@@ -142,18 +131,19 @@ final class MemoryTimelineListTests: XCTestCase {
                                                   hasPending: true, now: now, force: false), .none)
     }
 
+    /// v5：默认静默改 12 小时，这里显式传 30 分钟测规则本身
     func testQueueStateWaitsThirtyMinutesFromUpdate() {
         let upd = date(2026, 10, 11, 11, 50)
         let now = date(2026, 10, 11, 12, 0)
         XCTAssertEqual(SessionCloseout.queueState(updateTime: upd, coveredUntil: nil, lastMessageDate: upd.addingTimeInterval(-30),
-                                                  hasPending: true, now: now, force: false),
+                                                  hasPending: true, now: now, force: false, idle: 30 * 60),
                        .waiting(until: date(2026, 10, 11, 12, 20)))
         // 新建对话那次不等静默
         XCTAssertEqual(SessionCloseout.queueState(updateTime: upd, coveredUntil: nil, lastMessageDate: upd,
                                                   hasPending: true, now: now, force: true), .due)
         // 静默够了
         XCTAssertEqual(SessionCloseout.queueState(updateTime: upd, coveredUntil: date(2026, 10, 11, 9, 0), lastMessageDate: upd,
-                                                  hasPending: true, now: date(2026, 10, 11, 12, 21), force: false), .due)
+                                                  hasPending: true, now: date(2026, 10, 11, 12, 21), force: false, idle: 30 * 60), .due)
     }
 
     func testQueueStatusText() {

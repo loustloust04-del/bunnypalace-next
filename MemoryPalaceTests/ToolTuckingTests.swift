@@ -26,11 +26,11 @@ final class ToolTuckingTests: XCTestCase {
         let tucked = Set(ToolRegistry.tuckedDefinitions(ctx).map(\.name))
         XCTAssertTrue(inline.isDisjoint(with: tucked))
         XCTAssertEqual(inline.union(tucked), all)
-        XCTAssertTrue(tucked.isSubset(of: ToolRegistry.tuckedNames))
-        XCTAssertFalse(inline.contains(where: ToolRegistry.tuckedNames.contains))
+        XCTAssertTrue(tucked.isSubset(of: ToolRegistry.defaultTuckedNames))
+        XCTAssertFalse(inline.contains(where: ToolRegistry.defaultTuckedNames.contains))
         // 常用的不收
         for name in [SelfMemoryTool.rememberName, AskUserTool.toolName, CardGuideTool.toolName] {
-            XCTAssertFalse(ToolRegistry.tuckedNames.contains(name), name)
+            XCTAssertFalse(ToolRegistry.defaultTuckedNames.contains(name), name)
         }
     }
 
@@ -43,18 +43,25 @@ final class ToolTuckingTests: XCTestCase {
     }
 
     func testEveryTuckedToolHasABlurb() {
-        for name in ToolRegistry.tuckedNames {
+        for name in ToolRegistry.defaultTuckedNames {
             XCTAssertFalse((ToolRegistry.tuckedBlurbs[name] ?? "").isEmpty, name)
         }
+        // #093：抽屉里任何内建工具都可能被收起，每个都要有一句话（没手写的取描述第一句）
+        for entry in ToolRegistry.all {
+            XCTAssertFalse(ToolRegistry.blurb(for: entry.definition).isEmpty, entry.definition.name)
+        }
         #if os(iOS)
-        XCTAssertTrue(ToolRegistry.tuckedNames.contains(RunCommandTool.toolName))
+        XCTAssertTrue(ToolRegistry.defaultTuckedNames.contains(RunCommandTool.toolName))
         #else
-        XCTAssertFalse(ToolRegistry.tuckedNames.contains(RunCommandTool.toolName), "mac 上 run_command 照常直接给")
-        XCTAssertTrue(CodingTools.names.isSubset(of: ToolRegistry.tuckedNames))
+        XCTAssertFalse(ToolRegistry.defaultTuckedNames.contains(RunCommandTool.toolName), "mac 上 run_command 照常直接给")
+        XCTAssertTrue(CodingTools.names.isSubset(of: ToolRegistry.defaultTuckedNames))
         #endif
     }
 
     // MARK: tool_invoke 拆包
+
+    /// 默认抽屉下这一轮收起的（静态测例用）
+    private let tucked = ToolRegistry.defaultTuckedNames
 
     private func invoke(_ args: String, truncated: Bool = false) -> ToolCallBlock {
         ToolCallBlock(id: "call-1", name: MetaTools.invokeName, argumentsJSON: args, truncated: truncated)
@@ -62,7 +69,7 @@ final class ToolTuckingTests: XCTestCase {
 
     func testUnwrapTuckedBuiltin() throws {
         guard case .unwrapped(let inner) = ConversationViewModel.unwrapTuckedInvoke(
-            invoke(#"{"name":"ocr_image","arguments":{"path":"a.png"}}"#, truncated: true)) else { return XCTFail("应拆包") }
+            invoke(#"{"name":"ocr_image","arguments":{"path":"a.png"}}"#, truncated: true), tucked: tucked) else { return XCTFail("应拆包") }
         XCTAssertEqual(inner.id, "call-1", "同一个调用 id，结果才配得上")
         XCTAssertEqual(inner.name, OCRImageTool.toolName)
         XCTAssertTrue(inner.truncated, "截断标记带着走")
@@ -71,10 +78,10 @@ final class ToolTuckingTests: XCTestCase {
     }
 
     func testUnwrapRequiresArguments() {
-        guard case .invalid = ConversationViewModel.unwrapTuckedInvoke(invoke(#"{"name":"device_info"}"#)) else {
+        guard case .invalid = ConversationViewModel.unwrapTuckedInvoke(invoke(#"{"name":"device_info"}"#), tucked: tucked) else {
             return XCTFail("缺 arguments 要拒（schema 里是必填）")
         }
-        guard case .unwrapped(let inner) = ConversationViewModel.unwrapTuckedInvoke(invoke(#"{"name":"device_info","arguments":{}}"#)) else {
+        guard case .unwrapped(let inner) = ConversationViewModel.unwrapTuckedInvoke(invoke(#"{"name":"device_info","arguments":{}}"#), tucked: tucked) else {
             return XCTFail("显式 {} 照常拆")
         }
         XCTAssertEqual(inner.argumentsJSON, "{}")
@@ -82,7 +89,7 @@ final class ToolTuckingTests: XCTestCase {
 
     func testUnwrapRejectsNonObjectArguments() {
         guard case .invalid(let msg) = ConversationViewModel.unwrapTuckedInvoke(
-            invoke(#"{"name":"device_info","arguments":"kind=battery"}"#)) else { return XCTFail("应拒") }
+            invoke(#"{"name":"device_info","arguments":"kind=battery"}"#), tucked: tucked) else { return XCTFail("应拒") }
         XCTAssertTrue(msg.contains("对象"))
     }
 
@@ -95,10 +102,39 @@ final class ToolTuckingTests: XCTestCase {
             "not json",
         ]
         for c in cases {
-            guard case .notWrapped = ConversationViewModel.unwrapTuckedInvoke(invoke(c)) else { return XCTFail(c) }
+            guard case .notWrapped = ConversationViewModel.unwrapTuckedInvoke(invoke(c), tucked: tucked) else { return XCTFail(c) }
         }
         let notInvoke = ToolCallBlock(id: "x", name: OCRImageTool.toolName, argumentsJSON: "{}")
-        guard case .notWrapped = ConversationViewModel.unwrapTuckedInvoke(notInvoke) else { return XCTFail("直接叫名字不拆") }
+        guard case .notWrapped = ConversationViewModel.unwrapTuckedInvoke(notInvoke, tucked: tucked) else { return XCTFail("直接叫名字不拆") }
+    }
+
+    /// #093：拆不拆按这一轮的收起集合（工具抽屉）——用户收起的 roll_dice（默认直接给）能拆；抽屉里关掉的 ocr_image 不拆，交给元工具处理回「这一轮没开」
+    func testUnwrapFollowsThisTurnsTuckedSet() {
+        var drawer = ToolDrawerState.defaults
+        drawer.set(.tucked, for: DiceTool.toolName, profileId: nil)
+        drawer.set(.off, for: OCRImageTool.toolName, profileId: nil)
+        let now = Set(ToolRegistry.tuckedDefinitions(ToolGateContext(family: .openAI, deferMCP: false, drawer: drawer)).map(\.name))
+        guard case .unwrapped(let inner) = ConversationViewModel.unwrapTuckedInvoke(
+            invoke(#"{"name":"roll_dice","arguments":{}}"#), tucked: now) else {
+            return XCTFail("用户收起的工具要拆")
+        }
+        XCTAssertEqual(inner.name, DiceTool.toolName)
+        guard case .notWrapped = ConversationViewModel.unwrapTuckedInvoke(
+            invoke(#"{"name":"roll_dice","arguments":{}}"#), tucked: tucked) else { return XCTFail("默认抽屉下 roll_dice 直接给，不拆") }
+        XCTAssertFalse(now.contains(OCRImageTool.toolName))
+        guard case .notWrapped = ConversationViewModel.unwrapTuckedInvoke(
+            invoke(#"{"name":"ocr_image","arguments":{"path":"a.png"}}"#), tucked: now) else { return XCTFail("关掉的不拆") }
+    }
+
+    /// #093 astra #3：循环里能拆包的 = 这一轮发出去的清单里没有的内建工具（按发出去的清单，不按现读的抽屉）
+    func testInvokableBuiltinsFollowSentToolList() {
+        let sent: [[String: Any]] = [["type": "function", "function": ["name": FileLibraryTools.Name.read.rawValue]],
+                                     ["type": "function", "function": ["name": MetaTools.invokeName]]]
+        let set = ConversationViewModel.invokableBuiltins(sentTools: sent)
+        XCTAssertTrue(set.contains(FileLibraryTools.Name.delete.rawValue))
+        XCTAssertTrue(set.contains(DiceTool.toolName), "清单里没有的都能拆（关着的拆了会被执行前复查拒）")
+        XCTAssertFalse(set.contains(FileLibraryTools.Name.read.rawValue), "清单里有的不许包着调")
+        XCTAssertTrue(set.isDisjoint(with: MetaTools.names), "元工具不能包元工具")
     }
 
     func testRewrapAfterApprovalCardEdit() throws {
@@ -109,7 +145,7 @@ final class ToolTuckingTests: XCTestCase {
         XCTAssertEqual((outer["arguments"] as? [String: Any])?["path"] as? String, "改过.png")
         // 拆回来是同一个调用
         guard case .unwrapped(let inner) = ConversationViewModel.unwrapTuckedInvoke(
-            ToolCallBlock(id: "c", name: MetaTools.invokeName, argumentsJSON: wrapped)) else { return XCTFail() }
+            ToolCallBlock(id: "c", name: MetaTools.invokeName, argumentsJSON: wrapped), tucked: tucked) else { return XCTFail() }
         XCTAssertTrue(inner.argumentsJSON.contains("改过.png"))
     }
 

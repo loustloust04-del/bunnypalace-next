@@ -26,13 +26,13 @@ final class ModelCatalog: @unchecked Sendable {
     static let shared: ModelCatalog = {
         // #035：已装好隔离的测试宿主直接认，不依赖 XCTest 类此刻是否已加载
         if TestHostIsolation.active || NSClassFromString("XCTestCase") != nil {
-            let dir = FileManager.default.temporaryDirectory
+            let dir = AppPaths.temporaryDirectory
                 .appendingPathComponent("MemoryPalaceTests-catalog-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
             return ModelCatalog(cacheURL: dir.appendingPathComponent("model-catalog.json"),
                                 fetch: { throw URLError(.notConnectedToInternet) })
         }
-        let dir = URL.applicationSupportDirectory.appendingPathComponent("MemoryPalace", isDirectory: true)
-        return ModelCatalog(cacheURL: dir.appendingPathComponent("model-catalog.json"))
+        let dir = AppPaths.applicationSupport.appendingPathComponent("MemoryPalace", isDirectory: true)
+        return ModelCatalog(cacheURL: AppPaths.checked(dir.appendingPathComponent("model-catalog.json")))
     }()
 
     private struct CacheFile: Codable {
@@ -50,11 +50,14 @@ final class ModelCatalog: @unchecked Sendable {
     private var pricingNeedsRefresh = false
 
     init(cacheURL: URL, fetch: @escaping @Sendable () async throws -> Data = ModelCatalog.defaultFetch) {
-        self.cacheURL = cacheURL
+        self.cacheURL = AppPaths.checked(cacheURL)
         self.fetch = fetch
     }
 
     @Sendable static func defaultFetch() async throws -> Data {
+        #if os(macOS)
+        if BenchIsolation.active { throw URLError(.notConnectedToInternet) }
+        #endif
         var request = URLRequest(url: sourceURL, timeoutInterval: 30)
         request.httpMethod = "GET"
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -94,6 +97,9 @@ final class ModelCatalog: @unchecked Sendable {
     }
 
     func refreshIfStale(now: Date) async {
+        #if os(macOS)
+        if BenchIsolation.active { return }
+        #endif
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.quietNetwork { PerfGuardrails.suppress("modelCatalog"); return }   // 测量角色不拉 models.dev（perf P0 §3.1）
         #endif

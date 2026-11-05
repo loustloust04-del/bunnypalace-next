@@ -73,9 +73,10 @@ extension CodingSessionAdapter {
 
 /// 全部 adapter 的唯一构造点。`home` 可注入（测试指向合成 fixture，不碰真目录）
 enum CodingSessionRoster {
-    static func adapters(home: URL = FileManager.default.homeDirectoryForCurrentUser,
+    static func adapters(home: URL = AppPaths.home,
                          environment: [String: String] = ProcessInfo.processInfo.environment) -> [CodingSessionAdapter] {
-        [
+        let home = AppPaths.checked(home)
+        return [
             ClaudeCodeAdapter(root: home.appendingPathComponent(".claude/projects", isDirectory: true)),
             CodexAdapter.make(home: home, environment: environment),
             QoderAdapter.make(home: home, environment: environment),

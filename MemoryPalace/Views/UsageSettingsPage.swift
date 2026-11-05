@@ -19,9 +19,15 @@ enum UsageFormat {
     static func unpricedNote(_ n: Int) -> String? {
         n > 0 ? "\(n) 次未计价（查不到模型价格，未计入花费）" : nil
     }
+
+    /// 榜单显示几行：`limit` = nil 全显示（按用途榜：种类本来就少，截掉会看不见排在后面的 wiki 种子）
+    static func visibleRows(_ rows: [UsageGroup], limit: Int?) -> (shown: ArraySlice<UsageGroup>, hidden: Int) {
+        guard let limit else { return (rows[...], 0) }
+        return (rows.prefix(limit), max(0, rows.count - limit))
+    }
 }
 
-/// 统一用量页（research-magpie 2.1 / 2.5）：范围切换、总花费、时间柱、按模型 / 按卡两张榜、「N 次未计价」。
+/// 统一用量页（research-magpie 2.1 / 2.5）：范围切换、总花费、时间柱、按模型 / 按卡 / 按用途三张榜、「N 次未计价」。
 /// 数据：对话侧来自 `UsageLedger`（逐次调用），Mac 上「Code」筛选并入 Code 会话索引的会话级 token（`CodeUsageSource`）。
 ///
 /// 页顶 `quotaSlot` 留给「订阅额度卡」（`SubscriptionQuotaService` + 视图，另一条线做）：
@@ -77,6 +83,7 @@ struct UsageSettingsPage<QuotaSlot: View>: View {
             if let summary, !summary.models.isEmpty {
                 board("按模型", rows: summary.models)
                 board(scope == .code ? "按 Agent" : "按卡片", rows: summary.providers)
+                if scope != .code { board("按用途", rows: summary.kinds, limit: nil) }
             }
 
             if scope != .code {
@@ -231,9 +238,10 @@ struct UsageSettingsPage<QuotaSlot: View>: View {
 
     // MARK: - 榜单
 
-    private func board(_ title: String, rows: [UsageGroup]) -> some View {
-        Section {
-            ForEach(rows.prefix(8)) { row in
+    private func board(_ title: String, rows: [UsageGroup], limit: Int? = 8) -> some View {
+        let visible = UsageFormat.visibleRows(rows, limit: limit)
+        return Section {
+            ForEach(visible.shown) { row in
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(row.label)
@@ -253,8 +261,8 @@ struct UsageSettingsPage<QuotaSlot: View>: View {
                         .foregroundColor(Theme.textSecondary)
                 }
             }
-            if rows.count > 8 {
-                Text("…还有 \(rows.count - 8) 项")
+            if visible.hidden > 0 {
+                Text("…还有 \(visible.hidden) 项")
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
             }

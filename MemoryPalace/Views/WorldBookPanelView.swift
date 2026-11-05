@@ -96,7 +96,9 @@ struct WorldBookPanelView: View {
                     saveEntry(updated)
                     editingEntry = nil
                 },
-                onCancel: { editingEntry = nil }
+                onCancel: { editingEntry = nil },
+                versionKey: isAddingNew ? nil : (editingGlobalBookId ?? editingBookId?.uuidString)
+                    .map { .worldBookEntry(bookId: $0, entryId: entry.id) }
             )
         }
         .alert("重命名世界书", isPresented: Binding(
@@ -1031,6 +1033,8 @@ struct WorldBookEntryEditor: View {
     let isNew: Bool
     let onSave: (WorldBookEntry) -> Void
     let onCancel: () -> Void
+    /// 注入内容的版本历史 / 编辑位置；新建的条目没有
+    let versionKey: FileVersionStore.Key?
 
     @State private var comment: String
     @State private var keysText: String
@@ -1041,9 +1045,12 @@ struct WorldBookEntryEditor: View {
     @State private var isConstant: Bool
     @State private var matchWholeWords: Bool
     @State private var caseSensitive: Bool
+    @State private var confirmingDiscard = false
 
-    init(entry: WorldBookEntry, isNew: Bool, onSave: @escaping (WorldBookEntry) -> Void, onCancel: @escaping () -> Void) {
+    init(entry: WorldBookEntry, isNew: Bool, onSave: @escaping (WorldBookEntry) -> Void, onCancel: @escaping () -> Void,
+         versionKey: FileVersionStore.Key? = nil) {
         self.entry = entry
+        self.versionKey = versionKey
         self.isNew = isNew
         self.onSave = onSave
         self.onCancel = onCancel
@@ -1092,10 +1099,9 @@ struct WorldBookEntryEditor: View {
                 .listRowBackground(Theme.mainBg)
 
                 Section("注入内容") {
-                    TextEditor(text: $content)
-                        .font(.system(size: Theme.F.body))
-                        .frame(minHeight: 120)
-                        .scrollContentBackground(.hidden)
+                    LongTextField(title: "注入内容", text: $content,
+                                  editorTitle: "世界书条目 · " + (comment.isEmpty ? "注入内容" : comment),
+                                  showsTitle: false, versionKey: versionKey)
                 }
                 .listRowBackground(Theme.mainBg)
 
@@ -1145,7 +1151,7 @@ struct WorldBookEntryEditor: View {
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { onCancel() }
+                    Button("取消") { if isDirty { confirmingDiscard = true } else { onCancel() } }
                         .foregroundColor(Theme.textMuted)
                 }
                 ToolbarItem(placement: .confirmationAction) {
@@ -1154,9 +1160,22 @@ struct WorldBookEntryEditor: View {
                 }
             }
         }
+        .discardChangesGuard(isDirty: isDirty, confirming: $confirmingDiscard, onDiscard: onCancel)
         #if os(macOS)
         .frame(width: 440, height: 520)
         #endif
+    }
+
+    private var isDirty: Bool {
+        comment != entry.comment
+            || keysText != entry.keys.joined(separator: ", ")
+            || secondaryKeysText != entry.secondaryKeys.joined(separator: ", ")
+            || content != entry.content
+            || position != entry.position
+            || insertionOrder != "\(entry.insertionOrder)"
+            || isConstant != entry.isConstant
+            || matchWholeWords != entry.matchWholeWords
+            || caseSensitive != entry.caseSensitive
     }
 
     private func save() {

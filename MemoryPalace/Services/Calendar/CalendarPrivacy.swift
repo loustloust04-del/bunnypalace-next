@@ -33,7 +33,8 @@ struct CalendarPrivacy {
 enum FileLibraryAccess {
     enum Op { case read, write }
 
-    enum Zone: String { case journal, calendar }
+    /// prompt = 文件库「Prompt」虚拟根（PromptFolder.root）占用的名字：物理文件一律不经它读写，免得同一路径两种意思
+    enum Zone: String { case journal, calendar, prompt = ".prompt" }
 
     /// 规范化 + 解符号链接之后，看它落在库根的哪个受保护文件夹里（第一段，不分大小写——APFS 默认不区分）。
     /// 和 FileLibraryStore.resolve 同一套解析（先解 symlink 再判 containment）。
@@ -79,6 +80,8 @@ enum FileLibraryAccess {
             return nil
         case (.calendar, .write):
             return "calendar/ 是日历数据，只读。要记纪念日，用 anniversary 块（见说明）。"
+        case (.prompt, _):
+            return Self.promptDenial
         }
     }
 
@@ -86,9 +89,17 @@ enum FileLibraryAccess {
     /// 所以只看首段，不再逐个规范化 / 解链接。规则同 `denial(.read)`：journal/ 看日记闸，calendar/ 可读。
     /// 模型给的路径（工具参数、历史里的调用）不能用这个，走 `visible`。
     static func listedVisible(_ path: String, journalVisible: Bool) -> Bool {
-        guard !journalVisible else { return true }
         let first = path.split(separator: "/", maxSplits: 1).first.map { $0.lowercased() }
+        if first == Zone.prompt.rawValue { return false }
+        guard !journalVisible else { return true }
         return first != Zone.journal.rawValue
+    }
+
+    static let promptDenial = "「.prompt」是 Prompt 插槽的虚拟文件夹，文件工具读写不了；插槽在 Prompt 页或文件库「Prompt」里看和改。"
+
+    /// 物理写入口（新建 / 写 / 追加 / 改 / 删 / 改名两端）用：规范化后落在 `.prompt/` 就拒，库里已有的真文件只能看
+    static func isPromptZone(_ relPath: String, root: URL) -> Bool {
+        zone(of: relPath, root: root) == .prompt
     }
 
     /// 列表 / 搜索 / 回注用：这个路径 AI 能不能看到。

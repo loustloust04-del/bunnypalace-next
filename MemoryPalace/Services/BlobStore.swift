@@ -12,25 +12,25 @@ enum BlobStore {
                                             "savedProfiles", "savedPresets", "globalWorldBooks"]
 
     private static func directory(root: URL?) -> URL {
-        root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        root ?? AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("blobs", isDirectory: true)
+            .appendingPathComponent("blobs", isDirectory: true))
     }
 
     static func path(forKey key: String, root: URL? = nil) -> URL {
-        directory(root: root).appendingPathComponent(key)
+        AppPaths.checked(directory(root: root).appendingPathComponent(key))
     }
 
     /// 注入了临时 defaults 却没给 root（测试 / 离线演练漏传）：落进程临时目录，绝不碰真实 blobs
     static func resolvedRoot(_ root: URL?, defaults: UserDefaults) -> URL? {
         guard root == nil, defaults !== UserDefaults.standard else { return root }
-        return FileManager.default.temporaryDirectory.appendingPathComponent(
+        return AppPaths.temporaryDirectory.appendingPathComponent(
             "BlobStore-unrooted-\(ProcessInfo.processInfo.processIdentifier)-\(UInt(bitPattern: ObjectIdentifier(defaults).hashValue))",
             isDirectory: true)
     }
 
     static func read(forKey key: String, root: URL? = nil, defaults: UserDefaults = .standard) throws -> Data? {
-        let url = directory(root: root).appendingPathComponent(key)
+        let url = path(forKey: key, root: root)
         if let data = try readIfPresent(url) {
             // 文件是唯一写入目标：旧 key 还在（上次删没生效 / 迁移失败后又写成功）一定更旧，能读通才清；损坏的旧 key 留着备查
             if let legacy = defaults.data(forKey: key), (try? validate(legacy, forKey: key)) != nil {
@@ -94,9 +94,15 @@ enum BlobStore {
 
     static func set(_ data: Data?, forKey key: String, root: URL? = nil) throws {
         let dir = directory(root: root)
-        let url = dir.appendingPathComponent(key)
+        let url = path(forKey: key, root: root)
         if let data {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            #if (DEBUG || PERF_BENCH) && os(macOS)
+            if let configuration = BenchIsolation.configuration {
+                try configuration.writeAtomically(data, to: url)
+                return
+            }
+            #endif
             try data.write(to: url, options: .atomic)
         } else if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)

@@ -2,7 +2,7 @@ import XCTest
 import SwiftData
 @testable import 记忆花园
 
-/// MV1 碎片毕业 + 画像反馈 特征测试。
+/// MV1 碎片毕业 特征测试（画像喂提取那几条随 v5 C2 换掉删了）。
 /// in-memory ModelContainer；不调网络 LLM，只测纯函数层 + supersede 行为对下游列表的影响。
 final class MV1GraduationTests: XCTestCase {
 
@@ -23,29 +23,6 @@ final class MV1GraduationTests: XCTestCase {
         UserDefaults.standard.removeObject(forKey: "mem_supersede_soft")
         container = nil
         super.tearDown()
-    }
-
-    // MARK: - 刀1：buildPrompt 喂画像
-
-    func testBuildPromptIncludesProfileWhenProvided() {
-        let dream = UserProfileDream(text: "禾禾是独立开发者，喜欢暖奶白配色。", sourceCount: 5, updatedAt: Date())
-        let prompt = MemoryExtractor.buildPrompt(existingMemories: [], profile: dream, systemPrompt: "")
-        XCTAssertTrue(prompt.contains("禾禾是独立开发者"), "画像全文应注入 {{PROFILE}} 占位符")
-        // MV2 后规则 11 措辞扩展为"画像或当前记忆里已涵盖" — 只匹配稳定核心串"已涵盖的别 add"
-        XCTAssertTrue(prompt.contains("已经涵盖的别 add"), "「已涵盖的别 add」规则应在 prompt 中")
-    }
-
-    func testBuildPromptFallsBackWhenNoProfile() {
-        let prompt = MemoryExtractor.buildPrompt(existingMemories: [], profile: nil, systemPrompt: "")
-        // 占位符被替换为"无"，不应仍带原始 {{PROFILE}}
-        XCTAssertFalse(prompt.contains("{{PROFILE}}"), "占位符应被替换")
-        XCTAssertTrue(prompt.contains("的画像（已凝成的整体认知）"), "画像段标题仍在")
-    }
-
-    func testBuildPromptEmptyTextFallsBackToNone() {
-        let dream = UserProfileDream(text: "", sourceCount: 0, updatedAt: Date())
-        let prompt = MemoryExtractor.buildPrompt(existingMemories: [], profile: dream, systemPrompt: "")
-        XCTAssertFalse(prompt.contains("{{PROFILE}}"))
     }
 
     // MARK: - 刀2：毕业行为对下游列表的影响

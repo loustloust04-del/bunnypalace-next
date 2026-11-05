@@ -285,6 +285,7 @@ actor SubscriptionQuotaService {
     /// 现有数据 + 正在进行的刷新。有缓存就立刻返回（新鲜的不刷；过期的起后台刷新交回 pending）；
     /// 一次都没拉过才让调用方等 pending
     func snapshot(force: Bool = false) -> (current: [SubscriptionQuota]?, pending: Task<[SubscriptionQuota], Never>?) {
+        if BenchIsolation.active { return (nil, nil) }
         let fresh = cachedAt.map { now().timeIntervalSince($0) < ttl } ?? false
         if (!fresh || force), inflight == nil {
             let task = Task { await self.refreshAll() }
@@ -360,6 +361,9 @@ actor SubscriptionQuotaService {
 
     /// 一家的一次拉取。nil 凭据 → 这家不出现（没登录就不占一行）由 `credential` 决定；过期 → needsLogin，不发请求
     private nonisolated func fetch(_ source: Source) async -> SubscriptionQuota? {
+        if BenchIsolation.active {
+            return base(source, at: now(), status: .failed("性能测量包不可读取订阅额度"))
+        }
         let stamp = now()
         guard let credential = credential(for: source) else { return nil }
         var quota = base(source, at: stamp, status: .ok)
@@ -411,6 +415,7 @@ actor SubscriptionQuotaService {
     }
 
     private nonisolated func credential(for source: Source) -> SubscriptionQuotaParser.Credential? {
+        if BenchIsolation.active { return nil }
         switch source.provider {
         case .claude:
             if let data = readFile(source.root.appendingPathComponent(".credentials.json")),
@@ -427,6 +432,7 @@ actor SubscriptionQuotaService {
     // MARK: 默认依赖
 
     static let urlSessionTransport: Transport = { request in
+        if BenchIsolation.active { throw URLError(.notConnectedToInternet) }
         let configuration = URLSessionConfiguration.ephemeral   // 不落 cookie / 缓存
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
@@ -439,6 +445,7 @@ actor SubscriptionQuotaService {
     /// Keychain 里 Claude Code 的那项。走 `/usr/bin/security`：条目是 CLI 用它写的，它在 ACL 里，不会弹授权框。
     /// 先按当前用户名找（新版 CLI 按 `-a $USER` 存），再不带账号兜底；5 s 没回就放弃。输出只留在内存
     static func readKeychainPassword(service: String) -> Data? {
+        if BenchIsolation.active { return nil }
         // #035：mac 测试宿主不起 security 子进程读 CC 的钥匙串条目。mp-code 也编这个文件，用环境变量判，不引 TestHostIsolation
         if ProcessInfo.processInfo.environment["MP_TEST_HOST"] == "1" { return nil }
         for account in [NSUserName(), nil] as [String?] {
@@ -450,6 +457,7 @@ actor SubscriptionQuotaService {
     }
 
     private static func runSecurity(_ arguments: [String]) -> Data? {
+        if BenchIsolation.active { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
         process.arguments = arguments
@@ -513,7 +521,7 @@ final class SubscriptionQuotaStore {
     static let shared = SubscriptionQuotaStore(service: SubscriptionQuotaService(sources: {
         // 位置配置在主线程那份用户状态里：每轮刷新现读，她在位置 sheet 里加的自定义根下一轮就生效
         let overrides = await MainActor.run { CodingSessionState.shared.locationOverrides }
-        let home = FileManager.default.homeDirectoryForCurrentUser
+        let home = AppPaths.home
         let roster = CodingSessionRoster.configured(home: home, environment: ProcessInfo.processInfo.environment, overrides: overrides)
         return SubscriptionQuotaService.sources(adapters: roster.active, home: home)
     }))

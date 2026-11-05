@@ -90,11 +90,11 @@ enum TextRunMerger {
   }
 
   private static func run(_ blocks: [MarkdownRenderable], config: MarkdownRenderConfig) -> MarkdownRenderable {
-    // 与 BlockView / SingleBlockView 同一组数：iOS 写死块距 30 / 段落行距 5，mac 吃排版滑杆
+    // 与 BlockView / SingleBlockView 同源：两端都接受行距覆盖，iOS 块距保持30。
     #if os(macOS)
     let metrics = Metrics(blockSpacing: config.blockSpacing ?? 30, paragraphLineSpacing: config.paragraphLineSpacing ?? 5, config: config)
     #else
-    let metrics = Metrics(blockSpacing: 30, paragraphLineSpacing: 5, config: config)
+    let metrics = Metrics(blockSpacing: 30, paragraphLineSpacing: config.paragraphLineSpacing ?? 5, config: config)
     #endif
 
     let leaves = flatten(blocks, x: 0, spacing: metrics.blockSpacing, metrics: metrics)

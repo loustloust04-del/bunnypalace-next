@@ -10,6 +10,22 @@ enum FileLibraryTools {
     {{files}}{{fileContents}}
     """
 
+    /// 默认模板里那句工具清单的原文（全开、改名 / 删除收在〔更多工具〕时一字不差）
+    static let defaultToolSentence = "可用 fs_list / fs_read / fs_search / fs_write / fs_append / fs_edit 工具读写（改名、删文件用〔更多工具〕里的 fs_rename / fs_delete）"
+
+    /// 只提这一轮能调到的 fs 工具（粟粟 10-15：关了的不带说明）；tucked = 收在〔更多工具〕里的
+    static func toolSentence(available: Set<String>, tucked: Set<String>) -> String {
+        let main = [Name.list, .read, .search, .write, .append, .edit].map(\.rawValue).filter(available.contains)
+        let extra = [Name.rename, .delete].map(\.rawValue).filter(available.contains)
+        var s = main.isEmpty ? "可用" : "可用 \(main.joined(separator: " / ")) 工具读写"
+        if !extra.isEmpty {
+            let what = extra.count == 2 ? "改名、删文件" : (extra[0] == Name.rename.rawValue ? "改名" : "删文件")
+            let place = extra.allSatisfy(tucked.contains) ? "〔更多工具〕里的 " : " "
+            s += main.isEmpty ? " \(extra.joined(separator: " / ")) 工具\(what)" : "（\(what)用\(place)\(extra.joined(separator: " / "))）"
+        }
+        return s
+    }
+
     /// 工具名（API 下发 + 回灌时匹配）
     enum Name: String, CaseIterable {
         case list = "fs_list", read = "fs_read", search = "fs_search"
@@ -56,6 +72,9 @@ enum FileLibraryTools {
         if pathArgs.contains(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix(memPrefix) }) {
             switch Name(rawValue: name) {
             case .read:
+                if hiddenFromAssistant(str(args, "path"), profileId: profileId) {
+                    return Result(text: "工具执行失败: 没有这个文件: \(str(args, "path"))", isError: true)
+                }
                 do { return readResult(try FileLibraryStore.memoryRead(str(args, "path"), profileId: profileId), args: args) }
                 catch { return Result(text: "工具执行失败: \(error.localizedDescription)", isError: true) }
             case .write, .append, .edit, .rename, .delete:
@@ -94,14 +113,14 @@ enum FileLibraryTools {
             switch Name(rawValue: name) {
             case .list:
                 let items = (FileLibraryStore.list(profileId: profileId) + FileLibraryStore.memoryList(profileId: profileId))
-                    .filter { FileLibraryAccess.visible($0.path, profileId: profileId) }
+                    .filter { FileLibraryAccess.visible($0.path, profileId: profileId) && !FileLibraryMemoryFolder.isHiddenWikiPath($0.path) }
                 return ok(items.isEmpty ? "（空文件库）" : items.map { "\($0.path)  (\($0.bytes)B)" }.joined(separator: "\n"))
             case .read:
                 return readResult(try FileLibraryStore.read(str(args, "path"), profileId: profileId), args: args)
             case .search:
                 let hits = (FileLibraryStore.search(str(args, "keyword"), profileId: profileId)
                     + FileLibraryStore.memorySearch(str(args, "keyword"), profileId: profileId))
-                    .filter { FileLibraryAccess.visible($0.path, profileId: profileId) }
+                    .filter { FileLibraryAccess.visible($0.path, profileId: profileId) && !FileLibraryMemoryFolder.isHiddenWikiPath($0.path) }
                 return ok(hits.isEmpty ? "无命中" : hits.map { "\($0.path): \($0.line)" }.joined(separator: "\n"))
             case .write:
                 let path = str(args, "path")
@@ -261,6 +280,14 @@ enum FileLibraryTools {
     private static func str(_ d: [String: Any], _ k: String) -> String { d[k] as? String ?? "" }
     /// JSON 数字可能是 Int / Double / NSNumber，统一取整
     private static func int(_ d: [String: Any], _ k: String) -> Int? { (d[k] as? NSNumber)?.intValue }
+
+    /// wiki 里点开头的（.history / .proposals 含原始输出 / .group.md）不给助手看：规范化后按文件库列表同一条规则判
+    private static func hiddenFromAssistant(_ path: String, profileId: String) -> Bool {
+        guard let url = FileLibraryStore.resolveMemory(path, profileId: profileId) else { return false }
+        let root = FileLibraryStore.memoryRoot(profileId: profileId).standardizedFileURL.path
+        let rel = String(url.path.dropFirst(root.count + 1))
+        return FileLibraryMemoryFolder.isHiddenWikiPath((FileLibraryStore.memoryVirtualPrefix + rel).lowercased())
+    }
 
     /// fs_read 三种路径共用：范围读 + 头截 + 续读尾注（plan-B4 D3；实现在 ToolResultOffload.fileRead）
     private static func readResult(_ text: String, args: [String: Any]) -> Result {

@@ -8,7 +8,8 @@ enum SelfMemoryTool {
     static let forgetName = "forget_memory"
     static let names: Set<String> = [rememberName, editName, forgetName]
 
-    static var enabled: Bool { MemoryFlags.masterEnabled }
+    /// v5 B4：总开关 && 写入 B4（默认开）；关 = 不给这三个工具
+    static var enabled: Bool { MemoryWriterSettings.writes(.b4) }
 
     private static let typeProp: [String: Any] = [
         "type": "string", "enum": SelfMemoryStore.types,
@@ -45,8 +46,13 @@ enum SelfMemoryTool {
         var lines = [
             "〔我的记忆〕",
             "- 对方说「记住…」「别忘了…」：必须用 remember 记进 memory/self/。要记的是个日子也照样 remember；另外出纪念日块、建日程都可以，但那只是额外的，日程不算记住。要记住的事不要写成文件。",
-            "- 改或忘掉你记过的：edit_memory / forget_memory。",
         ]
+        switch (available.contains(editName), available.contains(forgetName)) {
+        case (true, true): lines.append("- 改或忘掉你记过的：edit_memory / forget_memory。")
+        case (true, false): lines.append("- 改你记过的：edit_memory。")
+        case (false, true): lines.append("- 忘掉你记过的：forget_memory。")
+        case (false, false): break
+        }
         if available.contains(RecallTool.toolName) {
             lines.append("- 想起我们说过的话、后台从聊天里整理的关于对方的档案：recall。")
         }

@@ -106,7 +106,7 @@ enum AssistantStamp {
         case .page2Appearance(let before, let after):
             guard ws.page2HomeIsFree else { throw AssistantStampError.invalid(Self.stitchedHome) }
             try after.validate()
-            if after.currentValues(in: ws.page2Appearance) != before { throw AssistantStampError.changedSince("主屏外观") }
+            if after.currentValues(in: ws.page2Appearance) != before { throw AssistantStampError.changedSince("桌面外观") }
         case .appIcon(let toolId, _, let before, let after):
             guard ws.page2HomeIsFree else { throw AssistantStampError.invalid(Self.stitchedHome) }
             if let symbol = after.symbol, !Page2IconChoices.symbols.contains(symbol) { throw AssistantStampError.invalid("没有 \(symbol) 这个符号") }
@@ -118,7 +118,7 @@ enum AssistantStamp {
         }
     }
 
-    static let stitchedHome = "现在用的是针脚主屏，这些外观设置不影响它"
+    static let stitchedHome = "现在用的是针脚桌面，这些外观设置不影响它"
 
     // MARK: 落地：先 validate，返回回执（补上落地时才知道的 id）
 
@@ -241,7 +241,7 @@ enum AssistantStamp {
                 let current = ws.page2Appearance
                 if after.currentValues(in: current) != after, !force { return .conflict(conflict) }
                 try ws.savePage2Appearance(before.applied(to: current))
-                return .done("主屏换回原来的样子了")
+                return .done("桌面换回原来的样子了")
             case .appIcon(let toolId, let name, let before, let after):
                 var appearance = ws.page2Appearance
                 if appearance.icons[toolId] != after, !force { return .conflict(conflict) }

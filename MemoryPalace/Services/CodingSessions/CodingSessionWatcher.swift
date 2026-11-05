@@ -54,6 +54,10 @@ final class CodingSessionWatcher: @unchecked Sendable {
     }
 
     var watchedPaths: [String] { roots.map(\.path) }
+    #if DEBUG || PERF_BENCH
+    private var perfStarted = false
+    var perfIsRunning: Bool { perfStarted && stream != nil && !roots.isEmpty }
+    #endif
 
     func start() {
         guard stream == nil, !roots.isEmpty else { return }
@@ -70,7 +74,12 @@ final class CodingSessionWatcher: @unchecked Sendable {
         guard let created = FSEventStreamCreate(kCFAllocatorDefault, callback, &context, roots.map(\.real) as CFArray,
                                                 FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0, flags) else { return }
         FSEventStreamSetDispatchQueue(created, queue)
+        #if DEBUG || PERF_BENCH
+        let started = FSEventStreamStart(created)
+        if ProcessInfo.processInfo.environment["MP_PERF_RUN"] == "1", BenchIsolation.active { perfStarted = started }
+        #else
         FSEventStreamStart(created)
+        #endif
         stream = created
     }
 
@@ -80,6 +89,9 @@ final class CodingSessionWatcher: @unchecked Sendable {
         FSEventStreamInvalidate(stream)
         FSEventStreamRelease(stream)
         self.stream = nil
+        #if DEBUG || PERF_BENCH
+        perfStarted = false
+        #endif
     }
 
     // MARK: - 队列内

@@ -136,6 +136,9 @@ struct SidebarView: View {
             sortBy: [SortDescriptor(\ConversationTag.order)]
         )
         descriptor.includePendingChanges = true
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+        #endif
         tags = (try? modelContext.fetch(descriptor)) ?? []
     }
     @AppStorage("page0GroupPlacement") private var groupPlacement = "timeline"
@@ -718,6 +721,9 @@ struct SidebarView: View {
                 predicate: #Predicate<Conversation> { $0.profileId == pid && $0.isTrashed == false && $0.isFavorite == true }
             )
             desc.propertiesToFetch = [\.id]
+            #if (DEBUG || PERF_BENCH) && os(macOS)
+            if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+            #endif
             let favoriteIds = Set(((try? modelContext.fetch(desc)) ?? []).map(\.id))
             index.conversationTags = index.conversationTags.filter { favoriteIds.contains($0.key) }
         }
@@ -920,6 +926,9 @@ struct SidebarView: View {
     }
 
     var body: some View {
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        let _ = PerfCountMac.hit(.sidebarBody)
+        #endif
         #if (DEBUG || PERF_BENCH) && os(iOS)
         let _ = PerfCount.hit("sidebarBody")
         #endif
@@ -928,6 +937,9 @@ struct SidebarView: View {
         // modelContext.save() 重跑」。对照 KBProbe 里的 `[SAVE]`（InputBarStack:91）读：
         // C4 前每个 [SAVE] 后面跟一条 SidebarView.body，C4 后跟 0 条。
         let _ = {
+            #if os(macOS)
+            guard KBProbe.enabled else { return }
+            #endif
             PerfCounters.sidebarBody += 1
             let line = String(format: "[PERF] SidebarView.body #%d t=%.3f tags=%d",
                               PerfCounters.sidebarBody, CFAbsoluteTimeGetCurrent(), tags.count)
@@ -2481,11 +2493,7 @@ struct SidebarView: View {
         #else
         MacConversationRow(conversation: conversation, selected: isSelected, canPin: !showTrash,
             favoriteTags: favoriteTags,
-            onSelect: {
-                onSelectConversation()
-                viewModel.loadConversation(conversation, context: modelContext)
-                macListFocused = true
-            },
+            onSelect: { openMacConversation(conversation) },
             onRename: {
                 renameText = conversation.title
                 renamingConversationId = conversation.id
@@ -2494,8 +2502,25 @@ struct SidebarView: View {
                 toggleConversationPin(conversation)
             },
             menuItems: { MenuActionSpec.menuItems(from: conversationMenuSpecs(conversation)) })
+        #if DEBUG || PERF_BENCH
+        .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "chat:\(profileId):\(conversation.id)") } }
+        .onAppear {
+            if PerfHarnessMac.enabled { PerfHarnessMacDriver.openConversation = openMacConversation }
+        }
+        #endif
         #endif
     }
+
+    #if os(macOS)
+    private func openMacConversation(_ conversation: Conversation) {
+        #if DEBUG || PERF_BENCH
+        PerfHarnessMacDriver.action()
+        #endif
+        onSelectConversation()
+        viewModel.loadConversation(conversation, context: modelContext)
+        macListFocused = true
+    }
+    #endif
 
     private func exportConversation(_ conversation: Conversation) {
         if exportMode == "full" {
@@ -3772,7 +3797,7 @@ struct SidebarView: View {
     private func createNewConversation() {
         onSelectConversation()
         let profileId = profileManager?.currentProfile.id ?? ""
-        viewModel.startDraftConversation(profileId: profileId, fresh: true)
+        viewModel.startNewConversation(profileId: profileId, fresh: true, cards: cardManager)
         // 在文件夹 tab 里新建 = 直接建在这个文件夹里（落库时一起带进去）
         viewModel.selectedConversation?.folderId = selectedTagId
     }
@@ -3918,6 +3943,9 @@ struct SidebarView: View {
             var descriptor = FetchDescriptor<Conversation>(sortBy: sortBy)
             descriptor.predicate = trashPredicate(search: searchText, interval: interval)
 
+            #if (DEBUG || PERF_BENCH) && os(macOS)
+            if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+            #endif
             if let count = try? modelContext.fetchCount(descriptor) {
                 totalCount = count
             }
@@ -3925,6 +3953,9 @@ struct SidebarView: View {
             descriptor.fetchOffset = offset
             descriptor.fetchLimit = limit
 
+            #if (DEBUG || PERF_BENCH) && os(macOS)
+            if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+            #endif
             if let results = try? modelContext.fetch(descriptor) {
                 if offset == 0 {
                     conversations = results
@@ -3949,11 +3980,17 @@ struct SidebarView: View {
                     // 现实全部场景：IN 查询 + 与另两分支同构的真分页
                     var descriptor = FetchDescriptor<Conversation>(sortBy: sortBy)
                     descriptor.predicate = tagPredicate(convIds: convIds, search: searchText, interval: interval)
+                    #if (DEBUG || PERF_BENCH) && os(macOS)
+                    if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+                    #endif
                     if let count = try? modelContext.fetchCount(descriptor) {
                         totalCount = count
                     }
                     descriptor.fetchOffset = offset
                     descriptor.fetchLimit = limit
+                    #if (DEBUG || PERF_BENCH) && os(macOS)
+                    if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+                    #endif
                     if let results = try? modelContext.fetch(descriptor) {
                         if offset == 0 {
                             conversations = results
@@ -3965,6 +4002,9 @@ struct SidebarView: View {
                     // 兜底：超大标签避开 SQLite IN 变量数上限——内存 filter 但分页正确
                     var convDescriptor = FetchDescriptor<Conversation>(sortBy: sortBy)
                     convDescriptor.predicate = normalPredicate(search: searchText, interval: interval, favoritesOnly: false)
+                    #if (DEBUG || PERF_BENCH) && os(macOS)
+                    if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+                    #endif
                     if let allConvs = try? modelContext.fetch(convDescriptor) {
                         let idSet = Set(convIds)
                         let filtered = allConvs.filter { idSet.contains($0.id) }
@@ -3986,6 +4026,9 @@ struct SidebarView: View {
         if showFavoritesOnly, favoritesKind == .conversations, let tag = favoriteTagFilter {
             var convDescriptor = FetchDescriptor<Conversation>(sortBy: sortBy)
             convDescriptor.predicate = normalPredicate(search: searchText, interval: interval, favoritesOnly: true)
+            #if (DEBUG || PERF_BENCH) && os(macOS)
+            if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+            #endif
             if let allConvs = try? modelContext.fetch(convDescriptor) {
                 let filtered = allConvs.filter { favoriteTagIndex.conversationTags[$0.id]?.contains(tag) == true }
                 totalCount = filtered.count
@@ -4003,6 +4046,9 @@ struct SidebarView: View {
         var descriptor = FetchDescriptor<Conversation>(sortBy: sortBy)
         descriptor.predicate = normalPredicate(search: searchText, interval: interval, favoritesOnly: showFavoritesOnly)
 
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+        #endif
         if let count = try? modelContext.fetchCount(descriptor) {
             totalCount = count
         }
@@ -4010,6 +4056,9 @@ struct SidebarView: View {
         descriptor.fetchOffset = offset
         descriptor.fetchLimit = limit
 
+        #if (DEBUG || PERF_BENCH) && os(macOS)
+        if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
+        #endif
         if let results = try? modelContext.fetch(descriptor) {
             if offset == 0 {
                 conversations = results

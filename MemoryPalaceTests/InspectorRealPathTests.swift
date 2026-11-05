@@ -19,6 +19,13 @@ final class InspectorRealPathTests: XCTestCase {
         return h
     }
 
+    private func waitUntil(_ description: String, timeout: TimeInterval = 5,
+                           _ condition: () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline { await Task.yield() }
+        XCTAssertTrue(condition(), description)
+    }
+
     private func preview(_ h: PromptRealPathHarness, globalModelId: String? = nil) throws -> TurnPreview {
         try XCTUnwrap(h.viewModel.previewTurn(profile: h.profile, preset: h.preset, providerManager: h.providerManager,
                                                globalModelId: globalModelId, context: h.context, excludingNodeId: h.a2.id))
@@ -85,8 +92,9 @@ final class InspectorRealPathTests: XCTestCase {
         XCTAssertEqual(try h.canonical(previewBody), try h.canonical(sent))
     }
 
-    /// v4-1 §六：发送时记账 = 插槽文字里实际出现的那几条；当前窗口还在窗口里的时间轴条目、老收尾段、和窗口重叠的段都不注；
-    /// 同一个窗口的待续只带一次。预览不记账
+    /// v4-1 §六：发送时记账 = 插槽文字里实际出现的那几行；当前窗口还在窗口里的时间轴条目、老收尾段、和窗口重叠的段都不注；
+    /// 同一个窗口的待续只带一次。预览不记账。c2c3-v2 第 7 段：夹具是老条目——今天、昨天的老条目逐条带（旧格式），
+    /// 第 3 天往前没有主调的带一行旧格式；记账键 = 一天「日期」+ 老条目「日期|窗口」；待续单独一段、带窗口编号
     func testSendRecordsExactlyWhatIsInjected() async throws {
         let h = try await make(PromptScenario(name: "L"))
         let conv = try XCTUnwrap(h.viewModel.selectedConversation).id
@@ -98,10 +106,11 @@ final class InspectorRealPathTests: XCTestCase {
             .replacingOccurrences(of: "\\n", with: "\n")
         let rec = try XCTUnwrap(MemoryInjectionMeter.load(profileId: h.profile.id))
         let other = PromptRealPathHarness.otherWindowId
-        XCTAssertEqual(rec.timelineKeys, ["2026-10-08|\(other)", "2026-10-09|\(conv)", "2026-10-10|\(other)"])
+        XCTAssertEqual(rec.timelineKeys, ["2026-10-08", "2026-10-09", "2026-10-10", "2026-10-10|\(other)"])
         XCTAssertEqual(rec.contextKeys, ["\(conv.prefix(8))|\(PromptRealPathHarness.goneNodeId)"])
         XCTAssertTrue(text.contains("[时间轴]") && text.contains("[上下文摘要]"))
-        XCTAssertTrue(text.contains("聊了团子的体检") && text.contains("本窗口早先聊的") && text.contains("给团子买了猫粮；停在挑罐头（待续：周末问团子吃不吃）"))
+        XCTAssertTrue(text.contains("聊了团子的体检") && text.contains("本窗口早先聊的") && text.contains("给团子买了猫粮；停在挑罐头 conv xctest-o"))
+        XCTAssertTrue(text.contains("[待续]") && text.contains("conv xctest-o：周末问团子吃不吃"))
         XCTAssertTrue(text.contains("挤出视野的一段的经过"))
         XCTAssertFalse(text.contains("不该注入") || text.contains("不该出现的待续"), "和窗口原文重复的不注")
         XCTAssertFalse(text.contains("旧待续"), "同一个窗口待续只带在最新那条后面")
@@ -117,7 +126,7 @@ final class InspectorRealPathTests: XCTestCase {
             XCTAssertEqual(composed.segments.contains { $0.source == .timeline }, preset.prompts.contains { $0.id == PromptSlot.timelineId && $0.isEnabled })
             return MemoryInjectionMeter.load(profileId: h.profile.id)?.timelineKeys
         }
-        XCTAssertEqual(send(h.preset)?.count, 3, "插槽开着：三条都记")
+        XCTAssertEqual(send(h.preset)?.count, 4, "插槽开着：三天的行 + 10 号那条老条目都记")
         var disabled = h.preset
         disabled.prompts = disabled.prompts.map { var p = $0; if p.id == PromptSlot.timelineId { p.isEnabled = false }; return p }
         XCTAssertEqual(send(disabled), [], "插槽关了：不记")
@@ -170,6 +179,151 @@ final class InspectorRealPathTests: XCTestCase {
         XCTAssertEqual(try h.canonical(parsed), try h.canonical(sent))
     }
 
+    /// #094：记忆表里学到「不收采样组 / stream_options、键名要 max_completion_tokens」→ 预览和实发都照着剥，整份相等
+    func testLearnedParamsAppliedToPreviewAndSend() async throws {
+        let h = try await make(PromptScenario(name: "G1-openai-full"))
+        let baseURL = try XCTUnwrap(h.providerManager.provider(for: h.model)?.baseURL)
+        ParamAdaptStore.shared.learn(
+            providerType: .openaiCompatible, baseURL: baseURL, modelId: h.model.modelId,
+            adding: .init(groups: [ParamCompat.Group.sampling, ParamCompat.Group.streamOptions], maxTokensKey: "max_completion_tokens"),
+            rawError: "xctest")
+        defer { ParamAdaptStore.shared.remove(key: ParamAdaptStore.key(providerType: .openaiCompatible, baseURL: baseURL, modelId: h.model.modelId)) }
+
+        let turn = try preview(h)
+        let previewBody = try XCTUnwrap(turn.requestBody(providerManager: h.providerManager))
+        let sent = try await h.regenerateCapturingBody()
+        XCTAssertEqual(try h.canonical(previewBody), try h.canonical(sent))
+        for body in [previewBody, sent] {
+            XCTAssertNil(body["temperature"])
+            XCTAssertNil(body["top_p"])
+            XCTAssertNil(body["stream_options"])
+            XCTAssertNil(body["max_tokens"])
+            XCTAssertNotNil(body["max_completion_tokens"])
+        }
+    }
+
+    // MARK: #093 工具抽屉
+
+    /// 抽屉关一个（fs_write）、收一个（roll_dice）、本楼层覆盖一个（remember 关）；历史 a1 调过 fs_write / roll_dice → 预览 = 实发
+    private func drawerScenario(historyCall: String) async throws -> (h: PromptRealPathHarness, preview: [String: Any], sent: [String: Any]) {
+        let h = try await make(PromptScenario(name: "D-drawer-\(historyCall)"))
+        ToolDrawerStore.shared.update {   // 夹具已清成默认，tearDown 还原 toolDrawer.v1 并重读
+            $0.set(.off, for: FileLibraryTools.Name.write.rawValue, profileId: nil)
+            $0.set(.tucked, for: DiceTool.toolName, profileId: nil)
+            $0.set(.off, for: SelfMemoryTool.rememberName, profileId: h.profile.id)
+        }
+        let a1 = try XCTUnwrap(h.viewModel.currentPath.first { $0.role == "assistant" })
+        a1.setSegments([.toolUse(id: "call_d1", name: historyCall, inputJSON: #"{"path":"x.md","content":"y"}"#, integrationName: nil, iconName: nil),
+                        .toolResult(toolUseId: "call_d1", text: "ok", isError: false, integrationName: nil),
+                        .text("回复一")])
+        try h.context.save()
+        let turn = try preview(h)
+        let previewBody = try XCTUnwrap(turn.requestBody(providerManager: h.providerManager))
+        let sent = try await h.regenerateCapturingBody()
+        XCTAssertEqual(try h.canonical(previewBody), try h.canonical(sent), "抽屉改过：预览 body ≠ 实发 body")
+        // 抽屉页顶部数字（previewTools）和实发记下的工具签名同源
+        let drawerPreview = try XCTUnwrap(h.viewModel.previewTools(providerManager: h.providerManager, globalModelId: nil))
+        let convId = try XCTUnwrap(h.viewModel.selectedConversation?.id)
+        XCTAssertEqual(drawerPreview.signature, ToolDrawerStore.shared.sentSignature(conversationId: convId))
+        XCTAssertEqual(drawerPreview.toolCount, (sent["tools"] as? [Any])?.count)
+        XCTAssertEqual(drawerPreview.tuckedCount, turn.tuckedTools.count)
+        return (h, previewBody, sent)
+    }
+
+    private func toolNames(_ body: [String: Any]) -> Set<String> {
+        ToolReplay.clientToolNames(body["tools"] as? [[String: Any]])
+    }
+
+    private func historyCallNames(_ body: [String: Any]) -> [String] {
+        ((body["messages"] as? [[String: Any]]) ?? []).flatMap { m in
+            ((m["tool_calls"] as? [[String: Any]]) ?? []).compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
+        }
+    }
+
+    func testDrawerOffToolInHistoryFallsBackToTextInPreviewAndSend() async throws {
+        let (h, _, sent) = try await drawerScenario(historyCall: FileLibraryTools.Name.write.rawValue)
+        let names = toolNames(sent)
+        XCTAssertFalse(names.contains(FileLibraryTools.Name.write.rawValue), "关了的不发")
+        XCTAssertFalse(names.contains(DiceTool.toolName), "收起的不在清单")
+        XCTAssertFalse(names.contains(SelfMemoryTool.rememberName), "本楼层关了")
+        XCTAssertTrue(names.contains(MetaTools.invokeName))
+        XCTAssertTrue(names.contains(FileLibraryTools.Name.read.rawValue))
+        XCTAssertEqual(historyCallNames(sent), [], "关掉的 fs_write 不包成 tool_invoke 发")
+        let text = try h.canonical(sent)
+        XCTAssertTrue(text.contains("〔系统记录"), "那条退纯文字 + 系统记录")
+        XCTAssertTrue(text.contains("- \(DiceTool.toolName) — "), "收起的进〔更多工具〕")
+    }
+
+    func testDrawerTuckedToolInHistoryRewrappedInPreviewAndSend() async throws {
+        let (_, _, sent) = try await drawerScenario(historyCall: DiceTool.toolName)
+        XCTAssertEqual(historyCallNames(sent), [MetaTools.invokeName], "收起的照 #089 规矩包回 tool_invoke")
+    }
+
+    // MARK: 工具关了，说明也不带（粟粟 10-15：哪个工具关了就不带那一串提示词；卡片段选 A）
+
+    private static let toolHintMarkers = ["<文件库>", "<设备>", "<命令>", "〔更多工具〕", "〔回忆〕", "〔我的记忆〕", "〔当前能用的工具〕",
+                                          "[聊天卡片]", "## MCP 外部工具", "〔外部工具〕", "〔到点提醒〕"]
+
+    private func toolsOffScenario(_ name: String, configure: (PromptRealPathHarness) -> Void) async throws -> (h: PromptRealPathHarness, sent: [String: Any]) {
+        let h = try await make(PromptScenario(name: name))
+        configure(h)
+        let turn = try preview(h)
+        let previewBody = try XCTUnwrap(turn.requestBody(providerManager: h.providerManager))
+        let sent = try await h.regenerateCapturingBody()
+        XCTAssertEqual(try h.canonical(previewBody), try h.canonical(sent), "\(name)：预览 body ≠ 实发 body")
+        return (h, sent)
+    }
+
+    private func drawerAllOff(except kept: Set<String> = []) {
+        ToolDrawerStore.shared.update { state in
+            for item in ToolDrawerCatalog.items where !kept.contains(item.name) { state.set(.off, for: item.name, profileId: nil) }
+            for name in kept { state.set(.inline, for: name, profileId: nil) }
+        }
+    }
+
+    func testDrawerAllOffSendsNoToolHints() async throws {
+        let (h, sent) = try await toolsOffScenario("T-drawer-all-off") { _ in drawerAllOff() }
+        XCTAssertNil(sent["tools"])
+        let text = try h.canonical(sent)
+        for marker in Self.toolHintMarkers { XCTAssertFalse(text.contains(marker), "抽屉全关还带着 \(marker)") }
+    }
+
+    func testToolsMasterOffSendsNoToolHints() async throws {
+        let (h, sent) = try await toolsOffScenario("T-master-off") {
+            $0.overrideDefault(PermissionDomain.toolsMaster.storageKey, PermissionLevel.notAllowed.rawValue)
+        }
+        XCTAssertNil(sent["tools"])
+        let text = try h.canonical(sent)
+        for marker in Self.toolHintMarkers { XCTAssertFalse(text.contains(marker), "总开关关了还带着 \(marker)") }
+    }
+
+    func testOnlyTwoToolsOnlyTheirHints() async throws {
+        let kept: Set<String> = [FileLibraryTools.Name.read.rawValue, OCRImageTool.toolName]
+        let (h, sent) = try await toolsOffScenario("T-two-tools") { _ in drawerAllOff(except: kept) }
+        XCTAssertEqual(toolNames(sent), kept)
+        let text = try h.canonical(sent, droppingTools: true)   // 只看说明，不看工具定义本身
+        XCTAssertTrue(text.contains("<文件库>"), "fs_read 开着，文件库说明要在")
+        XCTAssertTrue(text.contains("<设备>") && text.contains("识别图片文字（ocr_image）"))
+        for absent in ["calendar_*", "reminders_*", "clipboard_read", "notify_schedule", "open_url", "device_info", "<命令>", "〔回忆〕",
+                       "〔我的记忆〕", "〔更多工具〕", "[聊天卡片]"] {
+            XCTAssertFalse(text.contains(absent), "只开两个还带着 \(absent)")
+        }
+    }
+
+    /// card_guide 开着、roll_dice / ask_user 关着：卡片目录还在，但不再提那两个工具
+    func testCardIndexDropsSentencesForOffTools() async throws {
+        let (h, sent) = try await toolsOffScenario("T-card-no-dice") { _ in
+            ToolDrawerStore.shared.update {
+                $0.set(.off, for: DiceTool.toolName, profileId: nil)
+                $0.set(.off, for: AskUserTool.toolName, profileId: nil)
+            }
+        }
+        let text = try h.canonical(sent)
+        XCTAssertTrue(text.contains("[聊天卡片]"))
+        XCTAssertFalse(text.contains(DiceTool.toolName))
+        XCTAssertFalse(text.contains(AskUserTool.toolName))
+    }
+
     /// #089 P0-a：还没打字时预览（当前路径以 assistant 结尾），最后一条补占位用户消息，不以 assistant 结尾
     func testPreviewWithoutNewMessageEndsWithPlaceholderUser() async throws {
         let h = try await make(PromptScenario(name: "G1-openai-full"))
@@ -182,5 +336,1146 @@ final class InspectorRealPathTests: XCTestCase {
         let body = try XCTUnwrap(turn.requestBody(providerManager: h.providerManager))
         let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
         XCTAssertEqual(messages.last?["role"] as? String, "user")
+    }
+
+    func testWikiWindowIgnoresPreviewAndTriggerSyntheticMessages() async throws {
+        let h = try await make(PromptScenario(name: "wiki-synthetic"))
+        let oldest = try XCTUnwrap(h.viewModel.currentPath.first { $0.role == "user" })
+        oldest.content = "聊月光书店"
+        h.a2.content = "<think>思考专属词</think>[thinking]思考专属词[/thinking]回复二"
+        try await h.seedWiki([
+            WikiPage(path: "楼层/月光书店", title: "月光书店", now: "第四条真实消息命中。"),
+            WikiPage(path: "楼层/占位", triggers: ["你的下一条消息"], title: "占位", now: "占位文案不该触发。"),
+            WikiPage(path: "楼层/卡片", triggers: ["卡片里有新动作"], title: "卡片", now: "卡片文案不该触发。"),
+            WikiPage(path: "楼层/思考", triggers: ["思考专属词"], title: "思考", now: "思考文案不该触发。"),
+        ])
+        let warmed = try await WikiInjectionCache.shared.warm(h.profile.id, WikiInjectionCache.source(profileId: h.profile.id))
+        for cacheFriendly in [false, true] {
+            var preset = h.preset
+            preset.sampling.cacheFriendly = cacheFriendly
+            for mode in [ConversationViewModel.ComposeMode.preview, .send] {
+                let prompt = h.viewModel.composePrompt(profile: h.profile, preset: preset, excludingNodeId: nil,
+                                                       context: h.context, globalEntries: [], fileLibraryHint: nil, mode: mode,
+                                                       warmedWiki: mode == .send ? warmed : nil)
+                let text = prompt.segments.map(\.content).joined(separator: "\n")
+                XCTAssertTrue(text.contains("现在：第四条真实消息命中。"), "不能让合成消息挤掉倒数第四条")
+                XCTAssertFalse(text.contains("现在：占位文案不该触发。"))
+                XCTAssertFalse(text.contains("现在：卡片文案不该触发。"))
+                XCTAssertFalse(text.contains("现在：思考文案不该触发。"))
+            }
+        }
+    }
+
+    func testRegenerateWarmsInvalidatedWikiBeforeRequest() async throws {
+        let h = try await make(PromptScenario(name: "wiki-regenerate", cacheFriendly: true))
+        try await h.seedWiki([])
+        let wiki = await Task.detached { WikiStore(profileId: h.profile.id) }.value
+        let a1 = try XCTUnwrap(h.viewModel.currentPath.first { $0.role == "assistant" })
+        a1.content = "谈到月光书店"
+        try wiki.save(WikiPage(path: "楼层/月光书店", title: "月光书店", now: "新开的书店。"))
+        try wiki.rebuildAllIndexes()
+        let body = try await h.regenerateCapturingBody()
+        let text = try h.canonical(body)
+        XCTAssertTrue(text.contains("[C 档案 · 索引]"))
+        XCTAssertTrue(text.contains("现在：新开的书店。"))
+    }
+
+    func testEditResendWarmsInvalidatedWikiBeforeRequest() async throws {
+        let h = try await make(PromptScenario(name: "wiki-edit", cacheFriendly: true))
+        try await h.seedWiki([])
+        let wiki = await Task.detached { WikiStore(profileId: h.profile.id) }.value
+        try wiki.save(WikiPage(path: "楼层/月光书店", title: "月光书店", now: "编辑重发用的新页。"))
+        try wiki.rebuildAllIndexes()
+        let user = try XCTUnwrap(h.viewModel.currentPath.last { $0.role == "user" })
+        var captured: [String: Any]?
+        RequestBodyTap.handler = { captured = $0 }
+        defer { RequestBodyTap.handler = nil }
+        XCTAssertTrue(h.viewModel.editAndResend(user.id, newText: "去月光书店", isEdit: true,
+                                               model: h.model, profile: h.profile, preset: h.preset,
+                                               providerManager: h.providerManager, context: h.context))
+        await h.waitForTurn()
+        let text = try h.canonical(XCTUnwrap(captured))
+        XCTAssertTrue(text.contains("现在：编辑重发用的新页。"))
+    }
+
+    private final class WikiWarmGate: @unchecked Sendable {
+        let root: URL
+        let entered: XCTestExpectation
+        private let release = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var firstRead = true
+
+        init(root: URL, entered: XCTestExpectation) {
+            self.root = root
+            self.entered = entered
+        }
+
+        func source() -> WikiStore {
+            lock.lock()
+            let shouldBlock = firstRead
+            firstRead = false
+            lock.unlock()
+            if shouldBlock {
+                entered.fulfill()
+                release.wait()
+            }
+            return WikiStore(root: root)
+        }
+
+        func open() { release.signal() }
+    }
+
+    private enum PreparingEntry: Equatable { case send, regenerate, edit }
+    private enum PreparingExit: Equatable { case stop, floor, conversation, branch, branchMap, search }
+
+    private func beginPreparation(_ entry: PreparingEntry, _ h: PromptRealPathHarness) throws {
+        switch entry {
+        case .send:
+            XCTAssertTrue(h.viewModel.sendMessage("被取消的正文", model: h.model, profile: h.profile, preset: h.preset,
+                                                  providerManager: h.providerManager, context: h.context))
+        case .regenerate:
+            h.viewModel.regenerate(assistantNodeId: h.a2.id, model: h.model, profile: h.profile, preset: h.preset,
+                                   providerManager: h.providerManager, context: h.context)
+        case .edit:
+            let user = try XCTUnwrap(h.viewModel.currentPath.last { $0.role == "user" })
+            XCTAssertTrue(h.viewModel.editAndResend(user.id, newText: "被取消的编辑正文", isEdit: true,
+                                                    model: h.model, profile: h.profile, preset: h.preset,
+                                                    providerManager: h.providerManager, context: h.context))
+        }
+    }
+
+    private func assertWarmCancellation(entry: PreparingEntry, exit: PreparingExit) async throws {
+        let h = try await make(PromptScenario(name: "wiki-blocked-\(entry)-\(exit)"))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        defer {
+            if exit == .floor || exit == .conversation {
+                AttachmentStore.deleteConversationAttachments(conversationId: conversation.id, profileId: h.profile.id)
+            }
+        }
+        let parentId = try XCTUnwrap(h.a2.parentId)
+        let originalUser = try XCTUnwrap(h.viewModel.currentPath.first { $0.id == parentId })
+        let switchParentId: String
+        if entry == .edit {
+            switchParentId = try XCTUnwrap(originalUser.parentId)
+        } else {
+            switchParentId = parentId
+        }
+        var branchTargetId: String?
+        if [.branch, .branchMap, .search].contains(exit), entry != .edit {
+            let sibling = MessageNode(id: UUID().uuidString, role: "assistant", content: "另一分支", contentType: "text",
+                                      createTime: Date(), parentId: parentId, childrenIds: [],
+                                      conversationId: conversation.id, profileId: h.profile.id)
+            branchTargetId = sibling.id
+            h.context.insert(sibling)
+            let parent = try XCTUnwrap(h.viewModel.currentPath.first { $0.id == parentId })
+            parent.childrenIds.append(sibling.id)
+            try h.context.save()
+            h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { WikiStore(root: root) })
+            h.viewModel.loadConversation(conversation, context: h.context)
+            while h.viewModel.isLoading { try await Task.sleep(nanoseconds: 1_000_000) }
+        }
+        let entered = expectation(description: "先确认本轮已经进入 warm")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        var requests: [[String: Any]] = []
+        RequestBodyTap.handler = { requests.append($0) }
+        defer { RequestBodyTap.handler = nil }
+        try beginPreparation(entry, h)
+        await fulfillment(of: [entered], timeout: 3)
+        let preparations = h.viewModel.promptPreparationTasksForTesting
+        XCTAssertEqual(preparations.count, 1)
+        let placeholderId = try XCTUnwrap(h.viewModel.currentPath.last?.id)
+        switch exit {
+        case .stop:
+            h.viewModel.cancelAssistantTurn(context: h.context)
+        case .floor:
+            NotificationCenter.default.post(name: .profileWillSwitch, object: nil)
+        case .conversation:
+            h.viewModel.startDraftConversation(profileId: h.profile.id, fresh: true)
+        case .branch:
+            h.viewModel.switchBranch(at: switchParentId, to: entry == .edit ? 0 : 1)
+        case .branchMap:
+            h.viewModel.navigateToNodeFast(nodeId: try XCTUnwrap(branchTargetId))
+        case .search:
+            h.viewModel.navigateToSearchResult(nodeId: try XCTUnwrap(branchTargetId), conversation: conversation, context: h.context)
+        }
+        XCTAssertFalse(h.viewModel.assistantTurnInFlight)
+        XCTAssertNil(h.viewModel.activeConversationId)
+        let nodes = try h.context.fetch(FetchDescriptor<MessageNode>())
+        XCTAssertFalse(nodes.contains { $0.id == placeholderId }, "只移除本轮尚未发出的空占位")
+        XCTAssertTrue(requests.isEmpty)
+        if exit == .conversation || exit == .branch {
+            h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { WikiStore(root: root) })
+            XCTAssertTrue(h.viewModel.sendMessage("切换后的新发送", model: h.model, profile: h.profile, preset: h.preset,
+                                                  providerManager: h.providerManager, context: h.context))
+            let newPreparations = h.viewModel.promptPreparationTasksForTesting
+            gate.open()
+            for task in preparations { await task.value }
+            for task in newPreparations { await task.value }
+            await h.waitForTurn()
+            XCTAssertEqual(requests.count, 1, "旧 warm 退出不能清掉新一轮")
+            XCTAssertTrue(try h.canonical(XCTUnwrap(requests.first)).contains("切换后的新发送"))
+        } else {
+            gate.open()
+            for task in preparations { await task.value }
+            XCTAssertTrue(requests.isEmpty, "停止或切楼层后即使 source 解阻也不能发出请求")
+        }
+    }
+
+    func testSendStopsAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .send, exit: .stop) }
+    func testRegenerateStopsAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .regenerate, exit: .stop) }
+    func testEditStopsAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .edit, exit: .stop) }
+    func testSendFloorSwitchAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .send, exit: .floor) }
+    func testRegenerateFloorSwitchAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .regenerate, exit: .floor) }
+    func testEditFloorSwitchAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .edit, exit: .floor) }
+    func testSendConversationSwitchAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .send, exit: .conversation) }
+    func testRegenerateConversationSwitchAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .regenerate, exit: .conversation) }
+    func testEditConversationSwitchAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .edit, exit: .conversation) }
+    func testSendBranchSwitchAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .send, exit: .branch) }
+    func testRegenerateBranchSwitchAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .regenerate, exit: .branch) }
+    func testEditBranchSwitchAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .edit, exit: .branch) }
+    func testSendBranchMapNavigationAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .send, exit: .branchMap) }
+    func testSendSearchNavigationAfterEnteringWarm() async throws { try await assertWarmCancellation(entry: .send, exit: .search) }
+
+    private func assertAskCancellation(entry: PreparingEntry) async throws {
+        let h = try await make(PromptScenario(name: "wiki-ask-stop-\(entry)"))
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        conversation.permGrantsRaw = ""
+        h.overrideDefault(PermissionDomain.images.storageKey, PermissionLevel.askOnce.rawValue)
+        let center = PermissionPromptCenter(isolatedForTesting: true)
+        h.viewModel.injectionPermissionCenter = center
+        defer {
+            if let request = center.pendingRequest { center.respond(to: request.id, allowed: false) }
+        }
+        var requests = 0
+        RequestBodyTap.handler = { _ in requests += 1 }
+        defer { RequestBodyTap.handler = nil }
+        try beginPreparation(entry, h)
+        let deadline = Date().addingTimeInterval(3)
+        while center.pendingRequest == nil && Date() < deadline { try await Task.sleep(nanoseconds: 1_000_000) }
+        XCTAssertEqual(center.pendingRequest?.domain, .images)
+        let tasks = h.viewModel.promptPreparationTasksForTesting
+        XCTAssertEqual(tasks.count, 1)
+        h.viewModel.cancelAssistantTurn(context: h.context)
+        for task in tasks { await task.value }
+        XCTAssertNil(center.pendingRequest)
+        XCTAssertFalse(h.viewModel.assistantTurnInFlight)
+        XCTAssertNil(h.viewModel.activeConversationId)
+        XCTAssertEqual(requests, 0)
+        XCTAssertEqual(conversation.permGrantsRaw, "", "取消不是拒绝，不应写入旧授权")
+    }
+
+    func testSendStopCancelsAskBeforeWarm() async throws { try await assertAskCancellation(entry: .send) }
+    func testRegenerateStopCancelsAskBeforeWarm() async throws { try await assertAskCancellation(entry: .regenerate) }
+    func testEditStopCancelsAskBeforeWarm() async throws { try await assertAskCancellation(entry: .edit) }
+
+    func testWarmTimeoutFailsSendWithoutBuildingRequest() async throws {
+        let h = try await make(PromptScenario(name: "wiki-warm-timeout"))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "warm 已阻塞")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        var requests = 0
+        RequestBodyTap.handler = { _ in requests += 1 }
+        defer { RequestBodyTap.handler = nil }
+        try beginPreparation(.send, h)
+        await fulfillment(of: [entered], timeout: 3)
+        for task in h.viewModel.promptPreparationTasksForTesting { await task.value }
+        XCTAssertEqual(requests, 0)
+        XCTAssertFalse(h.viewModel.assistantTurnInFlight)
+        XCTAssertNil(h.viewModel.activeConversationId)
+        XCTAssertTrue(h.viewModel.currentPath.last?.content.contains("发送失败") == true)
+    }
+
+    @MainActor
+    private final class CCWire {
+        let client: CCBridgeWebSocketClient
+        private let suite = "InspectorCCWire.\(UUID().uuidString)"
+        private let session = URLSession(configuration: .ephemeral)
+        private(set) var frames: [[String: Any]] = []
+        var onSend: (() -> Void)?
+
+        init() {
+            client = CCBridgeWebSocketClient(dedupDefaults: UserDefaults(suiteName: suite)!, transportOffMain: false)
+            client.setTransmitHookForTesting { [weak self] _, text, completion in
+                DispatchQueue.main.async {
+                    if let frame = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any],
+                       let type = frame["type"] as? String, type == "send" || type == "command" {
+                        self?.frames.append(frame)
+                        self?.onSend?()
+                    }
+                    completion(nil)
+                }
+            }
+            let url = URL(string: "ws://127.0.0.1:9/cc")!
+            let task = session.webSocketTask(with: url)
+            client.adoptTaskForTesting(task, url: url)
+            client.urlSession(session, webSocketTask: task, didOpenWithProtocol: nil)
+        }
+
+        func waitUntilConnected() async throws {
+            let deadline = Date().addingTimeInterval(3)
+            while !client.isConnected && Date() < deadline { try await Task.sleep(nanoseconds: 1_000_000) }
+            XCTAssertTrue(client.isConnected)
+        }
+
+        func close() {
+            client.disconnect()
+            client.setTransmitHookForTesting(nil)
+            session.invalidateAndCancel()
+            UserDefaults.standard.removePersistentDomain(forName: suite)
+        }
+    }
+
+    func testCCColdCacheDoubleSendSerializesAppendWarmAssemblyAndFrames() async throws {
+        let h = try await make(PromptScenario(name: "wiki-cc-double", voiceHint: false))
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-cc-double")
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        conversation.currentStyleId = ""
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "第一条 CC 已进入 warm")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        XCTAssertTrue(h.viewModel.sendMessage("CC 第一条", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        let firstId = try XCTUnwrap(h.viewModel.currentPath.last?.id)
+        await fulfillment(of: [entered], timeout: 3)
+        XCTAssertTrue(h.viewModel.sendMessage("CC 第二条", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        XCTAssertEqual(h.viewModel.currentPath.last?.id, firstId, "前一条 WS 前不 append 下一条")
+        XCTAssertFalse(h.viewModel.assistantTurnInFlight)
+        XCTAssertNil(h.viewModel.activeConversationId)
+        XCTAssertTrue(wire.frames.isEmpty)
+        let sent = expectation(description: "两条 CC send 帧")
+        sent.expectedFulfillmentCount = 2
+        wire.onSend = { sent.fulfill() }
+        gate.open()
+        await fulfillment(of: [sent], timeout: 3)
+        let second = try XCTUnwrap(h.viewModel.currentPath.last)
+        XCTAssertNotEqual(second.id, firstId)
+        XCTAssertEqual(second.parentId, firstId)
+        XCTAssertEqual(wire.frames.map { $0["message_id"] as? String }, [firstId, second.id])
+        XCTAssertEqual(wire.frames.map { $0["chat_id"] as? String }, [conversation.id, conversation.id])
+        XCTAssertEqual(wire.frames.map { $0["content"] as? String }, ["CC 第一条", "CC 第二条"])
+        XCTAssertFalse(h.viewModel.assistantTurnInFlight)
+    }
+
+    func testCCWarmQueuePrecedesAPIAskAndStopLeavesNoOrphan() async throws {
+        let h = try await make(PromptScenario(name: "wiki-cc-api-ask-order", voiceHint: false))
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-cc-api-ask-order")
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        conversation.currentStyleId = ""
+        conversation.permGrantsRaw = ""
+        h.overrideDefault(PermissionDomain.images.storageKey, PermissionLevel.askOnce.rawValue)
+        let center = PermissionPromptCenter(isolatedForTesting: true)
+        h.viewModel.injectionPermissionCenter = center
+        defer {
+            if let request = center.pendingRequest { center.respond(to: request.id, allowed: false) }
+        }
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "CC 第一条 warm 阻塞")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        var requests = 0
+        RequestBodyTap.handler = { _ in requests += 1 }
+        defer { RequestBodyTap.handler = nil }
+        XCTAssertTrue(h.viewModel.sendMessage("CC 第一条先发", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        let firstId = try XCTUnwrap(h.viewModel.currentPath.last?.id)
+        await fulfillment(of: [entered], timeout: 3)
+        XCTAssertTrue(h.viewModel.sendMessage("CC 第二条再发", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        XCTAssertTrue(h.viewModel.sendMessage("API 最后询问", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        XCTAssertEqual(h.viewModel.currentPath.last?.id, firstId, "CC preparation 前不追加后续 CC 或 API 占位")
+        XCTAssertNil(center.pendingRequest)
+        XCTAssertTrue(wire.frames.isEmpty)
+        XCTAssertEqual(requests, 0)
+
+        let sent = expectation(description: "两条 CC 先按顺序发出")
+        sent.expectedFulfillmentCount = 2
+        wire.onSend = { sent.fulfill() }
+        gate.open()
+        await fulfillment(of: [sent], timeout: 3)
+        await waitUntil("前两条 CC 后才出现 API 权限卡") { center.pendingRequest != nil }
+        XCTAssertEqual(center.pendingRequest?.domain, .images)
+        XCTAssertEqual(wire.frames.map { $0["content"] as? String }, ["CC 第一条先发", "CC 第二条再发"])
+        let beforeStop = try h.context.fetch(FetchDescriptor<MessageNode>())
+        let second = try XCTUnwrap(beforeStop.first { $0.content == "CC 第二条再发" })
+        let apiUser = try XCTUnwrap(beforeStop.first { $0.content == "API 最后询问" })
+        let placeholder = try XCTUnwrap(h.viewModel.currentPath.last)
+        let placeholderId = placeholder.id
+        XCTAssertEqual(second.parentId, firstId)
+        XCTAssertEqual(apiUser.parentId, second.id)
+        XCTAssertEqual(placeholder.parentId, apiUser.id)
+        XCTAssertEqual(wire.frames.map { $0["message_id"] as? String }, [firstId, second.id])
+        let tasks = h.viewModel.promptPreparationTasksForTesting
+        h.viewModel.cancelAssistantTurn(context: h.context)
+        for task in tasks { await task.value }
+        XCTAssertNil(center.pendingRequest)
+        XCTAssertEqual(requests, 0, "停止询问不构建 API 请求")
+        XCTAssertFalse(h.viewModel.assistantTurnInFlight)
+        XCTAssertTrue(h.viewModel.pendingSends.isEmpty)
+        XCTAssertEqual(h.viewModel.currentPath.last?.id, apiUser.id)
+        XCTAssertEqual(conversation.currentNodeId, apiUser.id)
+        let nodes = try h.context.fetch(FetchDescriptor<MessageNode>())
+        XCTAssertFalse(nodes.contains { $0.id == placeholderId })
+        for node in nodes {
+            if let parentId = node.parentId {
+                let parent = try XCTUnwrap(nodes.first { $0.id == parentId })
+                XCTAssertTrue(parent.childrenIds.contains(node.id), "父节点应保留有效孩子链接")
+            }
+            for childId in node.childrenIds {
+                XCTAssertTrue(nodes.contains { $0.id == childId && $0.parentId == node.id }, "不能留下孤儿或悬空孩子")
+            }
+        }
+    }
+
+    func testStoppingPreparationKeepsPlaceholderWithExistingChild() async throws {
+        let h = try await make(PromptScenario(name: "wiki-stop-parent-with-child", voiceHint: false))
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-stop-parent-child")
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        conversation.permGrantsRaw = ""
+        h.overrideDefault(PermissionDomain.images.storageKey, PermissionLevel.askOnce.rawValue)
+        let center = PermissionPromptCenter(isolatedForTesting: true)
+        h.viewModel.injectionPermissionCenter = center
+        defer {
+            if let request = center.pendingRequest { center.respond(to: request.id, allowed: false) }
+        }
+        XCTAssertTrue(h.viewModel.sendMessage("等待权限", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        await waitUntil("API 停在权限卡") { center.pendingRequest != nil }
+        let placeholder = try XCTUnwrap(h.viewModel.currentPath.last)
+        let placeholderId = placeholder.id
+        let child = MessageNode(id: UUID().uuidString, role: "user", content: "已经挂上的孩子", contentType: "text",
+                                createTime: Date(), parentId: placeholderId, childrenIds: [],
+                                conversationId: conversation.id, profileId: h.profile.id)
+        h.context.insert(child)
+        let leaf = MessageNode(id: UUID().uuidString, role: "assistant", content: "孩子之后的叶子", contentType: "text",
+                               createTime: Date(), parentId: child.id, childrenIds: [],
+                               conversationId: conversation.id, profileId: h.profile.id)
+        h.context.insert(leaf)
+        // 旧竞态可能只来得及写 parentId；取消也必须保住这条关系。
+        try h.context.save()
+        XCTAssertTrue(h.viewModel.sendMessage("取消后接到已有叶子", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        XCTAssertEqual(h.viewModel.pendingSends.count, 1)
+        conversation.memoryEnabled = false
+        let sent = expectation(description: "修复路径之后排水")
+        wire.onSend = { sent.fulfill() }
+        let tasks = h.viewModel.promptPreparationTasksForTesting
+        h.viewModel.cancelAssistantTurn(context: h.context)
+        for task in tasks { await task.value }
+        await fulfillment(of: [sent], timeout: 3)
+        let nodes = try h.context.fetch(FetchDescriptor<MessageNode>())
+        let kept = try XCTUnwrap(nodes.first { $0.id == placeholderId })
+        XCTAssertTrue(kept.content.contains("发送失败"))
+        XCTAssertEqual(nodes.first { $0.id == child.id }?.parentId, kept.id)
+        let next = try XCTUnwrap(nodes.first { $0.content == "取消后接到已有叶子" })
+        XCTAssertEqual(next.parentId, leaf.id)
+        XCTAssertTrue(h.viewModel.currentPath.contains { $0.id == child.id })
+        XCTAssertTrue(h.viewModel.currentPath.contains { $0.id == leaf.id })
+        XCTAssertEqual(wire.frames.map { $0["message_id"] as? String }, [next.id])
+        XCTAssertTrue(h.viewModel.pendingSends.isEmpty)
+        XCTAssertFalse(h.viewModel.assistantTurnInFlight)
+    }
+
+    func testSearchReloadDefersPendingSendUntilTreeApplies() async throws {
+        let h = try await make(PromptScenario(name: "wiki-search-load-pending", voiceHint: false))
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        let originalTailId = h.a2.id
+        let originalPathIds = h.viewModel.currentPath.map(\.id)
+        let searchTargetId = try XCTUnwrap(h.viewModel.currentPath.first?.id)
+        let originalNodes = try h.context.fetch(FetchDescriptor<MessageNode>())
+        let originalIds = Set(originalNodes.map(\.id))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "重生成 warm 阻塞")
+        let warmGate = WikiWarmGate(root: root, entered: entered)
+        defer { warmGate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { warmGate.source() })
+        let sent = expectation(description: "树应用后排队正文才发出")
+        var requests: [[String: Any]] = []
+        RequestBodyTap.handler = { requests.append($0); sent.fulfill() }
+        defer { RequestBodyTap.handler = nil }
+        h.viewModel.regenerate(assistantNodeId: originalTailId, model: h.model, profile: h.profile, preset: h.preset,
+                               providerManager: h.providerManager, context: h.context)
+        await fulfillment(of: [entered], timeout: 3)
+        let oldTasks = h.viewModel.promptPreparationTasksForTesting
+        XCTAssertTrue(h.viewModel.sendMessage("搜索加载后补发", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        XCTAssertEqual(h.viewModel.pendingSends.count, 1)
+        let loadGate = DispatchSemaphore(value: 0)
+        defer { loadGate.signal() }
+        h.viewModel.testNextLoadBuildGate = loadGate
+        h.viewModel.navigateToSearchResult(nodeId: searchTargetId, conversation: conversation, context: h.context)
+        warmGate.open()
+        for task in oldTasks { await task.value }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertTrue(h.viewModel.isLoading)
+        XCTAssertEqual(h.viewModel.currentPath.map(\.id), originalPathIds)
+        XCTAssertEqual(h.viewModel.pendingSends.count, 1)
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertEqual(Set(try h.context.fetch(FetchDescriptor<MessageNode>()).map(\.id)), originalIds,
+                       "树未应用时不建 user 或 assistant 节点")
+
+        loadGate.signal()
+        await fulfillment(of: [sent], timeout: 5)
+        await h.waitForTurn()
+        XCTAssertFalse(h.viewModel.isLoading)
+        XCTAssertTrue(h.viewModel.pendingSends.isEmpty)
+        XCTAssertEqual(requests.count, 1)
+        let nodes = try h.context.fetch(FetchDescriptor<MessageNode>())
+        let user = try XCTUnwrap(nodes.first { $0.content == "搜索加载后补发" })
+        XCTAssertEqual(user.parentId, originalTailId, "恢复原树后接到原尾节点而非隐形根")
+        let originalTail = try XCTUnwrap(nodes.first { $0.id == originalTailId })
+        XCTAssertTrue(originalTail.childrenIds.contains(user.id))
+        XCTAssertTrue(h.viewModel.currentPath.contains { $0.id == user.id })
+        XCTAssertTrue(try h.canonical(XCTUnwrap(requests.first)).contains("搜索加载后补发"))
+        XCTAssertTrue(originalIds.isSubset(of: Set(nodes.map(\.id))))
+    }
+
+    private func assertCCFastNavigationDrainsPending(branchMap: Bool) async throws {
+        let h = try await make(PromptScenario(name: "wiki-cc-fast-navigation-\(branchMap)", voiceHint: false))
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        let parentId = try XCTUnwrap(h.a2.parentId)
+        let parent = try XCTUnwrap(h.viewModel.currentPath.first { $0.id == parentId })
+        let sibling = MessageNode(id: UUID().uuidString, role: "assistant", content: "快切分支", contentType: "text",
+                                  createTime: Date(), parentId: parentId, childrenIds: [],
+                                  conversationId: conversation.id, profileId: h.profile.id)
+        let leaf = MessageNode(id: UUID().uuidString, role: "user", content: "快切分支末尾", contentType: "text",
+                               createTime: Date(), parentId: sibling.id, childrenIds: [],
+                               conversationId: conversation.id, profileId: h.profile.id)
+        sibling.childrenIds = [leaf.id]
+        parent.childrenIds.append(sibling.id)
+        h.context.insert(sibling)
+        h.context.insert(leaf)
+        try h.context.save()
+        h.viewModel.loadConversation(conversation, context: h.context)
+        await waitUntil("准备好两条分支") { !h.viewModel.isLoading }
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-cc-fast-navigation")
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "CC 进入预热")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        XCTAssertTrue(h.viewModel.sendMessage("切支前的 CC", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        await fulfillment(of: [entered], timeout: 3)
+        let tasks = h.viewModel.promptPreparationTasksForTesting
+        XCTAssertTrue(h.viewModel.sendMessage("快切之后补发", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        XCTAssertEqual(h.viewModel.pendingSends.count, 1)
+        let sent = expectation(description: "快速导航自己唤醒排水")
+        var requests: [[String: Any]] = []
+        RequestBodyTap.handler = { requests.append($0); sent.fulfill() }
+        defer { RequestBodyTap.handler = nil }
+        conversation.memoryEnabled = false
+        if branchMap {
+            h.viewModel.navigateToNodeFast(nodeId: sibling.id)
+        } else {
+            h.viewModel.switchBranch(at: parentId, to: parent.childrenIds.count - 1)
+        }
+        gate.open()
+        for task in tasks { await task.value }
+        await fulfillment(of: [sent], timeout: 3)
+        await h.waitForTurn()
+        let next = try XCTUnwrap(h.context.fetch(FetchDescriptor<MessageNode>()).first { $0.content == "快切之后补发" })
+        XCTAssertEqual(next.parentId, leaf.id)
+        XCTAssertTrue(h.viewModel.pendingSends.isEmpty)
+        XCTAssertTrue(wire.frames.isEmpty, "被取消的预热不能再发送 CC")
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertTrue(try h.canonical(XCTUnwrap(requests.first)).contains("快切分支末尾"))
+    }
+
+    func testCCWarmBranchSwitchDrainsPendingOnNewBranch() async throws {
+        try await assertCCFastNavigationDrainsPending(branchMap: false)
+    }
+
+    func testCCWarmBranchMapNavigationDrainsPendingOnNewBranch() async throws {
+        try await assertCCFastNavigationDrainsPending(branchMap: true)
+    }
+
+    private func assertMixedSendFIFO(regenerate: Bool) async throws {
+        let h = try await make(PromptScenario(name: "wiki-mixed-fifo-\(regenerate)", voiceHint: false))
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        conversation.currentStyleId = ""
+        let originalUser = try XCTUnwrap(h.viewModel.currentPath.first { $0.id == h.a2.parentId })
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-mixed-fifo")
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "CC 首条占用准备期")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        let sent = expectation(description: "三个发送动作按入队顺序完成")
+        sent.expectedFulfillmentCount = 3
+        var order: [String] = []
+        wire.onSend = {
+            order.append(wire.frames.last?["content"] as? String ?? "")
+            sent.fulfill()
+        }
+        RequestBodyTap.handler = { _ in order.append("普通先入队"); sent.fulfill() }
+        defer { RequestBodyTap.handler = nil }
+        XCTAssertTrue(h.viewModel.sendMessage("CC 首条预热", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        let firstId = try XCTUnwrap(h.viewModel.currentPath.last?.id)
+        await fulfillment(of: [entered], timeout: 3)
+        XCTAssertTrue(h.viewModel.sendMessage("普通先入队", model: regenerate ? h.model : cc,
+                                              profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        if regenerate {
+            h.viewModel.regenerate(assistantNodeId: h.a2.id, model: cc, profile: h.profile, preset: h.preset,
+                                   providerManager: h.providerManager, context: h.context)
+        } else {
+            XCTAssertTrue(h.viewModel.editAndResend(originalUser.id, newText: "编辑后入队", isEdit: true,
+                                                    model: cc, profile: h.profile, preset: h.preset,
+                                                    providerManager: h.providerManager, context: h.context))
+        }
+        gate.open()
+        await fulfillment(of: [sent], timeout: 5)
+        await h.waitForTurn()
+        for task in h.viewModel.promptPreparationTasksForTesting { await task.value }
+        XCTAssertEqual(order, ["CC 首条预热", "普通先入队", regenerate ? originalUser.content : "编辑后入队"])
+        let nodes = try h.context.fetch(FetchDescriptor<MessageNode>())
+        let ordinary = try XCTUnwrap(nodes.first { $0.content == "普通先入队" })
+        XCTAssertEqual(ordinary.parentId, firstId, "普通发送不能被后入队的切支动作挪到另一分支")
+        if regenerate {
+            XCTAssertEqual(conversation.currentNodeId, originalUser.id)
+            XCTAssertEqual(wire.frames.last?["message_id"] as? String, originalUser.id)
+        } else {
+            let edited = try XCTUnwrap(nodes.first { $0.content == "编辑后入队" })
+            XCTAssertEqual(edited.parentId, originalUser.parentId)
+            XCTAssertEqual(conversation.currentNodeId, edited.id)
+        }
+        XCTAssertTrue(h.viewModel.pendingSends.isEmpty)
+    }
+
+    func testCCWarmOrdinaryAPISendPrecedesRegenerate() async throws {
+        try await assertMixedSendFIFO(regenerate: true)
+    }
+
+    func testCCWarmOrdinaryCCSendPrecedesEditResend() async throws {
+        try await assertMixedSendFIFO(regenerate: false)
+    }
+
+    private func assertTreeReadFailureKeepsPending(mainFetch: Bool) async throws {
+        let h = try await make(PromptScenario(name: "wiki-tree-fetch-failure-\(mainFetch)", voiceHint: false))
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        let originalPath = h.viewModel.currentPath.map(\.id)
+        let originalIds = Set(try h.context.fetch(FetchDescriptor<MessageNode>()).map(\.id))
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        h.viewModel.testNextLoadBuildGate = gate
+        h.viewModel.testNextLoadBuildFailure = !mainFetch
+        h.viewModel.testNextLoadApplyFailure = mainFetch
+        var requests: [[String: Any]] = []
+        RequestBodyTap.handler = { requests.append($0) }
+        defer { RequestBodyTap.handler = nil }
+        h.viewModel.loadConversation(conversation, context: h.context)
+        XCTAssertTrue(h.viewModel.sendMessage("读取成功后才发送", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        let queuedId = try XCTUnwrap(h.viewModel.pendingSends.first?.id)
+        gate.signal()
+        await waitUntil("失败应退出加载并提示") { !h.viewModel.isLoading }
+        h.viewModel.cancelAssistantTurn(context: h.context)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertEqual(h.viewModel.pendingSends.map(\.id), [queuedId])
+        XCTAssertEqual(h.viewModel.currentPath.map(\.id), originalPath)
+        XCTAssertEqual(Set(try h.context.fetch(FetchDescriptor<MessageNode>()).map(\.id)), originalIds)
+        XCTAssertNotNil(h.viewModel.transientNotice)
+        let sent = expectation(description: "重试真实树成功才排水")
+        RequestBodyTap.handler = { requests.append($0); sent.fulfill() }
+        h.viewModel.loadConversation(conversation, context: h.context)
+        await fulfillment(of: [sent], timeout: 5)
+        await h.waitForTurn()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertTrue(h.viewModel.pendingSends.isEmpty)
+        let next = try XCTUnwrap(h.context.fetch(FetchDescriptor<MessageNode>()).first { $0.content == "读取成功后才发送" })
+        XCTAssertEqual(next.parentId, originalPath.last)
+    }
+
+    func testBackgroundTreeReadFailureKeepsOldTreeAndPending() async throws {
+        try await assertTreeReadFailureKeepsPending(mainFetch: false)
+    }
+
+    func testMainTreeReadFailureKeepsOldTreeAndPending() async throws {
+        try await assertTreeReadFailureKeepsPending(mainFetch: true)
+    }
+
+    func testAPITurnDrainsCCThenCCThenAPIAndSurvivesReload() async throws {
+        let h = try await make(PromptScenario(name: "wiki-cc-api-queue", voiceHint: false))
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-cc-api-queue")
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        conversation.currentStyleId = ""
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "API 已进入 warm")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        var requests: [[String: Any]] = []
+        var order: [String] = []
+        let sent = expectation(description: "API、CC、CC、API 全部依次发出")
+        sent.expectedFulfillmentCount = 4
+        RequestBodyTap.handler = {
+            requests.append($0)
+            order.append(requests.count == 1 ? "API 首轮" : "API 尾轮")
+            sent.fulfill()
+        }
+        defer { RequestBodyTap.handler = nil }
+        wire.onSend = {
+            order.append(wire.frames.last?["content"] as? String ?? "")
+            sent.fulfill()
+        }
+
+        XCTAssertTrue(h.viewModel.sendMessage("API 首轮", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        let apiAssistantId = try XCTUnwrap(h.viewModel.currentPath.last?.id)
+        await fulfillment(of: [entered], timeout: 3)
+        for text in ["CC 队列一", "CC 队列二"] {
+            XCTAssertTrue(h.viewModel.sendMessage(text, model: cc, profile: h.profile, preset: h.preset,
+                                                  providerManager: h.providerManager, context: h.context))
+        }
+        XCTAssertTrue(h.viewModel.sendMessage("API 尾轮", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        XCTAssertEqual(h.viewModel.pendingSends.count, 3)
+        XCTAssertEqual(h.viewModel.currentPath.last?.id, apiAssistantId)
+        XCTAssertTrue(wire.frames.isEmpty)
+        XCTAssertTrue(requests.isEmpty)
+
+        gate.open()
+        await fulfillment(of: [sent], timeout: 5)
+        await h.waitForTurn()
+        for task in h.viewModel.promptPreparationTasksForTesting { await task.value }
+        XCTAssertEqual(order, ["API 首轮", "CC 队列一", "CC 队列二", "API 尾轮"])
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertTrue(h.viewModel.pendingSends.isEmpty)
+        let nodes = try h.context.fetch(FetchDescriptor<MessageNode>())
+        let firstCC = try XCTUnwrap(nodes.first { $0.content == "CC 队列一" })
+        let secondCC = try XCTUnwrap(nodes.first { $0.content == "CC 队列二" })
+        let apiUser = try XCTUnwrap(nodes.first { $0.content == "API 尾轮" })
+        XCTAssertEqual(firstCC.parentId, apiAssistantId)
+        XCTAssertEqual(secondCC.parentId, firstCC.id)
+        XCTAssertEqual(apiUser.parentId, secondCC.id)
+        XCTAssertEqual(wire.frames.map { $0["message_id"] as? String }, [firstCC.id, secondCC.id])
+        let tailBody = try h.canonical(XCTUnwrap(requests.last))
+        XCTAssertTrue(tailBody.contains("CC 队列一") && tailBody.contains("CC 队列二") && tailBody.contains("API 尾轮"))
+        try h.context.save()   // 后台加载用独立 context；内存夹具显式提交最后一轮。
+        h.viewModel.loadConversation(conversation, context: h.context)
+        await waitUntil("重载应完成") { !h.viewModel.isLoading }
+        XCTAssertTrue(h.viewModel.currentPath.contains { $0.id == firstCC.id })
+        XCTAssertTrue(h.viewModel.currentPath.contains { $0.id == secondCC.id })
+        XCTAssertTrue(h.viewModel.currentPath.contains { $0.id == apiUser.id })
+        XCTAssertEqual(wire.frames.map { $0["content"] as? String }, ["CC 队列一", "CC 队列二"])
+    }
+
+    func testConversationSwitchRestoresQueuedCCAndMarksAppendedCCUnsent() async throws {
+        let h = try await make(PromptScenario(name: "wiki-cc-abort-draft", voiceHint: false))
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-cc-abort-draft")
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        defer { AttachmentStore.deleteConversationAttachments(conversationId: conversation.id, profileId: h.profile.id) }
+        conversation.currentStyleId = ""
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "第一条 CC 已进入 warm")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        XCTAssertTrue(h.viewModel.sendMessage("CC 第一条", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        let firstId = try XCTUnwrap(h.viewModel.currentPath.last?.id)
+        await fulfillment(of: [entered], timeout: 3)
+        XCTAssertTrue(h.viewModel.sendMessage("CC 第二条回草稿", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        let tasks = h.viewModel.promptPreparationTasksForTesting
+
+        h.viewModel.startDraftConversation(profileId: h.profile.id, fresh: true)
+        gate.open()
+        for task in tasks { await task.value }
+        XCTAssertEqual(conversation.draftText, "CC 第二条回草稿")
+        let nodes = try h.context.fetch(FetchDescriptor<MessageNode>())
+        XCTAssertFalse(nodes.contains { $0.content == "CC 第二条回草稿" && $0.role == "user" })
+        XCTAssertFalse(nodes.contains { $0.parentId == firstId && $0.role == "system" }, "未发送状态不写进消息树")
+        let status = try XCTUnwrap(wire.client.sendTracker.store.entry(firstId))
+        XCTAssertEqual(status.state, .failed)
+        XCTAssertFalse(status.retryable)
+        XCTAssertFalse(status.canRetry)
+        XCTAssertTrue(status.visibleReason?.contains("未发送") == true)
+        h.viewModel.loadConversation(conversation, context: h.context)
+        await waitUntil("回到原对话应完成加载") { !h.viewModel.isLoading }
+        XCTAssertTrue(h.viewModel.currentPath.contains { $0.id == firstId })
+        XCTAssertTrue(wire.client.sendTracker.store.entry(firstId) === status, "同一 client 重载后保留气泡失败状态")
+        XCTAssertTrue(wire.frames.isEmpty)
+    }
+
+    func testCCWarmFailureDrainsQueuedSlashAndAPI() async throws {
+        let h = try await make(PromptScenario(name: "wiki-cc-failure-drain", voiceHint: false))
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-cc-failure-drain")
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        conversation.currentStyleId = ""
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "CC warm 阻塞到超时")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        XCTAssertTrue(h.viewModel.sendMessage("超时的 CC", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        let ccId = try XCTUnwrap(h.viewModel.currentPath.last?.id)
+        await fulfillment(of: [entered], timeout: 3)
+        conversation.memoryEnabled = false
+        let sent = expectation(description: "失败后继续发斜杠和 API")
+        sent.expectedFulfillmentCount = 2
+        var order: [String] = []
+        wire.onSend = { order.append("slash"); sent.fulfill() }
+        RequestBodyTap.handler = { _ in order.append("API"); sent.fulfill() }
+        defer { RequestBodyTap.handler = nil }
+        XCTAssertTrue(h.viewModel.sendMessage("/clear", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        XCTAssertTrue(h.viewModel.sendMessage("失败后继续 API", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        await fulfillment(of: [sent], timeout: 10)
+        await h.waitForTurn()
+        XCTAssertEqual(order, ["slash", "API"])
+        XCTAssertEqual(wire.frames.map { $0["type"] as? String }, ["command"])
+        XCTAssertEqual(wire.client.sendTracker.store.entry(ccId)?.state, .failed)
+        XCTAssertTrue(h.viewModel.pendingSends.isEmpty)
+        XCTAssertTrue(h.viewModel.currentPath.contains { $0.content == "失败后继续 API" })
+    }
+
+    func testCCSlashCommandWaitsForEarlierCCMessage() async throws {
+        let h = try await make(PromptScenario(name: "wiki-cc-slash-order", voiceHint: false))
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-cc-slash-order")
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        conversation.currentStyleId = ""
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "普通 CC 已进入 warm")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        XCTAssertTrue(h.viewModel.sendMessage("先普通消息", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        await fulfillment(of: [entered], timeout: 3)
+        XCTAssertTrue(h.viewModel.sendMessage("/clear", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        XCTAssertTrue(wire.frames.isEmpty)
+        let sent = expectation(description: "普通消息和命令按序发出")
+        sent.expectedFulfillmentCount = 2
+        wire.onSend = { sent.fulfill() }
+        gate.open()
+        await fulfillment(of: [sent], timeout: 3)
+        XCTAssertEqual(wire.frames.map { $0["type"] as? String }, ["send", "command"])
+        XCTAssertEqual(wire.frames.map { $0["content"] as? String }, ["先普通消息", "/clear"])
+    }
+
+    func testCCSendDoesNotResolveAskOncePermissionCard() async throws {
+        let h = try await make(PromptScenario(name: "wiki-cc-no-ask", voiceHint: false))
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-cc-no-ask")
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        conversation.currentStyleId = ""
+        conversation.permGrantsRaw = ""
+        h.overrideDefault(PermissionDomain.images.storageKey, PermissionLevel.askOnce.rawValue)
+        let center = PermissionPromptCenter(isolatedForTesting: true)
+        h.viewModel.injectionPermissionCenter = center
+        defer {
+            if let request = center.pendingRequest { center.respond(to: request.id, allowed: false) }
+        }
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { WikiStore(root: root) })
+        let sent = expectation(description: "CC 不弹权限卡直接发送")
+        wire.onSend = { sent.fulfill() }
+        XCTAssertTrue(h.viewModel.sendMessage("CC 不问权限", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        await fulfillment(of: [sent], timeout: 3)
+        XCTAssertNil(center.pendingRequest)
+        XCTAssertEqual(wire.frames.first?["content"] as? String, "CC 不问权限")
+    }
+
+    func testConversationMemoryOffSkipsWikiWarmAndSendsImmediately() async throws {
+        let h = try await make(PromptScenario(name: "wiki-cc-memory-off", voiceHint: false))
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-cc-memory-off")
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        conversation.currentStyleId = ""
+        conversation.memoryEnabled = false
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let warmAttempted = expectation(description: "对话记忆关闭时不应 warm")
+        warmAttempted.isInverted = true
+        let gate = WikiWarmGate(root: root, entered: warmAttempted)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        let sent = expectation(description: "跳过 warm 立即发出")
+        wire.onSend = { sent.fulfill() }
+        XCTAssertTrue(h.viewModel.sendMessage("记忆关闭也立即发", model: cc, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        await fulfillment(of: [sent], timeout: 1)
+        await fulfillment(of: [warmAttempted], timeout: 0.2)
+        XCTAssertEqual(wire.frames.first?["content"] as? String, "记忆关闭也立即发")
+    }
+
+    func testFloorSwitchRestoresAttachmentsFromEveryPendingSend() async throws {
+        let h = try await make(PromptScenario(name: "wiki-pending-attachments"))
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        defer { AttachmentStore.deleteConversationAttachments(conversationId: conversation.id, profileId: h.profile.id) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "首轮 API 已进入 warm")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        XCTAssertTrue(h.viewModel.sendMessage("阻塞首轮", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        await fulfillment(of: [entered], timeout: 3)
+        let first = PendingChatAttachment.text(name: "一.txt", typeDescription: "文本", extractedText: "一",
+                                               byteCount: 1, fileData: Data("1".utf8))
+        let second = PendingChatAttachment.text(name: "二.txt", typeDescription: "文本", extractedText: "二",
+                                                byteCount: 1, fileData: Data("2".utf8))
+        XCTAssertTrue(h.viewModel.sendMessage("排队一", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context, attachments: [first]))
+        XCTAssertTrue(h.viewModel.sendMessage("排队二", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context, attachments: [second]))
+        XCTAssertEqual(h.viewModel.pendingSends.count, 2)
+        let tasks = h.viewModel.promptPreparationTasksForTesting
+        NotificationCenter.default.post(name: .profileWillSwitch, object: nil)
+        gate.open()
+        for task in tasks { await task.value }
+        XCTAssertTrue(conversation.draftText.contains("排队一") && conversation.draftText.contains("排队二"))
+        let data = try XCTUnwrap(conversation.draftAttachmentsData)
+        let restored = try JSONDecoder().decode([PendingChatAttachment].self, from: data)
+        XCTAssertEqual(restored.map(\.name), ["一.txt", "二.txt"])
+    }
+
+    func testRegenerateStopRestoresOriginalAssistantSelection() async throws {
+        let h = try await make(PromptScenario(name: "wiki-regenerate-restore"))
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        let originalPath = h.viewModel.currentPath
+        XCTAssertEqual(originalPath.map(\.role), ["user", "assistant", "user", "assistant"])
+        let originalIds = originalPath.map(\.id)
+        let originalContents = originalPath.map(\.content)
+        let firstAssistant = try XCTUnwrap(originalPath.first { $0.role == "assistant" })
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "重新生成已进入 warm")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        h.viewModel.regenerate(assistantNodeId: firstAssistant.id, model: h.model, profile: h.profile, preset: h.preset,
+                               providerManager: h.providerManager, context: h.context)
+        await fulfillment(of: [entered], timeout: 3)
+        let placeholderId = try XCTUnwrap(h.viewModel.currentPath.last?.id)
+        XCTAssertNotEqual(placeholderId, firstAssistant.id)
+        let tasks = h.viewModel.promptPreparationTasksForTesting
+        h.viewModel.cancelAssistantTurn(context: h.context)
+        gate.open()
+        for task in tasks { await task.value }
+        XCTAssertEqual(h.viewModel.displayLeafIdForTesting, h.a2.id)
+        XCTAssertEqual(conversation.currentNodeId, h.a2.id)
+        XCTAssertEqual(h.viewModel.currentPath.last?.id, h.a2.id)
+        XCTAssertEqual(h.viewModel.currentPath.last?.content, "回复二")
+        XCTAssertEqual(h.viewModel.currentPath.map(\.id), originalIds, "停止历史轮次重生成后恢复完整 u1/a1/u2/a2")
+        XCTAssertEqual(h.viewModel.currentPath.map(\.content), originalContents)
+        let nodes = try h.context.fetch(FetchDescriptor<MessageNode>())
+        XCTAssertTrue(nodes.contains { $0.id == h.a2.id && $0.content == "回复二" })
+        XCTAssertFalse(nodes.contains { $0.id == placeholderId })
+        for original in originalPath {
+            XCTAssertTrue(nodes.contains { $0.id == original.id && $0.content == original.content })
+        }
+    }
+
+    func testOtherConversationStreamingFinishDoesNotCancelCCWarm() async throws {
+        let h = try await make(PromptScenario(name: "wiki-cc-other-finish", voiceHint: false))
+        let oldId = try XCTUnwrap(h.viewModel.selectedConversation?.id)
+        defer { AttachmentStore.deleteConversationAttachments(conversationId: oldId, profileId: h.profile.id) }
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-cc-other")
+        let wire = CCWire()
+        defer { wire.close() }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "CC 冷缓存 source 阻塞")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        let blockedCache = WikiInjectionCache(source: { gate.source() })
+        blockedCache.prefetch(profileId: h.profile.id)
+        await fulfillment(of: [entered], timeout: 3)
+        let apiFinished = expectation(description: "另一对话真实 streaming 出错收口")
+        let observer = NotificationCenter.default.addObserver(forName: .assistantTurnDidFinish, object: nil, queue: .main) { note in
+            if note.userInfo?["conversationId"] as? String == oldId { apiFinished.fulfill() }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        var ccNodeId: String?
+        var ccConversationId: String?
+        RequestBodyTap.handler = { _ in
+            RequestBodyTap.handler = nil
+            h.viewModel.wikiInjectionCache = blockedCache
+            h.viewModel.startDraftConversation(profileId: h.profile.id, fresh: true)
+            ccConversationId = h.viewModel.selectedConversation?.id
+            XCTAssertTrue(h.viewModel.sendMessage("CC 不受另一流收口影响", model: cc, profile: h.profile, preset: h.preset,
+                                                  providerManager: h.providerManager, context: h.context))
+            ccNodeId = h.viewModel.currentPath.last?.id
+        }
+        defer { RequestBodyTap.handler = nil }
+        h.viewModel.regenerate(assistantNodeId: h.a2.id, model: h.model, profile: h.profile, preset: h.preset,
+                               providerManager: h.providerManager, context: h.context)
+        await fulfillment(of: [apiFinished], timeout: 5)
+        XCTAssertFalse(h.viewModel.assistantTurnInFlight)
+        XCTAssertNil(h.viewModel.activeConversationId)
+        XCTAssertTrue(wire.frames.isEmpty)
+        let sent = expectation(description: "CC 仍按自己的请求发送")
+        wire.onSend = { sent.fulfill() }
+        gate.open()
+        await fulfillment(of: [sent], timeout: 3)
+        XCTAssertEqual(wire.frames.count, 1)
+        XCTAssertEqual(wire.frames.first?["message_id"] as? String, ccNodeId)
+        XCTAssertEqual(wire.frames.first?["chat_id"] as? String, ccConversationId)
+        XCTAssertEqual(wire.frames.first?["content"] as? String, "CC 不受另一流收口影响")
+    }
+
+    func testStoppingPreparationDrainsPendingWithoutOldCleanupTouchingNewTurn() async throws {
+        let h = try await make(PromptScenario(name: "wiki-stop-drain"))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let entered = expectation(description: "第一条准备停在 warm")
+        let gate = WikiWarmGate(root: root, entered: entered)
+        defer { gate.open() }
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { gate.source() })
+        var requests: [[String: Any]] = []
+        RequestBodyTap.handler = { requests.append($0) }
+        defer { RequestBodyTap.handler = nil }
+        try beginPreparation(.send, h)
+        await fulfillment(of: [entered], timeout: 3)
+        let oldTasks = h.viewModel.promptPreparationTasksForTesting
+        XCTAssertTrue(h.viewModel.sendMessage("排队的新一轮", model: h.model, profile: h.profile, preset: h.preset,
+                                              providerManager: h.providerManager, context: h.context))
+        XCTAssertEqual(h.viewModel.pendingSends.count, 1)
+        h.viewModel.wikiInjectionCache = WikiInjectionCache(source: { WikiStore(root: root) })
+        h.viewModel.cancelAssistantTurn(context: h.context)
+        gate.open()
+        for task in oldTasks { await task.value }
+        let sent = expectation(description: "取消准备后自动补发队列")
+        if requests.isEmpty {
+            RequestBodyTap.handler = { requests.append($0); sent.fulfill() }
+            await fulfillment(of: [sent], timeout: 3)
+        }
+        await h.waitForTurn()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertTrue(try h.canonical(XCTUnwrap(requests.first)).contains("排队的新一轮"))
+        XCTAssertTrue(h.viewModel.pendingSends.isEmpty)
+        XCTAssertFalse(h.viewModel.assistantTurnInFlight)
+    }
+
+    // MARK: - thinking 回传（plan-thinking §5 / §3.4）
+
+    func testG8PreviewEqualsSend() async throws {
+        try await assertPreviewEqualsSend(PromptScenario(name: "G8-opus-default-thinking", providerType: .anthropic,
+                                                         modelId: "claude-opus-5-5", thinkingDisplay: .inline))
+    }
+
+    /// 思考过程「隐藏」：预览和实发都不发 display（同一个 builder）
+    func testThinkingHiddenPreviewEqualsSendWithoutDisplay() async throws {
+        let h = try await make(PromptScenario(name: "G8-hidden", providerType: .anthropic, modelId: "claude-opus-5-5", thinkingDisplay: .hidden))
+        let previewBody = try XCTUnwrap(try preview(h).requestBody(providerManager: h.providerManager))
+        let sent = try await h.regenerateCapturingBody()
+        XCTAssertEqual(try h.canonical(previewBody), try h.canonical(sent))
+        let thinking = try XCTUnwrap(sent["thinking"] as? [String: Any])
+        XCTAssertEqual(thinking["type"] as? String, "adaptive")
+        XCTAssertNil(thinking["display"])
+    }
+
+    /// 历史节点带着原生思考段（普通回复只挂思考段、工具节点夹着思考段）：历史一个字节不变（Q1-A）= 和 G8 金样相同
+    func testHistoryThinkingSegmentsNeverSent() async throws {
+        let h = try await make(PromptScenario(name: "G8-history", providerType: .anthropic, modelId: "claude-opus-5-5", thinkingDisplay: .inline))
+        let a1 = try XCTUnwrap(h.viewModel.currentPath.first { $0.role == "assistant" })
+        a1.setSegments([.text(a1.content), .thinking(text: "历史里的思考", signature: "sig-history"),
+                        .thinking(text: "", signature: nil, redactedData: "ENC")])
+        try h.context.save()
+        let previewBody = try XCTUnwrap(try preview(h).requestBody(providerManager: h.providerManager))
+        let sent = try await h.regenerateCapturingBody()
+        XCTAssertEqual(try h.canonical(previewBody), try h.canonical(sent))
+        let text = try h.canonical(sent, droppingTools: true)
+        XCTAssertFalse(text.contains("sig-history") || text.contains("历史里的思考") || text.contains("ENC"))
+        let golden = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/prompt-golden/G8-opus-default-thinking.json")
+        XCTAssertEqual(text, try String(contentsOf: golden, encoding: .utf8), "历史带思考段时实发和金样逐字节相同")
     }
 }

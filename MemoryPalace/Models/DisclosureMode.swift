@@ -59,6 +59,14 @@ enum DisclosureKind {
     var mode: DisclosureMode {
         DisclosureMode(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? migratedDefault
     }
+
+    /// 思考行显示哪段（页 2 网页聊天）：[thinking] 标签 / CC 思考链跟「显示 CC 思考」开关；
+    /// 原生思考摘要（thinking 回传）跟「思考过程」设置（隐藏 = 不显示），流式时不出
+    static func thinkingLine(tagOrCC: String?, showCC: Bool, native: String?, showNative: Bool, streaming: Bool) -> String? {
+        if showCC, let t = tagOrCC, !t.isEmpty { return t }
+        guard showNative, !streaming, let n = native, !n.isEmpty else { return nil }
+        return n
+    }
 }
 
 /// 设置行（等待动画行同款）：左标题 body/textPrimary，右当前档 secondary/textMuted + 小 chevron，点开菜单选档

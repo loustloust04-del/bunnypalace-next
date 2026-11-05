@@ -80,7 +80,7 @@ import { PM_FRAMES, pmRelay } from "./pm-relay.ts"
 import { TmuxState, parsePaneTitles, parsePaneMeta, TMUX_PANES_ARGS, type PaneMeta } from "./tmux-state.ts"
 import { PaneStream } from "./tmux-pane-stream.ts"
 import { chainTmuxWrite, fetchPanes, k1Enabled, sharedTmuxControl, startSharedTmuxControl, TmuxCommandError, TmuxUncertainError, tmuxLoadBuffer, tmuxRun, tmuxRunCounts, waitTmuxWriteSettled } from "./tmux-control"
-import { findCodexRollout, locateEditArea, SendStatusBook, transcriptCursor, type EditArea, type SendStatusFrame, type TranscriptCursor } from "./send-verify"
+import { appAttemptOf, findCodexRollout, locateEditArea, SendStatusBook, transcriptCursor, withAttempt, type ActiveOp, type EditArea, type SendCtx, type SendStatusFrame, type TranscriptCursor } from "./send-verify"
 import { SendTracker, type InjectResult } from "./send-track"
 import { LagLog, classifyConnect, classifyTerminalOpen, parseConnectReport, parseTerminalReport, appendLedger, FAST_MS } from "./connect-ledger.ts"
 import {
@@ -552,7 +552,8 @@ export function buildChannelTag(msg: MPMessage, ts: string, attachments: string[
 export interface TmuxRunner {
   /// 注入排进 per-session 串行链（chainSessionSend）：resolve=已注入（Enter 已发/放弃重试），
   /// reject=sendLiteral 都没进去（session 死）。调用方按需 await/attach catch，不许裸 throw 假设。
-  send(text: string, session: string): Promise<void>
+  /// sc：app 消息这一次发送的上下文（A1 R5），交给送达核对；别的注入没有
+  send(text: string, session: string, sc?: SendCtx): Promise<void>
   /// L3：raw 文本直 send-keys + Enter，跟 send 实现相同，语义区分。
   /// 用于斜杠命令路径——text 不包 buildChannelTag，CC 看到裸 /clear 触发命令系统。
   sendRaw(text: string, session: string): Promise<void>
@@ -781,7 +782,7 @@ export const sendTracker = new SendTracker(sendStatusBook, {
   // 只清就绪：下一条消息重新判活、走拉起。不碰启动中的状态和排队（那是启动互斥的）
   sessionGone: (session) => { sessionReady.delete(session) },
   // 会话表刷新一次再交回原有路径，免得旧快照还说它活着
-  requeue: (session, text) => { void tmuxState.refresh().finally(() => ensureSessionAndSend(session, text)) },
+  requeue: (session, text, sc) => { void tmuxState.refresh().finally(() => ensureSessionAndSend(session, text, undefined, sc)) },
   legacyError: (session, messageId, reason) => {
     // 旧版 app 只认 error 帧（新版看 send_status）
     const frame = JSON.stringify({ type: "error", ...(messageId ? { message_id: messageId } : {}), session_name: session, reason: `这条消息没送进 ${session}：${reason}` })
@@ -810,8 +811,8 @@ const connectLedgerPath = join(SECRETS_DIR, "connect-ledger.jsonl")
 export const realTmuxRunner: TmuxRunner = {
   // 和 terminal_input 的 send-keys -H 同一条按会话写链（K1-0 时序风险 7）；pasteToTmux 里的 tmux 调用不带 session（带了死锁）
   paste: (session, text) => chainTmuxWrite(session, () => pasteToTmux(session, text)),
-  send(text: string, session: string) {
-    return chainSessionSend(session, () => sendTracker.send(text, session))
+  send(text: string, session: string, sc?: SendCtx) {
+    return chainSessionSend(session, () => sendTracker.send(text, session, sc))
   },
   sendRaw(text: string, session: string) {
     return chainSessionSend(session, () => pasteAwareSendAndEnter(text, session).then(() => {}))   // 斜杠命令不走送达核对（K1 第 4b 步只管消息）
@@ -1007,7 +1008,7 @@ function onStreamTurnEvent(name: string, m: any): void {
   }
 }
 const tmux: TmuxRunner = {
-  send: (t, s) => streamRunner.has(s) ? streamRunner.send(t, s) : baseTmux.send(t, s),
+  send: (t, s, sc) => streamRunner.has(s) ? streamRunner.send(t, s) : baseTmux.send(t, s, sc),
   sendRaw: (t, s) => streamRunner.has(s) ? streamSendRaw(t, s) : baseTmux.sendRaw(t, s),
   key: async (k, s) => { if (!streamRunner.has(s)) await baseTmux.key(k, s) },
   capture: async (s) => streamRunner.has(s) ? "" : baseTmux.capture(s),
@@ -1042,7 +1043,9 @@ function endStartup(name: string, gen: number): boolean {
   sessionSpawning.delete(name)
   return true
 }
-const pendingSends = new Map<string, string[]>()  // boot 期间排队的 channel tag
+/// boot 期间排队的 channel tag；app 消息带着这一次发送的上下文一起排（A1 R5）
+interface QueuedSend { tag: string; sc?: SendCtx }
+const pendingSends = new Map<string, QueuedSend[]>()
 
 /// 对话 Agent 的 --mcp-config：cwd 的 .mcp.json（launchd hub，start_cc.sh 渲染的）→ 内嵌 hub 现写的那份 → 没有（null，不带参数）
 function ccMcpConfig(): string | null { return pickMcpConfig(`${process.cwd()}/.mcp.json`, generatedMcpConfigThisBoot) }
@@ -1324,7 +1327,7 @@ export async function spawnSession(name: string, chatId?: string, isRetry = fals
     sessionReady.add(name)
     const queued = pendingSends.get(name) ?? []
     pendingSends.delete(name)
-    for (const tag of queued) tmux.send(tag, name).catch((err: any) => console.warn(`[hub] flush fail ${name}: ${err.message}`))
+    for (const q of queued) tmux.send(q.tag, name, q.sc).catch((err: any) => console.warn(`[hub] flush fail ${name}: ${err.message}`))
     console.warn(`[hub] ${name} 已经在了（会话表误报不在）→ 接管，补发 ${queued.length} 条`)
     return
   }
@@ -1374,7 +1377,7 @@ export async function spawnSession(name: string, chatId?: string, isRetry = fals
     const queued = pendingSends.get(name)
     pendingSends.delete(name)
     if (queued?.length) {
-      for (const tag of queued) { tmux.send(tag, name).catch((e: any) => console.warn(`[hub] flush fail ${name}: ${e.message}`)) }
+      for (const q of queued) { tmux.send(q.tag, name, q.sc).catch((e: any) => console.warn(`[hub] flush fail ${name}: ${e.message}`)) }
       console.log(`[hub] ${name} ready → flushed ${queued.length} queued`)
     }
   }
@@ -1416,7 +1419,8 @@ export async function spawnSession(name: string, chatId?: string, isRetry = fals
 /// 带思考强度的发送（effort.ts）：没要求 / 跟现在一样 → 照常发；claude 终端会话先发 `/effort <档>` 再发消息；
 /// stream 会话中途改不了（streamSendRaw 只认 /clear），等下次启动带 --effort；codex 跑着就杀掉用同一 id 恢复（带 -c 参数）
 /// 普通发送同步入队、返回 undefined（调用方别 await，否则注入会抢在 ack 前面）；只有 codex 重启返回 Promise，等 kill→重起
-export function sendWithEffort(name: string, tag: string, chatId: string | undefined, rawEffort: unknown): Promise<void> | undefined {
+/// sc：app 消息这一次发送的上下文（A1 R5），一路带进排队 / 会话链 / 核对
+export function sendWithEffort(name: string, tag: string, chatId: string | undefined, rawEffort: unknown, sc?: SendCtx): Promise<void> | undefined {
   const engine = sessionEngine(name)
   const want = normalizeEffort(engine, rawEffort)
   if (want) wantedEffort.set(name, want)
@@ -1427,7 +1431,7 @@ export function sendWithEffort(name: string, tag: string, chatId: string | undef
     void (async () => {
       try { await tmux.sendRaw(cmd, name); sessionEffort.set(name, want!) ; console.log(`[hub] effort ${name} → ${want}`) }
       catch (e: any) { console.warn(`[hub] effort ${name} 切换失败（照常发消息）: ${e?.message?.split("\n")[0]}`) }
-      ensureSessionAndSend(name, tag, chatId)
+      ensureSessionAndSend(name, tag, chatId, sc)
     })()
     return
   }
@@ -1436,53 +1440,123 @@ export function sendWithEffort(name: string, tag: string, chatId: string | undef
       try { await baseTmux.kill(name) } catch (e: any) { console.warn(`[hub] effort 重启 kill ${name} 失败: ${e?.message}`) }
       clearSessionState(name)
       console.log(`[hub] effort ${name} → ${want}：codex 用同一会话 id 重启`)
-      ensureSessionAndSend(name, tag, chatId)
+      ensureSessionAndSend(name, tag, chatId, sc)
     })()
   }
-  ensureSessionAndSend(name, tag, chatId)
+  ensureSessionAndSend(name, tag, chatId, sc)
 }
 
-export function ensureSessionAndSend(name: string, tag: string, chatId?: string): void {
-  void ensureSessionAndSendAsync(name, tag, chatId).catch(() => {})   // 自愈在 async 版内部，这里吞尾
+export function ensureSessionAndSend(name: string, tag: string, chatId?: string, sc?: SendCtx): void {
+  void ensureSessionAndSendAsync(name, tag, chatId, sc).catch(() => {})   // 自愈在 async 版内部，这里吞尾
 }
 
 /// async 版：resolve=已注入或已排队（spawn 流程接手），reject=永远不会（自愈内化）。
 /// agora executor 用它感知"直接注入失败"（reject 前已重排 spawn，claim 由 lease 兜底）。
-export async function ensureSessionAndSendAsync(name: string, tag: string, chatId?: string): Promise<void> {
+export async function ensureSessionAndSendAsync(name: string, tag: string, chatId?: string, sc?: SendCtx): Promise<void> {
   if (sessionReady.has(name)) {
-    try { await tmux.send(tag, name); return } catch (e: any) {
+    try { await tmux.send(tag, name, sc); return } catch (e: any) {
       // 结果不明（tmux 卡住超时 / 控制连接断，文本可能已经进了输入框）：不清态、不重发，告诉 app（审查 R1-2：原来这里整条重发 = 两遍）。
       // realTmuxRunner.send 已经在会话链里核对完（sendTracked，K1 第 4b 步），不会再抛到这里；这里只兜别的 runner
-      if (e instanceof TmuxUncertainError) { reportUncertainSend(name, tag, e); return }
+      if (e instanceof TmuxUncertainError) { reportUncertainSend(name, tag, e, sc); return }
       console.warn(`[hub] send fail ${name}（session 死了？）→ 清态重 spawn: ${e.message?.split("\n")[0]}`)
       clearSessionState(name)   // 掉下去走 spawn 路径，消息不丢
     }
   }
-  if (sessionSpawning.has(name)) { const q = pendingSends.get(name) ?? []; q.push(tag); pendingSends.set(name, q); return }
+  if (sessionSpawning.has(name)) { const q = pendingSends.get(name) ?? []; q.push({ tag, sc }); pendingSends.set(name, q); return }
   if (tmux.hasSession(name)) {
     sessionReady.add(name)
-    try { await tmux.send(tag, name) } catch (e: any) {
-      if (e instanceof TmuxUncertainError) reportUncertainSend(name, tag, e)
+    try { await tmux.send(tag, name, sc) } catch (e: any) {
+      if (e instanceof TmuxUncertainError) reportUncertainSend(name, tag, e, sc)
       else console.warn(`[hub] send fail ${name}: ${e.message}`)
     }
     return   // hub 重启前就在的老 session，claude 早就绪
   }
-  const q = pendingSends.get(name) ?? []; q.push(tag); pendingSends.set(name, q); await spawnSession(name, chatId)  // 全新（或 resume 绑定的记忆）
+  const q = pendingSends.get(name) ?? []; q.push({ tag, sc }); pendingSends.set(name, q); await spawnSession(name, chatId)  // 全新（或 resume 绑定的记忆）
 }
 
 /// 写进 tmux 的那一下结果不明（发出去了没拿到回执）：消息可能已经在输入框里，也可能没有，自动重发会发两遍。
 /// 记一行、给所有 app 发一帧 error（带 message_id），由她看一眼终端再决定要不要重发。
 /// 最坏要等多久才知道：见 perf/hub-实验日志.md「K1 第 4 步 · 审查 R1」
-function reportUncertainSend(name: string, tag: string, e: Error): void {
+/// A1 R5：带这一次发送自己的 app attempt（随发送上下文来），不按 latest 反查——被更新的一次顶掉的也带得上自己的编号
+function reportUncertainSend(name: string, tag: string, e: Error, sc?: SendCtx): void {
   const messageId = /message_id="([^"]*)"/.exec(tag)?.[1]
   console.warn(`[hub] send 结果不明 ${name}${messageId ? ` message_id=${messageId}` : ""}（不自动重发）: ${e.message.split("\n")[0]}`)
-  const frame = JSON.stringify({
+  const frame = JSON.stringify(uncertainSendFrame(name, tag, sc?.appAttempt))
+  for (const c of mpClients) { try { c.send(frame) } catch {} }
+}
+
+/// reportUncertainSend 的帧（A1 R4）：`uncertain: true` 跟核对失败后给旧版 app 的重复通知（legacyError，同一结果已经由 send_status 送到）
+/// 区分开；带上这次发送的 app attempt（app 据此给那一次出「不确定」回执）。
+/// A1 R5：分类标记只加在带 attempt 的请求的帧上，旧 app 收到的帧跟改动前逐字相同
+export function uncertainSendFrame(name: string, tag: string, attempt?: string): Record<string, unknown> {
+  const messageId = /message_id="([^"]*)"/.exec(tag)?.[1]
+  return withAttempt({
     type: "error",
     ...(messageId ? { message_id: messageId } : {}),
     session_name: name,
+    ...(attempt !== undefined ? { uncertain: true } : {}),
     reason: `tmux 卡住了，这条消息不确定有没有送进 ${name}（没有自动重发，看一眼终端再决定要不要重发）`,
-  })
-  for (const c of mpClients) { try { c.send(frame) } catch {} }
+  }, attempt)
+}
+
+/// 对一条 send 的直接回话（A1 R4：带回 app 给这一次的 attempt，没带就跟原来逐字相同）
+export function sendAckFrame(messageId: unknown, attempt?: string): Record<string, unknown> {
+  return withAttempt({ type: "ack", message_id: messageId }, attempt)
+}
+
+export function sendErrorFrame(messageId: unknown, reason: string, attempt?: string): Record<string, unknown> {
+  return withAttempt({ type: "error", message_id: messageId, reason }, attempt)
+}
+
+/// 收下的一条 app send：目标会话、组好的 channel 标签、这一次发送的上下文、被接受的重发
+export interface AdmittedSend { session: string; tag: string; sc: SendCtx; retryOp?: ActiveOp }
+let appSendSeq = 0
+
+/// app 的 send 帧（WS send 分支的前半段）：重发准入 → 定这一次发送的身份 → 附件落盘 / 组帧 → 登记。
+/// 身份是 hub 内部序号（A1 R5，不用毫秒 ts：同一毫秒的两次发送也分得开）；app attempt 跟它一起定下、之后不变。
+/// 重发不接受 / 预处理失败：已经回过话，返回 undefined
+export function admitAppSend(msg: any, reply: (frame: object) => void): AdmittedSend | undefined {
+  // L2：per-session 路由。缺省字段 fallback 默认 mp-cc 兼容旧 MP
+  const session = typeof msg.session_name === "string" && msg.session_name ? msg.session_name : TMUX_SESSION
+  const appAttempt = appAttemptOf(msg.attempt)   // A1 R4：app 给这一次发送的编号，结果里原样带回
+  // K1 第 4b 步：app 对没送达的消息重发（同 message_id + retry:true）。只接受 hub 记为 failed 且 retryable 的；
+  // 其余（送达了 / 还在核对 / 没记录 / 会话改走 stream / 正忙）不发，回当前状态，防重复
+  let retryOp: ActiveOp | undefined
+  if (msg.retry === true && typeof msg.message_id === "string") {
+    const r = sendStatusBook.acceptRetry(msg.message_id, String(msg.chat_id ?? ""), session, streamRunner.has(session) || transportOf(session) === "stream", appAttempt)
+    if (!r.accepted) {
+      console.log(`[hub] retry 不接受 ${msg.message_id}（${r.frame.status}）`)
+      const frame: SendStatusFrame = withAttempt({ type: "send_status" as const, chat_id: String(msg.chat_id ?? ""), message_id: msg.message_id, session_name: session, ...r.frame }, appAttempt)
+      reply(frame)
+      return undefined
+    }
+    sendTracker.armRetry(r.op)
+    retryOp = r.op
+    console.log(`[hub] retry 接受 ${msg.message_id} → ${session}`)
+  }
+  const sc: SendCtx = { key: `send-${++appSendSeq}`, appAttempt }
+  try {
+    const ts = new Date().toISOString()
+    // C2：susu 发来的图/文件先落盘 mp-inbox，channel 带路径让 CC Read/处理
+    const imgPaths = Array.isArray(msg.images) && msg.images.length > 0
+      ? saveInboundImages(msg.chat_id, msg.images) : []
+    const filePaths = Array.isArray(msg.files) && msg.files.length > 0
+      ? saveInboundFiles(msg.chat_id, msg.files) : []
+    const userReplyTo = typeof msg.reply_to === "string" ? msg.reply_to : undefined
+    const tag = buildChannelTag(msg as MPMessage, ts, [...imgPaths, ...filePaths], userReplyTo, replyViaTextFor(session))
+    // 这是这个 message_id 的第几次发送（重新生成 / 重发）：更早那次还没出的结果不再发给 app
+    if (typeof msg.message_id === "string") sendStatusBook.attemptStarted(msg.message_id, sc.key, retryOp !== undefined)
+    return { session, tag, sc, retryOp }
+  } catch (err: any) {
+    failAppSend(msg, { sc, retryOp }, err, reply)
+    return undefined
+  }
+}
+
+/// 收下之后没发出去：被接受的重发写回终态（结束准入时拿到的那个 op，审查 R1-8 / A1 R5），回这一次的直接 error
+export function failAppSend(msg: any, a: { sc: SendCtx; retryOp?: ActiveOp }, err: any, reply: (frame: object) => void): void {
+  if (a.retryOp) sendTracker.abortRetry(a.retryOp, `重发没发出去：${err?.message}`)
+  reply(sendErrorFrame(msg.message_id, `tmux: ${err?.message}`, a.sc.appAttempt))
 }
 
 export function listSessions(): string[] {
@@ -1659,7 +1733,7 @@ function onStreamReady(name: string, sid: string): void {
   if (bound && sid && bound.claudeSessionId !== sid) console.warn(`[hub] stream ${name} init sid=${sid.slice(0, 8)} ≠ 绑定 ${bound.claudeSessionId.slice(0, 8)}`)
   const queued = pendingSends.get(name)
   pendingSends.delete(name)
-  for (const tag of queued ?? []) tmux.send(tag, name).catch((e: any) => console.warn(`[hub] stream flush fail ${name}: ${e?.message}`))
+  for (const q of queued ?? []) tmux.send(q.tag, name, q.sc).catch((e: any) => console.warn(`[hub] stream flush fail ${name}: ${e?.message}`))
   console.log(`[hub] stream ready ${name} sid=${sid.slice(0, 8)}${queued?.length ? ` → flushed ${queued.length}` : ""}`)
 }
 
@@ -4232,51 +4306,22 @@ export function startHub(): WebSocketServer {
             if (reasons.length) console.warn(`[hub] ${probeTs()} SLOW terminal ${report.totalMs}ms ${report.session} from ${remote}: ${reasons.join("；")}`)
           }
         } else if (msg.type === "send") {
-          // L2：per-session 路由。缺省字段 fallback 默认 mp-cc 兼容旧 MP
-          const targetSession = typeof msg.session_name === "string" && msg.session_name
-            ? msg.session_name
-            : TMUX_SESSION
-          // K1 第 4b 步：app 对没送达的消息重发（同 message_id + retry:true）。只接受 hub 记为 failed 且 retryable 的；
-          // 其余（送达了 / 还在核对 / 没记录 / 会话改走 stream / 正忙）不发，回当前状态，防重复
-          let retryAccepted = false
-          if (msg.retry === true && typeof msg.message_id === "string") {
-            const r = sendStatusBook.acceptRetry(msg.message_id, String(msg.chat_id ?? ""), targetSession, streamRunner.has(targetSession) || transportOf(targetSession) === "stream")
-            if (!r.accepted) {
-              console.log(`[hub] retry 不接受 ${msg.message_id}（${r.frame.status}）`)
-              const frame: SendStatusFrame = { type: "send_status", chat_id: String(msg.chat_id ?? ""), message_id: msg.message_id, session_name: targetSession, ...r.frame }
-              ws.send(JSON.stringify(frame))
-              return
-            }
-            sendTracker.armRetry(r.op)
-            retryAccepted = true
-            console.log(`[hub] retry 接受 ${msg.message_id} → ${targetSession}`)
-          }
+          // 准入 / 组帧 / 登记（admitAppSend）：重发不接受、预处理失败都已经回过话
+          const reply = (f: object) => ws.send(JSON.stringify(f))
+          const admitted = admitAppSend(msg, reply)
+          if (!admitted) return
+          const targetSession = admitted.session
           try {
-            const ts = new Date().toISOString()
-            // C2：susu 发来的图/文件先落盘 mp-inbox，channel 带路径让 CC Read/处理
-            const imgPaths = Array.isArray(msg.images) && msg.images.length > 0
-              ? saveInboundImages(msg.chat_id, msg.images) : []
-            const filePaths = Array.isArray(msg.files) && msg.files.length > 0
-              ? saveInboundFiles(msg.chat_id, msg.files) : []
-            const userReplyTo = typeof (msg as any).reply_to === "string" ? (msg as any).reply_to : undefined
-            const tag = buildChannelTag(msg as MPMessage, ts, [...imgPaths, ...filePaths], userReplyTo, replyViaTextFor(targetSession))
-            // 这是这个 message_id 的第几次发送（重新生成 / 重发）：更早那次还没出的结果不再发给 app
-            if (typeof msg.message_id === "string") sendStatusBook.attemptStarted(msg.message_id, ts, retryAccepted)
             // 思考强度（effort.ts）：记下想要的档位；会话跑着且档位不同 → claude 先发 /effort，codex 用同一 id 重启
-            const restarting = sendWithEffort(targetSession, tag, msg.chat_id, (msg as any).effort)
+            const restarting = sendWithEffort(targetSession, admitted.tag, msg.chat_id, (msg as any).effort, admitted.sc)
             if (restarting) await restarting
             recordUserActivity(targetSession, msg.chat_id)   // nudge：记 susu 活跃，重置静默计时
             streamLastInbound.set(targetSession, { chatId: msg.chat_id, messageId: msg.message_id })
             onLaPhaseEvent(targetSession, { kind: "send" })   // M4a：新一轮 → working（新 run_id / since_unix）
             console.log(`[hub] send → tmux:${targetSession} chat_id=${msg.chat_id?.slice(0, 8)} ${msg.content?.slice(0, 50)}`)
-            ws.send(JSON.stringify({ type: "ack", message_id: msg.message_id }))
+            ws.send(JSON.stringify(sendAckFrame(msg.message_id, admitted.sc.appAttempt)))
           } catch (err: any) {
-            if (retryAccepted) sendTracker.abortRetry(msg.message_id, `重发没发出去：${err.message}`)   // 被接受的重发每条出口都写回终态（审查 R1-8）
-            ws.send(JSON.stringify({
-              type: "error",
-              message_id: msg.message_id,
-              reason: `tmux: ${err.message}`,
-            }))
+            failAppSend(msg, admitted, err, reply)   // 被接受的重发每条出口都写回终态（审查 R1-8）
           }
         } else if (msg.type === "spawn_cc") {
           const sessionName = typeof msg.session_name === "string" ? msg.session_name : ""

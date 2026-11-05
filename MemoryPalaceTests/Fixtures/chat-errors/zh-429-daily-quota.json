@@ -1,0 +1,7 @@
+{
+  "source": "未实测：按官方文档 / 公开 issue 里的报错形状还原，T9 拿到原文后替换",
+  "status": 429,
+  "headers": {},
+  "stream": false,
+  "body": "{\"error\":{\"message\":\"今日额度已用完，请明天再试\"}}"
+}

@@ -23,6 +23,13 @@ enum PushIdentityWriter {
     // MARK: - Paths
 
     private static var rootURL: URL? {
+        // XCTest 宿主不访问产品与推送扩展共用的 App Group。
+        if TestHostIsolation.active {
+            guard let home = TestHostIsolation.home else { return nil }
+            let dir = home.appendingPathComponent("push-identity", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            return dir
+        }
         guard let base = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId) else {
             // App Group 没配 → 静默；NSE 也读不到 → 自然 fallback hub 默认 title
             return nil

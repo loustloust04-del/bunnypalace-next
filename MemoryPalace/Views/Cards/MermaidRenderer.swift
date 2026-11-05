@@ -84,8 +84,8 @@ final class MermaidRenderer: NSObject, WKNavigationDelegate {
     // MARK: - 缓存
 
     static var cacheDir: URL {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MemoryPalace/mermaid-thumbs", isDirectory: true)
+        let dir = AppPaths.checked(AppPaths.caches
+            .appendingPathComponent("MemoryPalace/mermaid-thumbs", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -96,9 +96,9 @@ final class MermaidRenderer: NSObject, WKNavigationDelegate {
     }
 
     static func cached(key: String) -> Rendered? {
-        let png = cacheDir.appendingPathComponent("\(key).png")
-        let svg = cacheDir.appendingPathComponent("\(key).svg")
-        let json = cacheDir.appendingPathComponent("\(key).json")
+        let png = AppPaths.checked(cacheDir.appendingPathComponent("\(key).png"))
+        let svg = AppPaths.checked(cacheDir.appendingPathComponent("\(key).svg"))
+        let json = AppPaths.checked(cacheDir.appendingPathComponent("\(key).json"))
         guard FileManager.default.fileExists(atPath: png.path), FileManager.default.fileExists(atPath: svg.path),
               let data = try? Data(contentsOf: json), let meta = try? JSONDecoder().decode(Meta.self, from: data) else { return nil }
         return Rendered(png: png, svg: svg, width: meta.width, height: meta.height, type: meta.type)
@@ -273,9 +273,9 @@ final class MermaidRenderer: NSObject, WKNavigationDelegate {
         guard let png = Self.pngData(image) else { return .failed("截图失败") }
 
         let key = job.request.key
-        let pngURL = Self.cacheDir.appendingPathComponent("\(key).png")
-        let svgURL = Self.cacheDir.appendingPathComponent("\(key).svg")
-        let jsonURL = Self.cacheDir.appendingPathComponent("\(key).json")
+        let pngURL = AppPaths.checked(Self.cacheDir.appendingPathComponent("\(key).png"))
+        let svgURL = AppPaths.checked(Self.cacheDir.appendingPathComponent("\(key).svg"))
+        let jsonURL = AppPaths.checked(Self.cacheDir.appendingPathComponent("\(key).json"))
         do {
             try png.write(to: pngURL, options: .atomic)
             try Data(svg.utf8).write(to: svgURL, options: .atomic)

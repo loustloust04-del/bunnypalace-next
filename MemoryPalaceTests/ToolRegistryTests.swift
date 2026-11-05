@@ -134,6 +134,14 @@ final class ToolRegistryTests: XCTestCase {
                        "没 defer 时元工具跟着收起来的内建工具走")
         XCTAssertEqual(ToolRegistry.availability(of: MetaTools.searchName, .init(family: .openAI, deferMCP: true)), true)
 
+        // #093 工具抽屉：关了 → 拒；收起 → 照样能用
+        var drawer = ToolDrawerState.defaults
+        drawer.set(.off, for: AskUserTool.toolName, profileId: nil)
+        drawer.set(.tucked, for: DiceTool.toolName, profileId: nil)
+        let drawerCtx = ToolGateContext(family: .openAI, deferMCP: false, drawer: drawer)
+        XCTAssertEqual(ToolRegistry.availability(of: AskUserTool.toolName, drawerCtx), false, "抽屉里关了直接叫也要拒")
+        XCTAssertEqual(ToolRegistry.availability(of: DiceTool.toolName, drawerCtx), true)
+
         PermissionCenter.setLevel(.notAllowed, for: .toolsMaster)
         XCTAssertEqual(ToolRegistry.availability(of: AskUserTool.toolName, ctx), false, "工具总开关关了全拒")
     }
@@ -154,10 +162,10 @@ final class ToolRegistryTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: URL(fileURLWithPath: "/tmp/tools-schema.json"))
         #if PERSONAL_APPS
-        XCTAssertEqual(ToolRegistry.all.count, 40)   // + remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；+ death_scale（死亡天平，按楼层门控）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
+        XCTAssertEqual(ToolRegistry.all.count, 42)   // + suggest_wiki_direction（C2/C3 v2 第 4 段）；+ pending_notes（记忆 v5 待续）；+ remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；+ death_scale（死亡天平，按楼层门控）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
         #else
-        XCTAssertEqual(ToolRegistry.all.count, 39)   // + remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
+        XCTAssertEqual(ToolRegistry.all.count, 41)   // + suggest_wiki_direction（C2/C3 v2 第 4 段）；+ pending_notes（记忆 v5 待续）；+ remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
         #endif
-        XCTAssertEqual(tools.count, 39)   // 导出不含私有工具
+        XCTAssertEqual(tools.count, 41)   // 导出不含私有工具
     }
 }

@@ -159,6 +159,26 @@ enum ToolReplay {
         return textFallback(ordered)
     }
 
+    /// #093：某条回复里调过「这一轮调不到」的工具（不在工具清单、也不在〔更多工具〕：抽屉 / 权限关了的）→ 只这条退纯文字。
+    /// 不然 wireCall 看见 tools 里有 tool_invoke 就会把它包成 tool_invoke 发出去，等于告诉模型「你之前经更多工具调过它」，模型再调只会拿到「没开」。
+    /// offered = 这一轮能调到的名字（清单里的 + 收起的 + defer 的 MCP 目录）；实发 prepareRouterPayload 和检查器 requestBody 都调它
+    static func offeredOnly(_ ordered: [PromptMessage], offered: Set<String>) -> [PromptMessage] {
+        guard ordered.contains(where: { !$0.toolRounds.isEmpty }) else { return ordered }
+        return textFallback(ordered) { message in
+            message.toolRounds.contains { round in round.calls.contains { !isOffered($0, offered: offered) } }
+        }
+    }
+
+    /// MCP 经 tool_invoke 调的，节点里存的是外层 tool_invoke（内建收起的存内层名字）：看包着的那个这一轮还调不调得到（astra #2）。
+    /// 参数读不出名字的不动（照旧当 tool_invoke 回放）
+    static func isOffered(_ call: ToolCallBlock, offered: Set<String>) -> Bool {
+        guard offered.contains(call.name) else { return false }
+        guard call.name == MetaTools.invokeName,
+              let args = (try? JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8))) as? [String: Any],
+              let inner = args["name"] as? String, !inner.isEmpty else { return true }
+        return MetaTools.resolve(inner, names: Array(offered)) != nil
+    }
+
     // MARK: - 线上
 
     /// ask_user 的 Q/A 已在 tool_result 里：紧随的用户消息里同一段去掉（整块相同删块；是最新一条时后面贴了写作风格，只去掉开头那段）

@@ -23,12 +23,11 @@ struct GeminiAdapter: CodingSessionAdapter {
     var dataRoots: [URL] { [root] }
 
     func listSessionFiles() -> [CodingSessionFileRef] {
-        let fm = FileManager.default
-        guard let slugs = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
+        guard let slugs = try? AppPaths.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return [] }
         var refs: [CodingSessionFileRef] = []
         for slug in slugs {
             let chats = slug.appendingPathComponent("chats", isDirectory: true)
-            for file in (try? fm.contentsOfDirectory(at: chats, includingPropertiesForKeys: CodingParse.refKeys)) ?? [] {
+            for file in (try? AppPaths.contentsOfDirectory(at: chats, includingPropertiesForKeys: CodingParse.refKeys)) ?? [] {
                 if let ref = fileRef(file) { refs.append(ref) }
             }
         }
@@ -107,7 +106,7 @@ struct GeminiAdapter: CodingSessionAdapter {
     /// …/tmp/<slug>/chats/session-*.jsonl → slug → projects.json 反查的项目路径
     private func cwd(for ref: CodingSessionFileRef) -> String {
         let slug = URL(fileURLWithPath: ref.filePath).deletingLastPathComponent().deletingLastPathComponent().lastPathComponent
-        guard let data = try? Data(contentsOf: projectsJSON),
+        guard let data = try? Data(contentsOf: AppPaths.checked(projectsJSON)),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? CodingParse.JSON,
               let projects = json["projects"] as? [String: Any] else { return "" }
         return projects.first { ($0.value as? String) == slug }?.key ?? ""

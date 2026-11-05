@@ -11,6 +11,11 @@ protocol MemoryStore {
              profileId: String, isUserExplicit: Bool, extractedBy: String,
              sourceConversationId: String?, sourceQuote: String?, sourceNodeId: String?,
              context: ModelContext) throws -> Memory
+    /// 同 `add` 但只插入不存：调用方把别的字段赋好后自己存一次（C2 写库，10-16 astra #5）
+    func insertUnsaved(content: String, category: String, keywords: [String],
+                       profileId: String, isUserExplicit: Bool, extractedBy: String,
+                       sourceConversationId: String?, sourceQuote: String?, sourceNodeId: String?,
+                       context: ModelContext) -> Memory
     func update(id: UUID, content: String, keywords: [String],
                 sourceQuote: String?, sourceNodeId: String?, context: ModelContext) throws
     func delete(id: UUID, context: ModelContext) throws
@@ -57,6 +62,17 @@ struct SwiftDataMemoryStore: MemoryStore {
              profileId: String, isUserExplicit: Bool, extractedBy: String,
              sourceConversationId: String?, sourceQuote: String?, sourceNodeId: String?,
              context: ModelContext) throws -> Memory {
+        let memory = insertUnsaved(content: content, category: category, keywords: keywords, profileId: profileId,
+                                   isUserExplicit: isUserExplicit, extractedBy: extractedBy, sourceConversationId: sourceConversationId,
+                                   sourceQuote: sourceQuote, sourceNodeId: sourceNodeId, context: context)
+        try context.save()
+        return memory
+    }
+
+    func insertUnsaved(content: String, category: String, keywords: [String],
+                       profileId: String, isUserExplicit: Bool, extractedBy: String,
+                       sourceConversationId: String?, sourceQuote: String?, sourceNodeId: String?,
+                       context: ModelContext) -> Memory {
         let memory = Memory(
             content: content,
             category: category,
@@ -69,7 +85,6 @@ struct SwiftDataMemoryStore: MemoryStore {
         memory.sourceQuote = sourceQuote
         memory.sourceNodeId = sourceNodeId
         context.insert(memory)
-        try context.save()
         return memory
     }
 
@@ -83,6 +98,7 @@ struct SwiftDataMemoryStore: MemoryStore {
         memory.keywords = keywords
         memory.tokenCount = Memory.estimateTokens(content)
         memory.updatedAt = Date()
+        memory.userEditedAt = memory.updatedAt   // 只有召回卡片 / mac 条目区两个界面在调 = 人手改的
         // 出处只在有新校验通过的 quote 时覆盖（nil = 保留原始出处不动）
         if let sourceQuote {
             memory.sourceQuote = sourceQuote
@@ -244,10 +260,6 @@ struct DecayEngine {
             guard !memory.isUserExplicit else { continue }
             memory.decayWeight = effectiveWeight(memory)
             memory.lastAccessedAt = Date()
-            // 检查 validUntil
-            if let until = memory.validUntil, Date() > until {
-                memory.decayWeight = min(memory.decayWeight, 0.05)
-            }
         }
     }
 
@@ -350,22 +362,6 @@ enum MemoryFlags {
         d.set(true, forKey: sentinel)
     }
 
-    /// 修复第一刀·刀3：画像注入与做梦解绑。新 key 没写过时抄做梦开关当前值（升级后行为不变），只跑一次。
-    static func migrateProfileInjectionSplitIfNeeded() {
-        let d = UserDefaults.standard
-        let sentinel = "mem_profile_inject_split_v1"
-        guard !d.bool(forKey: sentinel) else { return }
-        if d.object(forKey: "mem_inject_profile") == nil {
-            d.set(d.bool(forKey: "mem_content_profile"), forKey: "mem_inject_profile")
-        }
-        d.set(true, forKey: sentinel)
-    }
-
-    /// 画像注入（设置-记忆 ④注入）。受总开关连坐；与做梦（mem_content_profile）互不影响。
-    static var profileInjectionEnabled: Bool {
-        masterEnabled && UserDefaults.standard.bool(forKey: "mem_inject_profile")
-    }
-
     /// 记忆系统总开关（设置-记忆）。关 = 不注入不提取不强化，数据不动。
     static var masterEnabled: Bool {
         (UserDefaults.standard.object(forKey: "mem_master") as? Bool) ?? true
@@ -381,12 +377,18 @@ enum MemoryFlags {
         UserDefaults.standard.bool(forKey: "mem_extract_firstperson")
     }
 
-    /// 上下文总结开关（设置-记忆-内容层）。默认开；受 mem_master 连坐。
-    /// 关 = 不自动压缩、不注入、历史窗口不锚定（退滑动窗）；已有摘要文件保留不删。
+    /// A2 上下文摘要写不写（设置-记忆-写入 A2）。默认开；受 mem_master 连坐。v5 起只管写：
+    /// 注入和历史窗口锚定看【开窗口】A2 那一勾（`contextSummaryInjected`）；已有摘要文件保留不删。
     /// fs 工具读记忆树（memory/）跟文件库开关走，不归这里管。
     static var contextSummaryEnabled: Bool {
         masterEnabled && ((UserDefaults.standard.object(forKey: "mem_content_summary") as? Bool) ?? true)
     }
+
+    /// A2 带不带进 prompt（【开窗口】A2）：关 = 不注入、历史窗口不锚定（退滑动窗）
+    static var contextSummaryInjected: Bool { MemoryOpenWindow.injects(.a2) }
+
+    /// A3 窗口总结写不写（v5 拆开；没写过跟老键）
+    static var windowSummaryEnabled: Bool { MemoryWriterSettings.writes(.a3) }
 
     /// 做梦毕业开关（key 沿用 mem_supersede_soft）：开 = 做梦后把消费碎片标失效。
     /// 修复第一刀起只管毕业——删除一律软失效，不再看任何开关。
@@ -405,13 +407,6 @@ enum MemoryFlags {
         (UserDefaults.standard.object(forKey: "mem_content_facts") as? Bool) ?? true
     }
 
-    /// MV2 提取间隔（轮次）：每 N 轮 onComplete 才跑一次 AUDN 提取。默认 3（粟粟批），
-    /// defaults write mem_extract_interval 1 退回 MV0 每轮提取。首轮必跑由 ExtractScheduler 保证。
-    static var extractInterval: Int {
-        let v = UserDefaults.standard.integer(forKey: "mem_extract_interval")
-        return v > 0 ? v : 3
-    }
-
     // 第二刀：AI 自己的记忆（memory/self/）几个可调限制——设置 → 记忆 → 高级；默认值粟粟 10-03 批
     /// 每轮常驻全文的「最近几条」（五级的另算，全部全文）
     static var selfRecentCount: Int { positive("mem_self_recent_count", 5) }
@@ -425,24 +420,6 @@ enum MemoryFlags {
     private static func positive(_ key: String, _ fallback: Int) -> Int {
         let v = UserDefaults.standard.integer(forKey: key)
         return v > 0 ? v : fallback
-    }
-}
-
-// MARK: - MV2 提取调度器
-
-/// 提取间隔化的纯决策函数（CV 字段持有 counter+hasEverRun，调用 tick 拿决策）。
-/// 抽出来是为了可测——CV 实例字段没法直接 XCTest。
-enum ExtractScheduler {
-    /// 计算本轮是否触发提取 + 更新后的 counter。
-    /// - counter: 自上次实际提取以来累积的"想触发"次数
-    /// - interval: 间隔轮次（<1 当 1 处理）
-    /// - hasEverRun: 本 session 是否已触发过提取（false=首轮，强制 run）
-    static func tick(counter: Int, interval: Int, hasEverRun: Bool) -> (shouldRun: Bool, newCounter: Int) {
-        let interval = max(1, interval)
-        if !hasEverRun { return (true, 0) }
-        let next = counter + 1
-        if next >= interval { return (true, 0) }
-        return (false, next)
     }
 }
 
@@ -477,7 +454,7 @@ protocol MemoryRetriever {
     func retrieve(_ memories: [Memory], recent: [String]) -> [ScoredMemory]
 }
 
-/// 常驻人格层。keyword 模式=手动/关系/偏好按 score 排序；纯全量模式=仅手动钉住、保持 fetch 序（现状）
+/// 常驻人格层：只有钉住的（`isPersistent`，两种模式一样），按创建时间排
 struct PersistentRetriever: MemoryRetriever {
     let explicitOnly: Bool
     var id: String { "persistent" }
@@ -493,8 +470,202 @@ struct PersistentRetriever: MemoryRetriever {
     }
 }
 
-/// 关键词检索层（M2 起 BM25 化，对齐 paramecium 的 jieba BM25）：
-/// NLTokenizer 分词建词袋，标准 BM25 打分。命中语义不变（分>0 = 提到才注），排序更聪明（稀有词 > 烂大街词）。
+struct MemoryRetrievalDocument: Sendable {
+    let id: UUID
+    let profileId: String
+    let content: String
+    let keywords: [String]
+    var embeddingData: Data?
+    var embeddingRevision: Int?
+
+    init(id: UUID, profileId: String = "", content: String, keywords: [String], embeddingData: Data? = nil, embeddingRevision: Int? = nil) {
+        self.id = id
+        self.profileId = profileId
+        self.content = content
+        self.keywords = keywords
+        self.embeddingData = embeddingData
+        self.embeddingRevision = embeddingRevision
+    }
+
+    init(_ memory: Memory) {
+        self.init(id: memory.id, profileId: memory.profileId, content: memory.content, keywords: memory.keywords,
+                  embeddingData: memory.embeddingData, embeddingRevision: memory.embeddingRevision)
+    }
+
+    func hasValidVector(revision: Int) -> Bool {
+        embeddingRevision == revision && embeddingData.map {
+            !$0.isEmpty && $0.count.isMultiple(of: MemoryLayout<Float>.stride)
+        } == true
+    }
+}
+
+enum MemoryBM25 {
+    static func tokens(_ text: String) -> [String] {
+        let text = SearchTextSegmenter.normalized(text)
+        var words: [String] = []
+        var previous: Unicode.Scalar?
+        var needsWordTokenizer = false
+        // 汉字取相邻双字，不依赖词典切专名；不生成单字，也不跨空格、标点拼接。
+        for scalar in text.unicodeScalars {
+            if scalar.properties.isIdeographic {
+                if let previous {
+                    var pair = String(previous)
+                    pair.unicodeScalars.append(scalar)
+                    words.append(pair)
+                }
+                previous = scalar
+            } else {
+                previous = nil
+                if !needsWordTokenizer && (scalar.properties.isAlphabetic || scalar.properties.numericType != nil) {
+                    needsWordTokenizer = true
+                }
+            }
+        }
+        guard needsWordTokenizer else { return words }
+        let tokenizer = NLTokenizer(unit: .word)
+        tokenizer.string = text
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+            let word = text[range]
+            if word.count >= 2 && !word.unicodeScalars.allSatisfy({ $0.properties.isIdeographic }) {
+                words.append(String(word))
+            }
+            return true
+        }
+        return words
+    }
+
+    static func document(content: String, keywords: [String]) -> [String] {
+        let keys = keywords.flatMap { tokens($0) }
+        return tokens(content) + keys + keys
+    }
+
+    static func scores(documents: [[String]], query: String, cancel: CatalogCancel? = nil) -> [Double] {
+        guard !documents.isEmpty else { return [] }
+        var groups: [(terms: Set<String>, requiresAll: Bool, dropsCommon: Bool)] = []
+        for segment in SearchTextSegmenter.catalogTerms([query]) {
+            let han = segment.unicodeScalars.allSatisfy { $0.properties.isIdeographic }
+            let terms: Set<String> = han ? Set(tokens(segment)) : (segment.count >= 2 ? [segment] : [])
+            guard !terms.isEmpty else { continue }
+            groups.append((terms, han && (3...6).contains(segment.count),
+                           han && segment.count >= 7 && documents.count >= 20))
+        }
+        guard !groups.isEmpty else { return Array(repeating: 0, count: documents.count) }
+        let k1 = 1.2
+        let b = 0.75
+        let n = Double(documents.count)
+        var df: [String: Int] = [:]
+        for doc in documents {
+            if cancel?.isCancelled == true { return [] }
+            for term in Set(doc) { df[term, default: 0] += 1 }
+        }
+        for index in groups.indices where groups[index].dropsCommon {
+            groups[index].terms = groups[index].terms.filter { Double(df[$0, default: 0]) <= n * 0.5 }
+        }
+        groups.removeAll { $0.terms.isEmpty }
+        guard !groups.isEmpty else { return Array(repeating: 0, count: documents.count) }
+        let avgLen = max(1.0, Double(documents.reduce(0) { $0 + $1.count }) / n)
+        var scores: [Double] = []
+        scores.reserveCapacity(documents.count)
+        var tf: [String: Int] = [:]
+        var matchedTerms = Set<String>()
+        for doc in documents {
+            if cancel?.isCancelled == true { return [] }
+            tf.removeAll(keepingCapacity: true)
+            matchedTerms.removeAll(keepingCapacity: true)
+            for term in doc { tf[term, default: 0] += 1 }
+            for group in groups {
+                if group.requiresAll && !group.terms.allSatisfy({ tf[$0] != nil }) { continue }
+                for term in group.terms where tf[term] != nil { matchedTerms.insert(term) }
+            }
+            var score = 0.0
+            for term in matchedTerms {
+                guard let f = tf[term], let d = df[term] else { continue }
+                let idf = log(1 + (n - Double(d) + 0.5) / (Double(d) + 0.5))
+                let freq = Double(f)
+                score += idf * (freq * (k1 + 1)) / (freq + k1 * (1 - b + b * Double(doc.count) / avgLen))
+            }
+            scores.append(score)
+        }
+        return scores
+    }
+}
+
+enum MemoryRankFusion {
+    static func fuse<Key: Hashable>(_ lists: [[Key]], cancel: CatalogCancel? = nil) -> [Key] {
+        var scores: [Key: Double] = [:]
+        var firstSeen: [Key: Int] = [:]
+        for list in lists {
+            var seen = Set<Key>()
+            for (rank, id) in list.enumerated() where seen.insert(id).inserted {
+                if cancel?.isCancelled == true { return [] }
+                scores[id, default: 0] += 1.0 / Double(61 + rank)
+                if firstSeen[id] == nil { firstSeen[id] = firstSeen.count }
+            }
+        }
+        if cancel?.isCancelled == true { return [] }
+        return scores.sorted {
+            $0.value != $1.value ? $0.value > $1.value : firstSeen[$0.key]! < firstSeen[$1.key]!
+        }.map(\.key)
+    }
+}
+
+enum MemoryRetrieval {
+    struct Result: Sendable {
+        let ids: [UUID]
+        let vectorStatus: String
+        let failedCount: Int
+        let validVectorCount: Int
+    }
+
+    static func search(query: String, documents: [MemoryRetrievalDocument],
+                       embedder: MemoryEmbedding = AppleMemoryEmbedder.shared, cancel: CatalogCancel? = nil) -> Result {
+        func cancelled() -> Result { Result(ids: [], vectorStatus: "已取消", failedCount: 0, validVectorCount: 0) }
+        var seen = Set<UUID>()
+        var unique: [MemoryRetrievalDocument] = []
+        var documentsForScoring: [[String]] = []
+        for document in documents where seen.insert(document.id).inserted {
+            guard cancel?.isCancelled != true else { return cancelled() }
+            unique.append(document)
+            documentsForScoring.append(MemoryBM25.document(content: document.content, keywords: document.keywords))
+        }
+        let scores = MemoryBM25.scores(documents: documentsForScoring, query: query, cancel: cancel)
+        guard cancel?.isCancelled != true else { return cancelled() }
+        let keywordIds = unique.indices.filter { scores[$0] > 0 }.sorted {
+            scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1
+        }.map { unique[$0].id }
+        let validCount = unique.reduce(0) { $0 + ($1.hasValidVector(revision: embedder.revision) ? 1 : 0) }
+        let failedCount = unique.count - validCount
+        guard cancel?.isCancelled != true else { return cancelled() }
+        guard embedder.isReady else {
+            return Result(ids: keywordIds, vectorStatus: "向量不可用（模型未就绪）",
+                          failedCount: failedCount, validVectorCount: validCount)
+        }
+        guard !unique.isEmpty else {
+            return Result(ids: [], vectorStatus: "向量命中 0 条", failedCount: 0, validVectorCount: 0)
+        }
+        let encoded = embedder.embed(query)
+        guard cancel?.isCancelled != true else { return cancelled() }
+        guard let vector = encoded else {
+            return Result(ids: keywordIds, vectorStatus: "向量不可用（查询编码失败）",
+                          failedCount: failedCount, validVectorCount: validCount)
+        }
+        guard cancel?.isCancelled != true else { return cancelled() }
+        guard validCount > 0 else {
+            return Result(ids: keywordIds, vectorStatus: "向量不可用（\(failedCount) 条没算出来）",
+                          failedCount: failedCount, validVectorCount: 0)
+        }
+        let ranked = VectorRetriever.rank(unique, query: vector, revision: embedder.revision, cancel: cancel)
+        guard cancel?.isCancelled != true else { return cancelled() }
+        let status = failedCount > 0
+            ? "向量部分不可用（\(failedCount) 条没算出来），命中 \(ranked.scores.count) 条"
+            : "向量命中 \(ranked.scores.count) 条"
+        return Result(ids: MemoryRankFusion.fuse([keywordIds, ranked.scores.map(\.id)], cancel: cancel),
+                      vectorStatus: status, failedCount: failedCount, validVectorCount: validCount)
+    }
+}
+
+/// 关键词检索复用共享 BM25：汉字段按相邻双字评分，短段须含齐，长段按当前候选的 df 抑制常见词。
+/// 关键词计两份；只有通过相同词面门槛的正分候选才参加排序。
 struct KeywordRetriever: MemoryRetriever {
     var id: String { "keyword" }
     var layer: MemoryLayer { .volatile }
@@ -504,41 +675,14 @@ struct KeywordRetriever: MemoryRetriever {
 
     init(excludePersistent: Bool = true) { self.excludePersistent = excludePersistent }
 
-    private let k1 = 1.2
-    private let b = 0.75
-
     func retrieve(_ memories: [Memory], recent: [String]) -> [ScoredMemory] {
         let candidates = excludePersistent ? memories.filter { !MemoryInjector.isPersistent($0) } : memories
-        guard !candidates.isEmpty else { return [] }
-        let queryTerms = Set(MemoryInjector.contentKeys(recent.joined(separator: "\n")).map { $0.lowercased() })
-        guard !queryTerms.isEmpty else { return [] }
-
-        // 词袋：content 分词 + 预存 keywords（提取时挑的词更可信，权重 ×2 计入词频）
-        let docs: [[String]] = candidates.map { m in
-            let terms = MemoryInjector.contentKeys(m.content).map { $0.lowercased() }
-            let keys = m.keywords.map { $0.lowercased() }
-            return terms + keys + keys
-        }
-
-        let n = Double(docs.count)
-        var df: [String: Int] = [:]
-        for doc in docs { for t in Set(doc) { df[t, default: 0] += 1 } }
-        let avgLen = max(1.0, Double(docs.reduce(0) { $0 + $1.count }) / n)
-
-        var scored: [ScoredMemory] = []
-        for (i, m) in candidates.enumerated() {
-            var tf: [String: Int] = [:]
-            for t in docs[i] { tf[t, default: 0] += 1 }
-            var score = 0.0
-            for t in queryTerms {
-                guard let f = tf[t], let d = df[t] else { continue }
-                let idf = log(1 + (n - Double(d) + 0.5) / (Double(d) + 0.5))
-                let freq = Double(f)
-                score += idf * (freq * (k1 + 1)) / (freq + k1 * (1 - b + b * Double(docs[i].count) / avgLen))
-            }
-            if score > 0 { scored.append(ScoredMemory(memory: m, score: score)) }
-        }
-        return scored.sorted { $0.score > $1.score }
+        let scores = MemoryBM25.scores(documents: candidates.map {
+            MemoryBM25.document(content: $0.content, keywords: $0.keywords)
+        }, query: recent.joined(separator: "\n"))
+        return candidates.indices.filter { scores[$0] > 0 }.sorted {
+            scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1
+        }.map { ScoredMemory(memory: candidates[$0], score: scores[$0]) }
     }
 }
 
@@ -573,28 +717,47 @@ struct VectorRetriever: MemoryRetriever {
             Self.lastDetail = "query embed 失败"
             return []
         }
-        let rev = embedder.revision
-
         let candidates = excludePersistent ? memories.filter { !MemoryInjector.isPersistent($0) } : memories
+        var lookup: [UUID: Memory] = [:]
+        var documents: [MemoryRetrievalDocument] = []
+        for memory in candidates where lookup[memory.id] == nil {
+            lookup[memory.id] = memory
+            documents.append(MemoryRetrievalDocument(memory))
+        }
+        let ranked = Self.rank(documents, query: query, revision: embedder.revision)
+        Self.lastDetail = ranked.detail
+        return ranked.scores.compactMap { hit in
+            lookup[hit.id].map { ScoredMemory(memory: $0, score: hit.score) }
+        }
+    }
+
+    static func rank(_ documents: [MemoryRetrievalDocument], query: [Float], revision: Int, cancel: CatalogCancel? = nil)
+        -> (scores: [(id: UUID, score: Double)], detail: String) {
+        // 两个调用入口均已按 UUID 去重，BM25 与向量不重复建立候选副本。
         var maxSim: Float = -1
-        let scored: [ScoredMemory] = candidates
-            .compactMap { m in
-                guard m.embeddingRevision == rev, let data = m.embeddingData else { return nil }
-                let sim = MemoryVector.dot(query, MemoryVector.floats(from: data))
-                maxSim = max(maxSim, sim)
-                guard sim >= Self.similarityThreshold else { return nil }
-                return ScoredMemory(memory: m, score: Double(sim))
+        var scores: [(index: Int, id: UUID, score: Double)] = []
+        for (index, document) in documents.enumerated() {
+            if cancel?.isCancelled == true { return ([], "已取消") }
+            guard document.hasValidVector(revision: revision), let data = document.embeddingData else { continue }
+            let similarity = MemoryVector.dot(query, MemoryVector.floats(from: data))
+            maxSim = max(maxSim, similarity)
+            if similarity >= similarityThreshold {
+                scores.append((index, document.id, Double(similarity)))
             }
-            .sorted { $0.score > $1.score }
-        let withVec = candidates.filter { $0.embeddingData != nil }.count
-        Self.lastDetail = "候选\(candidates.count)·带向量\(withVec)·最高相似\(maxSim < 0 ? "无" : String(format: "%.2f", maxSim))·阈值\(String(format: "%.2f", Self.similarityThreshold))"
-        return Array(scored.prefix(Self.topK))
+        }
+        if cancel?.isCancelled == true { return ([], "已取消") }
+        scores.sort { $0.score != $1.score ? $0.score > $1.score : $0.index < $1.index }
+        let withVec = documents.reduce(0) { $0 + ($1.embeddingData == nil ? 0 : 1) }
+        let detail = "候选\(documents.count)·带向量\(withVec)·最高相似\(maxSim < 0 ? "无" : String(format: "%.2f", maxSim))·阈值\(String(format: "%.2f", similarityThreshold))"
+        return (scores.prefix(topK).map { (id: $0.id, score: $0.score) }, detail)
     }
 }
 
 /// 全量兜底：填满剩余预算。excludePersistent 区分两种模式的候选集（现状语义）。
 /// 刀4：排序从衰减分改 createdAt 降序——①分数每轮微调=行序漂移毁缓存（Persistent 同款坑）
 /// ②超预算截断自然落在最老端（新的先装，钉住在 stable 层豁免），截断线移动才 miss 缓存。
+/// 审计台卡片 ⧫6：先按召回优先级（重要度，没定 = 3）高→低，同优先级再新→旧——装不下先丢重要度低的；
+/// 优先级只在她拖重要度时变，不逐轮漂移；全没定时和原来的顺序一样
 struct FullFallbackRetriever: MemoryRetriever {
     let excludePersistent: Bool   // true=keyword 模式（排除常驻层）；false=纯全量（排除手动钉住）
     var id: String { "fullFallback" }
@@ -605,7 +768,7 @@ struct FullFallbackRetriever: MemoryRetriever {
             ? memories.filter { !MemoryInjector.isPersistent($0) }
             : memories.filter { !$0.isUserExplicit }
         return candidates
-            .sorted { $0.createdAt > $1.createdAt }
+            .sorted { $0.recallPriority != $1.recallPriority ? $0.recallPriority > $1.recallPriority : $0.createdAt > $1.createdAt }
             .map { ScoredMemory(memory: $0, score: 1) }
     }
 }
@@ -613,6 +776,8 @@ struct FullFallbackRetriever: MemoryRetriever {
 // MARK: - Memory Injector
 
 struct MemoryInjector {
+    /// 目录模式尾巴的 recall 指路；这一轮 recall 没下发时组装层整句去掉（PromptAssembler.droppingOffToolMentions）
+    static let recallCatalogHint = "\n（想看完整内容用 recall 工具查）"
     /// 诊断日志去重（S1 预览高频重算会刷屏）
     fileprivate static var lastDiagLine = ""
 
@@ -685,31 +850,46 @@ struct MemoryInjector {
         let memories: [Memory]
         let selfMemory: SelfMemoryInjection.Built?
         let archiveBudget: Int
+        /// C 勾着时的 wiki 快照（根索引 + 触发词扫描用）；C 没勾 / 记忆关着 = nil
+        var wiki: WikiInjectionSnapshot? = nil
+    }
+
+    /// C 那一勾带哪些档案（plan-memory-c3-catalog 第六节）：她钉住的照带；其余只带碎片池里审计台点过「留下」的，
+    /// 没看过的、10 月前的旧原子档案都不带
+    static func isInjectable(_ m: Memory) -> Bool {
+        m.supersededAt == nil && (m.isUserExplicit || (m.isFragment && m.reviewedAt != nil))
     }
 
     /// 总开关关 = 全局不注入；开了再看对话级 memoryEnabled。
     /// 刀4：listActive 全量在场（未失效即注入）；第二刀 B3：AI 自己的记忆先装，档案用剩下的预算
     static func roundInputs(profileId: String, conversationMemoryEnabled: Bool,
-                            store: MemoryStore, context: ModelContext) -> RoundInputs {
+                            store: MemoryStore, context: ModelContext, wikiStore: WikiStore? = nil,
+                            warmedWiki: WikiInjectionCache.WarmedSnapshot? = nil,
+                            useCachedWiki: Bool = true) -> RoundInputs {
         let shouldInject = MemoryFlags.masterEnabled && conversationMemoryEnabled
+        let cOn = shouldInject && MemoryOpenWindow.isChecked(.c)
+        // v5【开窗口】：B4 / C 各一勾（默认开 = 今天）
         let memories: [Memory] = AirTimedSection.run("composePrompt.memory") {
-            shouldInject ? store.listActive(profileId: profileId, context: context) : []
+            cOn ? store.listActive(profileId: profileId, context: context).filter(isInjectable) : []
         }
+        let wiki = cOn ? (warmedWiki?.snapshot ?? (useCachedWiki
+            ? WikiInjectionCache.shared.snapshot(profileId: profileId, store: wikiStore) : nil)) : nil
         let selfMemory: SelfMemoryInjection.Built? = AirTimedSection.run("composePrompt.selfMemory") {
-            shouldInject
+            shouldInject && MemoryOpenWindow.isChecked(.b4)
                 ? SelfMemoryInjection.build(SelfMemoryStore.list(profileId: profileId),
                                             recentCount: MemoryFlags.selfRecentCount,
                                             budget: tokenBudget * MemoryFlags.selfBudgetPercent / 100)
                 : nil
         }
         return RoundInputs(memories: memories, selfMemory: selfMemory,
-                           archiveBudget: max(0, tokenBudget - (selfMemory?.tokens ?? 0)))
+                           archiveBudget: max(0, tokenBudget - (selfMemory?.tokens ?? 0)), wiki: wiki)
     }
 
     /// 拆层版本（cacheFriendly 用）：stable=常驻层（逐轮不变，可进缓存前缀），volatile=检索命中/兜底层（每轮可变）。
     /// 两段拼接 == buildInjection 输出，预算共享。
     /// M1 起为检索 pipeline：各检索器产候选 → stable 依序 / volatile 按 tier（同 tier 多路 RRF）→ 共享预算去重。
-    static func buildInjectionSplit(memories: [Memory], recentMessages: [String] = [], budget: Int = tokenBudget) -> (stable: String, volatile: String, hits: [InjectionHit]) {
+    static func buildInjectionSplit(memories: [Memory], recentMessages: [String] = [], budget: Int = tokenBudget,
+                                    now: Date = MemoryClock.now) -> (stable: String, volatile: String, hits: [InjectionHit]) {
         guard !memories.isEmpty else { return ("", "", []) }
 
         let retrievers = activeRetrievers()
@@ -720,26 +900,33 @@ struct MemoryInjector {
         var usedTokens = 0
         var injected = Set<UUID>()
         var hits: [InjectionHit] = []
+        var expiredPinned: [Memory] = []
 
         // 目录模式（SC-B3）：volatile 层换一行式目录，按目录行实际 token 计费（省 token 本体）
         let catalogMode = MemoryFlags.catalogInjection
         var catalogCount = 0
         var catalogSavedTokens = 0   // 全文 token - 目录行 token，CacheDiagLog 用
 
-        func tryAppend(_ m: Memory, to lines: inout [String], catalog: Bool = false, retriever: String, score: Double?) {
+        func tryAppend(_ m: Memory, to lines: inout [String], stable: Bool = false, catalog: Bool = false, retriever: String, score: Double?) {
             guard !injected.contains(m.id) else { return }
             let line: String
             let cost: Int
+            let validity = stable && m.isUserExplicit
+                ? m.validUntil.map { "（有效到 \(MemoryDay.key($0.addingTimeInterval(-1)))）" } ?? ""
+                : ""
             if catalog {
                 guard catalogCount < maxCatalogEntries else { return }
                 line = catalogLine(m)
             } else {
                 let label = categoryLabels[m.category] ?? m.category
-                line = "- \(m.content) [\(label)]"
+                line = "- \(m.content)\(validity) [\(label)]"
             }
-            cost = injectedCost(m, catalog: catalog)
+            let expired = !stable && WikiInjection.isExpired(m, now: now)
+            cost = injectedCost(m, catalog: catalog) + (validity.isEmpty ? 0 : Memory.estimateTokens(validity))
+                + (expired ? Memory.estimateTokens("（已过期）") : 0)
             guard usedTokens + cost <= budget else { return }
-            lines.append(line)
+            lines.append(expired ? line + "（已过期）" : line)
+            if stable, m.isUserExplicit, WikiInjection.isExpired(m, now: now) { expiredPinned.append(m) }
             usedTokens += cost
             injected.insert(m.id)
             hits.append(InjectionHit(
@@ -756,7 +943,17 @@ struct MemoryInjector {
         for r in retrievers where r.layer == .stable {
             let out = r.retrieve(memories, recent: recentMessages)
             contributions.append("\(r.id) \(out.count)")
-            for s in out { tryAppend(s.memory, to: &stableLines, retriever: r.id, score: s.score) }
+            for s in out { tryAppend(s.memory, to: &stableLines, stable: true, retriever: r.id, score: s.score) }
+        }
+        var expiredPinnedLines: [String] = []
+        let expiredPinnedTitle = "[已过期的钉住项]"
+        for m in expiredPinned {
+            let snippet = String(m.content.prefix(40)).replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
+            let line = "- \(snippet)（已过期）"
+            let cost = Memory.estimateTokens(line) + (expiredPinnedLines.isEmpty ? Memory.estimateTokens(expiredPinnedTitle + "\n") : 0)
+            guard usedTokens + cost <= budget else { continue }
+            expiredPinnedLines.append(line)
+            usedTokens += cost
         }
         // volatile 层：tier 升序；同 tier 单路直通，多路 RRF 融合（keyword+vector 双路召回）
         let volatileRetrievers = retrievers.filter { $0.layer == .volatile }
@@ -807,7 +1004,11 @@ struct MemoryInjector {
         // 目录尾 hint：只在 recall 工具真的可用时指路（关了不指模型去不存在的工具）
         var volatileText = volatileLines.joined(separator: "\n")
         if catalogMode && !volatileLines.isEmpty && RecallTool.enabled {
-            volatileText += "\n（想看完整内容用 recall 工具查）"
+            volatileText += Self.recallCatalogHint
+        }
+        if !expiredPinnedLines.isEmpty {
+            let expiredText = expiredPinnedTitle + "\n" + expiredPinnedLines.joined(separator: "\n")
+            volatileText = volatileText.isEmpty ? expiredText : expiredText + "\n\n" + volatileText
         }
 
         let result = (stable: stableLines.joined(separator: "\n"), volatile: volatileText, hits: hits)
@@ -820,83 +1021,22 @@ struct MemoryInjector {
             lastDiagLine = line
             CacheDiagLog.shared.log(line)
         }
-        #if DEBUG
-        // M1 回归探针：仅在 keyword/vector 都关（纯全量）且非目录模式时对照
-        // ——BM25 化/向量/目录行都是预期的行为变化，不是回归
-        let useKeyword = UserDefaults.standard.bool(forKey: "mem_inject_keyword")
-        let useVector = UserDefaults.standard.bool(forKey: "mem_inject_vector")
-        if !useKeyword && !useVector && !catalogMode {
-            let legacy = legacyBuildInjectionSplit(memories: memories, recentMessages: recentMessages, budget: budget)
-            if legacy.stable != result.stable || legacy.volatile != result.volatile {
-                print("[PROBE] ⚠️ M1 记忆回归不一致！legacy.stable=\(legacy.stable.count)字 new.stable=\(result.stable.count)字")
-                CacheDiagLog.shared.log("⚠️ M1 记忆回归不一致（检索 pipeline ≠ 旧实现），截图反馈给开发者")
-            }
-        }
-        #endif
         return result
     }
 
     /// RRF（Reciprocal Rank Fusion）：多路排序融合，score = Σ 1/(60+rank)。kiwi/paramecium 同款。
     static func rrfFuse(_ lists: [[ScoredMemory]]) -> [Memory] {
-        var scores: [UUID: Double] = [:]
         var lookup: [UUID: Memory] = [:]
-        var firstSeen: [UUID: Int] = [:]   // 平分时按首次出现序，保证确定性
-        var counter = 0
         for list in lists {
-            for (rank, s) in list.enumerated() {
-                scores[s.memory.id, default: 0] += 1.0 / Double(60 + rank + 1)
-                if lookup[s.memory.id] == nil {
-                    lookup[s.memory.id] = s.memory
-                    firstSeen[s.memory.id] = counter
-                    counter += 1
-                }
-            }
+            for hit in list where lookup[hit.memory.id] == nil { lookup[hit.memory.id] = hit.memory }
         }
-        return scores.sorted {
-            $0.value != $1.value ? $0.value > $1.value : (firstSeen[$0.key] ?? 0) < (firstSeen[$1.key] ?? 0)
-        }.compactMap { lookup[$0.key] }
+        return MemoryRankFusion.fuse(lists.map { $0.map { $0.memory.id } }).compactMap { lookup[$0] }
     }
 
-    #if DEBUG
-    /// M1 重构前的旧实现，只用于回归对照。pipeline 稳定后连同对照逻辑一起删。
-    private static func legacyBuildInjectionSplit(memories: [Memory], recentMessages: [String], budget: Int) -> (stable: String, volatile: String) {
-        let useKeyword = UserDefaults.standard.bool(forKey: "mem_inject_keyword")
-        let useFull = (UserDefaults.standard.object(forKey: "mem_inject_full") as? Bool) ?? true
 
-        var stableLines: [String] = []
-        var volatileLines: [String] = []
-        var usedTokens = 0
-        var injected = Set<UUID>()
-
-        func tryAppend(_ m: Memory, to lines: inout [String]) {
-            guard !injected.contains(m.id), usedTokens + m.tokenCount <= budget else { return }
-            let label = categoryLabels[m.category] ?? m.category
-            lines.append("- \(m.content) [\(label)]")
-            usedTokens += m.tokenCount
-            injected.insert(m.id)
-        }
-
-        if useKeyword {
-            for m in memories.filter(isPersistent).sorted(by: { score($0) > score($1) }) { tryAppend(m, to: &stableLines) }
-            let rest = memories.filter { !isPersistent($0) }
-            for m in rest.filter({ matchesKeyword($0, recentMessages) })
-                .sorted(by: { hitScore($0, recentMessages) > hitScore($1, recentMessages) }) { tryAppend(m, to: &volatileLines) }
-            if useFull {
-                for m in rest.filter({ !injected.contains($0.id) }).sorted(by: { score($0) > score($1) }) { tryAppend(m, to: &volatileLines) }
-            }
-        } else if useFull {
-            // 与新实现同步：常驻层按 createdAt 稳定排序（缓存前缀不许抖）
-            for m in memories.filter({ $0.isUserExplicit }).sorted(by: { $0.createdAt < $1.createdAt }) { tryAppend(m, to: &stableLines) }
-            for m in memories.filter({ !$0.isUserExplicit }).sorted(by: { score($0) > score($1) }) { tryAppend(m, to: &volatileLines) }
-        }
-
-        return (stableLines.joined(separator: "\n"), volatileLines.joined(separator: "\n"))
-    }
-    #endif
-
-    /// 常驻人格层判定：用户手动 或 关系/偏好类（AUDN 无 importance，用 category 替代）
-    fileprivate static func isPersistent(_ m: Memory) -> Bool {
-        m.isUserExplicit || m.category == "relationship" || m.category == "preference"
+    /// 常驻人格层判定：只有她亲手钉住的（C3 ② 起按类别（关系 / 偏好）自动常驻的那批停掉）
+    static func isPersistent(_ m: Memory) -> Bool {
+        m.isUserExplicit
     }
 
     /// keywords（空则 content 分词兜底）是否命中最近对话
@@ -915,17 +1055,9 @@ struct MemoryInjector {
         return Double(hits) * DecayEngine.effectiveWeight(m)
     }
 
-    /// keywords 为空时用 NLTokenizer 给 content 中文分词兜底（取 2 字以上的词）
+    /// keywords 为空时沿用共享词面 token 兜底；汉字用相邻双字，不生成单字。
     fileprivate static func contentKeys(_ content: String) -> [String] {
-        let tokenizer = NLTokenizer(unit: .word)
-        tokenizer.string = content
-        var words: [String] = []
-        tokenizer.enumerateTokens(in: content.startIndex..<content.endIndex) { range, _ in
-            let w = String(content[range])
-            if w.count >= 2 { words.append(w) }
-            return true
-        }
-        return words
+        MemoryBM25.tokens(content)
     }
 
     /// 拼接到 system prompt
@@ -962,6 +1094,60 @@ enum MemoryEmbeddingBackfill {
         set { lock.lock(); defer { lock.unlock() }; _inFlight = newValue }
     }
 
+    struct Result: Sendable {
+        let documents: [MemoryRetrievalDocument]
+        let failedCount: Int
+        let validVectorCount: Int
+    }
+
+    static func fill(_ documents: [MemoryRetrievalDocument], embedder: MemoryEmbedding, cancel: CatalogCancel? = nil) -> Result {
+        let revision = embedder.revision
+        let ready = embedder.isReady
+        var filled: [UUID: MemoryRetrievalDocument] = [:]
+        var results: [MemoryRetrievalDocument] = []
+        for document in documents {
+            guard cancel?.isCancelled != true else { break }
+            if let existing = filled[document.id] { results.append(existing); continue }
+            var result = document
+            if ready, !document.hasValidVector(revision: revision),
+               let vector = embedder.embed(document.content) {
+                result.embeddingData = MemoryVector.data(from: vector)
+                result.embeddingRevision = revision
+            }
+            guard cancel?.isCancelled != true else { break }
+            filled[document.id] = result
+            results.append(result)
+        }
+        let validCount = filled.values.reduce(0) { $0 + ($1.hasValidVector(revision: revision) ? 1 : 0) }
+        return Result(documents: results, failedCount: filled.count - validCount, validVectorCount: validCount)
+    }
+
+    /// 编码期间原记录可能已改字、移楼、撤销或删除；不把旧快照的向量写回。
+    @discardableResult
+    static func persist(_ documents: [MemoryRetrievalDocument], container: ModelContainer, revision: Int,
+                        isEligible: (Memory) -> Bool = { $0.supersededAt == nil }, cancel: CatalogCancel? = nil) throws -> [UUID] {
+        try cancel?.check()
+        var seen = Set<UUID>()
+        var written: [UUID] = []
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        for document in documents where seen.insert(document.id).inserted && document.hasValidVector(revision: revision) {
+            try cancel?.check()
+            let id = document.id
+            let descriptor = FetchDescriptor<Memory>(predicate: #Predicate { $0.id == id })
+            guard let row = try context.fetch(descriptor).first,
+                  row.content == document.content, row.profileId == document.profileId,
+                  isEligible(row) else { continue }
+            guard row.embeddingData != document.embeddingData || row.embeddingRevision != document.embeddingRevision else { continue }
+            row.embeddingData = document.embeddingData
+            row.embeddingRevision = document.embeddingRevision
+            written.append(id)
+        }
+        try cancel?.check()
+        if context.hasChanges { try context.save() }
+        return written
+    }
+
     /// 给缺向量（或 revision 过期）的记忆补算。fire-and-forget，无事可做时零开销。
     /// 注入 fetch 处每轮调一次：新提取的记忆下一轮就有向量。
     static func run(memories: [Memory], context: ModelContext) {
@@ -973,7 +1159,7 @@ enum MemoryEmbeddingBackfill {
         }
         guard !inFlight else { return }
         let rev = embedder.revision
-        let pending = memories.filter { $0.embeddingData == nil || $0.embeddingRevision != rev }
+        let pending = memories.filter { $0.supersededAt == nil && !MemoryRetrievalDocument($0).hasValidVector(revision: rev) }
         // M3 存量边扫描（每次启动一次）：M2 时期已 embed 但没建过边的
         if !edgesSweepDone {
             edgesSweepDone = true
@@ -986,35 +1172,29 @@ enum MemoryEmbeddingBackfill {
         }
         guard !pending.isEmpty else { return }
         inFlight = true
-        let items = pending.map { (id: $0.id, content: $0.content) }
+        let items = pending.map { MemoryRetrievalDocument($0) }
+        let container = context.container
 
         CacheDiagLog.shared.log("🧠 向量回填启动: \(items.count) 条待补")
         Task.detached(priority: .utility) {
-            var results: [(UUID, Data)] = []
-            for item in items {
-                if let v = AppleMemoryEmbedder.shared.embed(item.content) {
-                    results.append((item.id, MemoryVector.data(from: v)))
-                }
+            let result = fill(items, embedder: embedder)
+            let written: [UUID]
+            do {
+                written = try persist(result.documents, container: container, revision: rev)
+            } catch {
+                CacheDiagLog.shared.log("🧠 向量回填保存失败：\(error.localizedDescription)")
+                written = []
             }
-            let final = results
             await MainActor.run {
-                for (id, data) in final {
-                    let d = FetchDescriptor<Memory>(predicate: #Predicate<Memory> { $0.id == id })
-                    if let m = try? context.fetch(d).first {
-                        m.embeddingData = data
-                        m.embeddingRevision = rev
-                    }
-                }
-                try? context.save()
                 inFlight = false
                 // 成败都开口：失败数非零 = embed 在抛错，别再静默
-                CacheDiagLog.shared.log("🧠 向量回填完成: 成功 \(final.count) / 失败 \(items.count - final.count)")
-                // M3：新向量顺手建边
-                if !final.isEmpty {
-                    let profileId = pending.first?.profileId ?? ""
-                    if !profileId.isEmpty {
-                        MemoryGraph.linkEdges(newIds: final.map { $0.0 }, profileId: profileId, context: context)
-                    }
+                CacheDiagLog.shared.log("🧠 向量回填完成: 成功 \(result.validVectorCount) / 失败 \(result.failedCount)")
+                // M3：只给实际写回的新向量顺手建边，读取同样使用新 context。
+                let graphContext = ModelContext(container)
+                let writtenIds = Set(written)
+                let profiles = Dictionary(grouping: items.filter { writtenIds.contains($0.id) }, by: \.profileId)
+                for (profileId, documents) in profiles {
+                    MemoryGraph.linkEdges(newIds: documents.map(\.id), profileId: profileId, context: graphContext)
                 }
             }
         }
@@ -1066,54 +1246,10 @@ enum MemoryGraph {
     }
 }
 
-// MARK: - Memory Extractor (AUDN)
-
-enum MemoryAction {
-    case add(content: String, category: String, keywords: [String], quote: String?)
-    case update(id: UUID, content: String, keywords: [String], quote: String?)
-    case delete(id: UUID)
-}
+// MARK: - 记忆写手共用的小件（v5 C2 换掉了 AUDN 提取，旧的提示词 / 解析 / 执行已删）
 
 struct MemoryExtractor {
-    /// 第二刀 A2：人设本人视角（整段人设是「你是谁」，不是背景材料）；称呼用楼层真名，不出现「用户」「AI」；原话为主
-    static let extractionPrompt = """
-你是{{CHAR_NAME}}。下面是你的人设：
-{{SYSTEM_PROMPT}}
-
-现在不是在聊天。你在给自己整理关于{{USER_NAME}}的档案：读最近的对话，决定档案要不要加、改、删。
-
-## {{USER_NAME}}的画像（已凝成的整体认知）
-{{PROFILE}}
-
-## 现有档案
-{{MEMORIES}}
-
-## 规则
-1. 每条档案是一件独立的事（"喜欢暖色调"而不是"有各种审美偏好"）。
-2. 分类：preference（偏好）、fact（事实）、relationship（关系）、goal（目标/项目）、context（当前情境，有时效性）。
-3. 对每条新信息做一个判断：
-   - add: 全新的，现有档案没覆盖
-   - update: 现有档案要修正或补充——给出档案 ID
-   - delete: 现有档案被明确否定或过时——给出档案 ID
-   - 不操作: 已经覆盖，或者不值得记
-4. 只记{{USER_NAME}}明确说出或强烈暗示的。不要推断敏感信息。
-5. 用你自己的口吻写：「我」就是{{CHAR_NAME}}，称呼对方用「{{USER_NAME}}」。不要出现「用户」「AI」这两个词。
-6. 原话为主：每条档案里{{USER_NAME}}的原话占 30–50%（逐字，用「」括起来），你自己说过的原话约 30%（也用「」），你的概括不超过 40%。写成「{{USER_NAME}}说：「……」」这样，不要写成「{{USER_NAME}}提到……」的转述。quote 字段是给程序核对的出处，另外交；content 里照样要有原话，不能因为给了 quote 就把 content 写成转述。
-7. 需要时加时间限定（「{{USER_NAME}}最近在做…」）。
-8. 新旧矛盾时，delete 旧档案 + add 新版本。
-9. 不记：日常闲聊、一次性的问题、{{USER_NAME}}在问（而不是在说）的、同一轮里重复说的。
-10. 不记系统状态：报错 / 重试 / 网络 / 工具失败。随口的安抚客套（比如「多喝热水」）不是正式的决定或偏好。
-11. 对话明显是在编辑文件库文件（讨论 fs_ 操作或文件内容本身）时，输出空 actions。
-12. 画像或现有档案已经涵盖的别 add——哪怕措辞不同。细化或补充已有的，用 update 改写那一条。
-13. 剧情和真话分开：你人设里的身份、世界观、剧情设定，以及对话里演出来的虚构情节，都不是{{USER_NAME}}的真实情况，不记。{{USER_NAME}}跳出剧情说的真话（真实生活、真实感受、对剧情走向的偏好）照常记。
-
-## 输出格式
-只输出 JSON，不要解释：
-{"actions": [{"type": "add", "content": "{{USER_NAME}}说：「下周三要去复诊」。我得记着，到时候问问{{USER_NAME}}怎么样。", "category": "context", "keywords": ["复诊"]}, {"type": "update", "id": "档案ID", "content": "新内容（同样带原话）", "keywords": ["关键词"]}, {"type": "delete", "id": "档案ID"}]}
-如果没有需要操作的，输出：{"actions": []}
-"""
-
-    /// 楼层真名（空的话：对方叫「她」，自己叫「我」）。人设里的 {{user}} / {{char}} 宏也换成真名
+    /// 楼层真名（空的话：对方叫「用户」，自己叫「我」）。人设里的 {{user}} / {{char}} 宏也换成真名
     struct Names: Equatable {
         let user: String
         let char: String
@@ -1128,247 +1264,6 @@ struct MemoryExtractor {
         func apply(_ text: String) -> String {
             text.replacingOccurrences(of: "{{user}}", with: user, options: .caseInsensitive)
                 .replacingOccurrences(of: "{{char}}", with: char, options: .caseInsensitive)
-        }
-    }
-
-    /// 构建提取请求（优先用用户自定义提示词）
-    /// MV1: profile 短期画像全文注入 {{PROFILE}}；第二刀 A2：{{CHAR_NAME}} / {{USER_NAME}} 真名，人设作为「你是谁」
-    static func buildPrompt(existingMemories: [Memory], profile: UserProfileDream?, systemPrompt: String, names: Names = Names(userName: "", assistantName: "")) -> String {
-        var memoriesJSON = "无"
-        if !existingMemories.isEmpty {
-            let items = existingMemories.map { m in
-                "  {\"id\": \"\(m.id.uuidString)\", \"content\": \"\(m.content)\", \"category\": \"\(m.category)\"}"
-            }
-            memoriesJSON = "[\n\(items.joined(separator: ",\n"))\n]"
-        }
-        let profileText: String = {
-            guard let text = profile?.text, !text.isEmpty else { return "无" }
-            return text
-        }()
-        let systemPromptText: String = {
-            let trimmed = names.apply(systemPrompt).trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "（没写人设：你是陪{{USER_NAME}}聊天的伙伴）" : trimmed
-        }()
-
-        let customPrompt = UserDefaults.standard.string(forKey: "customMemoryExtractionPrompt") ?? ""
-        let template = customPrompt.isEmpty ? extractionPrompt : customPrompt
-        // 固定拼接（不进可编辑模板）：custom prompt 用户也生效，否则自定义模板没写 quote 规则会被机械校验全扔
-        return template
-            .replacingOccurrences(of: "{{SYSTEM_PROMPT}}", with: systemPromptText)
-            .replacingOccurrences(of: "{{CHAR_NAME}}", with: names.char)
-            .replacingOccurrences(of: "{{USER_NAME}}", with: names.user)
-            .replacingOccurrences(of: "{{PROFILE}}", with: profileText)
-            .replacingOccurrences(of: "{{MEMORIES}}", with: memoriesJSON) + quoteRuleAppendix
-    }
-
-    /// 出处规则附加段（刀2）：要求逐字 quote，机械校验配套
-    static let quoteRuleAppendix = """
-
-
-## 出处要求（程序会机械校验，不满足将被丢弃）
-每条 add 必须带 "quote" 字段：从对话原文【逐字】复制的 10-40 字片段，作为该记忆的出处证据。不许改写、不许拼接多句。找不到逐字出处的信息不要 add。
-quote 只是出处，不代替 content 里的原话：content 照样按上面的规则带「」原话。
-update 可选带 "quote"，同样要求逐字。
-示例：{"type": "add", "content": "...", "category": "...", "keywords": [...], "quote": "对话里逐字出现的原文片段"}
-"""
-
-    // MARK: - 机械校验（paramecium extract-memories.mjs:199-218 同款，纯函数可测）
-
-    /// 刀2 风险对冲常量：true = 无有效 quote 的 add 整条扔（宁缺勿滥）；
-    /// 日用拦截率离谱时改 false 降级为"无锚存入"
-    static let quoteRequiredForAdd = true
-
-    /// norm：去全部空白（hard cap slice 不信 prompt）
-    static func normalizeForQuote(_ s: String) -> String {
-        String(s.filter { !$0.isWhitespace })
-    }
-
-    /// quote 有效 = norm 后 ≥8 字 且 逐字出现在窗口文本里
-    static func validateQuote(_ quote: String?, windowText: String) -> Bool {
-        guard let quote else { return false }
-        let nq = normalizeForQuote(quote)
-        guard nq.count >= 8 else { return false }
-        return normalizeForQuote(windowText).contains(nq)
-    }
-
-    /// 定位 quote 所在消息：窗口内第一条 norm(content) 包含 norm(quote) 的消息 id
-    static func locateQuote(_ quote: String, in messages: [(id: String, role: String, content: String)]) -> String? {
-        let nq = normalizeForQuote(quote)
-        return messages.first { normalizeForQuote($0.content).contains(nq) }?.id
-    }
-
-    // MARK: - 写时近似去重（paramecium sim>0.75 同款，2026-06-13）
-
-    /// 近似重复 = 同一事实再确认 → 强化旧条不开新条（全等去重挡不住"喜欢暖奶白"vs"偏好暖奶白色调"）
-    static let dedupSimilarityThreshold: Float = 0.75
-
-    /// 纯比对层（可测）：在候选里找与新向量相似度超阈的最相近条。
-    /// 排除已失效条——否则"delete旧+add新"的矛盾更新会被去重打穿（新事实被旧版本吸收）。
-    static func findNearDuplicate(vector newVec: [Float], revision: Int, in existing: [Memory]) -> Memory? {
-        var best: (memory: Memory, sim: Float)? = nil
-        for m in existing {
-            guard m.supersededAt == nil,
-                  let data = m.embeddingData, m.embeddingRevision == revision else { continue }
-            let sim = MemoryVector.dot(newVec, MemoryVector.floats(from: data))
-            if sim > dedupSimilarityThreshold, sim > (best?.sim ?? 0) { best = (m, sim) }
-        }
-        return best?.memory
-    }
-
-    /// embed 外壳：模型未就绪/无向量 → nil = 跳过去重（app 自包含，向量路静默退场）
-    static func findNearDuplicate(of content: String, in existing: [Memory]) -> Memory? {
-        guard let newVec = AppleMemoryEmbedder.shared.embed(content) else { return nil }
-        return findNearDuplicate(vector: newVec, revision: AppleMemoryEmbedder.shared.revision, in: existing)
-    }
-
-    /// 构建发给 LLM 的 system prompt 和 messages（窗口带 node id，定位 quote 出处用；id 不进 prompt）
-    /// MV1: profile（短期画像）透传 buildPrompt
-    /// 紧急修(2026-06-14): systemPrompt（楼层语境）透传 buildPrompt
-    static func buildRequest(
-        recentMessages: [(id: String, role: String, content: String)],
-        existingMemories: [Memory],
-        profile: UserProfileDream?,
-        systemPrompt: String,
-        names: Names = Names(userName: "", assistantName: "")
-    ) -> (systemPrompt: String, messages: [(role: String, content: String)]) {
-        let prompt = buildPrompt(existingMemories: existingMemories, profile: profile, systemPrompt: systemPrompt, names: names)
-
-        // 把最近对话格式化为用户消息
-        var conversationText = ""
-        for msg in recentMessages {
-            let label = msg.role == "user" ? names.user : names.char
-            conversationText += "\(label): \(msg.content)\n\n"
-        }
-
-        let messages = [(role: "user", content: "以下是最近的对话（\(names.user)和\(names.char)），请整理档案：\n\n\(conversationText)")]
-        return (systemPrompt: prompt, messages: messages)
-    }
-
-    /// 解析 LLM 返回的 JSON 为操作列表
-    static func parseActions(_ jsonString: String) -> [MemoryAction] {
-        // 尝试直接解析
-        if let actions = parseJSON(jsonString) { return actions }
-
-        // Fallback: 从文本中提取 JSON 块
-        if let range = jsonString.range(of: "\\{[\\s\\S]*\\}", options: .regularExpression),
-           let actions = parseJSON(String(jsonString[range])) {
-            return actions
-        }
-
-        return []
-    }
-
-    private static func parseJSON(_ json: String) -> [MemoryAction]? {
-        guard let data = json.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let actions = obj["actions"] as? [[String: Any]] else {
-            return nil
-        }
-
-        var result: [MemoryAction] = []
-
-        for action in actions {
-            guard let type = action["type"] as? String else { continue }
-
-            switch type {
-            case "add":
-                guard let content = action["content"] as? String,
-                      let category = action["category"] as? String else { continue }
-                let keywords = action["keywords"] as? [String] ?? []
-                let quote = action["quote"] as? String
-                result.append(.add(content: content, category: category, keywords: keywords, quote: quote))
-
-            case "update":
-                guard let idStr = action["id"] as? String,
-                      let id = UUID(uuidString: idStr),
-                      let content = action["content"] as? String else { continue }
-                let keywords = action["keywords"] as? [String] ?? []
-                let quote = action["quote"] as? String
-                result.append(.update(id: id, content: content, keywords: keywords, quote: quote))
-
-            case "delete":
-                guard let idStr = action["id"] as? String,
-                      let id = UUID(uuidString: idStr) else { continue }
-                result.append(.delete(id: id))
-
-            default:
-                break
-            }
-        }
-
-        return result.isEmpty ? nil : result
-    }
-
-    /// 执行操作列表
-    static func executeActions(
-        _ actions: [MemoryAction],
-        store: MemoryStore,
-        profileId: String,
-        extractedBy: String,
-        sourceConversationId: String?,
-        recentMessages: [(id: String, role: String, content: String)],
-        context: ModelContext
-    ) throws {
-        // 提取去重：模型偶尔会对已有记忆再次输出 add（实测"焦糖布丁"注入两遍）
-        let existing = store.listAll(profileId: profileId, context: context)
-        let existingContents = Set(existing.map(\.content))
-        let windowText = recentMessages.map(\.content).joined(separator: "\n")
-
-        // delete 先行：模型的矛盾更新是 delete旧+add新 两动作，若 add 先跑、
-        // 还活着的旧版本会把新事实近似去重吸收掉 → 随后 delete 失效旧条 = 新事实丢失
-        let isDelete: (MemoryAction) -> Bool = { if case .delete = $0 { return true } else { return false } }
-        let ordered = actions.filter(isDelete) + actions.filter { !isDelete($0) }
-
-        for action in ordered {
-            switch action {
-            case .add(let content, let category, let keywords, let quote):
-                if existingContents.contains(content) { continue }
-                let validQuote = validateQuote(quote, windowText: windowText) ? quote : nil
-                if validQuote == nil {
-                    CacheDiagLog.shared.log("🧠 quote 校验拦截 add：\(content.prefix(40))（quote=\(quote?.prefix(40) ?? "缺失")）")
-                    if quoteRequiredForAdd { continue }
-                }
-                let nodeId = validQuote.flatMap { locateQuote($0, in: recentMessages) }
-                // 写时近似去重：超阈 → 强化旧条（reinforce）不开新条；旧条无锚时顺手补 quote
-                if let dup = findNearDuplicate(of: content, in: existing) {
-                    CacheDiagLog.shared.log("🧠 写时去重：「\(content.prefix(24))」≈「\(dup.content.prefix(24))」→ 强化旧条")
-                    try store.recordAccess(ids: [dup.id], context: context)
-                    if dup.sourceQuote == nil, let validQuote {
-                        dup.sourceQuote = validQuote
-                        dup.sourceNodeId = nodeId
-                        try? context.save()
-                    }
-                    continue
-                }
-                try store.add(
-                    content: content,
-                    category: category,
-                    keywords: keywords,
-                    profileId: profileId,
-                    isUserExplicit: false,
-                    extractedBy: extractedBy,
-                    sourceConversationId: sourceConversationId,
-                    sourceQuote: validQuote,
-                    sourceNodeId: nodeId,
-                    context: context
-                )
-
-            case .update(let id, let content, let keywords, let quote):
-                // update 不强制 quote（更新常是改写）；给了且校验过才更新出处
-                let validQuote = validateQuote(quote, windowText: windowText) ? quote : nil
-                let nodeId = validQuote.flatMap { locateQuote($0, in: recentMessages) }
-                try store.update(id: id, content: content, keywords: keywords,
-                                 sourceQuote: validQuote, sourceNodeId: nodeId, context: context)
-
-            case .delete(let id):
-                // 钉住记忆神圣不可侵犯（软硬两种模式都不动）
-                if let target = existing.first(where: { $0.id == id }), target.isUserExplicit {
-                    CacheDiagLog.shared.log("🧠 拒绝失效钉住记忆：\(target.content.prefix(40))")
-                    continue
-                }
-                // 修复第一刀：AI 的删除永远是软失效（可复活），真删只留给用户在面板对已失效条再删
-                try store.supersede(id: id, context: context)
-            }
         }
     }
 }
@@ -1395,19 +1290,35 @@ enum MemoryHealthStore {
         "mem_health_\(kind.rawValue)_\(field)_\(profileId)"
     }
 
-    static func recordOK(_ kind: Kind, profileId: String, modelName: String) {
+    /// 这一项现在写不写（总开关 && 这一项）。关着 = 灰字「关着，没在写」，不亮红、计数不清（v5 · 0.1）
+    static func isOn(_ kind: Kind) -> Bool {
+        guard MemoryFlags.masterEnabled else { return false }
+        switch kind {
+        case .extract: return MemoryFlags.factsEnabled
+        case .dream: return UserDefaults.standard.bool(forKey: "mem_content_profile")
+        case .context: return MemoryFlags.contextSummaryEnabled
+        case .summary: return MemoryFlags.windowSummaryEnabled
+        case .timeline: return TimelineConsolidator.enabled
+        }
+    }
+
+    /// note = 这次写了什么（记忆日志那条的说明）；A2 / A3 / A4 / C2 成败都在这里顺手记一条日志（v5 §十一）
+    /// rejected = C2 这次拒收了几张（「本周拒收 N 次」从日志里数）
+    static func recordOK(_ kind: Kind, profileId: String, modelName: String, note: String = "写好了", rejected: Int? = nil) {
         let d = UserDefaults.standard
         d.set(Date().timeIntervalSince1970, forKey: key(kind, "ok", profileId))
         d.set(0, forKey: key(kind, "streak", profileId))
         d.set(modelName, forKey: key(kind, "model", profileId))
+        MemoryWriteLog.record(kind, profileId: profileId, ok: true, note: note, model: modelName, rejected: rejected)
     }
 
-    static func recordError(_ kind: Kind, profileId: String, message: String, modelName: String) {
+    static func recordError(_ kind: Kind, profileId: String, message: String, modelName: String, rejected: Int? = nil) {
         let d = UserDefaults.standard
         d.set(Date().timeIntervalSince1970, forKey: key(kind, "err", profileId))
         d.set(String(message.prefix(200)), forKey: key(kind, "errmsg", profileId))
         d.set(failStreak(kind, profileId: profileId) + 1, forKey: key(kind, "streak", profileId))
         d.set(modelName, forKey: key(kind, "model", profileId))
+        MemoryWriteLog.record(kind, profileId: profileId, ok: false, note: String(message.prefix(200)), model: modelName, rejected: rejected)
     }
 
     static func failStreak(_ kind: Kind, profileId: String) -> Int {

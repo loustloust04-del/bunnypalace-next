@@ -1,0 +1,33 @@
+{
+ "source": "2026-10-16 中转实测原文（ekanw，new-api v1.0.0-rc.25），id 已固定化",
+ "path": "/v1/chat/completions",
+ "status": 200,
+ "content_type": "text/event-stream",
+ "request_body": {
+  "model": "单间-claude-opus-4-6-thinking",
+  "max_tokens": 2048,
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_time",
+     "description": "获取当前时间",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "content": "现在几点？你必须先调用 get_time 工具获取时间，不要直接回答。"
+   }
+  ],
+  "stream": true,
+  "stream_options": {
+   "include_usage": true
+  }
+ }
+}

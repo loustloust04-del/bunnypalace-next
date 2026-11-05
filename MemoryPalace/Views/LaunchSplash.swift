@@ -109,6 +109,7 @@ enum LaunchSplash {
     static func install(fromPush: Bool) {
         guard !installed else { return }
         installed = true
+        LaunchResumeMarker.startRecording()
         preload()
         start = CACurrentMediaTime()
         pushLaunch = pushLaunch || fromPush
@@ -126,6 +127,7 @@ enum LaunchSplash {
                 #if (DEBUG || PERF_BENCH) && os(iOS)
                 LaunchTrace.event("sceneConnected", at: sceneConnectedAt, fields: ["scene": connected.session.persistentIdentifier, "source": "willConnectNotification"])
                 #endif
+                if skipForResume(connected.session) { return }
                 // 在 scene 连接通知内同步建 layer / 加完整动画 / flush，不 dispatch 到下一轮。
                 if phase == .waiting { show(in: connected) }
             }
@@ -183,11 +185,23 @@ enum LaunchSplash {
             #if (DEBUG || PERF_BENCH) && os(iOS)
             LaunchTrace.event("sceneConnected", at: sceneConnectedAt, fields: ["scene": candidate.session.persistentIdentifier, "source": "rootGate"])
             #endif
+            if skipForResume(candidate.session) { return }
             show(in: candidate)
         } else {
             // 不把罩挂到别的 scene；此分支需要主 session 用 trace 核实宿主连接顺序。
             trace("splashAwaitingScene", reason: "noUniqueScene")
         }
+    }
+
+    /// 被系统回收后回来（plan-bg-keepalive §2.1）：标记读一次就清；跳过同推送启动——不建罩、不放声、直接放内容
+    private static func skipForResume(_ session: UISceneSession) -> Bool {
+        guard LaunchResumeMarker.consume(session), phase == .waiting else { return false }
+        #if (DEBUG || PERF_BENCH) && os(iOS)
+        if PerfHarness.anyRole { return false }
+        #endif
+        requestFinish(reason: "resume", immediately: true)
+        trace("splashSkipped", reason: finishReason)
+        return true
     }
 
     /// 通知响应走这里；晚到的响应也立即撤罩，不等动画。

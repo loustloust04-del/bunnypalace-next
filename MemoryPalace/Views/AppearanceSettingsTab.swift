@@ -15,8 +15,8 @@ import UIKit
 struct AppearancePage: View {
     @Environment(ThemeManager.self) private var themeManager: ThemeManager?
     @Environment(\.settingsMetrics) private var m
-    /// 昵称 / 时间戳两个开关在文章模式也生效（`CardFlowView.articleModeBody`）：mac 沿 J2 常驻；iOS 保持基线只在气泡模式露出（改它是 iOS 可见变化，待她批）——R6c I4
-    private var showNameTimeToggles: Bool {
+    /// 时间戳开关保持原入口：mac常驻，iOS只在气泡模式露出。
+    private var showTimestampToggle: Bool {
         #if os(macOS)
         true
         #else
@@ -29,7 +29,6 @@ struct AppearancePage: View {
     @Bindable private var glass = MacGlass.shared
     #endif
     @AppStorage("hideTimestamp") private var hideTimestamp: Bool = false
-    @AppStorage("hideRoleName") private var hideRoleName: Bool = false
     @AppStorage("hideActionBar") private var hideActionBar: Bool = false
     @AppStorage("showFlagBlocks") private var showFlagBlocks: Bool = true
     @AppStorage("showMessageUsage") private var showMessageUsage: Bool = true
@@ -38,7 +37,6 @@ struct AppearancePage: View {
     @AppStorage("page0ListStyle") private var page0ListStyle = "compact"
     @AppStorage("page0LiquidMetal") private var page0LiquidMetal = true
     @AppStorage("page0MetalFlowers") private var page0MetalFlowers = true
-    @AppStorage("showAvatar") private var showAvatar = true
     @AppStorage("gardenSceneEnabled") private var gardenSceneEnabled = true
     @AppStorage("globalMusicCapsuleEnabled") private var globalMusicCapsuleEnabled = true
     @AppStorage(OrbState.storageKey) private var orbStyleRaw = OrbState.working.rawValue
@@ -285,18 +283,7 @@ struct AppearancePage: View {
                 .pickerStyle(.segmented)
                 .searchAnchor("leaf-appear-bubblemode")
 
-                if chatBubbleMode {
-                    Toggle("显示头像", isOn: $showAvatar)
-                        .font(m.body)
-                        .tint(Theme.branchIndicator)
-                        .searchAnchor("leaf-appear-avatar")
-                }
-                if showNameTimeToggles {
-                    Toggle("显示昵称", isOn: Binding(
-                        get: { !hideRoleName }, set: { hideRoleName = !$0 }))
-                        .font(m.body)
-                        .tint(Theme.branchIndicator)
-                        .searchAnchor("leaf-appear-nickname")
+                if showTimestampToggle {
                     Toggle("显示时间戳", isOn: Binding(
                         get: { !hideTimestamp }, set: { hideTimestamp = !$0 }))
                         .font(m.body)
@@ -687,13 +674,12 @@ struct AdvancedAppearancePage: View {
     @AppStorage("bubbleSpacing") private var bubbleSpacing: Double = 31
     @AppStorage("lineSpacingScale") private var lineSpacingScale: Double = 1.45
     @AppStorage("paragraphSpacingScale") private var paragraphSpacingScale: Double = 1.65
-    @AppStorage("bubbleModeCornerRadius") private var bubbleModeCornerRadius: Double = 23
+    @AppStorage("bubbleModeCornerRadius") private var bubbleModeCornerRadius: Double = 20
     @AppStorage("blurRadius") private var blurRadius = 1.3
     // 负向 key：true = 关闭自动半透明。这样 key 缺省（false）= 行为保持原样。
     @AppStorage("disableAutoTransparentBubblesOnWallpaper") private var disableAutoTransparent: Bool = false
-    // E6：重置取两端并集（12 项），这三个 hide 在外观主页面（昵称 / 时间戳在聊天样式，操作按钮在消息显示），只在重置里出现
+    // 重置同时恢复主页面的时间戳和操作按钮设置。
     @AppStorage("hideTimestamp") private var hideTimestamp: Bool = false
-    @AppStorage("hideRoleName") private var hideRoleName: Bool = false
     @AppStorage("hideActionBar") private var hideActionBar: Bool = false
     /// 正文栏最大宽度（宽屏才生效）。消费点读 Theme.contentMaxWidth，实时性靠
     /// ContentView 里同 key 的订阅带整棵树重算。
@@ -758,8 +744,8 @@ struct AdvancedAppearancePage: View {
                 Button(action: resetPageToDefaults) {
                     HStack {
                         Spacer()
-                        // E6 / G7：重置的范围跨了别的页（昵称 / 时间戳在聊天样式，操作按钮在消息显示，壁纸半透明在聊天背景），文案照实说
-                        Text("重置气泡几何、行距段距、边缘模糊、壁纸下半透明，以及昵称、时间戳、操作按钮的显示")
+                        // 重置跨页：时间戳在聊天样式，操作按钮在消息显示，壁纸半透明在聊天背景。
+                        Text("重置气泡几何、行距段距、边缘模糊、壁纸下半透明，以及时间戳、操作按钮的显示")
                             .font(m.secondary)
                             .foregroundColor(Theme.textMuted)
                             .multilineTextAlignment(.center)
@@ -804,7 +790,7 @@ struct AdvancedAppearancePage: View {
         }
     }
 
-    /// E6：两端同一份 12 项并集（交集 6 + 旧 mac 三个 hide + 原 iOS 三项）+ `notifyThemeChange()`。
+    /// 两端恢复同一组默认值，并通知主题刷新。
     /// 不含主题 / 字体 / 语言 / 正文栏宽度。
     private func resetPageToDefaults() {
         bubbleCornerRadius = 16
@@ -813,11 +799,10 @@ struct AdvancedAppearancePage: View {
         bubbleSpacing = 31
         lineSpacingScale = 1.45
         paragraphSpacingScale = 1.65
-        bubbleModeCornerRadius = 23
+        bubbleModeCornerRadius = 20
         blurRadius = 1.3
         disableAutoTransparent = false
         hideTimestamp = false
-        hideRoleName = false
         hideActionBar = false
         themeManager?.notifyThemeChange()
     }

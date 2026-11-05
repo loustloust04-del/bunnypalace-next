@@ -258,8 +258,14 @@ struct PromptAssembler {
         selfMemory: String? = nil,
         /// 第二刀 B3：原子档案能用的预算（总预算减去「我的记忆」实际占用）；nil = 总预算
         memoryBudget: Int? = nil,
-        /// 这轮发了 card_guide 工具：卡片说明只放短目录，模型要用再查（粟粟 10-03）
-        cardGuideCompact: Bool = false
+        /// 卡片说明放哪一版：发了 card_guide 只放短目录、模型要用再查（粟粟 10-03）；对方关了 card_guide / 工具总开关就不放（10-15）
+        cardGuide: ChatCardPromptGuide.Mode = .full,
+        /// 这一轮能调到的工具名：卡片说明 / 记忆段里点名的工具没有就去掉那几句（粟粟 10-15）；nil = 不改
+        availableTools: Set<String>? = nil,
+        /// C 档案（`RoundInputs.wiki`）：根索引进记忆槽常驻层，触发词命中的页进命中层；nil = 不带
+        wiki: WikiInjectionSnapshot? = nil,
+        /// 追加合成消息前的最近 4 条真实消息；实发与检查器共用，不占用历史窗口。
+        wikiScanMessages: [String]? = nil
     ) -> (segments: [TaggedSegment], memoryHits: [InjectionHit]) {
         // 本轮注入命中（召回卡片 + S1 检查器）——cacheFriendly 分支和 marker 老路都会填
         var memoryHits: [InjectionHit] = []
@@ -274,6 +280,10 @@ struct PromptAssembler {
         let trimmedHistoryIds: [String?] = historyNodeIds.flatMap { ids in
             ids.count == chatHistory.count ? Array(ids.suffix(trimmedHistory.count)) : nil
         } ?? Array(repeating: nil, count: trimmedHistory.count)
+        let wikiScan = wikiScanMessages ?? chatHistory.enumerated().filter { index, message in
+            (message.role == "user" || message.role == "assistant")
+                && !(historyNodeIds?.count == chatHistory.count && historyNodeIds?[index] == ConversationViewModel.syntheticUserNodeId)
+        }.suffix(WikiInjection.windowSize).map { $0.element.content }
 
         // ⑤a 发送正则：历史副本（宏展开后）按深度（最新 = 0）跑发送规则，世界书扫描吃处理后的文本；
         // 没有发送规则 = nil，下面全部走原路
@@ -414,7 +424,8 @@ struct PromptAssembler {
             // 记忆槽拆两层：常驻层留原位（稳定），命中/兜底层下沉（每轮可变）
             if cacheFriendly && slot.isMarker && slot.id == PromptSlot.memoryInjectionId {
                 let layers = memoryLayers(profile: profile, selfMemory: selfMemory, memories: memories,
-                                          recentMessages: trimmedHistory.map { $0.content }, budget: memoryBudget)
+                                          recentMessages: trimmedHistory.map { $0.content }, budget: memoryBudget, wiki: wiki,
+                                          wikiScanMessages: wikiScan)
                 memoryHits = layers.hits
                 if !layers.stable.isEmpty {
                     let text = layers.stable
@@ -472,7 +483,7 @@ struct PromptAssembler {
                 continue
             }
 
-            guard let pair = resolveSlotContentPair(slot, profile: profile, preset: preset, memories: memories, chatHistory: trimmedHistory, health: healthSummary, trading: tradingSummary, selfMemory: selfMemory, memoryBudget: memoryBudget, hitsSink: { memoryHits = $0 }),
+            guard let pair = resolveSlotContentPair(slot, profile: profile, preset: preset, memories: memories, chatHistory: trimmedHistory, health: healthSummary, trading: tradingSummary, selfMemory: selfMemory, memoryBudget: memoryBudget, wiki: wiki, wikiScanMessages: wikiScan, hitsSink: { memoryHits = $0 }),
                   !pair.expanded.isEmpty else { continue }
 
             let source: SegmentSource = slot.id == PromptSlot.memoryInjectionId
@@ -651,13 +662,27 @@ struct PromptAssembler {
         }
 
         // 聊天卡片格式说明（research-chat-cards §4.7）：固定文字，放历史之前不破坏缓存前缀
-        // 发了 card_guide 工具只放目录（完整写法模型自己查）；没发工具（CC / 工具关了）照旧放全文
-        let cardGuideText = cardGuideCompact ? ChatCardPromptGuide.index : ChatCardPromptGuide.text
-        let cardGuide: [TaggedSegment] = ChatCardPromptGuide.isEnabledForTesting
-            ? [TaggedSegment(source: .cardGuide, role: "system",
-                             template: cardGuideText, content: cardGuideText)]
+        // 发了 card_guide 工具只放目录（完整写法模型自己查）；卡发不了工具（CC / 本机模型）放全文；对方关了就不放
+        let cardGuideBase: String? = switch cardGuide {
+        case .index: ChatCardPromptGuide.index
+        case .full: ChatCardPromptGuide.text
+        case .none: nil
+        }
+        let cardGuideText = cardGuideBase.map { base in availableTools.map { ChatCardPromptGuide.adjusted(base, available: $0) } ?? base }
+        let cardGuideSegments: [TaggedSegment] = ChatCardPromptGuide.isEnabledForTesting
+            ? cardGuideText.map { [TaggedSegment(source: .cardGuide, role: "system", template: $0, content: $0)] } ?? []
             : []
-        var result = preHistorySystem + cardGuide + allMessages + postHistorySystem + fileLibrarySegments
+        var result = preHistorySystem + cardGuideSegments + allMessages + postHistorySystem + fileLibrarySegments
+        if let availableTools {
+            result = result.map { seg in
+                if case .chatHistory = seg.source { return seg }
+                var out = TaggedSegment(source: seg.source, role: seg.role,
+                                        template: Self.droppingOffToolMentions(seg.template, available: availableTools),
+                                        content: Self.droppingOffToolMentions(seg.content, available: availableTools))
+                out.nodeId = seg.nodeId
+                return out
+            }
+        }
         // 写作风格段：tagging 中独立显示（预览/插槽可见），assemble wrapper 合并到 last user content 末尾
         if let styleContent, !styleContent.isEmpty {
             let styleText = "<style>\(styleContent)</style>"
@@ -665,16 +690,40 @@ struct PromptAssembler {
         }
         return (segments: result, memoryHits: memoryHits)
     }
-    /// cacheFriendly 记忆槽两层：常驻层 =「我的记忆」+ 档案常驻，命中层 = 档案本轮相关。
+    /// 记忆段里点名的工具这一轮没有就去掉那句（「我的记忆」尾注、档案目录尾的 recall 指路）；都有时原文不变
+    static func droppingOffToolMentions(_ text: String, available: Set<String>) -> String {
+        var s = text
+        if !available.contains(RecallTool.toolName) { s = s.replacingOccurrences(of: MemoryInjector.recallCatalogHint, with: "") }
+        if s.contains(SelfMemoryInjection.footer) {
+            s = s.replacingOccurrences(of: SelfMemoryInjection.footer, with: SelfMemoryInjection.footerText(available: available))
+        }
+        return s
+    }
+
+    /// cacheFriendly 记忆槽两层：常驻层 =「我的记忆」+ C 档案根索引 + 档案常驻，命中层 = 触发词命中的页 + 档案本轮相关。
     /// 实发组装和记忆面板「下一轮会想起什么」预览共用（预览 = 实发）
-    static func memoryLayers(profile: Profile, selfMemory: String?, memories: [Memory],
-                             recentMessages: [String], budget: Int?) -> (stable: String, volatile: String, hits: [InjectionHit]) {
-        let (stable, volatile, hits) = MemoryInjector.buildInjectionSplit(memories: memories, recentMessages: recentMessages, budget: budget ?? MemoryInjector.tokenBudget)
-        let stableText = [selfMemory ?? "", stable.isEmpty ? "" : "[\(archiveLabel(profile))]\n\(stable)"]
+    static func memoryLayers(profile: Profile, selfMemory: String?, memories: [Memory], recentMessages: [String], budget: Int?,
+                             wiki: WikiInjectionSnapshot? = nil, now: Date = MemoryClock.now, wikiScanMessages: [String]? = nil)
+        -> (stable: String, volatile: String, hits: [InjectionHit], pages: [WikiPageHit]) {
+        let pages = wikiHits(wiki, profile: profile, recentMessages: wikiScanMessages ?? recentMessages)
+        let (stable, volatile, hits) = MemoryInjector.buildInjectionSplit(memories: WikiInjection.dedup(memories, against: pages),
+                                                                          recentMessages: recentMessages,
+                                                                          budget: budget ?? MemoryInjector.tokenBudget, now: now)
+        let stableText = [selfMemory ?? "", wiki.map(WikiInjection.indexBlock) ?? "",
+                          stable.isEmpty ? "" : "[\(archiveLabel(profile))]\n\(stable)"]
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
-        let volatileText = volatile.isEmpty ? "" : "[\(archiveLabel(profile))·本轮相关]\n\(volatile)"
-        return (stableText, volatileText, hits)
+        let volatileText = [WikiInjection.hitsBlock(pages, now: now), volatile.isEmpty ? "" : "[\(archiveLabel(profile))·本轮相关]\n\(volatile)"]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        return (stableText, volatileText, hits, pages)
+    }
+
+    /// 这一轮触发词命中的页：用户名、助手名不触发
+    static func wikiHits(_ wiki: WikiInjectionSnapshot?, profile: Profile, recentMessages: [String]) -> [WikiPageHit] {
+        guard let wiki else { return [] }
+        let names = EffectiveCharacterContext(profile: profile)
+        return WikiInjection.hits(wiki, recent: recentMessages, excluding: [profile.userName, profile.assistantName, names.userName, names.charName])
     }
 
     /// 原子档案段的标签：粟粟 10-03 批改「[关于用户]」→「[关于{她在楼层里的称呼}]」；没设称呼用「对方」
@@ -693,6 +742,8 @@ struct PromptAssembler {
         trading: String = "",
         selfMemory: String? = nil,
         memoryBudget: Int? = nil,
+        wiki: WikiInjectionSnapshot? = nil,
+        wikiScanMessages: [String] = [],
         hitsSink: (([InjectionHit]) -> Void)? = nil
     ) -> (template: String, expanded: String)? {
 
@@ -740,9 +791,15 @@ struct PromptAssembler {
             return (template: raw, expanded: applyMacros(raw, profile: profile, health: health, trading: trading))
 
         case PromptSlot.memoryInjectionId:
-            let (stable, volatile, hits) = MemoryInjector.buildInjectionSplit(memories: memories, recentMessages: chatHistory.map { $0.content }, budget: memoryBudget ?? MemoryInjector.tokenBudget)
+            let recent = chatHistory.map { $0.content }
+            let pages = wikiHits(wiki, profile: profile, recentMessages: wikiScanMessages)
+            let now = MemoryClock.now
+            let (stable, volatile, hits) = MemoryInjector.buildInjectionSplit(memories: WikiInjection.dedup(memories, against: pages), recentMessages: recent,
+                                                                              budget: memoryBudget ?? MemoryInjector.tokenBudget, now: now)
             let injection = [stable, volatile].filter { !$0.isEmpty }.joined(separator: "\n")
-            let parts = [selfMemory ?? "", injection.isEmpty ? "" : "[\(archiveLabel(profile))]\n\(injection)"].filter { !$0.isEmpty }
+            let parts = [selfMemory ?? "", wiki.map(WikiInjection.indexBlock) ?? "",
+                         injection.isEmpty ? "" : "[\(archiveLabel(profile))]\n\(injection)",
+                         WikiInjection.hitsBlock(pages, now: now)].filter { !$0.isEmpty }
             guard !parts.isEmpty else { return nil }
             hitsSink?(hits)
             let text = parts.joined(separator: "\n\n")

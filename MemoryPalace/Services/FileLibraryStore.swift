@@ -35,6 +35,9 @@ enum FileLibraryStore {
     static let iCloudContainerId = "iCloud.com.susu.MemoryPalace"
 
     static var iCloudEnabled: Bool {
+        #if os(macOS)
+        if BenchIsolation.active { return false }
+        #endif
         // XCTest 宿主 = 真 app + 真 UserDefaults：不钉死本地，测试楼层会生进真 iCloud 容器（实测污染过）
         if NSClassFromString("XCTestCase") != nil { return false }
         return UserDefaults.standard.bool(forKey: iCloudEnabledKey)
@@ -47,8 +50,9 @@ enum FileLibraryStore {
     /// iOS 走 ubiquity API（容器由 entitlement 声明）。
     static func iCloudDocumentsRoot() -> URL? {
         #if os(macOS)
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Mobile Documents/iCloud~com~susu~MemoryPalace/Documents", isDirectory: true)
+        if BenchIsolation.active { return nil }
+        let dir = AppPaths.checked(AppPaths.home
+            .appendingPathComponent("Library/Mobile Documents/iCloud~com~susu~MemoryPalace/Documents", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
         #else
@@ -58,6 +62,9 @@ enum FileLibraryStore {
 
     /// iOS：url(forUbiquityContainerIdentifier:) 不能在主线程首调（会卡），app 启动/开关打开时预热。
     static func primeICloudContainer(completion: ((Bool) -> Void)? = nil) {
+        #if os(macOS)
+        if BenchIsolation.active { completion?(false); return }
+        #endif
         #if os(iOS)
         DispatchQueue.global(qos: .userInitiated).async {
             let url = FileManager.default.url(forUbiquityContainerIdentifier: iCloudContainerId)?
@@ -80,10 +87,10 @@ enum FileLibraryStore {
 
     /// 本地 floors 根（记忆树/迁移源永远用它）
     static func localDocumentsBaseRoot() -> URL {
-        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let dir = base
+        let base = AppPaths.documents
+        let dir = AppPaths.checked(base
             .appendingPathComponent(appFolderName, isDirectory: true)
-            .appendingPathComponent(floorsFolderName, isDirectory: true)
+            .appendingPathComponent(floorsFolderName, isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -91,7 +98,7 @@ enum FileLibraryStore {
     /// iCloud floors 根（开关开 + 容器可用时的活动根）
     static func iCloudFloorsRoot() -> URL? {
         guard let docs = iCloudDocumentsRoot() else { return nil }
-        let dir = docs.appendingPathComponent(floorsFolderName, isDirectory: true)
+        let dir = AppPaths.checked(docs.appendingPathComponent(floorsFolderName, isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -105,11 +112,11 @@ enum FileLibraryStore {
     }
 
     static func legacyRoot(profileId: String) -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return base
+        let base = AppPaths.applicationSupport
+        return AppPaths.checked(base
             .appendingPathComponent("MemoryPalace", isDirectory: true)
             .appendingPathComponent("fileLibrary", isDirectory: true)
-            .appendingPathComponent(profileId, isDirectory: true)
+            .appendingPathComponent(profileId, isDirectory: true))
     }
 
     /// 测试用：文件库根换到临时目录（#050，导入测试验附件落盘，不碰真文件库）。nil = 正常路径
@@ -117,7 +124,7 @@ enum FileLibraryStore {
 
     static func libraryRoot(profileId: String) -> URL {
         MainThreadIO.note(.mkdir, "FileLibraryStore.libraryRoot")
-        let root = testRootOverride?.appendingPathComponent(profileId, isDirectory: true) ?? filesystemRoot(profileId: profileId)
+        let root = AppPaths.checked(testRootOverride?.appendingPathComponent(profileId, isDirectory: true) ?? filesystemRoot(profileId: profileId))
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }
@@ -152,7 +159,7 @@ enum FileLibraryStore {
     static func prepareProfile(_ profile: Profile) {
         let floorURL = renameFloorDirectoryIfNeeded(profile: profile, current: floorDirectory(for: profile))
         try? FileManager.default.createDirectory(at: floorURL, withIntermediateDirectories: true)
-        let filesystemURL = floorURL.appendingPathComponent(filesystemFolderName, isDirectory: true)
+        let filesystemURL = AppPaths.checked(floorURL.appendingPathComponent(filesystemFolderName, isDirectory: true))
         try? FileManager.default.createDirectory(at: filesystemURL, withIntermediateDirectories: true)
         writeManifest(profile: profile, floorURL: floorURL)
         migrateLegacyFilesIfNeeded(profile: profile, destinationRoot: filesystemURL)
@@ -162,9 +169,10 @@ enum FileLibraryStore {
     /// updateProfile 和启动 prepareProfiles 都走这里：改名瞬间跟随，存量旧名启动时一次性修正。
     /// 目标名被占或 rename 失败 → 保持旧名继续用，不挡功能。
     private static func renameFloorDirectoryIfNeeded(profile: Profile, current: URL) -> URL {
+        let current = AppPaths.checked(current)
         let desired = slug(for: profile)
         guard current.lastPathComponent != desired else { return current }
-        let target = documentsBaseRoot().appendingPathComponent(desired, isDirectory: true)
+        let target = AppPaths.checked(documentsBaseRoot().appendingPathComponent(desired, isDirectory: true))
         guard !FileManager.default.fileExists(atPath: target.path) else { return current }
         if FileManager.default.fileExists(atPath: current.path) {
             do { try FileManager.default.moveItem(at: current, to: target) }
@@ -196,7 +204,7 @@ enum FileLibraryStore {
         let root = libraryRoot(profileId: profileId).standardizedFileURL.resolvingSymlinksInPath()
         let target = root.appendingPathComponent(clamped).standardizedFileURL.resolvingSymlinksInPath()
         guard target.path == root.path || target.path.hasPrefix(root.path + "/") else { return nil }
-        return target
+        return AppPaths.checked(target)
     }
 
     /// R10：把单个路径段 clamp 到 255 UTF-8 字节。
@@ -222,6 +230,11 @@ enum FileLibraryStore {
         }
         let result = suffix.utf8.count < limit ? out + suffix : out
         return result.isEmpty ? String(name.prefix(1)) : result
+    }
+
+    /// 「.prompt」归文件库「Prompt」虚拟根用：规范化（含 ./、大小写、经符号链接）后落进去的物理写一律拒
+    private static func rejectPromptZone(_ relPath: String, profileId: String) throws {
+        if FileLibraryAccess.isPromptZone(relPath, root: libraryRoot(profileId: profileId)) { throw err(FileLibraryAccess.promptDenial) }
     }
 
     /// R5/E5：末段是 symlink 就拒绝写。写入口都过它——不让「把 symlink 当普通文件覆盖」
@@ -503,6 +516,7 @@ enum FileLibraryStore {
 
     /// 已在 `writeQueue` 上时用这个（`edit` 的读-改-写要整体在队列里）
     private static func writeLocked(_ relPath: String, content: String, profileId: String) throws {
+        try rejectPromptZone(relPath, profileId: profileId)
         guard let url = resolve(relPath, profileId: profileId) else { throw err("非法路径: \(relPath)") }
         try validateTextFile(url)
         try validateNotSymlink(url)
@@ -520,6 +534,7 @@ enum FileLibraryStore {
     }
 
     private static func appendLocked(_ relPath: String, content: String, profileId: String) throws {
+        try rejectPromptZone(relPath, profileId: profileId)
         guard let url = resolve(relPath, profileId: profileId) else { throw err("非法路径: \(relPath)") }
         try validateTextFile(url)
         try validateNotSymlink(url)
@@ -583,6 +598,7 @@ enum FileLibraryStore {
     static func delete(_ relPath: String, profileId: String) throws {
         MainThreadIO.assertOffMain(.write, "FileLibraryStore.delete")
         try writeQueue.sync {
+            try rejectPromptZone(relPath, profileId: profileId)
             guard let url = resolve(relPath, profileId: profileId) else { throw err("非法路径: \(relPath)") }
             try validateSupported(url)
             try validateRegularFile(url)
@@ -597,6 +613,8 @@ enum FileLibraryStore {
     }
 
     private static func renameLocked(_ oldPath: String, to newPath: String, profileId: String) throws {
+        try rejectPromptZone(oldPath, profileId: profileId)
+        try rejectPromptZone(newPath, profileId: profileId)
         guard let sourceURL = resolve(oldPath, profileId: profileId) else { throw err("非法路径: \(oldPath)") }
         guard let targetURL = resolve(newPath, profileId: profileId) else { throw err("非法路径: \(newPath)") }
         try validateSupported(sourceURL)
@@ -616,6 +634,7 @@ enum FileLibraryStore {
     static func createIfAbsent(_ relPath: String, content: String, profileId: String) throws -> Bool {
         MainThreadIO.assertOffMain(.write, "FileLibraryStore.createIfAbsent")
         return try writeQueue.sync {
+            try rejectPromptZone(relPath, profileId: profileId)
             guard let url = resolve(relPath, profileId: profileId) else { throw err("非法路径: \(relPath)") }
             try validateTextFile(url)
             try validateNotSymlink(url)
@@ -644,6 +663,7 @@ enum FileLibraryStore {
     }
 
     private static func writeDataLocked(_ relPath: String, data: Data, profileId: String) throws {
+        try rejectPromptZone(relPath, profileId: profileId)
         guard let url = resolve(relPath, profileId: profileId) else { throw err("非法路径: \(relPath)") }
         try validateSupported(url)
         try validateNotSymlink(url)
@@ -673,9 +693,9 @@ enum FileLibraryStore {
     /// ⚠️ 永远本地（方针#4：隐私敏感，不随 iCloud 开关迁移）。
     static func memoryRoot(profileId: String) -> URL {
         MainThreadIO.note(.mkdir, "FileLibraryStore.memoryRoot")
-        let dir = localDocumentsBaseRoot()
+        let dir = AppPaths.checked(localDocumentsBaseRoot()
             .appendingPathComponent(floorSlug(profileId: profileId), isDirectory: true)
-            .appendingPathComponent(memoryFolderName, isDirectory: true)
+            .appendingPathComponent(memoryFolderName, isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -689,7 +709,7 @@ enum FileLibraryStore {
         let root = memoryRoot(profileId: profileId).standardizedFileURL
         let target = root.appendingPathComponent(rel).standardizedFileURL
         guard target.path.hasPrefix(root.path + "/") else { return nil }
-        return target
+        return AppPaths.checked(target)
     }
 
     /// 记忆树文件清单（路径带 memory/ 前缀，与 fs_* 工具视角一致）
@@ -726,6 +746,46 @@ enum FileLibraryStore {
         if airSpan != nil { airReturnedCount = out.count }
         #endif
         return out.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    /// 文件库 UI 的独立清单：普通可见文件 + 两处诊断白名单。不得替代助手的 memoryList。
+    static func memoryUIList(profileId: String, memoryRoot: URL? = nil) -> [FileMeta] {
+        MainThreadIO.assertOffMain(.enumerate, "FileLibraryStore.memoryUIList")
+        let root = memoryRoot ?? Self.memoryRoot(profileId: profileId)
+        let rootPrefix = RootPrefix(rootPath: root.path)
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey]
+        var out: [FileMeta] = []
+        func append(_ url: URL, path: String) {
+            guard isSupportedFile(url),
+                  let values = try? url.resourceValues(forKeys: keys),
+                  values.isRegularFile == true, values.isSymbolicLink != true else { return }
+            out.append(.init(path: path, bytes: values.fileSize ?? 0,
+                             modifiedAt: values.contentModificationDate ?? .distantPast))
+        }
+        if let entries = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys)) {
+            for case let url as URL in entries {
+                let path = memoryVirtualPrefix + relativeToRoot(url, root: rootPrefix)
+                if FileLibraryMemoryFolder.isHiddenWikiPath(path) {
+                    if url.hasDirectoryPath { entries.skipDescendants() }
+                    continue
+                }
+                append(url, path: path)
+            }
+        }
+        let canonicalRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
+        for storage in FileLibraryMemoryFolder.diagnosticStorageFolders {
+            let relative = String(storage.dropFirst(memoryVirtualPrefix.count))
+            let folder = root.appendingPathComponent(relative, isDirectory: true)
+            guard folder.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(canonicalRoot + "/") else { continue }
+            let entries = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: Array(keys),
+                                                                       options: [.skipsHiddenFiles])) ?? []
+            for url in entries {
+                let path = storage + "/" + url.lastPathComponent
+                guard FileLibraryMemoryFolder.diagnosticFolder(containing: path) != nil else { continue }
+                append(url, path: path)
+            }
+        }
+        return FileLibraryMemoryFolder.visible(out).sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 
     static func memoryRead(_ virtualPath: String, profileId: String) throws -> String {
@@ -765,9 +825,9 @@ enum FileLibraryStore {
     /// 存档根：floors/{slug}/tool-results/（与 memory/ 平级，**永远本地**，不随 iCloud 开关迁移，不进 list()/fs_list）
     static func toolResultsRoot(profileId: String) -> URL {
         MainThreadIO.note(.mkdir, "FileLibraryStore.toolResultsRoot")
-        let dir = localDocumentsBaseRoot()
+        let dir = AppPaths.checked(localDocumentsBaseRoot()
             .appendingPathComponent(floorSlug(profileId: profileId), isDirectory: true)
-            .appendingPathComponent(toolResultsFolderName, isDirectory: true)
+            .appendingPathComponent(toolResultsFolderName, isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -781,7 +841,7 @@ enum FileLibraryStore {
         let root = toolResultsRoot(profileId: profileId).standardizedFileURL
         let target = root.appendingPathComponent(rel).standardizedFileURL
         guard target.path.hasPrefix(root.path + "/") else { return nil }
-        return target
+        return AppPaths.checked(target)
     }
 
     /// 读存档；`maxBytes` 给显示侧封顶用（nil = 全文）
@@ -802,9 +862,9 @@ enum FileLibraryStore {
         MainThreadIO.assertOffMain(.write, "FileLibraryStore.toolResultWrite")
         let conv = toolResultComponent(conversationId)
         let file = toolResultComponent(toolUseId) + "-" + toolResultComponent(toolName) + ".txt"
-        let dir = toolResultsRoot(profileId: profileId).appendingPathComponent(conv, isDirectory: true)
+        let dir = AppPaths.checked(toolResultsRoot(profileId: profileId).appendingPathComponent(conv, isDirectory: true))
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try utf8Data(content).write(to: dir.appendingPathComponent(file), options: .atomic)
+        try utf8Data(content).write(to: AppPaths.checked(dir.appendingPathComponent(file)), options: .atomic)
         pruneToolResults(in: dir)
         return toolResultsVirtualPrefix + conv + "/" + file
     }
@@ -887,17 +947,17 @@ enum FileLibraryStore {
     /// internal（原 private）：离线沙箱的 bind mount 要断言「挂载源就是这个函数的返回值」，
     /// 不给参数化（plan §1.5）。行为一字未改。
     static func filesystemRoot(profileId: String) -> URL {
-        floorDirectory(profileId: profileId)
-            .appendingPathComponent(filesystemFolderName, isDirectory: true)
+        AppPaths.checked(floorDirectory(profileId: profileId)
+            .appendingPathComponent(filesystemFolderName, isDirectory: true))
     }
 
     /// 楼层 `.memorypalace/`（和 manifest 同目录，不在文件列表里）。不建目录，写的人自己建。
     static func metadataDirectory(profileId: String) -> URL {
-        floorDirectory(profileId: profileId).appendingPathComponent(metadataFolderName, isDirectory: true)
+        AppPaths.checked(floorDirectory(profileId: profileId).appendingPathComponent(metadataFolderName, isDirectory: true))
     }
 
     private static func floorDirectory(profileId: String) -> URL {
-        documentsBaseRoot().appendingPathComponent(floorSlug(profileId: profileId), isDirectory: true)
+        AppPaths.checked(documentsBaseRoot().appendingPathComponent(floorSlug(profileId: profileId), isDirectory: true))
     }
 
     private static func floorDirectory(for profile: Profile) -> URL {
@@ -908,7 +968,7 @@ enum FileLibraryStore {
 
         let slug = uniqueSlug(base: slug(for: profile), profileId: profile.id)
         setSlug(slug, for: profile.id)
-        return documentsBaseRoot().appendingPathComponent(slug, isDirectory: true)
+        return AppPaths.checked(documentsBaseRoot().appendingPathComponent(slug, isDirectory: true))
     }
 
     private static func slug(for profile: Profile) -> String {
@@ -923,7 +983,7 @@ enum FileLibraryStore {
     /// 名字比较用小写：APFS 默认大小写不敏感，`fileExists` 原本就是这么判的。
     private static func uniqueSlug(base: String, profileId: String) -> String {
         let root = documentsBaseRoot()
-        let taken = Set(((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []).map { $0.lowercased() })
+        let taken = Set(((try? AppPaths.contentsOfDirectory(atPath: root.path)) ?? []).map { $0.lowercased() })
         let owned = findExistingFloorDirectory(profileId: profileId)?.lastPathComponent.lowercased()
         var candidate = base
         var index = 2
@@ -937,13 +997,13 @@ enum FileLibraryStore {
     private static func findExistingFloorDirectory(profileId: String) -> URL? {
         let root = documentsBaseRoot()
         if let mapped = slugMap()[profileId], !mapped.isEmpty {
-            let url = root.appendingPathComponent(mapped, isDirectory: true)
+            let url = AppPaths.checked(root.appendingPathComponent(mapped, isDirectory: true))
             if FileManager.default.fileExists(atPath: url.path) {
                 return url
             }
         }
 
-        guard let urls = try? FileManager.default.contentsOfDirectory(
+        guard let urls = try? AppPaths.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
@@ -952,9 +1012,9 @@ enum FileLibraryStore {
         for url in urls {
             let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
             guard values?.isDirectory == true else { continue }
-            let manifestURL = url
+            let manifestURL = AppPaths.checked(url
                 .appendingPathComponent(metadataFolderName, isDirectory: true)
-                .appendingPathComponent(manifestFileName)
+                .appendingPathComponent(manifestFileName))
             guard let data = try? Data(contentsOf: manifestURL),
                   let manifest = try? manifestDecoder.decode(FloorManifest.self, from: data),
                   manifest.profileId == profileId else { continue }
@@ -971,8 +1031,8 @@ enum FileLibraryStore {
             filesystemPath: filesystemFolderName,
             createdAt: profile.createdAt
         )
-        let metadataURL = floorURL.appendingPathComponent(metadataFolderName, isDirectory: true)
-        let fileURL = metadataURL.appendingPathComponent(manifestFileName)
+        let metadataURL = AppPaths.checked(floorURL.appendingPathComponent(metadataFolderName, isDirectory: true))
+        let fileURL = AppPaths.checked(metadataURL.appendingPathComponent(manifestFileName))
         guard let data = try? manifestEncoder.encode(manifest) else { return }
         // perf-flash L3：启动时每个楼层都走这里；内容逐字节没变就不再 atomic 重写（缺文件 / 改名 / 损坏照旧写）
         if (try? Data(contentsOf: fileURL)) == data { return }
@@ -1013,23 +1073,23 @@ enum FileLibraryStore {
         guard let floorNames = try? fm.contentsOfDirectory(atPath: sourceRoot.path) else { return result }
 
         for floorName in floorNames where !floorName.hasPrefix(".") {
-            let sourceFloor = sourceRoot.appendingPathComponent(floorName, isDirectory: true)
+            let sourceFloor = AppPaths.checked(sourceRoot.appendingPathComponent(floorName, isDirectory: true))
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: sourceFloor.path, isDirectory: &isDir), isDir.boolValue else { continue }
             result.floors += 1
 
             for sub in [filesystemFolderName, metadataFolderName] {
-                let sourceSub = sourceFloor.appendingPathComponent(sub, isDirectory: true)
+                let sourceSub = AppPaths.checked(sourceFloor.appendingPathComponent(sub, isDirectory: true))
                 guard fm.fileExists(atPath: sourceSub.path),
                       let en = fm.enumerator(at: sourceSub, includingPropertiesForKeys: [.isRegularFileKey]) else { continue }
-                let destSub = destinationRoot
+                let destSub = AppPaths.checked(destinationRoot
                     .appendingPathComponent(floorName, isDirectory: true)
-                    .appendingPathComponent(sub, isDirectory: true)
+                    .appendingPathComponent(sub, isDirectory: true))
                 for case let fileURL as URL in en {
                     let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey])
                     guard values?.isRegularFile == true else { continue }
                     let rel = String(fileURL.standardizedFileURL.path.dropFirst(sourceSub.standardizedFileURL.path.count + 1))
-                    let destURL = destSub.appendingPathComponent(rel)
+                    let destURL = AppPaths.checked(destSub.appendingPathComponent(rel))
                     do {
                         let hadConflict = fm.fileExists(atPath: destURL.path)
                             && (try? Data(contentsOf: destURL)) != (try? Data(contentsOf: fileURL))
@@ -1076,7 +1136,7 @@ enum FileLibraryStore {
             let values = try? sourceURL.resourceValues(forKeys: [.isRegularFileKey])
             guard values?.isRegularFile == true else { continue }
             let rel = String(sourceURL.standardizedFileURL.path.dropFirst(sourceRoot.standardizedFileURL.path.count + 1))
-            let destinationURL = destinationRoot.appendingPathComponent(rel)
+            let destinationURL = AppPaths.checked(destinationRoot.appendingPathComponent(rel))
             do {
                 try copyLegacyFile(sourceURL, to: destinationURL)
                 copiedAny = true
@@ -1116,7 +1176,7 @@ enum FileLibraryStore {
         let ext = url.pathExtension
         let base = url.deletingPathExtension().lastPathComponent
         let name = ext.isEmpty ? "\(base).conflict-\(stamp)" : "\(base).conflict-\(stamp).\(ext)"
-        return url.deletingLastPathComponent().appendingPathComponent(name)
+        return AppPaths.checked(url.deletingLastPathComponent().appendingPathComponent(name))
     }
 
     // MARK: - UserDefaults + Helpers

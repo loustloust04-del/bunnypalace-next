@@ -44,6 +44,12 @@ enum ToolRegistry {
         // 自己的记忆（记忆修复第二刀 B2）：remember / edit_memory / forget_memory，受记忆总开关管
         entries += SelfMemoryTool.definitions.map { d in Entry(definition: d, enabledIf: { _ in SelfMemoryTool.enabled }) }
 
+        // 待续（v5 §3-2）：标做完了 / 淡了；总开关 && A4 时间轴开着才给
+        entries.append(Entry(definition: PendingNotesTool.definition, enabledIf: { _ in PendingNotesTool.enabled }))
+
+        // 给 wiki 提整理方向（C2/C3 v2 第 4 段）：只交待批方向；总开关 && C3 开着才给
+        entries.append(Entry(definition: WikiSuggestTool.definition, enabledIf: { _ in WikiSuggestTool.enabled }))
+
         // 问问题（官端 AskUserQuestion 同款）：常开，受 sendToolsEnabled 总开关连坐
         entries.append(Entry(definition: AskUserTool.definition, enabledIf: { _ in true }))
 
@@ -77,18 +83,21 @@ enum ToolRegistry {
         }
         #endif
 
-        // 元工具 3 件（放最后：门控要看前面收起来的那些）：MCP 工具海 defer，或有内建工具收在「更多工具」里时上
-        let tucked = entries.filter { tuckedNames.contains($0.definition.name) }
+        // 元工具 3 件（放最后：门控要看前面收起来的那些）：MCP 工具海 defer，或有内建工具收在「更多工具」里时上。
+        // #093：「收起」按这一轮抽屉算（用户自己收起的也算）；元工具本身不吃抽屉（Q4）
+        let builtins = entries
         entries += MetaTools.definitions.map { d in
-            Entry(definition: d, enabledIf: { ctx in ctx.deferMCP || tucked.contains { $0.enabledIf(ctx) } })
+            Entry(definition: d, enabledIf: { ctx in
+                ctx.deferMCP || builtins.contains { $0.enabledIf(ctx) && mode(of: $0.definition.name, ctx) == .tucked }
+            })
         }
 
         return entries
     }
 
-    /// 收进「更多工具」的内建工具（#069 第 2 步）：平时聊天用不到，不放进工具清单（省 schema、少干扰选择），
-    /// 系统提示〔更多工具〕列名字 + 一句话，经 tool_invoke 调（直接叫名字也照常执行）。只随平台变
-    static let tuckedNames: Set<String> = {
+    /// 默认收进「更多工具」的内建工具（#069 第 2 步）：平时聊天用不到，不放进工具清单（省 schema、少干扰选择），
+    /// 系统提示〔更多工具〕列名字 + 一句话，经 tool_invoke 调（直接叫名字也照常执行）。只随平台变；#093 起工具抽屉能逐个改
+    static let defaultTuckedNames: Set<String> = {
         var names: Set<String> = [
             FileLibraryTools.Name.rename.rawValue, FileLibraryTools.Name.delete.rawValue,
             ProfileCardTool.toolName, TwitterAITool.toolName,
@@ -128,31 +137,69 @@ enum ToolRegistry {
         return b
     }()
 
-    /// 这一轮能用的全部内建工具（直接给的 + 收在「更多工具」里的）
+    /// 抽屉管不着的：元工具（它们就是「更多工具」的门，Q4）、隐藏子应用（不进抽屉）
+    static var drawerExempt: Set<String> {
+        var names = MetaTools.names
+        #if PERSONAL_APPS
+        names.insert(DeathScaleAITool.toolName)
+        #endif
+        return names
+    }
+
+    /// Anthropic 服务端搜索（不在注册表，注入处特例）：抽屉里只有开 / 关（tool_invoke 调不到服务端工具，不能收起）
+    static let serverWebSearchName = "web_search"
+
+    static func serverWebSearchOn(_ ctx: ToolGateContext) -> Bool {
+        ctx.drawer.override(serverWebSearchName, profileId: ctx.profileId) != .off
+    }
+
+    /// 抽屉没改过时的档位
+    static func defaultMode(_ name: String) -> ToolDrawerMode {
+        defaultTuckedNames.contains(name) ? .tucked : .inline
+    }
+
+    /// 这一轮抽屉里的档位（本楼层覆盖 → 全局 → 默认）；上游门另算
+    static func mode(of name: String, _ ctx: ToolGateContext) -> ToolDrawerMode {
+        if drawerExempt.contains(name) { return .inline }
+        return ctx.drawer.override(name, profileId: ctx.profileId) ?? defaultMode(name)
+    }
+
+    /// 〔更多工具〕/ tool_search 里的一句话：手写的 blurb，没有（用户自己收起的，比如 fs_write）就取描述第一句
+    static func blurb(for d: ToolDefinition) -> String {
+        tuckedBlurbs[d.name] ?? firstSentence(d.description)
+    }
+
+    /// 描述的第一句（到「。」或换行），超过 60 字截断加「…」。〔当前能用的工具〕和 blurb 共用这一种切法
+    static func firstSentence(_ description: String) -> String {
+        let first = description.split(whereSeparator: { "。\n".contains($0) }).first.map(String.init) ?? description
+        return first.count > 60 ? String(first.prefix(60)) + "…" : first
+    }
+
+    /// 这一轮能用的全部内建工具（直接给的 + 收在「更多工具」里的）：上游门开 且 抽屉不是关
     @MainActor
     static func enabledDefinitions(_ ctx: ToolGateContext) -> [ToolDefinition] {
-        all.filter { $0.enabledIf(ctx) }.map(\.definition)
+        all.filter { $0.enabledIf(ctx) && mode(of: $0.definition.name, ctx) != .off }.map(\.definition)
     }
 
     /// 放进工具清单直接给模型的
     @MainActor
     static func inlineDefinitions(_ ctx: ToolGateContext) -> [ToolDefinition] {
-        enabledDefinitions(ctx).filter { !tuckedNames.contains($0.name) }
+        enabledDefinitions(ctx).filter { mode(of: $0.name, ctx) == .inline }
     }
 
     /// 能用、但收在「更多工具」里的
     @MainActor
     static func tuckedDefinitions(_ ctx: ToolGateContext) -> [ToolDefinition] {
-        enabledDefinitions(ctx).filter { tuckedNames.contains($0.name) }
+        enabledDefinitions(ctx).filter { mode(of: $0.name, ctx) == .tucked }
     }
 
-    /// 执行前复查（#069）：模型照着历史直接叫一个这一轮没下发的内建工具时拒掉——
+    /// 执行前复查（#069）：模型照着历史直接叫一个这一轮没下发的内建工具时拒掉（#093：抽屉里关了的也拒）——
     /// 只靠开关门控、不归权限域的工具（remember / recall…）权限闸拦不住。不是内建工具（MCP）返回 nil
     @MainActor
     static func availability(of name: String, _ ctx: ToolGateContext) -> Bool? {
         let entries = all.filter { $0.definition.name == name }
         guard !entries.isEmpty else { return nil }
         guard PermissionCenter.capabilityEnabled(.toolsMaster) else { return false }
-        return entries.contains { $0.enabledIf(ctx) }
+        return entries.contains { $0.enabledIf(ctx) && mode(of: name, ctx) != .off }
     }
 }

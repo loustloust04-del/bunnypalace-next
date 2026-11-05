@@ -10,9 +10,9 @@ import SwiftData
 enum AgentBridge {
 
     static var root: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("agent", isDirectory: true)
+            .appendingPathComponent("agent", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -43,6 +43,9 @@ enum AgentBridge {
     }
 
     static func loadConfig(from url: URL? = nil) -> HubConfig {
+        #if os(macOS)
+        if BenchIsolation.active { return HubConfig() }
+        #endif
         guard let data = try? Data(contentsOf: url ?? configURL),
               let cfg = try? decoder.decode(HubConfig.self, from: data) else { return HubConfig() }
         return cfg
@@ -53,6 +56,9 @@ enum AgentBridge {
     /// 用户一动开关就把 hub 的 provider/model 配置清回默认（Phase 1 验收发现的活雷）。
     /// 读-改-写 保未知键；「哪层楼用哪 provider/model」正式交给 app 管归 Phase 2。
     static func saveConfig(_ cfg: HubConfig, to url: URL? = nil) {
+        #if os(macOS)
+        if BenchIsolation.active { return }
+        #endif
         let target = url ?? configURL
         var dict = ((try? Data(contentsOf: target)).flatMap {
             try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -77,6 +83,9 @@ enum AgentBridge {
 
     /// 当前 config.json 里的 model 显示信息（macOS 直读；无 = hub 默认）。
     static func currentModelInfo(from url: URL? = nil) -> (id: String, name: String)? {
+        #if os(macOS)
+        if BenchIsolation.active { return nil }
+        #endif
         guard let data = try? Data(contentsOf: url ?? configURL),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let model = dict["model"] as? [String: Any],
@@ -86,6 +95,9 @@ enum AgentBridge {
 
     /// 写读书模型（读-改-写只覆盖 model/apiKeyAccount，保 app 管的四键与未知键）。
     static func saveModelSelection(model: [String: Any], apiKeyAccount: String, to url: URL? = nil) {
+        #if os(macOS)
+        if BenchIsolation.active { return }
+        #endif
         let target = url ?? configURL
         var dict = ((try? Data(contentsOf: target)).flatMap {
             try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -118,6 +130,9 @@ enum AgentBridge {
     // MARK: - 用量 / 活动（hub 产出，设置页只读）
 
     static func todaySpentUSD() -> Double? {
+        #if os(macOS)
+        if BenchIsolation.active { return nil }
+        #endif
         let day = ISO8601DateFormatter().string(from: Date()).prefix(10)
         let url = root.appendingPathComponent("budget-\(day).json")
         guard let data = try? Data(contentsOf: url),
@@ -134,6 +149,9 @@ enum AgentBridge {
     }
 
     static func recentActivity(limit: Int = 50) -> [ActivityEntry] {
+        #if os(macOS)
+        if BenchIsolation.active { return [] }
+        #endif
         let url = root.appendingPathComponent("activity.jsonl")
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
         return text.split(separator: "\n").suffix(limit).reversed().compactMap { line in
@@ -167,6 +185,9 @@ enum AgentOutboxDrainer {
     /// 语义（D1/D2 已定）：消息对按普通消息插进楼层最近对话，只带 agentOrigin 字段不做特殊 UI。
     @discardableResult
     static func drain(context: ModelContext) -> Int {
+        #if os(macOS)
+        if BenchIsolation.active { return 0 }
+        #endif
         let outboxRoot = AgentBridge.root.appendingPathComponent("outbox", isDirectory: true)
         let fm = FileManager.default
         guard let floors = try? fm.contentsOfDirectory(at: outboxRoot, includingPropertiesForKeys: nil) else { return 0 }

@@ -272,7 +272,11 @@ enum SchemaCoverageCheck {
             sourceConversationId: nil, extractedBy: "", isUserExplicit: false,
             sourceQuote: nil, sourceNodeId: nil, supersededAt: nil, profileId: "",
             createdAt: Date(), updatedAt: Date(),
-            embeddingData: nil, embeddingRevision: nil, relatedIds: [], parentId: nil
+            embeddingData: nil, embeddingRevision: nil, relatedIds: [], parentId: nil,
+            occurredDay: "", importance: 0, emotion: 0, resolved: false,
+            reviewedAt: Date(), userEditedAt: Date(),
+            organizedAt: Date(), organizedPage: "", organizeRejectedAt: Date(),
+            subject: "虚构归因对象", speaker: "用户自述"
         )
         try compareFields(modelName: "Memory",
                           modelFields: modelFieldNames(model),

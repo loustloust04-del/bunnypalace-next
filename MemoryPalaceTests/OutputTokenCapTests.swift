@@ -90,9 +90,12 @@ final class OutputTokenCapTests: XCTestCase {
     // MARK: - OpenAI 请求 body
 
     func testMaxTokensKeyByHost() {
-        XCTAssertEqual(OpenAICompatibleProvider.maxTokensKey(baseURL: "https://api.openai.com/v1"), "max_completion_tokens")
-        XCTAssertEqual(OpenAICompatibleProvider.maxTokensKey(baseURL: "https://openrouter.ai/api/v1"), "max_tokens")
-        XCTAssertEqual(OpenAICompatibleProvider.maxTokensKey(baseURL: "https://api.deepseek.com"), "max_tokens")
+        func key(_ base: String) -> String {
+            ParamCompat.resolve(providerType: .openaiCompatible, baseURL: base, modelId: "gpt-5", reasoningEffort: "auto").maxTokensKey
+        }
+        XCTAssertEqual(key("https://api.openai.com/v1"), "max_completion_tokens")
+        XCTAssertEqual(key("https://openrouter.ai/api/v1"), "max_tokens")
+        XCTAssertEqual(key("https://api.deepseek.com"), "max_tokens")
     }
 
     func testOpenAIBodyAlwaysSendsCapUnderRightKey() {
@@ -108,7 +111,7 @@ final class OutputTokenCapTests: XCTestCase {
 
         let official = OpenAICompatibleProvider.buildRequestBody(
             messages: [(role: "user", content: "hi")], model: "gpt-5", systemPrompt: nil, samplingParams: resolved,
-            maxTokensKey: "max_completion_tokens")
+            compat: ResolvedCompat(params: ParamCompat(maxTokensKey: "max_completion_tokens")))
         XCTAssertEqual(official["max_completion_tokens"] as? Int, 16_384)
         XCTAssertNil(official["max_tokens"])
     }
@@ -116,31 +119,19 @@ final class OutputTokenCapTests: XCTestCase {
     func testOrderedOverloadForwardsKeyAndTemperatureDrop() {
         let ordered = [PromptMessage(role: "user", content: "hi", source: .chatHistory, nodeId: nil, pinnedToSystemPrefix: false)]
         let body = OpenAICompatibleProvider.buildRequestBody(
-            ordered: ordered, model: "o3", samplingParams: sampling(8192), interleavedSystem: true,
-            maxTokensKey: "max_completion_tokens", dropTemperature: true)
+            ordered: ordered, model: "o3", samplingParams: sampling(8192),
+            compat: ResolvedCompat(params: ParamCompat(sendsSampling: false, maxTokensKey: "max_completion_tokens"), interleavedSystem: true))
         XCTAssertEqual(body["max_completion_tokens"] as? Int, 8192)
         XCTAssertNil(body["temperature"])
         XCTAssertNil(body["top_p"])
     }
 
-    // MARK: - N4：OpenAI 官方推理模型不发 temperature
+    // MARK: - N4：推理模型不发 temperature（#094 起判断在 ParamCompat，见 ParamCompatTests；这里只看 builder 守不守）
 
-    func testDropsSamplingTemperature() {
-        let official = "https://api.openai.com/v1"
-        XCTAssertTrue(OpenAICompatibleProvider.dropsSamplingTemperature(baseURL: official, model: "gpt-5", reasoningEffort: "auto"))
-        XCTAssertTrue(OpenAICompatibleProvider.dropsSamplingTemperature(baseURL: official, model: "o3", reasoningEffort: "auto"))
-        XCTAssertTrue(OpenAICompatibleProvider.dropsSamplingTemperature(baseURL: official, model: "o4-mini", reasoningEffort: "auto"))
-        XCTAssertTrue(OpenAICompatibleProvider.dropsSamplingTemperature(baseURL: official, model: "gpt-6-sol", reasoningEffort: "auto"))
-        XCTAssertFalse(OpenAICompatibleProvider.dropsSamplingTemperature(baseURL: official, model: "gpt-4o", reasoningEffort: "auto"))
-        XCTAssertFalse(OpenAICompatibleProvider.dropsSamplingTemperature(baseURL: official, model: "gpt-4.1-mini", reasoningEffort: "auto"))
-        XCTAssertTrue(OpenAICompatibleProvider.dropsSamplingTemperature(baseURL: official, model: "gpt-4o", reasoningEffort: "high"),
-                      "推理档不是 none 时一律去掉（官方 latest-model 指南）")
-        XCTAssertFalse(OpenAICompatibleProvider.dropsSamplingTemperature(baseURL: "https://openrouter.ai/api/v1", model: "openai/gpt-5", reasoningEffort: "high"))
-        XCTAssertFalse(OpenAICompatibleProvider.dropsSamplingTemperature(baseURL: "https://api.deepseek.com", model: "deepseek-reasoner", reasoningEffort: "auto"))
-
+    func testBuilderHonorsCompatSampling() {
         let body = OpenAICompatibleProvider.buildRequestBody(
             messages: [(role: "user", content: "hi")], model: "gpt-5", systemPrompt: nil, samplingParams: sampling(4096),
-            dropTemperature: true)
+            compat: ResolvedCompat(params: ParamCompat(sendsSampling: false)))
         XCTAssertNil(body["temperature"])
         XCTAssertNil(body["top_p"])
         let kept = OpenAICompatibleProvider.buildRequestBody(
@@ -187,11 +178,28 @@ extension OutputTokenCapTests {
         private let listener: NWListener
         private let queue = DispatchQueue(label: "OutputTokenCapTests.ScriptedHTTPServer")
         private let lock = NSLock()
-        private let respond: (Int, Data) -> (status: Int, contentType: String, body: Data)
+        private let respond: (Int, Data) -> Response
         private var bodies: [Data] = []
 
-        init(respond: @escaping (Int, Data) -> (status: Int, contentType: String, body: Data)) throws {
-            self.respond = respond
+        struct Response {
+            var status: Int
+            var contentType: String
+            var body: Data
+            var headers: [String: String] = [:]
+            /// 声明的 Content-Length 比实际 body 长 → 发完就断，客户端见到连接中途断开
+            var declaredLength: Int? = nil
+        }
+
+        convenience init(respond: @escaping (Int, Data) -> (status: Int, contentType: String, body: Data)) throws {
+            try self.init(responding: { index, body in
+                let r = respond(index, body)
+                return Response(status: r.status, contentType: r.contentType, body: r.body)
+            })
+        }
+
+        /// 带响应头（Retry-After 等）
+        init(responding: @escaping (Int, Data) -> Response) throws {
+            self.respond = responding
             listener = try NWListener(using: .tcp, on: .any)
         }
 
@@ -226,9 +234,13 @@ extension OutputTokenCapTests {
                     }
                     let r = self.respond(index, body)
                     let reason = r.status == 200 ? "OK" : "Bad Request"
-                    var response = Data("HTTP/1.1 \(r.status) \(reason)\r\nContent-Type: \(r.contentType)\r\nContent-Length: \(r.body.count)\r\nConnection: close\r\n\r\n".utf8)
+                    let extra = r.headers.map { "\($0.key): \($0.value)\r\n" }.joined()
+                    var response = Data("HTTP/1.1 \(r.status) \(reason)\r\nContent-Type: \(r.contentType)\r\n\(extra)Content-Length: \(r.declaredLength ?? r.body.count)\r\nConnection: close\r\n\r\n".utf8)
                     response.append(r.body)
-                    connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+                    connection.send(content: response, completion: .contentProcessed { [queue] _ in
+                        // 截断的响应：等客户端把已发的那片读走再断，否则 RST 会连带丢掉没读的数据
+                        if r.declaredLength == nil { connection.cancel() } else { queue.asyncAfter(deadline: .now() + 0.3) { connection.cancel() } }
+                    })
                 } else if error != nil || isComplete {
                     connection.cancel()
                 } else {

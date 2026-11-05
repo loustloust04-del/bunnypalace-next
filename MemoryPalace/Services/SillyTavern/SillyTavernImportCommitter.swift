@@ -530,7 +530,9 @@ extension SillyTavernImportCommitter {
         // MARK: 楼层 + 聊天
 
         private mutating func addFloor(card: CharacterCard, path: String, placeholderNote: String?) throws -> String {
-            let made = try CharacterFloorService.makeFloor(card: card, presets: env.presets)
+            let made = try CharacterFloorService.makeFloor(card: card, presets: env.presets,
+                                                           userName: CharacterFloorService.floorUserName(env.profiles),
+                                                           userAvatar: DefaultUserAvatar.live.load())
             var profile = made.profile
             let preset = made.preset, book = made.book
             if let placeholderNote { profile.description = placeholderNote }

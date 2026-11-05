@@ -160,6 +160,7 @@ struct CachedMarkdownView: View {
     var listener: MarkdownListener? = nil
     /// L1c：刚流完的节点——首见未命中时不看长度门槛，同步解析一次（ChatMarkdownView 按 MarkdownRenderCache.isFreshlyStreamed 给）
     var syncOnMiss: Bool = false
+    let preparedDocument: RenderableDocument?
 
     @State private var renderable: RenderableDocument?
 
@@ -193,13 +194,14 @@ struct CachedMarkdownView: View {
     #endif
 
     init(text: String, config: MarkdownRenderConfig, cacheDims: String, transient: Bool = false, listener: MarkdownListener? = nil,
-         syncOnMiss: Bool = false) {
+         syncOnMiss: Bool = false, preparedDocument: RenderableDocument? = nil) {
         self.text = text
         self.config = config
         self.cacheDims = cacheDims
         self.transient = transient
         self.listener = listener
         self.syncOnMiss = syncOnMiss
+        self.preparedDocument = preparedDocument
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure {
             perfReq = PerfHarness.currentReqId
@@ -215,7 +217,9 @@ struct CachedMarkdownView: View {
         }
         #endif
         // 命中同步带初值：首帧即真身，消灭「先 .empty 再跳高度」的振荡源
-        if let hit = MarkdownRenderCache.shared.lookup(dims: cacheDims, text: text) {
+        if let preparedDocument {
+            _renderable = State(initialValue: preparedDocument)
+        } else if let hit = MarkdownRenderCache.shared.lookup(dims: cacheDims, text: text) {
             _renderable = State(initialValue: hit)
             #if (DEBUG || PERF_BENCH) && os(iOS)
             if let perfNode { PerfRenderLedger.noteMarkdown(nodeId: perfNode, text: text, cacheDims: cacheDims, kind: "initHit", reqId: perfReq) }
@@ -240,8 +244,12 @@ struct CachedMarkdownView: View {
 
     var body: some View {
         DocumentView(renderableDocument: renderable ?? .empty, config: config, listener: listener)
+            .onChange(of: preparedDocument) { _, document in
+                if let document { renderable = document }
+            }
             #if os(iOS)
             .task(id: text) {
+                if let preparedDocument { renderable = preparedDocument; return }
                 #if DEBUG || PERF_BENCH
                 // M3 不闪空探针：以空占位上屏（renderable == nil → DocumentView(.empty)）记开头，真身落地的 taskHit / asyncEnd 回执收口
                 if let perfNode, renderable == nil {
@@ -284,6 +292,16 @@ struct CachedMarkdownView: View {
             // 字体颜色是 parse 时写进 attributed string 的，L3 只吃 text 会留旧渲染）。
             // 取代 L3b 的 onChange 方案：onChange 与 task 双写 renderable 会「旧解析晚到盖新结果」。
             .task(id: text + "\u{1F}" + cacheDims) {
+                if let preparedDocument { renderable = preparedDocument; return }
+                #if (DEBUG || PERF_BENCH) && os(macOS)
+                PerfCountMac.hit(.markdownStart)
+                defer { PerfCountMac.hit(.markdownEnd) }
+                #endif
+                #if DEBUG || PERF_BENCH
+                let measuringMac = PerfHarnessMac.enabled
+                if measuringMac { PerfHarnessMacDriver.markdownPending += 1 }
+                defer { if measuringMac { PerfHarnessMacDriver.markdownPending -= 1 } }
+                #endif
                 requestGen += 1
                 let gen = requestGen
                 if let hit = MarkdownRenderCache.shared.lookup(dims: cacheDims, text: text) {

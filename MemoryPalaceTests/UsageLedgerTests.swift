@@ -225,6 +225,43 @@ final class UsageLedgerTests: XCTestCase {
         XCTAssertEqual(code.models.first?.id, "opus")
     }
 
+    /// 走查截图 34：用量页按用途分项，wiki 种子单独一行
+    func testPurposeBoardSeparatesWikiSeed() {
+        let now = date(2026, 9, 24, 10)
+        let recs = [
+            record("cheap", at: date(2026, 9, 24, 1), input: 1_000_000, output: 0, kind: .chat),
+            record("cheap", at: date(2026, 9, 24, 2), input: 2_000_000, output: 0, kind: .catalogSeed),
+            record("cheap", at: date(2026, 9, 24, 3), input: 1_000_000, output: 0, kind: .catalogSeed),
+            record("cheap", at: date(2026, 9, 24, 4), input: 500_000, output: 0, kind: .catalog),
+        ]
+        let s = UsageSummarizer.summarize(.today, now: now, records: recs, calendar: calendar, price: price)
+        XCTAssertEqual(s.kinds.map(\.label), ["wiki 种子", "对话", "整理编目"], "按花费降序")
+        XCTAssertEqual(s.kinds[0].totals.calls, 2)
+        XCTAssertEqual(s.kinds[0].totals.costUSD, 3, accuracy: 1e-9)
+        XCTAssertEqual(s.kinds.map(\.totals.costUSD).reduce(0, +), s.totals.costUSD, accuracy: 1e-9, "分项加起来等于总花费")
+    }
+
+    /// astra P1-3：用途超过 8 种、种子花得最少，按用途榜照样看得见；按模型榜仍截 8 行
+    func testPurposeBoardShowsEveryKindEvenPastEight() {
+        let now = date(2026, 9, 24, 10)
+        let kinds: [UsageKind] = [.chat, .assistant, .memory, .catalog, .dream, .timeline, .summary, .windowSummary, .image]
+        var recs = kinds.enumerated().map { i, kind in
+            record("cheap", at: date(2026, 9, 24, 1), input: 1_000_000 * (i + 2), output: 0, kind: kind)
+        }
+        recs.append(record("cheap", at: date(2026, 9, 24, 2), input: 100_000, output: 0, kind: .catalogSeed))
+        let s = UsageSummarizer.summarize(.today, now: now, records: recs, calendar: calendar, price: price)
+        XCTAssertEqual(s.kinds.count, 10)
+        XCTAssertEqual(s.kinds.last?.label, "wiki 种子", "种子花得最少，排第 10")
+        let all = UsageFormat.visibleRows(s.kinds, limit: nil)
+        XCTAssertEqual(all.shown.map(\.label), s.kinds.map(\.label))
+        XCTAssertEqual(all.hidden, 0)
+        XCTAssertEqual(all.shown.map(\.totals.costUSD).reduce(0, +), s.totals.costUSD, accuracy: 1e-9, "显示的各行加起来等于总花费")
+        let capped = UsageFormat.visibleRows(s.kinds, limit: 8)
+        XCTAssertEqual(capped.shown.count, 8)
+        XCTAssertEqual(capped.hidden, 2)
+        XCTAssertFalse(capped.shown.contains { $0.label == "wiki 种子" }, "旧的截 8 行确实会把它截掉")
+    }
+
     // MARK: 保险闸兼容
 
     func testBudgetSpentCanBeRebuiltFromLedger() {

@@ -28,37 +28,37 @@ enum BookStore {
 
     /// `filesystem/books/`
     static func booksRoot(profileId: String) -> URL {
-        let dir = FileLibraryStore.libraryRoot(profileId: profileId)
-            .appendingPathComponent(booksFolderName, isDirectory: true)
+        let dir = AppPaths.checked(FileLibraryStore.libraryRoot(profileId: profileId)
+            .appendingPathComponent(booksFolderName, isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
     /// `filesystem/books/{safeName}/`
     static func bookDir(safeName: String, profileId: String) -> URL {
-        booksRoot(profileId: profileId).appendingPathComponent(safeName, isDirectory: true)
+        AppPaths.checked(booksRoot(profileId: profileId).appendingPathComponent(safeName, isDirectory: true))
     }
 
     static func indexURL(safeName: String, profileId: String) -> URL {
-        bookDir(safeName: safeName, profileId: profileId).appendingPathComponent("index.json")
+        AppPaths.checked(bookDir(safeName: safeName, profileId: profileId).appendingPathComponent("index.json"))
     }
 
     static func notesURL(safeName: String, profileId: String) -> URL {
-        bookDir(safeName: safeName, profileId: profileId).appendingPathComponent("notes.json")
+        AppPaths.checked(bookDir(safeName: safeName, profileId: profileId).appendingPathComponent("notes.json"))
     }
 
     static func chapterURL(safeName: String, chapterNo: Int, profileId: String) -> URL {
         let name = String(format: "chapter_%04d.txt", chapterNo)
-        return bookDir(safeName: safeName, profileId: profileId).appendingPathComponent(name)
+        return AppPaths.checked(bookDir(safeName: safeName, profileId: profileId).appendingPathComponent(name))
     }
 
     /// 导入时规范化后的全文（P4-A 起新导入的书才有）
     static func sourceURL(safeName: String, profileId: String) -> URL {
-        bookDir(safeName: safeName, profileId: profileId).appendingPathComponent("source.txt")
+        AppPaths.checked(bookDir(safeName: safeName, profileId: profileId).appendingPathComponent("source.txt"))
     }
 
     static func coverURL(safeName: String, profileId: String) -> URL {
-        bookDir(safeName: safeName, profileId: profileId).appendingPathComponent("cover.jpg")
+        AppPaths.checked(bookDir(safeName: safeName, profileId: profileId).appendingPathComponent("cover.jpg"))
     }
 
     // MARK: - safeName 防穿越
@@ -165,7 +165,7 @@ enum BookStore {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         let data = try encoder.encode(value)
-        let tmp = url.appendingPathExtension("tmp")
+        let tmp = AppPaths.checked(url.appendingPathExtension("tmp"))
         try data.write(to: tmp, options: .atomic)
         _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
     }
@@ -194,7 +194,7 @@ enum BookStore {
     // MARK: - F1 书签
 
     static func bookmarksURL(safeName: String, profileId: String) -> URL {
-        bookDir(safeName: safeName, profileId: profileId).appendingPathComponent("bookmarks.json")
+        AppPaths.checked(bookDir(safeName: safeName, profileId: profileId).appendingPathComponent("bookmarks.json"))
     }
 
     static func loadBookmarks(safeName: String, profileId: String) -> [Bookmark] {

@@ -1,8 +1,10 @@
 // codemirror.bundle.js 的入口：这里 re-export 的符号就是 markdown-editor.js 可 import 的全部表面。
 // 改动后跑 build.sh 重新生成 bundle。
 export { basicSetup, minimalSetup } from "codemirror";
-export { EditorState, RangeSetBuilder, StateField } from "@codemirror/state";
-export { Decoration, EditorView, ViewPlugin, WidgetType, keymap } from "@codemirror/view";
+export { EditorState, EditorSelection, RangeSetBuilder, StateEffect, StateField, Transaction } from "@codemirror/state";
+// 撤销 / 重做：浮条按钮走命令通道调用，undoDepth / redoDepth 给按钮置灰（history 本身由 basicSetup 装）
+export { undo, redo, undoDepth, redoDepth, isolateHistory, deleteCharBackward, deleteCharForward } from "@codemirror/commands";
+export { Decoration, EditorView, ViewPlugin, WidgetType, keymap, runScopeHandlers } from "@codemirror/view";
 export {
   bracketMatching,
   defaultHighlightStyle,

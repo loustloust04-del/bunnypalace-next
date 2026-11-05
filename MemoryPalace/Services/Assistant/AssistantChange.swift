@@ -84,7 +84,7 @@ extension AssistantChange {
         case .addWorldBookEntry: "世界书 · 加条目"
         case .updateWorldBookEntry: "世界书 · 改条目"
         case .deleteWorldBookEntry: "世界书 · 删条目"
-        case .page2Appearance: "外观 · 主屏"
+        case .page2Appearance: "外观 · 桌面"
         case .appIcon: "外观 · 图标"
         case .stageTheme: "外观 · 舞台"
         }
@@ -100,7 +100,7 @@ extension AssistantChange {
         case .addWorldBookEntry(_, _, let book, let e): "「\(book)」· \(Self.entryName(e))"
         case .updateWorldBookEntry(_, _, let book, let before, _): "「\(book)」· \(Self.entryName(before))"
         case .deleteWorldBookEntry(_, _, let book, let e, _): "「\(book)」· \(Self.entryName(e))"
-        case .page2Appearance: "换个主屏样子"
+        case .page2Appearance: "换个桌面样子"
         case .appIcon(_, let name, _, _): "「\(name)」的图标"
         case .stageTheme(_, let after): "换成「\(XiaoyaStageTheme(rawValue: after)?.title ?? after)」"
         }

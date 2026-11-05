@@ -219,7 +219,7 @@ enum ExportPackageScanner {
     }
 
     /// 扫描。必须在后台线程调。`tempRoot` 只给测试用。
-    static func scan(_ urls: [URL], tempRoot: URL = FileManager.default.temporaryDirectory) throws -> ExportPackageScan {
+    static func scan(_ urls: [URL], tempRoot: URL = AppPaths.temporaryDirectory) throws -> ExportPackageScan {
         cleanupStale(in: tempRoot)
         let staging = tempRoot.appendingPathComponent("\(stagingPrefix)\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)

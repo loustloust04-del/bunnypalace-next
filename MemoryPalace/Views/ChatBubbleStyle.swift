@@ -3,9 +3,8 @@ import SwiftStreamingMarkdown   // P3 menu 探针起给 assistant 静态分支�
 
 // MARK: - 气泡尾巴 Shape（iMessage 式）
 //
-// 圆角 = 系统 `Path(roundedRect:style:.continuous)`（Apple 连续曲率，与文章模式同款，无尖棱）。
-// 尾巴 = 港自粟粟矢量稿（pao.svg）的脚丫子路径，addPath 并入同一 Path 一次填充
-// （单次 fill，半透明气泡重叠区也不会叠深）。脚丫按顺时针构造，与系统矩形 winding 一致。
+// 主体保留系统连续曲率圆角；尾巴按 iMessage 3x 截图截面拟合（plan §1b）。
+// 默认 r=20 时下伸 20px，不越过主体左右边界；同向 winding、一次 fill，半透明接缝不叠深。
 // isUser=true → 尾巴右下；assistant → 左下（pt 镜像）。
 
 /// 输入框正在编辑这条消息时的气泡描边（plan-edit-in-composer §6）：稀、段稍长、稍粗、圆头。
@@ -24,58 +23,37 @@ struct BubbleTailShape: Shape {
 
     func path(in rect: CGRect) -> Path {
         let bodyR = min(radius, min(rect.width, rect.height) / 2)
-        // 主体：系统连续曲率圆角矩形
         var p = Path(roundedRect: rect, cornerSize: CGSize(width: bodyR, height: bodyR), style: .continuous)
         guard hasTail else { return p }
-        let r = bodyR * tailScale
-
-        let minX = rect.minX, maxX = rect.maxX, maxY = rect.maxY
-        // 镜像：assistant 尾巴翻到左下
+        // 以下坐标以参考图 r=60px 为单位；群聊仅缩尾巴，主体不变。
+        let unit = bodyR * tailScale / 60
         func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-            CGPoint(x: isUser ? x : minX + maxX - x, y: y)
+            CGPoint(x: isUser ? rect.maxX - x * unit : rect.minX + x * unit,
+                    y: rect.maxY + y * unit)
         }
-        // 脚丫：必须让 tail 在它自己（镜像后的）局部坐标里仍是 CW，才与矩形 winding 同向、nonZero fill 不相消挖洞。
-        // 镜像本身会反转绕向，所以 user / assistant 两套 addCurve 顺序必须相反：
-        //  - isUser=true（右下，不镜像）：原顺序 e0→e1→…→e5（视觉 CW）
-        //  - isUser=false（左下，镜像）：反序 e5→e4→…→e0（镜像后视觉 CW）
-        var t = Path()
+        var tail = Path()
+        // 镜像同时反转遍历顺序，使接缝重叠区仍为 nonZero 填充。
         if isUser {
-            t.move(to: pt(maxX, maxY - r))
-            t.addCurve(to: pt(maxX - 0.4621 * r, maxY - 0.1641 * r),
-                       control1: pt(maxX, maxY - 0.6496 * r),
-                       control2: pt(maxX - 0.1858 * r, maxY - 0.3427 * r))
-            t.addCurve(to: pt(maxX - 0.4762 * r, maxY + 0.2789 * r),
-                       control1: pt(maxX - 0.5986 * r, maxY - 0.0555 * r),
-                       control2: pt(maxX - 0.5922 * r, maxY + 0.1357 * r))
-            t.addCurve(to: pt(maxX - 0.4503 * r, maxY + 0.3571 * r),
-                       control1: pt(maxX - 0.4563 * r, maxY + 0.3042 * r),
-                       control2: pt(maxX - 0.4333 * r, maxY + 0.3244 * r))
-            t.addCurve(to: pt(maxX - 0.5543 * r, maxY + 0.3822 * r),
-                       control1: pt(maxX - 0.4752 * r, maxY + 0.4050 * r),
-                       control2: pt(maxX - 0.5281 * r, maxY + 0.3902 * r))
-            t.addCurve(to: pt(maxX - 1.3789 * r, maxY),
-                       control1: pt(maxX - 0.7326 * r, maxY + 0.3286 * r),
-                       control2: pt(maxX - 0.9753 * r, maxY + 0.0322 * r))
+            tail.move(to: pt(19.5, -16))
+            tail.addCurve(to: pt(24, 18),
+                          control1: pt(37, -14 / 3),
+                          control2: pt(32.5, 20 / 3))
+            tail.addQuadCurve(to: pt(28, 20), control: pt(23.5, 20))
+            tail.addCurve(to: pt(63, 0),
+                          control1: pt(34.5, 20),
+                          control2: pt(63.5, 0))
         } else {
-            t.move(to: pt(maxX - 1.3789 * r, maxY))
-            t.addCurve(to: pt(maxX - 0.5543 * r, maxY + 0.3822 * r),
-                       control1: pt(maxX - 0.9753 * r, maxY + 0.0322 * r),
-                       control2: pt(maxX - 0.7326 * r, maxY + 0.3286 * r))
-            t.addCurve(to: pt(maxX - 0.4503 * r, maxY + 0.3571 * r),
-                       control1: pt(maxX - 0.5281 * r, maxY + 0.3902 * r),
-                       control2: pt(maxX - 0.4752 * r, maxY + 0.4050 * r))
-            t.addCurve(to: pt(maxX - 0.4762 * r, maxY + 0.2789 * r),
-                       control1: pt(maxX - 0.4333 * r, maxY + 0.3244 * r),
-                       control2: pt(maxX - 0.4563 * r, maxY + 0.3042 * r))
-            t.addCurve(to: pt(maxX - 0.4621 * r, maxY - 0.1641 * r),
-                       control1: pt(maxX - 0.5922 * r, maxY + 0.1357 * r),
-                       control2: pt(maxX - 0.5986 * r, maxY - 0.0555 * r))
-            t.addCurve(to: pt(maxX, maxY - r),
-                       control1: pt(maxX - 0.1858 * r, maxY - 0.3427 * r),
-                       control2: pt(maxX, maxY - 0.6496 * r))
+            tail.move(to: pt(63, 0))
+            tail.addCurve(to: pt(28, 20),
+                          control1: pt(63.5, 0),
+                          control2: pt(34.5, 20))
+            tail.addQuadCurve(to: pt(24, 18), control: pt(23.5, 20))
+            tail.addCurve(to: pt(19.5, -16),
+                          control1: pt(32.5, 20 / 3),
+                          control2: pt(37, -14 / 3))
         }
-        t.closeSubpath()
-        p.addPath(t)
+        tail.closeSubpath()
+        p.addPath(tail)
         return p
     }
 }
@@ -106,14 +84,14 @@ struct AvatarBox: View {
     }
 }
 
-/// 气泡两侧头像（一个参数穿透 CardFlowView → BubbleView → BubbleModeRow）
+/// 对话内查找列表的双方头像；正文气泡不再传递头像数据。
 struct ChatAvatars {
     let user: Image?
     let assistant: Image?
     static let none = ChatAvatars(user: nil, assistant: nil)
 }
 
-/// Profile 头像 Data → SwiftUI Image 解码缓存。气泡行是 hot path，禁止每 body 解码。
+/// Profile头像Data → SwiftUI Image解码缓存，列表和顶栏不在每次body重新解码。
 /// 指纹 = (字节数, 头8字节, 尾8字节)，O(1) 校验；数据变了才重新解码。主线程（SwiftUI body）专用。
 enum AvatarImageCache {
     private struct Entry {
@@ -143,9 +121,9 @@ enum AvatarImageCache {
 
 // MARK: - 气泡模式单条渲染（第 1 步：整条一个气泡，不拆）
 //
-// iMessage 式：assistant 左（头像 + 气泡），user 右（气泡 + 头像）。
-// 头像 + 名字/时间戳在组顶显示，尾巴挂在气泡上。
-// 按段落自动拆多气泡（splitBlocks）；B6 A2' 流式=已完成段落逐泡弹入 + 尾部 typing dots，不吐字。
+// iMessage 式：assistant 左、user 右，正文不显示头像和昵称。
+// 连发仅末条带尾巴，时间分隔由列表绘制。
+// 按段落自动拆多气泡（splitBlocks）；流式按完整段落呈现并保留尾部 typing dots，弹入受总开关控制。
 
 /// 等待/流式指示：思考球（Vendor/ThinkingOrbsKit，px20 设计放大到 34）+ 轮换 shimmer 文案，
 /// 流式尾泡 + CC 等待泡 + 文章模式空占位三处共用；样式跟设置页 `thinkingOrbStyle`（含怀旧三点）。
@@ -196,15 +174,15 @@ struct BouncingDotsView: View {
 /// 纯 UI 合成行不是 MessageNode；样式对齐气泡模式 assistant 泡（固定 iMessage 外观值）。
 struct CCWaitingBubbleRow: View {
     var body: some View {
-        HStack {
+        HStack(spacing: 0) {
             TypingDotsView()
                 .padding(.horizontal, BubbleModeRow.fixedPaddingH)
                 .padding(.vertical, BubbleModeRow.fixedPaddingV)
                 .background(
-                    BubbleTailShape(isUser: false, radius: 23, hasTail: true)
+                    BubbleTailShape(isUser: false, radius: 20, hasTail: true)
                         .fill(Theme.assistantBubble)
                 )
-            Spacer(minLength: 60)
+            Spacer(minLength: 62)
         }
     }
 }
@@ -220,9 +198,10 @@ struct BubbleModeRow: View {
     var entrancePending: Bool = false
     /// reveal 弹完回调（调用点从 vm 待弹集合移除）
     var onEntranceDone: (() -> Void)? = nil
-    /// pop-tuner v7：发消息弹泡（行内泡级）——true=本行的泡带弹入 transition（头像/昵称直出）。
+    /// pop-tuner v7：发消息弹泡（行内泡级）——true=本行的泡带弹入 transition。
     /// 白名单在 vm 自动销账（duration+0.6s），滚回重挂载不重弹
     var popPending: Bool = false
+    var isLastInRun: Bool = true
     let selectedFont: String
     let fontScale: Double
     let lineSpacingScale: Double
@@ -234,9 +213,6 @@ struct BubbleModeRow: View {
     let userName: String
     let assistantName: String
     var hideTimestamp: Bool = false
-    var hideRoleName: Bool = false
-    var showAvatar: Bool = true
-    var avatars: ChatAvatars = .none
     /// A4：每个气泡（block）的长按菜单 spec，参数=该气泡文字（引用/复制本段作用于它）+ 她的语音泡的音频路径（菜单加「分享」）。
     /// 父层 BubbleView 构造。iOS 走 UIKit 桥 marker（反转列表 contextMenu 修复），macOS 从 spec 渲染 .contextMenu。
     var blockMenuSpecs: ((_ text: String, _ voicePath: String?) -> [MenuActionSpec])? = nil
@@ -250,11 +226,12 @@ struct BubbleModeRow: View {
     /// 输入框正在编辑这条：所有分泡一起变透明 + 圆角虚线（plan-edit-in-composer §6）
     var isBeingEdited: Bool = false
 
-    private let avatarSize: CGFloat = 32
-    private let rowGap: CGFloat = 8
+    @AppStorage(BubblePopTuning.enabledKey) private var popEnabled = BubblePopTuning.defaultEnabled
 
     /// 思考链回传开关：关=不渲染 CC thinking（数据照落库）
     @AppStorage("ccShowThinking") private var showCCThinking = true
+    /// 原生思考摘要跟「设置 → 思考过程」（thinking 回传；隐藏时连气泡底都不画）
+    @AppStorage(DisclosureKind.thinking.key) private var thinkingModeRaw = DisclosureKind.thinking.migratedDefault.rawValue
 
     /// CC 入场 reveal：非 nil=进行中（只放出前 N 块，0=只有 dots 前奏）。滚走重置，滚回从头重弹。
     @State private var revealedCount: Int? = nil
@@ -265,28 +242,26 @@ struct BubbleModeRow: View {
     @Environment(\.modelContext) private var modelContext
 
     // 气泡模式锁定外观：iMessage 固定值，不受「气泡外观（高级）」滑块影响（仅普通模式可调）
-    static let fixedPaddingH: Double = 18
-    static let fixedPaddingV: Double = 15
-    static let fixedLineSpacing: Double = 1.45
+    static let fixedPaddingH: Double = 14
+    static let fixedPaddingV: Double = 10
+    static let fixedLineSpacing: Double = 0
     static let fixedParagraphSpacing: Double = 1.65
 
     var body: some View {
-        HStack(alignment: .top, spacing: rowGap) {
+        HStack(alignment: .top, spacing: 0) {
             if isUser {
-                Spacer(minLength: 40)
+                Spacer(minLength: 62)
                 VStack(alignment: .trailing, spacing: 4) { header; attachmentStrip; bubbleStack.chatReactionBadge(target: ChatReactionTarget(node: node), isUser: true); branchPager }
-                if showAvatar { AvatarBox(size: avatarSize, image: avatars.user) }
             } else {
-                if showAvatar { AvatarBox(size: avatarSize, image: avatars.assistant) }
                 VStack(alignment: .leading, spacing: 8) {
                     header
                     attachmentStrip
                     bubbleStack.chatReactionBadge(target: ChatReactionTarget(node: node), isUser: false)
-                    RecallCardView(node: node).padding(.horizontal, 18)
+                    RecallCardView(node: node).padding(.horizontal, Self.fixedPaddingH)
                     branchPager
                     usageFooter
                 }
-                Spacer(minLength: 40)
+                Spacer(minLength: 62)
             }
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
@@ -333,15 +308,10 @@ struct BubbleModeRow: View {
 
     @ViewBuilder
     private var header: some View {
-        // 时间挪到列表中间的分割线 + 长按菜单底部（TASK page1-消息-20）
-        if !hideRoleName || (isUser && (node.styleIdSnapshot != nil || node.cardEventsData != nil)) {
+        if isUser, node.styleIdSnapshot != nil || node.cardEventsData != nil {
             HStack(spacing: 4) {
-                if !hideRoleName {
-                    Text(isUser ? userName : assistantName)
-                        .font(.caption2.weight(.medium))
-                        .foregroundColor(Theme.textMuted)
-                }
-                if isUser { StyleChip(styleId: node.styleIdSnapshot); CardEventsChip(node: node) }
+                StyleChip(styleId: node.styleIdSnapshot)
+                CardEventsChip(node: node)
             }
             .padding(.horizontal, 2)
         }
@@ -375,7 +345,7 @@ struct BubbleModeRow: View {
         // 她的语音条在文字下面（plan-voice-note M7），尾巴归最后一条语音，文字块不带
         let voices = voiceSegs
         let userVoicesBelow = isUser && !voices.isEmpty
-        let voiceTail = !isComplex && (shownBlocks.isEmpty || userVoicesBelow) && !showPartialDots
+        let voiceTail = isLastInRun && !isComplex && (shownBlocks.isEmpty || userVoicesBelow) && !showPartialDots
         return VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
             if !isUser {
                 // 长按挂在气泡壳这层（胶囊自己的菜单关掉）：浮层预览带壳带尾巴，同她的语音泡
@@ -398,11 +368,11 @@ struct BubbleModeRow: View {
             } else if isComplex {
                 // 附件消息不拆块：reveal 前奏=dots 一拍，然后整泡弹入
                 if revealedCount == 0 {
-                    singleBubble(hasTail: true) { typingDots }
+                    singleBubble(hasTail: isLastInRun) { typingDots }
                         .transition(BubblePopTuning.popTransition(isUser: false))
                 } else {
-                    quotable(node.content) { _ in
-                        singleBubble(hasTail: true) {
+                    quotable(node.content) { forceTail in
+                        singleBubble(hasTail: forceTail || isLastInRun) {
                             MessageSegmentsView(
                                 segments: ChatDisplaySnapshot.segments(of: node) ?? [],
                                 selectedFont: selectedFont,
@@ -427,13 +397,16 @@ struct BubbleModeRow: View {
                         : .identity)
                 }
             } else {
-                if let thinking = parsed.thinking ?? (showCCThinking ? node.ccThinking : nil), !thinking.isEmpty {
+                // 原生思考摘要（thinking 回传 §3.8）：普通回复只挂思考段，回复完成后出现
+                if let thinking = parsed.thinking ?? (showCCThinking ? node.ccThinking : nil)
+                    ?? (isLiveStreaming || DisclosureMode(rawValue: thinkingModeRaw) == .hidden
+                        ? nil : ChatDisplaySnapshot.segments(of: node)?.attachedThinkingText), !thinking.isEmpty {
                     ThinkingBubble(text: thinking, nodeId: node.id, profileId: node.profileId)
                 }
                 ForEach(shownBlocks.indices, id: \.self) { i in
                     quotable(shownBlocks[i]) { forceTail in
                         // partial 态（流式/reveal）中尾巴归 dots 泡；定格后回到末块
-                        singleBubble(hasTail: forceTail || (i == shownBlocks.count - 1 && !showPartialDots && !userVoicesBelow)) {
+                        singleBubble(hasTail: forceTail || (isLastInRun && i == shownBlocks.count - 1 && !showPartialDots && !userVoicesBelow)) {
                             blockText(shownBlocks[i])
                         }
                     }
@@ -446,7 +419,7 @@ struct BubbleModeRow: View {
                 // B6 A2'：partial 尾部 typing dots 独立泡（固定 identity，不混进块 ForEach——
                 // 否则「dots 变正文」被 transition 当内容替换而不是新泡弹入）
                 if showPartialDots {
-                    singleBubble(hasTail: true) { typingDots }
+                    singleBubble(hasTail: isLastInRun) { typingDots }
                         .transition(BubblePopTuning.popTransition(isUser: false))
                 }
             }
@@ -468,15 +441,22 @@ struct BubbleModeRow: View {
                 }
             }
         }
-        .animation(BubblePopTuning.popAnimation, value: shownBlocks.count)
-        .animation(BubblePopTuning.popAnimation, value: showPartialDots)
-        .animation(BubblePopTuning.popAnimation, value: revealedCount)
+        .animation(popEnabled ? BubblePopTuning.popAnimation : nil, value: shownBlocks.count)
+        .animation(popEnabled ? BubblePopTuning.popAnimation : nil, value: showPartialDots)
+        .animation(popEnabled ? BubblePopTuning.popAnimation : nil, value: revealedCount)
         .animation(.easeInOut(duration: 0.2), value: isBeingEdited)
         .onAppear { startEntranceIfNeeded(blocks: parsed.blocks) }
         .onDisappear {
             revealTask?.cancel()
             revealTask = nil
             revealedCount = nil
+        }
+        .onChange(of: popEnabled) { _, enabled in
+            guard !enabled else { return }
+            revealTask?.cancel()
+            revealTask = nil
+            revealedCount = nil
+            if entrancePending { onEntranceDone?() }
         }
         .overlay(
             RoundedRectangle(cornerRadius: bubbleCornerRadius)
@@ -494,6 +474,10 @@ struct BubbleModeRow: View {
 
     /// CC 入场 reveal 节奏器：dots 前奏 → 按泡长自适应间隔逐块放出 → 收 dots + 回调移除待弹。
     private func startEntranceIfNeeded(blocks: [String]) {
+        guard popEnabled else {
+            if entrancePending { onEntranceDone?() }
+            return
+        }
         guard entrancePending, !isUser, !isLiveStreaming, revealTask == nil else { return }
         let total = isComplex ? 1 : blocks.count
         guard total > 0 else { onEntranceDone?(); return }  // 空消息不弹，直接销账
@@ -518,8 +502,9 @@ struct BubbleModeRow: View {
     /// 有 thinking / tool / attachment 段 = 复杂，整块不拆（思考链气泡是第 3 步）。
     /// audioRef 不算数（对齐 hasRenderableSegments）：语音走独立语音气泡，
     /// 只挂语音条的消息正文仍走纯文本拆块分支。
+    /// 只挂原生思考段的普通回复同理（plan-thinking §3.2）：正文在 content，照旧拆块
     private var isComplex: Bool {
-        guard let segs = ChatDisplaySnapshot.segments(of: node) else { return false }
+        guard let segs = ChatDisplaySnapshot.segments(of: node), segs.hasRenderableSegments else { return false }
         return segs.contains { seg in
             switch seg {
             case .text, .image, .audioRef: return false
@@ -600,7 +585,7 @@ struct BubbleModeRow: View {
                     .font(FontManager.font(size: 13.5))
                     .foregroundColor(Theme.userText)
                     .textSelection(.enabled)
-                    .lineSpacing(4 * (fontScale > 0 ? fontScale : 1.0) * lineSpacingScale)
+                    .lineSpacing(0)
             }
         } else {
             let regexed = RegexPipeline.run(regexScripts, text: block, phase: .display,
@@ -620,7 +605,8 @@ struct BubbleModeRow: View {
                 onQuote: onQuoteText,
                 // M1 三格：这里是 blockText 的 else 分支（非 user），恒为 AI 正文；
                 // 同函数的 user 分支是上面那个纯 Text，走 Theme.userText
-                role: .assistant
+                role: .assistant,
+                lineSpacingScaleOverride: Self.fixedLineSpacing
             )
             // 整条消息定稿前不抓链接（research-chat-cards §7.4）；已写完的网页块例外，不用等整条结束（TASK page1-卡片-05）
             .chatCardRenderer(nodeId: node.id, streaming: isStreaming && !ChatCardRegistry.isFinishedHTMLBlock(display))
@@ -728,8 +714,7 @@ struct ThinkingBubble: View {
     var body: some View {
         // 展开/弹 sheet 分流统一在 ThinkingDisclosure（「思考过程弹出显示」开关）
         ThinkingDisclosure(label: "思考", text: text, nodeId: nodeId, profileId: profileId)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, BubbleModeRow.fixedPaddingH)
             .background(
                 RoundedRectangle(cornerRadius: 12)
                     .fill(Theme.textMuted.opacity(0.1))

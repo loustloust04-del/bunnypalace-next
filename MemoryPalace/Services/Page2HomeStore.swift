@@ -11,7 +11,7 @@ final class Page2HomeStore {
             defaults.set(Data("[]".utf8), forKey: "dashboardWidgets_v2")
             let requested = ProcessInfo.processInfo.environment["PAGE2_UI_LAYOUT_CASE"] ?? UUID().uuidString
             let caseID = requested.filter { $0.isLetter || $0.isNumber || $0 == "-" }
-            let store = Page2HomeStore(defaults: defaults, fileURL: FileManager.default.temporaryDirectory.appendingPathComponent("page2-ui-\(caseID).json"))
+            let store = Page2HomeStore(defaults: defaults, fileURL: AppPaths.temporaryDirectory.appendingPathComponent("page2-ui-\(caseID).json"))
             guard !store.isInitialized else { return store }
             store.bootstrap(toolIDs: [], dockIDs: ["calendar", "memory", "vocab", "reading"])
             if let pair = ProcessInfo.processInfo.environment["PAGE2_UI_WIDGET_PAIR"]?.split(separator: "-").map(String.init), pair.count == 2 {
@@ -69,8 +69,8 @@ final class Page2HomeStore {
     init(defaults: UserDefaults = .standard, fileURL: URL? = nil,
          writeData: @escaping (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }) {
         self.defaults = defaults
-        self.fileURL = fileURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("MemoryPalace/Page2/home-layout-v1.json")
+        self.fileURL = fileURL ?? AppPaths.checked(AppPaths.applicationSupport
+            .appendingPathComponent("MemoryPalace/Page2/home-layout-v1.json"))
         self.writeData = writeData
         if FileManager.default.fileExists(atPath: self.fileURL.path) {
             do {

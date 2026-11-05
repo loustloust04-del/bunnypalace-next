@@ -175,6 +175,26 @@ final class CharacterFloorServiceTests: XCTestCase {
                        template.prompts.first { $0.id == PromptSlot.jailbreakId }?.content)
     }
 
+    /// 小芽引导导卡（plan-onboarding-xiaoya-impl §2.6 / H6）：楼层建好、发布，但人不切过去
+    func testEnterWithoutActivateBuildsAndPublishesButStays() async throws {
+        let f = try Fixture(); defer { f.clean() }
+        let card = try f.card(book: true)
+        let profile = try await f.service.enter(card: card, activate: false)
+        XCTAssertEqual(f.profiles.currentProfile.id, "original")
+        XCTAssertNil(f.defaults.string(forKey: "lastProfileId"))
+        XCTAssertEqual(f.profiles.profiles.map(\.id), ["original", profile.id])
+        XCTAssertEqual(f.cards.cards[0].bindingState, .active)
+        XCTAssertEqual(f.cards.cards[0].linkedProfileId, profile.id)
+        XCTAssertEqual(f.presets.presets.filter { $0.ownerProfileId == profile.id }.count, 1)
+        // 已绑的卡再进一次（不激活）也不切
+        let again = try await f.service.enter(card: card, activate: false)
+        XCTAssertEqual(again.id, profile.id)
+        XCTAssertEqual(f.profiles.currentProfile.id, "original")
+        // 默认照旧切过去
+        _ = try await f.service.enter(card: card)
+        XCTAssertEqual(f.profiles.currentProfile.id, profile.id)
+    }
+
     func testPersistNewDoesNotPublishOrSwitchDefaults() throws {
         let f = try Fixture(); defer { f.clean() }
         let value = Profile(id: "new", name: "新", emoji: "", description: "", userName: "你", assistantName: "角色")
@@ -274,6 +294,19 @@ final class CharacterFloorServiceTests: XCTestCase {
         card.firstMes = " \r\n"
         card.alternateGreetings = ["", " 第一条\r\n ", "重复", "重复", "\t"]
         XCTAssertEqual(card.greetings, [" 第一条\r\n ", "重复", "重复"])
+    }
+
+    /// H9（plan-onboarding-xiaoya-impl §4.4）：默认称呼排在链首——人在小芽楼层导卡时，小芽楼层的「你」不算数
+    func testFloorUserNameReadsDefaultUserNameFirst() throws {
+        let f = try Fixture(); defer { f.clean() }
+        var current = f.profiles.currentProfile
+        current.userName = "原楼层的称呼"
+        f.profiles.updateProfile(current)
+        XCTAssertEqual(CharacterFloorService.floorUserName(f.profiles, defaults: f.defaults), "原楼层的称呼")
+        f.defaults.set("宝", forKey: DefaultUserName.key)
+        XCTAssertEqual(CharacterFloorService.floorUserName(f.profiles, defaults: f.defaults), "宝")
+        f.defaults.set("  ", forKey: DefaultUserName.key)
+        XCTAssertEqual(CharacterFloorService.floorUserName(f.profiles, defaults: f.defaults), "原楼层的称呼", "空白不算")
     }
 
 }

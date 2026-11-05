@@ -1,6 +1,10 @@
 /// K1 第 4b 步（docs/plan-hub-perf.md）：结果不明的消息由 hub 自己核对送达——这里是纯工具和状态账，流程在 send-track.ts。
 /// 协议：hub→app `{type:"send_status", chat_id, message_id, session_name, status:"uncertain"|"delivered"|"failed", retryable, reason?}`；
 /// app→hub 重发 = 原 send 帧 + `retry:true`，只接受这里记为 failed 且 retryable 的 message_id
+/// A1 R4：send / 重发帧可带 `attempt`（app 生成的这一次发送的编号），hub 把它记在这次发送上，在 ack、直接 error、send_status
+/// （含快照条目）里原样带回这个结果所属的 attempt——同一个 message_id 多次发送时 app 据此认领，不再靠先后猜。纯增字段：不带的旧 app 帧里也不出现
+/// A1 R5：hub 内部的发送身份是不重复的序号（`SendCtx.key`），不是毫秒 ts；app attempt 随这个不可变的上下文从收帧起一路带到核对 / 终态，
+/// 不在核对或报错时按「最新那次」反查
 import { open, readdir, stat } from "node:fs/promises"
 import { join } from "node:path"
 
@@ -14,6 +18,18 @@ export interface SendStatusFrame {
   status: SendStatus
   retryable: boolean
   reason?: string
+  /// 这个结果属于 app 的哪一次发送（app 没带就没有）
+  attempt?: string
+  /// 重发因「上一次还在核对 / 重发中」被拒时：正在跑的那一次的 attempt（A1 R5）。app 接着跟它的终态；请求没带 attempt 的旧 app 帧里没有
+  active_attempt?: string
+}
+
+/// 一次发送的身份（A1 R5）：hub 收到 send 帧时定下，随这次发送从排队、会话链一路带到核对 / 终态 / 结果不明的报告，之后不变
+export interface SendCtx {
+  /// hub 内部序号，进程内不重复（同一毫秒的两次发送也不同）
+  readonly key: string
+  /// app 给这一次的编号（旧 app 没带 = undefined）
+  readonly appAttempt?: string
 }
 
 const CHAT_RE = /^<channel source="memorypalace"[^>]*?\schat_id="([^"]*)"/
@@ -192,8 +208,10 @@ export interface ActiveOp {
   requeued: boolean
   /// 原来那次发送前记下的 transcript 位置（重发前查「其实进过」用）
   cursor?: TranscriptCursor
-  /// 这是哪一次发送（channel 标签的 ts）。同一个 message_id 有更新的发送开始后，这一次的结果一律不再发给 app
+  /// 这是哪一次发送（`SendCtx.key`，A1 R5 起不再用 channel 标签的 ts）。同一个 message_id 有更新的发送开始后，这一次的结果一律不再发给 app
   attempt?: string
+  /// app 给这一次发送的编号（A1 R4），结果帧里原样带回
+  appAttempt?: string
   since: number
 }
 
@@ -205,18 +223,32 @@ export interface SendRecord {
   retryable: boolean
   cursor?: TranscriptCursor
   at: number
+  /// 这个终态属于 app 的哪一次发送（A1 R4）
+  appAttempt?: string
 }
 
 export interface Outcome { status: "delivered" | "failed"; reason: string; retryable: boolean }
 
-export interface SnapshotItem { chat_id: string; message_id: string; session_name: string; status: SendStatus; retryable: boolean; reason?: string }
+export interface SnapshotItem { chat_id: string; message_id: string; session_name: string; status: SendStatus; retryable: boolean; reason?: string; attempt?: string }
 
-export type RetryAdmission = { accepted: true; op: ActiveOp } | { accepted: false; frame: Omit<SendStatusFrame, "type" | "chat_id" | "message_id" | "session_name"> }
+/// app 帧里的 attempt（A1 R4）：非空字符串（≤64）或有限数字，其余当没带
+export function appAttemptOf(v: unknown): string | undefined {
+  if (typeof v === "string") return v.length > 0 && v.length <= 64 ? v : undefined
+  if (typeof v === "number" && Number.isFinite(v)) return String(v)
+  return undefined
+}
+
+/// 带上 attempt 字段（没有就不加这个键，旧 app 看到的帧跟原来逐字相同）
+export function withAttempt<T extends object>(frame: T, attempt: string | undefined): T & { attempt?: string } {
+  return attempt === undefined ? frame : { ...frame, attempt }
+}
+
+export type RetryAdmission = { accepted: true; op: ActiveOp } | { accepted: false; frame: Omit<SendStatusFrame, "type" | "chat_id" | "message_id" | "session_name" | "attempt"> }
 
 export class SendStatusBook {
   readonly active = new Map<string, ActiveOp>()
   private readonly history = new Map<string, SendRecord>()
-  /// message_id → 最新一次发送的 ts（hub 收到 send 帧时记）
+  /// message_id → 最新一次发送的身份（`SendCtx.key`，hub 收到 send 帧时记）
   private readonly latest = new Map<string, string>()
   private readonly watchers = new Set<(f: SendStatusFrame) => void>()
 
@@ -260,10 +292,11 @@ export class SendStatusBook {
     return l === undefined || attempt === undefined || l === attempt
   }
 
-  /// 普通发送进入核对：登记进行中、广播 uncertain。已经有更新的一次开始了 → undefined（不进账、不广播）
-  begin(messageId: string, chatId: string, session: string, cursor: TranscriptCursor | undefined, attempt: string | undefined): ActiveOp | undefined {
+  /// 普通发送进入核对：登记进行中、广播 uncertain。已经有更新的一次开始了 → undefined（不进账、不广播）。
+  /// appAttempt = 这一次自己的（随发送上下文带来，A1 R5），不按 latest 反查
+  begin(messageId: string, chatId: string, session: string, cursor: TranscriptCursor | undefined, attempt: string | undefined, appAttempt?: string): ActiveOp | undefined {
     if (!this.isCurrent(messageId, attempt)) return undefined
-    const op: ActiveOp = { messageId, chatId, session, retry: false, started: true, requeued: false, cursor, attempt, since: this.now() }
+    const op: ActiveOp = { messageId, chatId, session, retry: false, started: true, requeued: false, cursor, attempt, appAttempt, since: this.now() }
     this.active.set(messageId, op)
     this.emit(frameOf(op, "uncertain", false))
     return op
@@ -274,9 +307,9 @@ export class SendStatusBook {
     if (this.active.get(op.messageId) !== op || !this.isCurrent(op.messageId, op.attempt)) return false
     this.active.delete(op.messageId)
     this.history.delete(op.messageId)
-    this.history.set(op.messageId, { status: o.status, chatId: op.chatId, session: op.session, reason: o.reason, retryable: o.retryable, cursor: cursor ?? op.cursor, at: this.now() })
+    this.history.set(op.messageId, { status: o.status, chatId: op.chatId, session: op.session, reason: o.reason, retryable: o.retryable, cursor: cursor ?? op.cursor, at: this.now(), appAttempt: op.appAttempt })
     this.prune()
-    this.emit({ type: "send_status", chat_id: op.chatId, message_id: op.messageId, session_name: op.session, status: o.status, retryable: o.retryable, reason: o.reason })
+    this.emit(withAttempt({ type: "send_status", chat_id: op.chatId, message_id: op.messageId, session_name: op.session, status: o.status, retryable: o.retryable, reason: o.reason }, op.appAttempt))
     return true
   }
 
@@ -285,19 +318,25 @@ export class SendStatusBook {
     const r = this.history.get(messageId)
     if (!r) return
     r.reason = reason
-    this.emit({ type: "send_status", chat_id: r.chatId, message_id: messageId, session_name: r.session, status: r.status, retryable: r.retryable, reason })
+    this.emit(withAttempt({ type: "send_status", chat_id: r.chatId, message_id: messageId, session_name: r.session, status: r.status, retryable: r.retryable, reason }, r.appAttempt))
   }
 
-  /// app 的 retry：只接受记为 failed 且 retryable 的（转进行中，不广播）；其余不接受，回当前状态
-  acceptRetry(messageId: string, chatId: string, session: string, crossTransport: boolean): RetryAdmission {
-    if (this.active.has(messageId)) return { accepted: false, frame: { status: "uncertain", retryable: false, reason: "这条还在核对 / 重发中" } }
+  /// app 的 retry：只接受记为 failed 且 retryable 的（转进行中，不广播）；其余不接受，回当前状态。
+  /// appAttempt = 这次重发请求的编号：准入成功就写进 op（A1 R5，预处理失败的 abortRetry 也带得上）；
+  /// 因已有操作在跑被拒时回帧带上那个操作的 `active_attempt`（只给带了 attempt 的请求，旧 app 的帧不变）
+  acceptRetry(messageId: string, chatId: string, session: string, crossTransport: boolean, appAttempt?: string): RetryAdmission {
+    const live = this.active.get(messageId)
+    if (live) {
+      const active = appAttempt !== undefined && live.appAttempt !== undefined ? { active_attempt: live.appAttempt } : {}
+      return { accepted: false, frame: { status: "uncertain", retryable: false, reason: "这条还在核对 / 重发中", ...active } }
+    }
     const r = this.record(messageId)
     if (r?.status === "delivered") return { accepted: false, frame: { status: "delivered", retryable: false, reason: r.reason } }
     if (!r) return { accepted: false, frame: { status: "failed", retryable: false, reason: "电脑那边没有这条的记录（可能已经送达，也可能 hub 重启过），看一眼再决定要不要当新消息发" } }
     if (!r.retryable) return { accepted: false, frame: { status: "failed", retryable: false, reason: r.reason } }
     if (crossTransport) return { accepted: false, frame: { status: "failed", retryable: false, reason: "这个会话现在不走终端了，电脑那边没法核对这条，看一眼再决定要不要当新消息发" } }
     if (this.active.size >= this.maxActive) return { accepted: false, frame: { status: "failed", retryable: true, reason: "电脑那边正忙，稍后再点重发" } }
-    const op: ActiveOp = { messageId, chatId: chatId || r.chatId, session, retry: true, started: false, requeued: false, cursor: r.cursor, since: this.now() }
+    const op: ActiveOp = { messageId, chatId: chatId || r.chatId, session, retry: true, started: false, requeued: false, cursor: r.cursor, appAttempt, since: this.now() }
     this.history.delete(messageId)
     this.active.set(messageId, op)
     return { accepted: true, op }
@@ -313,9 +352,9 @@ export class SendStatusBook {
   snapshot(): SnapshotItem[] {
     this.prune()
     const out: SnapshotItem[] = []
-    for (const op of this.active.values()) out.push({ chat_id: op.chatId, message_id: op.messageId, session_name: op.session, status: "uncertain", retryable: false })
+    for (const op of this.active.values()) out.push(withAttempt({ chat_id: op.chatId, message_id: op.messageId, session_name: op.session, status: "uncertain" as const, retryable: false }, op.appAttempt))
     for (const [id, r] of this.history) {
-      if (r.status === "failed" && !this.active.has(id)) out.push({ chat_id: r.chatId, message_id: id, session_name: r.session, status: "failed", retryable: r.retryable, ...(r.reason ? { reason: r.reason } : {}) })
+      if (r.status === "failed" && !this.active.has(id)) out.push(withAttempt({ chat_id: r.chatId, message_id: id, session_name: r.session, status: "failed" as const, retryable: r.retryable, ...(r.reason ? { reason: r.reason } : {}) }, r.appAttempt))
     }
     return out
   }
@@ -330,5 +369,5 @@ export class SendStatusBook {
 }
 
 function frameOf(op: ActiveOp, status: SendStatus, retryable: boolean): SendStatusFrame {
-  return { type: "send_status", chat_id: op.chatId, message_id: op.messageId, session_name: op.session, status, retryable }
+  return withAttempt({ type: "send_status", chat_id: op.chatId, message_id: op.messageId, session_name: op.session, status, retryable }, op.appAttempt)
 }

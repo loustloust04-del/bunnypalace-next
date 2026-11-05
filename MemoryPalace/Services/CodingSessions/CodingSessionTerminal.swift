@@ -57,7 +57,7 @@ enum CodingResumeTarget: String, CaseIterable, Sendable {
     }
 
     /// 已安装的 .app（`/Applications` 优先，再试 `~/Applications`；终端在系统目录）
-    func appPath(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> String? {
+    func appPath(home: URL = AppPaths.home) -> String? {
         if self == .memoryPalace { return Bundle.main.bundlePath }
         let candidates = self == .terminal
             ? ["/System/Applications/Utilities/Terminal.app"]
@@ -92,6 +92,7 @@ extension CodingSessionResume {
     /// 按目标续跑；失败回错误说明
     @discardableResult
     static func resume(_ meta: CodingSessionMeta, target: CodingResumeTarget) -> String? {
+        if let error = handoffError { return error }
         switch target {
         case .memoryPalace:
             // 走不到：Library.resume 先拦下来开面板（这里回一句只为 switch 完备）
@@ -113,7 +114,7 @@ extension CodingSessionResume {
             guard let command = shellCommand(for: meta) else { return noResume(meta) }
             guard !command.contains("\n") else { return "Warp 只接单行命令" }
             let yaml = "name: MP Resume\nwindows:\n  - tabs:\n      - layout:\n          commands:\n            - exec: |-\n                \(command)\n"
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent("mp-warp-resume.yaml")
+            let url = AppPaths.temporaryDirectory.appendingPathComponent("mp-warp-resume.yaml")
             do {
                 try yaml.write(to: url, atomically: true, encoding: .utf8)
             } catch {
@@ -135,7 +136,8 @@ extension CodingSessionResume {
     /// 桌面版深链。对端只认裸 UUID——不合格就地报错（`open` 对已注册 scheme 恒成功，对端静默丢弃看不见）。
     /// Claude：先查 desktop 自己的会话索引，这条 CLI 会话已被某个 desktop 会话收编就发那条的 stem，避免重复导入
     static func desktopURL(for meta: CodingSessionMeta, target: CodingResumeTarget,
-                           home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Result<URL, Failure> {
+                           home: URL = AppPaths.home) -> Result<URL, Failure> {
+        if let error = handoffError { return .failure(Failure(text: error)) }
         guard target.supports(meta.agent) else { return .failure(Failure(text: "\(target.displayName)打不开 \(meta.agent.displayName) 的会话")) }
         var id = meta.nativeId
         if target == .claudeDesktop, isUUID(id), let owned = claudeDesktopOwnedStem(cliId: id, home: home) {
@@ -151,7 +153,7 @@ extension CodingSessionResume {
     /// 返回其 stem uuid；多份命中取 mtime 最新（基本即当前账户）。每次现扫，不缓存（desktop 随时在写）
     static func claudeDesktopOwnedStem(cliId: String, home: URL) -> String? {
         guard !cliId.isEmpty else { return nil }
-        let root = home.appendingPathComponent("Library/Application Support/Claude/claude-code-sessions")
+        let root = AppPaths.checked(home.appendingPathComponent("Library/Application Support/Claude/claude-code-sessions"))
         let fm = FileManager.default
         var best: (date: Date, stem: String)?
         let needle = Data(cliId.utf8)
@@ -198,6 +200,7 @@ extension CodingSessionResume {
     }
 
     private static func run(_ tool: String, _ args: [String]) -> String? {
+        if let error = handoffError { return error }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tool)
         process.arguments = args

@@ -67,6 +67,10 @@ struct Page2GestureContainer<Content: View>: UIViewControllerRepresentable {
             }
         }
         #endif
+        if let trace = driver.trace, driver.enabled != enabled || driver.library != library || driver.view == nil {
+            trace("PROBE config enabled=\(driver.enabled)→\(enabled) library=\(driver.library)→\(library) envPhase=\(inheritedEnvironment.scenePhase) " +
+                  "uiState=\(UIApplication.shared.applicationState.rawValue) " + (probeState?() ?? ""))
+        }
         location.coordinateView = view
         location.coordinateInset = coordinateInset
         driver.setOuterDragLock = PagingViewController.setPage2DragLocked

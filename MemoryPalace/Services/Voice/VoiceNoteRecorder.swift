@@ -65,7 +65,7 @@ final class VoiceNoteRecorder: NSObject, AVAudioRecorderDelegate {
         } catch {
             return .failed
         }
-        let url = FileManager.default.temporaryDirectory
+        let url = AppPaths.temporaryDirectory
             .appendingPathComponent("voice-rec-\(UUID().uuidString).m4a")
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,

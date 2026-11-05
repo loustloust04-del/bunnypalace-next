@@ -12,6 +12,7 @@ struct AssistantEnv {
     let cardManager: CharacterCardManager
     let providerManager: ProviderManager
     let modelContext: ModelContext
+    var defaults: UserDefaults = .standard
 
     var profileId: String { profileManager.currentProfile.id }
 }
@@ -75,7 +76,7 @@ enum AssistantTools {
                    keywords: ["预设", "插槽", "采样", "温度", "prompt", "提示词"], page: "preset"),
         LocalGroup(tools: ["query_memories"], keywords: ["记得", "记忆", "记住"], page: "memory"),
         LocalGroup(tools: ["read_appearance", "propose_stage_theme", "propose_page2_appearance", "propose_app_icon"],
-                   keywords: ["外观", "主屏", "壁纸", "图标", "舞台", "主题", "深色", "暗色", "亮色", "好看"]),
+                   keywords: ["外观", "主屏", "桌面", "壁纸", "图标", "舞台", "主题", "深色", "暗色", "亮色", "好看"]),
     ]
 
     private static func toolName(_ def: [String: Any]) -> String {
@@ -89,7 +90,7 @@ enum AssistantTools {
     /// P3 外观包：舞台两端都有；Page2 主屏只在 iOS（mac 没有 Page2 桌面）
     private static var appearanceDefinitions: [[String: Any]] {
         var defs: [[String: Any]] = [
-            tool("read_appearance", description: "读取现在的外观：她的舞台主题；iOS 上还有 Page2 主屏的壁纸 / 图标外观 / 明暗 / 大图标 / 自定义图标，以及每一项能选的值。改外观前必读。", properties: [:]),
+            tool("read_appearance", description: "读取现在的外观：她的舞台主题；iOS 上还有 gardenOS 桌面的壁纸 / 图标外观 / 明暗 / 大图标 / 自定义图标，以及每一项能选的值。改外观前必读。", properties: [:]),
             tool("propose_stage_theme", description: "提案：换小芽窗口顶上的剪纸舞台。用户盖章后才换。", properties: [
                 "theme": ["type": "string", "enum": XiaoyaStageTheme.allCases.map(\.rawValue),
                           "description": XiaoyaStageTheme.allCases.map { "\($0.rawValue)=\($0.title)" }.joined(separator: "，")]
@@ -97,7 +98,7 @@ enum AssistantTools {
         ]
         #if os(iOS)
         defs += [
-            tool("propose_page2_appearance", description: "提案：改 Page2 主屏外观。只传要改的项；卡片会给用户看换完的样子，盖章才换。", properties: [
+            tool("propose_page2_appearance", description: "提案：改 gardenOS 桌面外观。只传要改的项；卡片会给用户看换完的样子，盖章才换。", properties: [
                 "wallpaper": ["type": "string", "enum": Array(Page2AppearancePatch.wallpapers.keys).sorted(),
                               "description": Page2AppearancePatch.wallpapers.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "，")],
                 "rendering": ["type": "string", "enum": ["default", "dark", "clear", "tinted"], "description": "图标外观：默认 / 深色 / 透明 / 着色"],
@@ -107,7 +108,7 @@ enum AssistantTools {
                 "tintHue": ["type": "number", "description": "着色时的色相 0~1（rendering=tinted 才有效）"],
                 "tintSaturation": ["type": "number", "description": "着色时的饱和度 0~1"]
             ]),
-            tool("propose_app_icon", description: "提案：改 Page2 上某个 app 的图标符号和颜色。", properties: [
+            tool("propose_app_icon", description: "提案：改 gardenOS 桌面上某个 app 的图标符号和颜色。", properties: [
                 "toolId": ["type": "string", "description": "app 的 id（从 read_appearance 拿）"],
                 "symbol": ["type": "string", "enum": Page2IconChoices.symbols, "description": "图标符号；不传就保留原图标只换颜色"],
                 "tint": ["type": "string", "enum": Array(Page2IconChoices.tints.keys).sorted(),
@@ -463,10 +464,10 @@ enum AssistantTools {
         #if os(iOS)
         let free = (UserDefaults.standard.string(forKey: "page2HomePresentation_v1") ?? "free") == "free"
         if !free {
-            lines.append("Page2 主屏：用户现在用的是针脚主屏，壁纸 / 图标外观这些设置不影响它，别提这类提案。")
+            lines.append("gardenOS 桌面：用户现在用的是针脚桌面，壁纸 / 图标外观这些设置不影响它，别提这类提案。")
         } else {
             let a = Page2AppearanceStore.shared.value
-            lines.append("Page2 主屏：壁纸 \(a.wallpaper)，图标外观 \(a.rendering)，明暗 \(a.luminosity)，大图标 \(a.largeIcons ? "开" : "关")，明亮遮罩 \(a.dimming)，着色色相 \(a.tintHue) 饱和度 \(a.tintSaturation)")
+            lines.append("gardenOS 桌面：壁纸 \(a.wallpaper)，图标外观 \(a.rendering)，明暗 \(a.luminosity)，大图标 \(a.largeIcons ? "开" : "关")，明亮遮罩 \(a.dimming)，着色色相 \(a.tintHue) 饱和度 \(a.tintSaturation)")
             lines.append("壁纸可选：" + Page2AppearancePatch.wallpapers.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "，"))
             lines.append("app（id=名字）：" + RightPanelToolManager.builtInTools.filter { !RightPanelToolManager.secretToolIds.contains($0.id) }.map { tool -> String in
                 let custom = a.icons[tool.id].map { " [自定义 \($0.symbol ?? "图片") \($0.tint)]" } ?? ""

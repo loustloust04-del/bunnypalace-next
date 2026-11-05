@@ -28,6 +28,11 @@ enum PlaceholderMaterializer {
     /// 递归 materialize 一个目录下所有 placeholder。
     /// 调用方负责包在 Task 里 + 处理 Task.checkCancellation。
     static func materialize(filesUnder root: URL, recursive: Bool = true) async throws {
+        #if os(macOS)
+        if BenchIsolation.active {
+            throw GlobalBackupError.ioFailed(root, CocoaError(.featureUnsupported))
+        }
+        #endif
         guard FileManager.default.fileExists(atPath: root.path) else { return }
 
         let fm = FileManager.default

@@ -2,7 +2,7 @@ import Foundation
 
 /// CC 小克的 memory → 选定楼层记忆树的 memory/cc/（plan-cc-memory-sync）。
 /// 手机来拉：连上 hub / 收到 cc_memory_changed / 手动 / 每 6 小时 → 要清单 → 按哈希差分批取 → 写入；
-/// 清单里没有的本地文件删掉。hub 已过滤日记，这里按同一套规则再兜一遍。
+/// 清单里没有的本地文件删掉。hub 已按名字排除（私人文件、名单、符号链接），这里按同一条私人文件规则再兜一遍。
 /// AI 侧仍只读：memory/ 写入一律被 fs 工具拒绝，这里是系统自己写。
 enum CCMemorySync {
     static let enabledKey = "ccMemorySyncEnabled"
@@ -23,7 +23,7 @@ enum CCMemorySync {
     private static var timer: Timer?   // 只在主线程碰（WS didOpen 回主线程后调）
 
     static func directory(profileId: String) -> URL {
-        FileLibraryStore.memoryRoot(profileId: profileId).appendingPathComponent(subdir, isDirectory: true)
+        AppPaths.checked(FileLibraryStore.memoryRoot(profileId: profileId).appendingPathComponent(subdir, isDirectory: true))
     }
 
     /// 文件库提示里那一行（D3）：只在开着、而且是选定楼层时出现；纯静态文本，缓存前缀稳定
@@ -66,7 +66,7 @@ enum CCMemorySync {
         let dir = directory(profileId: targetProfileId)
         let todo = diff(remote: remote, local: localHashes(dir: dir))
         for name in todo.delete {
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+            removeFileOrLink(dir.appendingPathComponent(name))
         }
         for start in stride(from: 0, to: todo.fetch.count, by: batchSize) {
             let names = Array(todo.fetch[start..<min(start + batchSize, todo.fetch.count)])
@@ -89,7 +89,7 @@ enum CCMemorySync {
         var written = 0
         for f in files {
             guard let name = f["name"] as? String, let content = f["content"] as? String,
-                  isSafeName(name), !isExcluded(name: name, content: content) else { continue }
+                  isSafeName(name), !isExcluded(name: name) else { continue }
             do {
                 try Data(wrap(content, at: Date()).utf8).write(to: dir.appendingPathComponent(name), options: .atomic)
                 written += 1
@@ -113,7 +113,7 @@ enum CCMemorySync {
     static func parseManifest(_ obj: [String: Any]) -> [RemoteEntry]? {
         guard (obj["ok"] as? Bool) == true, let files = obj["files"] as? [[String: Any]] else { return nil }
         return files.compactMap { f in
-            guard let name = f["name"] as? String, let hash = f["sha256"] as? String, isSafeName(name) else { return nil }
+            guard let name = f["name"] as? String, let hash = f["sha256"] as? String, isSafeName(name), !isExcluded(name: name) else { return nil }
             return RemoteEntry(name: name, sha256: hash)
         }
     }
@@ -130,28 +130,10 @@ enum CCMemorySync {
         name.hasSuffix(".md") && !name.contains("/") && !name.contains("\\") && !name.hasPrefix(".") && name.count <= 200
     }
 
-    /// 与 hub 同一套：private_ 开头 / 文件名或 frontmatter 的 name、description 提到日记
-    static func isExcluded(name: String, content: String) -> Bool {
-        if name.hasPrefix("private_") || mentionsDiary(name) { return true }
-        let fm = frontmatter(content)
-        return mentionsDiary(fm.name ?? "") || mentionsDiary(fm.description ?? "")
-    }
-
-    private static func mentionsDiary(_ s: String) -> Bool {
-        s.range(of: "diary", options: .caseInsensitive) != nil || s.contains("日记")
-    }
-
-    static func frontmatter(_ text: String) -> (name: String?, description: String?) {
-        let lines = text.components(separatedBy: "\n")
-        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else { return (nil, nil) }
-        var name: String?
-        var description: String?
-        for line in lines.dropFirst() {
-            if line.trimmingCharacters(in: .whitespaces) == "---" { break }
-            if line.hasPrefix("name:") { name = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces) }
-            if line.hasPrefix("description:") { description = String(line.dropFirst(12)).trimmingCharacters(in: .whitespaces) }
-        }
-        return (name, description)
+    /// 与 hub（isPrivateName）、种子（CatalogSeed）同一条：去掉路径后的文件名以 private_ 开头（不分大小写）就是私人文件，
+    /// 不同步、不打开；只是中间带 private_ 的（project_private_repo.md）是普通文件。名单由 hub 端挡，不按内容里的字样整份扔
+    static func isExcluded(name: String) -> Bool {
+        (name as NSString).lastPathComponent.lowercased().hasPrefix("private_")
     }
 
     static let headerPrefix = "<!-- 同步自 CC 的 memory（只读）"
@@ -170,14 +152,47 @@ enum CCMemorySync {
         return String(fileText[fileText.index(after: nl)...])
     }
 
-    /// 本地已有：文件名 → 去头注释后内容的 sha256
-    static func localHashes(dir: URL) -> [String: String] {
+    /// 本地已有：文件名 → 去头注释后内容的 sha256。先列名字（lstat，不跟链接），只读允许的普通文件；
+    /// 私人文件、符号链接、读不了的不读正文，哈希记空（清单里没有就按名字删，有就重取覆盖）；
+    /// 目录等别的东西不进来，不会成为删除候选
+    static func localHashes(dir: URL, read: (URL) throws -> String = readNoFollow) -> [String: String] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
         var out: [String: String] = [:]
         for name in names where isSafeName(name) {
-            guard let text = try? String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8) else { continue }
+            let url = dir.appendingPathComponent(name)
+            let type = itemType(url)
+            guard type == .typeRegular || type == .typeSymbolicLink else { continue }
+            guard type == .typeRegular, !isExcluded(name: name), let text = try? read(url) else {
+                out[name] = ""
+                continue
+            }
             out[name] = FileLibraryStore.sha256Hex(Data(unwrap(text).utf8))
         }
         return out
+    }
+
+    /// 不跟符号链接打开，在同一个描述符上 fstat 确认是普通文件再读：列名字和读之间被换成链接，也读不到链接目标
+    static func readNoFollow(_ url: URL) throws -> String {
+        let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { throw POSIXError(.EFTYPE) }
+        guard let text = String(data: try handle.readToEnd() ?? Data(), encoding: .utf8) else {
+            throw CocoaError(.fileReadInapplicableStringEncoding)
+        }
+        return text
+    }
+
+    /// 只删普通文件 / 符号链接本身；unlink 不递归，扫描后被换成目录也删不掉
+    static func removeFileOrLink(_ url: URL) {
+        let type = itemType(url)
+        guard type == .typeRegular || type == .typeSymbolicLink else { return }
+        unlink(url.path)
+    }
+
+    /// lstat 看到的类型（不跟链接）
+    private static func itemType(_ url: URL) -> FileAttributeType? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType
     }
 }

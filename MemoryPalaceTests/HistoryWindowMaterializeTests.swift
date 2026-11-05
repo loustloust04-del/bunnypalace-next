@@ -8,7 +8,7 @@ final class HistoryWindowMaterializeTests: XCTestCase {
 
     let pid = "xctest-history-window"
     private var savedDefaults: [String: Any?] = [:]
-    private let keys = ["maxImagesToModel", "imageTranscriptionEnabled", "mem_master", "mem_content_summary"]
+    private let keys = ["maxImagesToModel", "imageTranscriptionEnabled", "mem_master", "mem_content_summary", MemoryOpenWindow.a2Key]
 
     override func setUp() {
         super.setUp()
@@ -17,6 +17,7 @@ final class HistoryWindowMaterializeTests: XCTestCase {
         UserDefaults.standard.set(true, forKey: "imageTranscriptionEnabled")
         UserDefaults.standard.set(true, forKey: "mem_master")
         UserDefaults.standard.set(true, forKey: "mem_content_summary")
+        UserDefaults.standard.removeObject(forKey: MemoryOpenWindow.a2Key)   // v5：锚定跟【开窗口】A2，没写过跟上一行
     }
 
     override func tearDown() {

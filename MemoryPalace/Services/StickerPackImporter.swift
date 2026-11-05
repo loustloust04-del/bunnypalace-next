@@ -16,7 +16,7 @@ enum StickerPackImporter {
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
         // 解压到临时目录
-        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("stickerpack_import_\(UUID().uuidString)")
+        let tmpDir = AppPaths.temporaryDirectory.appendingPathComponent("stickerpack_import_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 

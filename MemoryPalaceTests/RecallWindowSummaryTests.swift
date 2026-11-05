@@ -47,7 +47,7 @@ final class RecallWindowSummaryTests: XCTestCase {
         try WindowSummaryStore.save(SessionSummary(conversationId: "conv-wwww-0001", title: "色色", compressedCount: 0,
                                                    segments: [seg(.rolling, "上下文摘要那段"), seg(.closeout, "最后那截")], updatedAt: Date(),
                                                    closedThrough: "w-n0"), in: root)
-        try TimelineStore.upsert(TimelineEntry(start: Date(), end: Date(), conversationId: "conv-wwww-0001", title: "色色", text: "- 一件事",
+        try TimelineStore.seedLegacy(TimelineEntry(start: Date(), end: Date(), conversationId: "conv-wwww-0001", title: "色色", text: "- 一件事",
                                                pending: "周末问猫粮\n下次接着写", day: "2026-10-11", lastNodeId: "w-n0"),
                                  in: TimelineStore.dir(root: root))
         r = await run()

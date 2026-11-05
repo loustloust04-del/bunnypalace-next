@@ -9,17 +9,33 @@ import Darwin
 struct MacShellBackend: RunCommandBackend {
 
     var toolDescription: String {
-        "在用户的 Mac 上运行一条 shell 命令（/bin/zsh -c）。每次调用是独立进程，无共享会话；命令返回时同一进程组里的后台进程会一并结束（自己 setsid 或交给 launchd 的守护进程不在此列，别指望它们被清理）；工作目录默认是当前楼层的文件库根。适合列目录、搜索、跑脚本、调用命令行工具；改文件库里的文件内容优先用 fs_write/fs_edit（原子写）。返回 exit_code/stdout/stderr，非零退出码也原样返回。"
+        #if DEBUG || PERF_BENCH
+        if BenchIsolation.active {
+            return "bench 仅运行固定合成输出程序。command 必须逐字为 mp-bench-synthetic-output；不支持 shell 文本、续跑或自选可执行程序。这不是 L-term 恒定负载生成器。"
+        }
+        #endif
+        return "在用户的 Mac 上运行一条 shell 命令（/bin/zsh -c）。每次调用是独立进程，无共享会话；命令返回时同一进程组里的后台进程会一并结束（自己 setsid 或交给 launchd 的守护进程不在此列，别指望它们被清理）；工作目录默认是当前楼层的文件库根。适合列目录、搜索、跑脚本、调用命令行工具；改文件库里的文件内容优先用 fs_write/fs_edit（原子写）。返回 exit_code/stdout/stderr，非零退出码也原样返回。"
     }
 
     var cwdParamDescription: String {
-        "工作目录：绝对路径，或相对文件库根的路径；默认文件库根"
+        #if DEBUG || PERF_BENCH
+        if BenchIsolation.active { return "bench 省略 cwd 使用隔离根；只接受与隔离根逐字相同的路径" }
+        #endif
+        return "工作目录：绝对路径，或相对文件库根的路径；默认文件库根"
     }
 
     func prepare() async throws {}   // macOS 没有要预热的东西
 
     /// 相对路径经文件库根 containment（同 `FileLibraryStore.resolve` 语义）；绝对路径放行（macOS 无沙箱，askOnce 已授权整条对话）。
     func resolveCwd(_ raw: String?, profileId: String) -> Result<String, RunCommandTool.CwdError> {
+        #if DEBUG || PERF_BENCH
+        if BenchIsolation.active {
+            guard LocalTerminalLaunch.BenchSyntheticOutput.accepts(directory: raw) else {
+                return .failure(RunCommandTool.CwdError(message: "bench 只允许固定合成程序的隔离根 cwd"))
+            }
+            return .success(LocalTerminalLaunch.BenchSyntheticOutput.directory)
+        }
+        #endif
         // 两边都解 symlink 再比前缀：库里一个指向库外的 symlink 不能把 cwd 带出去（B 报告 R5 同款漏，这里先堵）
         let root = FileLibraryStore.libraryRoot(profileId: profileId).standardizedFileURL.resolvingSymlinksInPath()
         let target: URL
@@ -44,8 +60,11 @@ struct MacShellBackend: RunCommandBackend {
 
     /// app 环境 + PATH 前置（GUI app 不含 brew/npm，`CCHubProcess` 同套路）。**不注入 MP 自己的任何密钥。**
     func environment() -> [String: String] {
+        #if DEBUG || PERF_BENCH
+        if BenchIsolation.active { return LocalTerminalLaunch.BenchSyntheticOutput.environment }
+        #endif
         var env = ProcessInfo.processInfo.environment
-        let home = NSHomeDirectory()
+        let home = AppPaths.home.path
         env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:\(home)/.bun/bin:\(home)/.local/bin:" + (env["PATH"] ?? "/usr/bin:/bin")
         env["TERM"] = "dumb"
         env["NO_COLOR"] = "1"
@@ -55,6 +74,29 @@ struct MacShellBackend: RunCommandBackend {
 
     /// `/bin/zsh -c command`，stdin=/dev/null，stdout/stderr 各一根管道，chdir cwd，自成进程组，其余 fd 不继承。
     func spawn(command: String, cwd: String, env: [String: String]) throws -> any RunCommandHandle {
+        let executable: String
+        let argv: [String]
+        let envp: [String]
+        #if DEBUG || PERF_BENCH
+        if BenchIsolation.active {
+            guard command == LocalTerminalLaunch.BenchSyntheticOutput.command,
+                  cwd == LocalTerminalLaunch.BenchSyntheticOutput.directory else {
+                throw NSError(domain: "RunCommand", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "bench 禁止通用 shell / 任意 cwd；仅支持 mp-bench-synthetic-output"])
+            }
+            executable = LocalTerminalLaunch.BenchSyntheticOutput.executable
+            argv = [executable] + LocalTerminalLaunch.BenchSyntheticOutput.arguments
+            envp = LocalTerminalLaunch.BenchSyntheticOutput.environment.map { "\($0.key)=\($0.value)" }
+        } else {
+            executable = "/bin/zsh"
+            argv = [executable, "-c", command]
+            envp = env.map { "\($0.key)=\($0.value)" }
+        }
+        #else
+        executable = "/bin/zsh"
+        argv = [executable, "-c", command]
+        envp = env.map { "\($0.key)=\($0.value)" }
+        #endif
         var outPipe: [Int32] = [-1, -1], errPipe: [Int32] = [-1, -1]
         guard pipe(&outPipe) == 0, pipe(&errPipe) == 0 else { throw NSError(domain: "RunCommand", code: Int(errno), userInfo: [NSLocalizedDescriptionKey: "pipe 失败"]) }
 
@@ -72,12 +114,10 @@ struct MacShellBackend: RunCommandBackend {
         posix_spawnattr_setflags(&attr, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
         posix_spawnattr_setpgroup(&attr, 0)   // pgid = 自己的 pid
 
-        let argv = ["/bin/zsh", "-c", command]
-        let envp = env.map { "\($0.key)=\($0.value)" }
         var pid: pid_t = 0
         let rc = Self.withCStrings(argv) { argvPtr in
             Self.withCStrings(envp) { envPtr in
-                posix_spawn(&pid, "/bin/zsh", &fa, &attr, argvPtr, envPtr)
+                posix_spawn(&pid, executable, &fa, &attr, argvPtr, envPtr)
             }
         }
         close(outPipe[1]); close(errPipe[1])

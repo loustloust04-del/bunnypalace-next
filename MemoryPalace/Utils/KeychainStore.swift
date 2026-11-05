@@ -19,6 +19,9 @@ enum KeychainStore {
     /// 为保证一致性：写入前先删除同 account 的所有条目（本机+云），再按 sync 写一份。
     @discardableResult
     static func set(_ value: String?, account: String, sync: Bool, service: String = KeychainStore.service) -> Bool {
+        #if os(macOS)
+        if BenchIsolation.active { return false }
+        #endif
         guard let value, !value.isEmpty else {
             remove(account: account, service: service)
             return true
@@ -48,6 +51,9 @@ enum KeychainStore {
     }
 
     static func get(account: String, service: String = KeychainStore.service) -> String? {
+        #if os(macOS)
+        if BenchIsolation.active { return nil }
+        #endif
         var query = anyQuery(account: account, service: service)
         query[kSecReturnData as String] = kCFBooleanTrue!
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -65,6 +71,9 @@ enum KeychainStore {
 
     /// 只看能不能读（不取值）：诊断用，锁屏读不到是 errSecInteractionNotAllowed(-25308)
     static func readStatus(account: String, service: String = KeychainStore.service) -> OSStatus {
+        #if os(macOS)
+        if BenchIsolation.active { return errSecNotAvailable }
+        #endif
         var query = anyQuery(account: account, service: service)
         query[kSecReturnData as String] = kCFBooleanTrue!
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -73,6 +82,12 @@ enum KeychainStore {
     }
 
     static func remove(account: String, service: String = KeychainStore.service) {
+        #if os(macOS)
+        if BenchIsolation.active {
+            log.error("remove unavailable in perf bench")
+            return
+        }
+        #endif
         let status = SecItemDelete(TestHostIsolation.keychainQuery(anyQuery(account: account, service: service)) as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
             print("[KeychainStore] remove failed account=\(account) status=\(status)")
@@ -81,6 +96,9 @@ enum KeychainStore {
 
     /// 列出当前 service 下所有 account（本机+云）。用于开关同步时统一迁移。
     static func allAccounts(service: String = KeychainStore.service) -> [String] {
+        #if os(macOS)
+        if BenchIsolation.active { return [] }
+        #endif
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -100,6 +118,9 @@ enum KeychainStore {
     /// 一次性读出当前 service 下所有 account→value 映射。
     /// 一次 SecItemCopyMatching 只触发一次 Keychain 授权弹窗，避免循环调 get 导致狂弹。
     static func getAll(service: String = KeychainStore.service) -> [String: String] {
+        #if os(macOS)
+        if BenchIsolation.active { return [:] }
+        #endif
         // macOS legacy 钥匙串不支持 kSecMatchLimitAll + kSecReturnData 同用，会返回
         // errSecParam(-50) → 整批读空 → 启动后所有 key 像被清空（iOS 支持该组合故无此症）。
         // 改成：批量只取 account 名（仅属性，不取 data），再逐条 get() 取值。

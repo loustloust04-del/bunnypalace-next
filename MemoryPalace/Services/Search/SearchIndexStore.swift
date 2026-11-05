@@ -35,14 +35,14 @@ final class SearchIndexStore: @unchecked Sendable {
     static let minimumSQLiteVersion: Int32 = 3_043_000
 
     static var defaultURL: URL {
-        URL.applicationSupportDirectory
+        AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("search-index.sqlite")
+            .appendingPathComponent("search-index.sqlite"))
     }
 
     static func removeFiles(at url: URL = defaultURL) {
         for suffix in ["", "-wal", "-shm", "-journal"] {
-            try? FileManager.default.removeItem(atPath: url.path + suffix)
+            try? FileManager.default.removeItem(at: AppPaths.checked(URL(fileURLWithPath: url.path + suffix)))
         }
     }
 
@@ -325,6 +325,54 @@ final class SearchIndexStore: @unchecked Sendable {
             while try s.step() {
                 guard let nodeId = s.text(0), let convId = s.text(1) else { continue }
                 if let scope, !scope.contains(convId) { continue }
+                out.append(SearchIndexHit(nodeId: nodeId, conversationId: convId, role: s.text(2) ?? "",
+                                          created: s.optionalDouble(3).map(Date.init(timeIntervalSince1970:))))
+            }
+            return out
+        }
+    }
+
+    /// C3 原文召回：查询词之间 OR，过滤后按 FTS5 相关度、稳定 id 取前 300 条；不改变搜索框 hits 的时间排序。
+    /// 任一词不可索引时返回 nil，由 SearchService 整次扫描回退。
+    func catalogHits(terms: [String], profileId: String,
+                     interval: DateInterval? = nil, scope: Set<String>? = nil,
+                     cancel: CatalogCancel? = nil) throws -> [SearchIndexHit]? {
+        try cancel?.check()
+        let words = SearchTextSegmenter.catalogTerms(terms)
+        let queries = words.compactMap { SearchTextSegmenter.ftsQuery(for: $0) }
+        guard queries.count == words.count else { return nil }
+        guard !queries.isEmpty else { return [] }
+        if let scope, scope.isEmpty { return [] }
+        let scopeList = scope?.sorted()
+        var sql = """
+            SELECT d.node_id, d.conversation_id, d.role, d.created FROM fts JOIN doc d ON d.id = fts.rowid
+            WHERE fts MATCH ? AND d.profile_id = ? AND d.node_trashed = 0
+            AND d.role IN ('user', 'assistant')
+            """
+        if interval != nil { sql += " AND d.created IS NOT NULL AND d.created >= ? AND d.created <= ?" }
+        if let scopeList {
+            sql += " AND d.conversation_id IN (\(Array(repeating: "?", count: scopeList.count).joined(separator: ",")))"
+        }
+        sql += " ORDER BY bm25(fts), d.id LIMIT 300"
+        return try withReader { db in
+            try cancel?.check()
+            let s = try db.prepare(sql)
+            s.bind(1, queries.joined(separator: " OR "))
+            s.bind(2, profileId)
+            var i: Int32 = 3
+            if let interval {
+                s.bind(i, interval.start.timeIntervalSince1970); i += 1
+                s.bind(i, interval.end.timeIntervalSince1970); i += 1
+            }
+            if let scopeList {
+                for conversationId in scopeList {
+                    s.bind(i, conversationId); i += 1
+                }
+            }
+            var out: [SearchIndexHit] = []
+            while try s.step() {
+                try cancel?.check()
+                guard let nodeId = s.text(0), let convId = s.text(1) else { continue }
                 out.append(SearchIndexHit(nodeId: nodeId, conversationId: convId, role: s.text(2) ?? "",
                                           created: s.optionalDouble(3).map(Date.init(timeIntervalSince1970:))))
             }

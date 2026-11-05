@@ -60,6 +60,7 @@ struct CCPhaseHost: View {
     let conversationId: String
     /// 这个对话发出去了、回复还没落地（原来的三个点）
     let waitingForReply: Bool
+    let spacingBefore: CGFloat
 
     /// 已经亮够的那次「做完了」（按 updated 认）
     @State private var expiredDone: Date?
@@ -67,6 +68,7 @@ struct CCPhaseHost: View {
     var body: some View {
         if let phase = CCSessionPhaseStore.shared.phase(for: conversationId), shows(phase) {
             CCPhaseCardView(phase: phase)
+                .padding(.top, spacingBefore)
                 .task(id: phase.updated) {
                     guard phase.phase == .done else { return }
                     let left = CCSessionPhase.doneLinger - Date().timeIntervalSince(phase.updated)
@@ -75,6 +77,7 @@ struct CCPhaseHost: View {
                 }
         } else if waitingForReply {
             CCWaitingBubbleRow()
+                .padding(.top, spacingBefore)
         }
     }
 

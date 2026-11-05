@@ -50,6 +50,12 @@ struct PromptSlot: Identifiable, Codable, Hashable {
 
     /// 锁死槽：UI 不给开关（其余内置 marker 可开关，注入只看 isEnabled）
     var isLocked: Bool { id == Self.mainId || id == Self.chatHistoryId }
+
+    /// 组装时由系统内容填充、不读槽里存的正文的 marker（PromptAssembler：对话历史 / 上下文摘要 / 时间轴 / 用户画像 / 记忆 / 世界书前后）。
+    /// Prompt 页、文件库「Prompt」、完整底图都按它判只读 / 不算人填的字
+    var isAutoFilled: Bool { isMarker && Self.autoFilledIds.contains(id) }
+    private static let autoFilledIds: Set<String> = [chatHistoryId, contextSummaryId, timelineId, userProfileId,
+                                                      memoryInjectionId, worldInfoBeforeId, worldInfoAfterId]
 }
 
 // MARK: - Sampling Parameters
@@ -75,6 +81,7 @@ struct SamplingParams: Codable, Hashable {
     // ⚠️ 可选型：synthesized Codable 对非可选新字段在老数据上会 decode 失败（preset 全量丢失），Bool? 缺 key 安全得 nil
     var cacheFriendly: Bool? = nil        // 缓存命中优化：易变段下沉 system 尾部，nil/false = 关
     var maxTokensAuto: Bool? = nil        // 输出上限按模型自动；nil = 老数据，按「4096 即自动」解读（OutputTokenCap）
+    var cacheLongTTL: Bool? = nil         // 缓存保留 1 小时；nil = 默认 1 小时（粟粟 10-15），false = 5 分钟
 }
 
 // MARK: - Preset

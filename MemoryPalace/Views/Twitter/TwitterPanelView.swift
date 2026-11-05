@@ -52,7 +52,7 @@ struct TwitterPanelView: View {
 
     private var accent: Color { TwitterAccent.color(fromHex: accentHex) }
     private var mediaDir: URL {
-        TwitterArchiveImporter.defaultMediaRoot().appendingPathComponent(profileId, isDirectory: true)
+        AppPaths.checked(TwitterArchiveImporter.defaultMediaRoot().appendingPathComponent(profileId, isDirectory: true))
     }
 
     var body: some View {

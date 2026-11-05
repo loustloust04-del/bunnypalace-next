@@ -84,8 +84,7 @@ struct ContextSummarizer {
             if let to = try await SessionCloseout.shared.compress(
                 messages: messages, oldCount: needed.oldMessages.count, conversationId: conversationId,
                 title: conversationTitle, ctx: ctx,
-                caller: SessionSegmentWriter.modelCaller(model: ctx.model, providerManager: providerManager,
-                                                         conversationId: conversationId, profileId: ctx.profileId)) {
+                caller: SessionCloseout.modelCaller(.context, ctx: ctx, providerManager: providerManager, conversationId: conversationId)) {
                 CacheDiagLog.shared.log("📝 窗口摘要: ✅ 压到第 \(to) 条")
             }
         } catch {

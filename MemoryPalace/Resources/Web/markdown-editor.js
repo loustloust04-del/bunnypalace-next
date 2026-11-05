@@ -4,6 +4,7 @@ const editorRoot = document.getElementById("editor");
 let view = null;
 let fallbackTextArea = null;
 let revision = 0;
+let nativeRevision = -1;
 let applyingNativeUpdate = false;
 let debounceTimer = null;
 let content = "";
@@ -18,41 +19,129 @@ function post(message) {
   bridge?.postMessage(message);
 }
 
+// 仅 DEBUG 宿主在 document-start 显式注入开关；关闭时不注册观测、不发送探针消息。
+const editorProbe = window.__mpEditorProbeEnabled === true ? createEditorProbe() : null;
+
+function createEditorProbe() {
+  let sequence = 0;
+  function record(event, detail = {}) {
+    const viewport = window.visualViewport;
+    post({
+      type: "editorProbe",
+      event,
+      sequence: ++sequence,
+      timeMs: Date.now(),
+      performanceMs: performance.now(),
+      windowScrollY: window.scrollY,
+      innerHeight: window.innerHeight,
+      visualViewport: viewport ? { height: viewport.height, offsetTop: viewport.offsetTop } : null,
+      cm: view ? {
+        scrollTop: view.scrollDOM.scrollTop,
+        clientHeight: view.scrollDOM.clientHeight,
+        undoDepth: window.MPCodeMirror.undoDepth(view.state),
+        redoDepth: window.MPCodeMirror.redoDepth(view.state),
+        anchor: view.state.selection.main.anchor,
+        head: view.state.selection.main.head,
+        composing: view.composing,
+        hasFocus: view.hasFocus
+      } : null,
+      revision,
+      ...detail
+    });
+  }
+  for (const event of ["resize", "scroll"]) {
+    window.addEventListener(event, () => record(`window.${event}`), { passive: true });
+    window.visualViewport?.addEventListener(event, () => {
+      record(`visualViewport.${event}`);
+      requestAnimationFrame(() => record(`visualViewport.${event}.afterFrame`));
+    }, { passive: true });
+  }
+  document.addEventListener("beforeinput", (event) => {
+    if (!editorRoot.contains(event.target)) return;
+    const detail = { inputType: event.inputType, isComposing: event.isComposing, defaultPrevented: event.defaultPrevented };
+    record("beforeinput", detail);
+    requestAnimationFrame(() => record("beforeinput.afterFrame", { ...detail, defaultPrevented: event.defaultPrevented }));
+  }, { capture: true, passive: true });
+  for (const event of ["pointerdown", "pointerup", "pointercancel", "focusin", "focusout"]) {
+    editorRoot.addEventListener(event, () => record(event), { passive: true });
+  }
+  return {
+    record,
+    attach(editorView) {
+      editorView.scrollDOM.addEventListener("scroll", () => record("cm.scroll"), { passive: true });
+      new ResizeObserver(() => record("cm.resize")).observe(editorView.scrollDOM);
+      record("cm.ready");
+    }
+  };
+}
+
 function currentContent() {
   if (view) return view.state.doc.toString();
   return fallbackTextArea?.value ?? content;
 }
 
+function postEditorSnapshot(type, token = null) {
+  content = currentContent();
+  const message = { type, content, revision, nativeRevision };
+  if (Number.isInteger(token)) message.token = token;
+  post(message);
+}
+
 function scheduleContentChanged() {
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
+    debounceTimer = null;
     if (applyingNativeUpdate) return;
-    content = currentContent();
-    post({
-      type: "contentChanged",
-      content,
-      revision
-    });
+    postEditorSnapshot("contentChanged");
   }, 180);
 }
 
 function noteEditorChanged() {
   revision += 1;
+  if (debounceTimer === null) post({ type: "documentChanged", revision, nativeRevision });
   scheduleContentChanged();
 }
 
-function setEditorContent(nextContent, nativeRevision = null) {
-  if (nativeRevision !== null && nativeRevision < revision) return;
+// 有改动还在 180ms 防抖里没发：马上发（编辑器被藏起来 / 切走模式前调用，免得最后几个字只留在网页里）
+function flushContentChanged(type = "contentChanged", token = null) {
+  const pending = debounceTimer !== null;
+  clearTimeout(debounceTimer);
+  debounceTimer = null;
+  if (pending || type !== "contentChanged") postEditorSnapshot(type, token);
+}
+
+// 只换掉真正不同的一段，保留公共前后缀及选区映射。
+function minimalChange(current, next) {
+  let from = 0;
+  const limit = Math.min(current.length, next.length);
+  while (from < limit && current.charCodeAt(from) === next.charCodeAt(from)) from += 1;
+  let currentEnd = current.length;
+  let nextEnd = next.length;
+  while (currentEnd > from && nextEnd > from && current.charCodeAt(currentEnd - 1) === next.charCodeAt(nextEnd - 1)) {
+    currentEnd -= 1;
+    nextEnd -= 1;
+  }
+  return { from, to: currentEnd, insert: next.slice(from, nextEnd) };
+}
+
+// 仅显式原生操作写正文；原生操作序独立于该操作内的 JS 编辑版本。
+// 每份文档新建编辑器，首次载入不入栈；同文档外部替换 / 源码提交各自独立一步。
+function replaceEditorDocument(nextContent, nextNativeRevision) {
+  if (!Number.isInteger(nextNativeRevision) || nextNativeRevision <= nativeRevision) return;
+  const initializing = nativeRevision < 0;
+  clearTimeout(debounceTimer);
+  debounceTimer = null;
+  nativeRevision = nextNativeRevision;
+  revision = 0;
   content = nextContent;
   if (view) {
-    if (nextContent === view.state.doc.toString()) return;
+    const current = view.state.doc.toString();
+    if (nextContent === current) return;
+    const { Transaction, isolateHistory } = window.MPCodeMirror;
     applyingNativeUpdate = true;
     view.dispatch({
-      changes: {
-        from: 0,
-        to: view.state.doc.length,
-        insert: nextContent
-      }
+      changes: minimalChange(current, nextContent),
+      annotations: initializing ? Transaction.addToHistory.of(false) : isolateHistory.of("full")
     });
     applyingNativeUpdate = false;
     return;
@@ -63,12 +152,200 @@ function setEditorContent(nextContent, nativeRevision = null) {
   }
 }
 
-function requestSave() {
-  content = currentContent();
-  post({
-    type: "requestSave",
-    content
+// 再次打开回到上次位置：选区 + 视口顶上那行的文档位置（UTF-16 偏移，和源码模式 NSRange 同单位）。
+// 滚动 / 选区变了 250ms 防抖报给 Swift，关编辑器时由 Swift 落盘
+let positionTimer = null;
+let positionRestored = false;
+
+function currentPosition() {
+  if (!view) return null;
+  const { anchor, head } = view.state.selection.main;
+  const rect = view.scrollDOM.getBoundingClientRect();
+  const top = view.lineBlockAtHeight(Math.max(0, rect.top - view.documentTop)).from;
+  return { anchor, head, top };
+}
+
+function postPosition() {
+  clearTimeout(positionTimer);
+  positionTimer = null;
+  const position = currentPosition();
+  if (position) post({ type: "position", ...position });
+}
+
+function schedulePosition() {
+  if (!positionRestored) return;
+  clearTimeout(positionTimer);
+  positionTimer = setTimeout(postPosition, 250);
+}
+
+// 打开后的首次配置恢复位置；选区落在文件头里就只滚不选（选进去会把属性卡展开成源码）
+function restorePosition(position) {
+  if (positionRestored || !view) return;
+  positionRestored = true;
+  if (!position) return;
+  const { EditorView } = window.MPCodeMirror;
+  const length = view.state.doc.length;
+  const clamp = (n) => Math.max(0, Math.min(length, Number.isInteger(n) ? n : 0));
+  const anchor = clamp(position.anchor);
+  const head = clamp(position.head);
+  const spec = { effects: EditorView.scrollIntoView(clamp(position.top), { y: "start", yMargin: 0 }) };
+  const frontmatter = docFrontmatterRange(view.state.doc);
+  if (!frontmatter || Math.min(anchor, head) > frontmatter.to) spec.selection = { anchor, head };
+  view.dispatch(spec);
+}
+
+// SwiftUI 管 frame，CM 管内滚；WebKit 在 iOS 26 仍可能滚 document，视口事件后再复核一帧。
+const isIOSWebKit = /Apple Computer/.test(navigator.vendor) && (/Mobile\/\w+/.test(navigator.userAgent) || navigator.maxTouchPoints > 2);
+function resetWindowScroll() {
+  if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
+}
+
+if (isIOSWebKit) {
+  const viewportChanged = () => {
+    resetWindowScroll();
+    requestAnimationFrame(resetWindowScroll);
+  };
+  for (const event of ["resize", "scroll"]) {
+    window.addEventListener(event, viewportChanged, { passive: true });
+    window.visualViewport?.addEventListener(event, viewportChanged, { passive: true });
+  }
+}
+
+function createKeyboardViewportExtension({ ViewPlugin, EditorView }) {
+  let lastPointerDown = -Infinity;
+  return ViewPlugin.fromClass(class {
+    update(update) {
+      if (!update.geometryChanged || !update.view.hasFocus || Date.now() - lastPointerDown > 1000) return;
+      update.view.requestMeasure({
+        read(editorView) {
+          const caret = editorView.coordsAtPos(editorView.state.selection.main.head);
+          const bounds = editorView.scrollDOM.getBoundingClientRect();
+          const viewport = window.visualViewport;
+          const top = Math.max(bounds.top, viewport?.offsetTop ?? 0);
+          const bottom = Math.min(bounds.bottom, (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight));
+          return caret && (caret.top < top || caret.bottom > bottom);
+        },
+        write(hidden, editorView) {
+          if (hidden) queueMicrotask(() => {
+            if (editorView.dom.isConnected && editorView.hasFocus && Date.now() - lastPointerDown <= 1000) {
+              editorView.dispatch({
+                effects: EditorView.scrollIntoView(editorView.state.selection.main.head, { y: "nearest", yMargin: 0 })
+              });
+            }
+          });
+        }
+      });
+    }
+  }, {
+    eventHandlers: {
+      pointerdown() { lastPointerDown = Date.now(); }
+    }
   });
+}
+
+// SilverBullet ios_enter：keydown 只挡住 CM 延迟回放；beforeinput 以 DOM 光标为准执行一次 keymap。
+function createIOSInputExtension() {
+  const { ViewPlugin, EditorSelection, runScopeHandlers, deleteCharBackward, deleteCharForward } = window.MPCodeMirror;
+  return ViewPlugin.fromClass(class {
+    constructor(editorView) {
+      this.view = editorView;
+      this.pendingKey = null;
+      this.timer = null;
+      this.suppressedType = null;
+      this.suppressUntil = 0;
+      this.onKeyDown = this.onKeyDown.bind(this);
+      this.onBeforeInput = this.onBeforeInput.bind(this);
+      editorView.dom.addEventListener("keydown", this.onKeyDown, true);
+      editorView.dom.addEventListener("beforeinput", this.onBeforeInput, true);
+    }
+
+    destroy() {
+      clearTimeout(this.timer);
+      this.view.dom.removeEventListener("keydown", this.onKeyDown, true);
+      this.view.dom.removeEventListener("beforeinput", this.onBeforeInput, true);
+    }
+
+    handlesInput(event) {
+      return !event.isComposing && event.keyCode !== 229 && !event.synthetic &&
+        !this.view.composing && !this.view.state.readOnly &&
+        this.view.contentDOM.isContentEditable && event.target === this.view.contentDOM;
+    }
+
+    domSelection() {
+      const dom = document.getSelection();
+      if (this.view.state.selection.ranges.length > 1 || !dom?.anchorNode || !dom.focusNode ||
+          !this.view.contentDOM.contains(dom.anchorNode) || !this.view.contentDOM.contains(dom.focusNode)) {
+        return this.view.state.selection;
+      }
+      return EditorSelection.single(
+        this.view.posAtDOM(dom.anchorNode, dom.anchorOffset),
+        this.view.posAtDOM(dom.focusNode, dom.focusOffset)
+      );
+    }
+
+    crossesLine(type) {
+      const selection = this.domSelection().main;
+      if (!selection.empty) return false;
+      const line = this.view.state.doc.lineAt(selection.head);
+      return type === "deleteContentBackward"
+        ? selection.head > 0 && selection.head === line.from
+        : selection.head < this.view.state.doc.length && selection.head === line.to;
+    }
+
+    onKeyDown(event) {
+      if (!this.handlesInput(event) || event.ctrlKey || event.altKey || event.metaKey) return;
+      const type = event.key === "Enter" ? "insertParagraph" :
+        event.key === "Backspace" ? "deleteContentBackward" :
+        event.key === "Delete" ? "deleteContentForward" : null;
+      if (!type || (event.key !== "Enter" && !this.crossesLine(type))) return;
+      event.stopPropagation();
+      this.pendingKey = event;
+      clearTimeout(this.timer);
+      this.timer = setTimeout(() => {
+        this.runKey(type);
+        this.suppressedType = type;
+        this.suppressUntil = Date.now() + 1000;
+      }, 500);
+    }
+
+    onBeforeInput(event) {
+      if (!this.handlesInput(event) || !event.cancelable) return;
+      const type = event.inputType;
+      const enter = type === "insertParagraph" || type === "insertLineBreak";
+      const deleting = type === "deleteContentBackward" || type === "deleteContentForward";
+      const suppressed = !this.pendingKey && Date.now() < this.suppressUntil &&
+        (type === this.suppressedType || (enter && this.suppressedType === "insertParagraph"));
+      if (!enter && !(deleting && (suppressed || this.crossesLine(type)))) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!suppressed) this.runKey(type);
+    }
+
+    runKey(type) {
+      clearTimeout(this.timer);
+      const key = this.pendingKey;
+      this.pendingKey = null;
+      if (!this.view.contentDOM.isContentEditable || this.view.state.readOnly || this.view.composing) return;
+      const selection = this.domSelection();
+      if (!selection.eq(this.view.state.selection)) this.view.dispatch({ selection, userEvent: "select" });
+      const enter = type === "insertParagraph" || type === "insertLineBreak";
+      const event = new KeyboardEvent("keydown", {
+        key: enter ? "Enter" : type === "deleteContentBackward" ? "Backspace" : "Delete",
+        code: enter ? "Enter" : type === "deleteContentBackward" ? "Backspace" : "Delete",
+        keyCode: enter ? 13 : type === "deleteContentBackward" ? 8 : 46,
+        shiftKey: key?.shiftKey ?? type === "insertLineBreak"
+      });
+      if (runScopeHandlers(this.view, event, "editor")) return;
+      if (enter) this.view.dispatch(this.view.state.replaceSelection(this.view.state.lineBreak), {
+        scrollIntoView: true, userEvent: "input"
+      });
+      else (type === "deleteContentBackward" ? deleteCharBackward : deleteCharForward)(this.view);
+    }
+  });
+}
+
+function requestSave() {
+  flushContentChanged("requestSave");
 }
 
 function selectedRange(state) {
@@ -529,7 +806,10 @@ const markdownCommands = {
   taskList: toggleLinePrefix(/^(\s*)[-*+]\s+\[[ xX]\]\s+/, () => "- [ ] "),
   quote: toggleLinePrefix(/^(\s*)>\s?/, () => "> "),
   codeBlock: insertCodeBlock,
-  table: insertTable
+  table: insertTable,
+  // iPhone 软键盘按不出 ⌘Z：浮条的撤销 / 重做走命令通道到这里
+  undo: (editorView) => window.MPCodeMirror.undo(editorView),
+  redo: (editorView) => window.MPCodeMirror.redo(editorView)
 };
 
 const fallbackMarkdownCommands = {
@@ -545,8 +825,41 @@ const fallbackMarkdownCommands = {
   taskList: toggleFallbackLinePrefix(/^(\s*)[-*+]\s+\[[ xX]\]\s+/, "- [ ] "),
   quote: toggleFallbackLinePrefix(/^(\s*)>\s?/, "> "),
   codeBlock: insertFallbackBlockSnippet(["```", "", "```"], 1, 0),
-  table: insertFallbackBlockSnippet(["| 列1 | 列2 |", "| --- | --- |", "|     |     |"], 2, 2)
+  table: insertFallbackBlockSnippet(["| 列1 | 列2 |", "| --- | --- |", "|     |     |"], 2, 2),
+  undo: () => fallbackHistoryCommand("undo"),
+  redo: () => fallbackHistoryCommand("redo")
 };
+
+function fallbackHistoryCommand(name) {
+  if (!fallbackTextArea) return false;
+  fallbackTextArea.focus();
+  return document.execCommand(name);
+}
+
+// 撤销 / 重做按钮置灰用：深度有没有变成 0 才发，不是每次选区变化都发
+let lastHistoryState = null;
+function reportHistoryState(state) {
+  const { undoDepth, redoDepth } = window.MPCodeMirror;
+  const canUndo = undoDepth(state) > 0;
+  const canRedo = redoDepth(state) > 0;
+  const key = `${canUndo}${canRedo}`;
+  if (key === lastHistoryState) return;
+  lastHistoryState = key;
+  post({ type: "historyState", canUndo, canRedo });
+}
+
+// 编辑器被藏起来（切到源码 / 预览模式；WebView 不拆，撤销历史留着切回来接着用）：
+// 先把防抖里的改动发掉，再收焦点，键盘不会留在看不见的编辑器上
+let editorActive = true;
+function setEditorActive(active) {
+  if (active === editorActive) return;
+  editorActive = active;
+  if (active) return;
+  flushContentChanged();
+  if (positionTimer !== null) postPosition();
+  if (view) view.contentDOM.blur();
+  else fallbackTextArea?.blur();
+}
 
 function runMarkdownCommand(name) {
   const command = view ? markdownCommands[name] : fallbackMarkdownCommands[name];
@@ -717,18 +1030,22 @@ function applyColors(colors) {
   if (colors.text) root.setProperty("--mp-text", colors.text);
   if (colors.muted) root.setProperty("--mp-muted", colors.muted);
   if (colors.scheme) root.setProperty("color-scheme", colors.scheme);
+  if (colors.caret) root.setProperty("--mp-caret", colors.caret);
 }
 
 window.memoryPalaceNative = {
   receive(payload) {
     if (!payload) return;
-    if (payload.type === "setContent") {
-      setEditorContent(
-        payload.content ?? "",
-        Number.isInteger(payload.revision) ? payload.revision : null
-      );
+    if (payload.type === "replaceDocument") {
+      replaceEditorDocument(payload.content ?? "", payload.nativeRevision);
+    } else if (payload.type === "configure") {
+      if (!positionRestored) restorePosition(payload.restore);
+      if (typeof payload.active === "boolean") setEditorActive(payload.active);
       if (typeof payload.lineNumbers === "boolean") setLineNumbers(payload.lineNumbers);
       if (payload.colors) applyColors(payload.colors);
+      // Swift 切模式会把命令 token 归零（payload 不带 command）；WebView 不再随切模式重建，
+      // 这里也跟着清，不然切回来第一个命令的 token 和上次撞号会被当成重放吞掉
+      if (!payload.command) lastCommandToken = null;
       const pendingCommand = payload.command && payload.command.token !== lastCommandToken ? payload.command : null;
       const replacing = pendingCommand && replaceCommandNames.has(pendingCommand.name);
       if (payload.find) {
@@ -748,7 +1065,8 @@ window.memoryPalaceNative = {
       if (pendingCommand) {
         lastCommandToken = payload.command.token;
         // 替换不抢焦点（键盘留在查找/替换输入框）；格式命令执行完会 focus 回编辑器
-        if (replaceCommandNames.has(payload.command.name)) runReplaceCommand(payload.command.name);
+        if (pendingCommand.name === "flush") flushContentChanged("flushed", pendingCommand.token);
+        else if (replaceCommandNames.has(payload.command.name)) runReplaceCommand(payload.command.name);
         else runMarkdownCommand(payload.command.name);
       }
     } else if (payload.type === "find") {
@@ -862,13 +1180,179 @@ function collectInlineDecorations(lineText, lineFrom, isActiveLine, Decoration, 
   }
 }
 
+let decorationInteractionField = null;
+let decorationInteractionEffect = null;
+let widgetLayoutEffect = null;
+const measuredWidgetHeights = new Map();
+const widgetHeightKeys = new WeakMap();
+
+function decorationsHeld(state) {
+  const interaction = state.field(decorationInteractionField);
+  return interaction.holding || interaction.composing;
+}
+
+function decorationRefresh(tr) {
+  return tr.effects.some(effect => effect.is(decorationInteractionEffect) || effect.is(widgetLayoutEffect));
+}
+
+function createDecorationInteractionExtension({ StateField, StateEffect, ViewPlugin }) {
+  decorationInteractionEffect = StateEffect.define();
+  widgetLayoutEffect = StateEffect.define();
+  decorationInteractionField = StateField.define({
+    create: state => ({
+      selection: state.selection, holding: false, composing: false,
+      layout: { width: 320, tableSize: 13, tableLine: 19.5, cardSize: 12, cardLine: 17.4, key: "initial" }
+    }),
+    update(value, tr) {
+      let next = { ...value, selection: value.selection.map(tr.changes) };
+      for (const effect of tr.effects) {
+        if (effect.is(decorationInteractionEffect)) next = { ...next, ...effect.value };
+        if (effect.is(widgetLayoutEffect)) next.layout = effect.value;
+      }
+      if (!next.holding && !next.composing) next.selection = tr.state.selection;
+      return next;
+    }
+  });
+  const interactionPlugin = ViewPlugin.fromClass(class {
+    constructor(editorView) {
+      this.view = editorView;
+      this.pointers = new Set();
+      this.composing = false;
+      this.frame = 0;
+      this.start = event => {
+        if (!editorView.contentDOM.contains(event.target)) return;
+        this.pointers.add(event.pointerId);
+        cancelAnimationFrame(this.frame);
+        editorView.dispatch({ effects: decorationInteractionEffect.of({ holding: true }) });
+      };
+      this.end = event => {
+        if (!this.pointers.delete(event.pointerId) || this.pointers.size) return;
+        this.release();
+      };
+      this.compositionStart = () => {
+        this.composing = true;
+        editorView.dispatch({ effects: decorationInteractionEffect.of({ composing: true }) });
+      };
+      this.compositionEnd = () => { this.composing = false; this.release(); };
+      this.blur = () => { this.pointers.clear(); this.composing = false; this.release(); };
+      editorView.dom.addEventListener("pointerdown", this.start, true);
+      editorView.dom.addEventListener("compositionstart", this.compositionStart, true);
+      editorView.dom.addEventListener("compositionend", this.compositionEnd, true);
+      document.addEventListener("pointerup", this.end, true);
+      document.addEventListener("pointercancel", this.end, true);
+      window.addEventListener("blur", this.blur);
+      this.measure();
+    }
+
+    release() {
+      cancelAnimationFrame(this.frame);
+      this.frame = requestAnimationFrame(() => {
+        this.frame = 0;
+        this.view.dispatch({ effects: decorationInteractionEffect.of({
+          holding: this.pointers.size > 0, composing: this.composing
+        }) });
+      });
+    }
+
+    update(update) {
+      if (update.geometryChanged || update.viewportChanged || update.docChanged) this.measure();
+    }
+
+    measure() {
+      this.view.requestMeasure({
+        key: this,
+        read(editorView) {
+          const previous = editorView.state.field(decorationInteractionField).layout;
+          const style = getComputedStyle(editorView.contentDOM);
+          const table = editorView.contentDOM.querySelector(".mp-md-table");
+          const card = editorView.contentDOM.querySelector(".mp-md-frontmatter");
+          const tableStyle = table ? getComputedStyle(table) : null;
+          const cardStyle = card ? getComputedStyle(card) : null;
+          const layout = {
+            width: Math.max(1, editorView.contentDOM.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)),
+            tableSize: tableStyle ? parseFloat(tableStyle.fontSize) : previous.tableSize,
+            tableLine: tableStyle ? parseFloat(tableStyle.lineHeight) : previous.tableLine,
+            cardSize: cardStyle ? parseFloat(cardStyle.fontSize) : previous.cardSize,
+            cardLine: cardStyle ? parseFloat(cardStyle.lineHeight) : previous.cardLine,
+            tableFont: tableStyle?.font ?? previous.tableFont ?? "",
+            cardFont: cardStyle?.font ?? previous.cardFont ?? ""
+          };
+          layout.key = `${style.font}|${JSON.stringify(layout)}`;
+          const heights = [];
+          for (const dom of editorView.contentDOM.querySelectorAll(".mp-md-table-widget, .mp-md-frontmatter")) {
+            const key = widgetHeightKeys.get(dom);
+            const height = dom.getBoundingClientRect().height;
+            if (key && height > 0) heights.push([key, height]);
+          }
+          return { layout, heights };
+        },
+        write: ({ layout, heights }, editorView) => {
+          for (const [key, height] of heights) {
+            measuredWidgetHeights.set(key, height);
+            if (measuredWidgetHeights.size > 128) measuredWidgetHeights.delete(measuredWidgetHeights.keys().next().value);
+          }
+          if (layout.key !== editorView.state.field(decorationInteractionField).layout.key) {
+            queueMicrotask(() => {
+              if (!this.destroyed && layout.key !== editorView.state.field(decorationInteractionField).layout.key) {
+                editorView.dispatch({ effects: widgetLayoutEffect.of(layout) });
+              }
+            });
+          }
+        }
+      });
+    }
+
+    destroy() {
+      this.destroyed = true;
+      cancelAnimationFrame(this.frame);
+      this.view.dom.removeEventListener("pointerdown", this.start, true);
+      this.view.dom.removeEventListener("compositionstart", this.compositionStart, true);
+      this.view.dom.removeEventListener("compositionend", this.compositionEnd, true);
+      document.removeEventListener("pointerup", this.end, true);
+      document.removeEventListener("pointercancel", this.end, true);
+      window.removeEventListener("blur", this.blur);
+    }
+  });
+  return [decorationInteractionField, interactionPlugin];
+}
+
+// 打字时光标离开的行先不收起：A 行带长链接，行尾回车后 A 收起 URL（harness J1：96px 缩成 24px），
+// 新行跟着往上跳 72px——这就是「换行时行自己乱动」。从开始打字的那行起一直露源码，
+// 点击 / 方向键 / 查找跳转真正挪光标后才收，undo / redo 只映射。值 = 露源码区起点，null = 只露光标行
+let typingRevealField = null;
+
+function createTypingRevealField(StateField) {
+  return StateField.define({
+    create: () => null,
+    update(from, tr) {
+      const typing = tr.docChanged && !applyingNativeUpdate && !tr.isUserEvent("undo") && !tr.isUserEvent("redo");
+      if (typing) {
+        const start = from === null ? tr.startState.doc.lineAt(tr.startState.selection.main.from).from : tr.changes.mapPos(from, -1);
+        return Math.min(start, tr.state.doc.lineAt(tr.state.selection.main.from).from);
+      }
+      const mapped = from === null || !tr.docChanged ? from : tr.changes.mapPos(from, -1);
+      if (tr.isUserEvent("undo") || tr.isUserEvent("redo") || decorationsHeld(tr.state)) return mapped;
+      const previous = tr.startState.field(decorationInteractionField).selection;
+      if ((tr.selection || decorationRefresh(tr)) && !previous.eq(tr.state.selection)) return null;
+      return mapped;
+    }
+  });
+}
+
+function activeLineRange(state) {
+  const doc = state.doc;
+  const selection = state.field(decorationInteractionField).selection.main;
+  let from = doc.lineAt(selection.from).number;
+  const reveal = typingRevealField ? state.field(typingRevealField, false) : null;
+  if (typeof reveal === "number") from = Math.min(from, doc.lineAt(Math.min(reveal, doc.length)).number);
+  return { from, to: doc.lineAt(selection.to).number };
+}
+
 function buildMarkdownPreviewDecorations(view, Decoration, RangeSetBuilder, taskWidgets) {
   const builder = new RangeSetBuilder();
   const doc = view.state.doc;
-  // 选区碰到的行全部还原源码（跨行拖选时和 Obsidian 一致）
-  const selection = view.state.selection.main;
-  const activeFromLine = doc.lineAt(selection.from).number;
-  const activeToLine = doc.lineAt(selection.to).number;
+  // 选区碰到的行全部还原源码（跨行拖选时和 Obsidian 一致），连同打字时刚离开的行
+  const { from: activeFromLine, to: activeToLine } = activeLineRange(view.state);
   const headingRe = /^(#{1,3})(\s+)\S/;
   const taskRe = /^(\s*)([-*+]\s+\[([ xX])\])(\s)/;
   const quoteRe = /^((?:\s*>\s?)+)/;
@@ -1060,23 +1544,29 @@ function frontmatterMarkdownExtension(tags) {
 
 // 属性卡走 StateField（块级 replace 不能由 ViewPlugin 提供，同表格块）。外观照阅读模式的 FrontmatterCard。
 // 打开文件时光标在位置 0 = 头部里：只有用户把选区放进头部（点击 / 方向键 / 查找命中 / 输入）才露源码，
-// native setContent 整篇替换和初始创建不算，所以打开时出卡
+// 显式原生正文替换和初始创建不算，所以打开时出卡
 function createMarkdownFrontmatterExtension({ Decoration, EditorView, RangeSetBuilder, StateField, WidgetType }) {
   class FrontmatterWidget extends WidgetType {
-    constructor(fields) {
+    constructor(fields, layout) {
       super();
       this.fields = fields;
-      this.signature = JSON.stringify(fields);
+      this.key = `frontmatter|${layout.key}|${JSON.stringify(fields)}`;
+      const longest = Math.max(0, ...fields.map(field => Array.from(field.key).length));
+      this.keyWidth = Math.min(160, Math.max(72, longest * 8 + 8));
+      const width = Math.max(layout.cardSize, layout.width - this.keyWidth - 35);
+      this.estimate = 1 + fields.reduce((height, field) =>
+        height + Math.max(1, Math.ceil(field.value.length * layout.cardSize / width),
+          Math.ceil(field.key.length * layout.cardSize / this.keyWidth)) * layout.cardLine + 14.5, 0);
     }
 
+    get estimatedHeight() { return measuredWidgetHeights.get(this.key) ?? this.estimate; }
+
     eq(other) {
-      return other.signature === this.signature;
+      return other.key === this.key;
     }
 
     toDOM() {
       // 键列宽度照 FrontmatterCard：按最长的键估，夹在 72...160
-      const longest = Math.max(0, ...this.fields.map((field) => Array.from(field.key).length));
-      const keyWidth = Math.min(160, Math.max(72, longest * 8 + 8));
       const card = document.createElement("div");
       card.className = "mp-md-frontmatter";
       for (const field of this.fields) {
@@ -1084,7 +1574,7 @@ function createMarkdownFrontmatterExtension({ Decoration, EditorView, RangeSetBu
         row.className = "mp-md-frontmatter-row";
         const key = document.createElement("span");
         key.className = "mp-md-frontmatter-key";
-        key.style.width = keyWidth + "px";
+        key.style.width = this.keyWidth + "px";
         key.textContent = field.key;
         const value = document.createElement("span");
         value.className = "mp-md-frontmatter-value";
@@ -1092,6 +1582,7 @@ function createMarkdownFrontmatterExtension({ Decoration, EditorView, RangeSetBu
         row.append(key, value);
         card.appendChild(row);
       }
+      widgetHeightKeys.set(card, this.key);
       return card;
     }
 
@@ -1107,11 +1598,13 @@ function createMarkdownFrontmatterExtension({ Decoration, EditorView, RangeSetBu
     const range = docFrontmatterRange(state.doc);
     if (!range) return { revealed: false, decorations: builder.finish() };
     const fields = splitFrontmatter(state.doc.sliceString(0, range.to)).fields;
-    const inside = state.selection.main.from <= range.to;
+    const inside = activeLineRange(state).from <= state.doc.lineAt(range.to).number;
     const showSource = inside && revealed;
     // 字段一个都认不出：不出空卡，直接露源码（还能点进去改）
     if (fields.length && !showSource) {
-      builder.add(0, range.to, Decoration.replace({ widget: new FrontmatterWidget(fields), block: true }));
+      builder.add(0, range.to, Decoration.replace({
+        widget: new FrontmatterWidget(fields, state.field(decorationInteractionField).layout), block: true
+      }));
     } else {
       let line = state.doc.line(1);
       for (;;) {
@@ -1128,9 +1621,11 @@ function createMarkdownFrontmatterExtension({ Decoration, EditorView, RangeSetBu
       return buildFrontmatterState(state, false);
     },
     update(value, tr) {
-      if (!tr.docChanged && !tr.selection) return value;
+      if (decorationsHeld(tr.state)) return { ...value, decorations: value.decorations.map(tr.changes) };
+      if (!tr.docChanged && !tr.selection && !decorationRefresh(tr)) return value;
       const userPlaced =
         tr.selection !== undefined ||
+        tr.effects.some(effect => effect.is(decorationInteractionEffect)) ||
         tr.isUserEvent("input") ||
         tr.isUserEvent("delete") ||
         tr.isUserEvent("undo") ||
@@ -1153,18 +1648,23 @@ const tableSeparatorRe = /^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/;
 // 不能由 ViewPlugin 提供。全文扫描（含 fence 跟踪），表格少、文件小，每次编辑重算可接受。
 function createMarkdownTableExtension({ Decoration, EditorView, RangeSetBuilder, StateField, WidgetType }) {
   class MarkdownTableWidget extends WidgetType {
-    constructor(source) {
+    constructor(source, layout) {
       super();
-      this.source = source;
+      this.key = `table|${layout.key}|${source}`;
+      this.rows = source.split("\n").filter((_, index) => index !== 1).map(parseTableCells);
+      const width = Math.max(layout.tableSize, layout.width / this.rows[0].length - 21);
+      this.estimate = 9 + this.rows.reduce((height, cells) =>
+        height + Math.max(1, ...cells.map(cell => Math.ceil(cell.length * layout.tableSize / width))) * layout.tableLine + 9, 0);
     }
 
+    get estimatedHeight() { return measuredWidgetHeights.get(this.key) ?? this.estimate; }
+
     eq(other) {
-      return other.source === this.source;
+      return other.key === this.key;
     }
 
     toDOM() {
-      const lines = this.source.split("\n");
-      const header = parseTableCells(lines[0]);
+      const header = this.rows[0];
       const table = document.createElement("table");
       table.className = "mp-md-table";
       const thead = table.createTHead();
@@ -1175,15 +1675,16 @@ function createMarkdownTableExtension({ Decoration, EditorView, RangeSetBuilder,
         headRow.appendChild(th);
       }
       const tbody = table.createTBody();
-      for (const line of lines.slice(2)) {
+      for (const cells of this.rows.slice(1)) {
         const row = tbody.insertRow();
-        for (const cell of parseTableCells(line)) {
+        for (const cell of cells) {
           row.insertCell().textContent = cell;
         }
       }
       const wrap = document.createElement("div");
       wrap.className = "mp-md-table-widget";
       wrap.appendChild(table);
+      widgetHeightKeys.set(wrap, this.key);
       return wrap;
     }
 
@@ -1195,9 +1696,7 @@ function createMarkdownTableExtension({ Decoration, EditorView, RangeSetBuilder,
   function buildTableDecorations(state) {
     const builder = new RangeSetBuilder();
     const doc = state.doc;
-    const selection = state.selection.main;
-    const activeFromLine = doc.lineAt(selection.from).number;
-    const activeToLine = doc.lineAt(selection.to).number;
+    const { from: activeFromLine, to: activeToLine } = activeLineRange(state);
     let inCodeBlock = false;
     // 从 frontmatter 之后扫：两个块级 replace 不能叠在一起
     const frontmatter = docFrontmatterRange(doc);
@@ -1229,7 +1728,7 @@ function createMarkdownTableExtension({ Decoration, EditorView, RangeSetBuilder,
           line.from,
           endLine.to,
           Decoration.replace({
-            widget: new MarkdownTableWidget(doc.sliceString(line.from, endLine.to)),
+            widget: new MarkdownTableWidget(doc.sliceString(line.from, endLine.to), state.field(decorationInteractionField).layout),
             block: true
           })
         );
@@ -1244,7 +1743,8 @@ function createMarkdownTableExtension({ Decoration, EditorView, RangeSetBuilder,
       return buildTableDecorations(state);
     },
     update(value, tr) {
-      if (tr.docChanged || tr.selection) return buildTableDecorations(tr.state);
+      if (decorationsHeld(tr.state)) return value.map(tr.changes);
+      if (tr.docChanged || tr.selection || decorationRefresh(tr)) return buildTableDecorations(tr.state);
       return value;
     },
     provide: (field) => EditorView.decorations.from(field)
@@ -1298,7 +1798,9 @@ function createMarkdownLivePreviewExtension({ Decoration, ViewPlugin, RangeSetBu
       }
 
       update(update) {
-        if (update.docChanged || update.viewportChanged || update.selectionSet) {
+        if (decorationsHeld(update.state)) {
+          this.decorations = this.decorations.map(update.changes);
+        } else if (update.docChanged || update.viewportChanged || update.selectionSet || update.transactions.some(decorationRefresh)) {
           this.decorations = buildMarkdownPreviewDecorations(update.view, Decoration, RangeSetBuilder, taskWidgets);
         }
       }
@@ -1396,8 +1898,8 @@ async function upgradeToCodeMirror() {
         color: "var(--mp-muted)",
         borderRight: "1px solid rgba(207, 220, 216, 0.72)"
       },
-      ".cm-cursor": {
-        borderLeftColor: "#5f7f76"
+      ".cm-cursor, .cm-dropCursor": {
+        borderLeftColor: "var(--mp-caret)"
       },
       "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
         backgroundColor: "rgba(95, 127, 118, 0.22)"
@@ -1433,10 +1935,14 @@ async function upgradeToCodeMirror() {
         markdown({ extensions: [frontmatterMarkdownExtension(tags)] }),
         searchExtensions,
         syntaxHighlighting(markdownHighlightStyle),
+        createDecorationInteractionExtension(window.MPCodeMirror),
+        (typingRevealField = createTypingRevealField(StateField)),
         createMarkdownLivePreviewExtension({ Decoration, ViewPlugin, RangeSetBuilder, WidgetType }),
         createMarkdownTableExtension({ Decoration, EditorView, RangeSetBuilder, StateField, WidgetType }),
         createMarkdownFrontmatterExtension({ Decoration, EditorView, RangeSetBuilder, StateField, WidgetType }),
         memoryPalaceTheme,
+        createKeyboardViewportExtension({ ViewPlugin, EditorView }),
+        isIOSWebKit ? createIOSInputExtension() : [],
         EditorView.lineWrapping,
         keymap.of([
           { key: "Mod-b", run: markdownCommands.bold },
@@ -1454,6 +1960,9 @@ async function upgradeToCodeMirror() {
         ]),
         EditorView.updateListener.of((update) => {
           if (update.docChanged && !applyingNativeUpdate) noteEditorChanged();
+          if (update.transactions.length) reportHistoryState(update.state);
+          if (update.selectionSet || update.docChanged) schedulePosition();
+          if (update.transactions.length) editorProbe?.record("cm.transaction");
         }),
         EditorView.domEventHandlers({
           keydown(event) {
@@ -1480,6 +1989,9 @@ async function upgradeToCodeMirror() {
     });
 
     fallbackTextArea = null;
+    editorProbe?.attach(view);
+    view.scrollDOM.addEventListener("scroll", schedulePosition, { passive: true });
+    reportHistoryState(view.state);
     if (currentFindQuery) applyCodeMirrorFind(currentFindQuery, currentFindIndex);
   } catch {
     // Keep the fallback editor active. It is intentionally silent so the user

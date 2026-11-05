@@ -70,6 +70,51 @@ struct ChatTimeDividerCache {
     }
 }
 
+/// 与时间分割线同口径：只在路径节点或时间显示开关变化时重算，行内只查表。
+struct ChatBubbleRunCache {
+    struct Layout: Equatable {
+        let spacingBefore: CGFloat
+        var hasTail: Bool
+    }
+
+    private var nodes: [MessageNode] = []
+    private var includesTimeDividers = false
+    private var result: [String: Layout] = [:]
+    private(set) var builds = 0
+
+    mutating func layouts(for path: [MessageNode], dividers: [String: Date],
+                          includesTimeDividers: Bool) -> [String: Layout] {
+        if self.includesTimeDividers == includesTimeDividers,
+           path.count == nodes.count, zip(path, nodes).allSatisfy({ $0 === $1 }) {
+            return result
+        }
+        result = [:]
+        result.reserveCapacity(path.count)
+        var previous: (id: String, role: String)?
+        for node in path {
+            let id = node.id
+            let role = node.role
+            let hasDivider = includesTimeDividers && dividers[id] != nil
+            let continuesRun = previous?.role == role
+                && (role == "user" || role == "assistant") && !hasDivider
+            if continuesRun, let previous { result[previous.id]?.hasTail = false }
+            result[id] = Layout(
+                spacingBefore: previous == nil || hasDivider ? 0 : (continuesRun ? 4 : 10),
+                hasTail: true)
+            previous = (id, role)
+        }
+        nodes = path
+        self.includesTimeDividers = includesTimeDividers
+        builds += 1
+        return result
+    }
+
+    mutating func reset() {
+        nodes = []
+        result = [:]
+    }
+}
+
 /// 长按气泡时菜单底部那行（粟粟 10-02 选 ①）：时间；模型的消息再加输入 / 输出 token 和缓存命中
 enum ChatBubbleInfo {
     static func line(time: Date?, isUser: Bool, prompt: Int?, completion: Int?, cacheRead: Int?,
@@ -105,17 +150,19 @@ enum ChatBubbleInfo {
 }
 
 /// 分割线的样子：居中一个时间（粟粟 10-11 去掉两侧波浪线）。
-/// 上方离上一条 = 列表行距；下方补同样的行距，时间正好坐在两条消息中间
+/// 文章模式下方补列表行距；气泡模式用独立时间留白，不叠加连发间距。
 struct ChatTimeDividerView: View {
     let date: Date
     let spacing: CGFloat
+    var bubbleMode: Bool = false
 
     var body: some View {
         Text(ChatTimeDivider.label(date))
-            .font(.caption2)
+            .font(bubbleMode ? .system(size: 11) : .caption2)
             .foregroundColor(Theme.textMuted)
             .frame(maxWidth: .infinity)
-            .padding(.bottom, spacing)
+            .padding(.top, bubbleMode ? 16 : 0)
+            .padding(.bottom, bubbleMode ? 6 : spacing)
             .accessibilityLabel(ChatTimeDivider.label(date))
     }
 }

@@ -64,7 +64,7 @@ final class ChatGPTOAuthProvider: BaseChatProvider {
         for (k, v) in Self.codexHeaders(accessToken: apiKey).merging(extraHeaders, uniquingKeysWith: { _, new in new }) {
             request.setValue(v, forHTTPHeaderField: k)
         }
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        request.httpBody = Self.encodeBody(body)
 
         startRequest(request)
     }
@@ -97,7 +97,7 @@ final class ChatGPTOAuthProvider: BaseChatProvider {
             request.setValue(v, forHTTPHeaderField: k)
         }
         request.setValue("application/json", forHTTPHeaderField: "Accept")   // 非流式覆盖 SSE Accept
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        request.httpBody = Self.encodeBody(body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -114,14 +114,17 @@ final class ChatGPTOAuthProvider: BaseChatProvider {
     // MARK: - SSE 解析（BaseChatProvider hook）
 
     override func processData(_ data: Data) {
-        guard let chunk = String(data: data, encoding: .utf8) else { return }
-        buffer += chunk
+        if httpStatusCode != 0 && httpStatusCode != 200 {
+            errorBytes.append(data)
+            return
+        }
+        handle(feedSSE(data))
+    }
 
-        // SSE 按 \n\n 切 event。流式可能跨包，留尾部到下次。
-        while let range = buffer.range(of: "\n\n") {
-            let rawEvent = String(buffer[..<range.lowerBound])
-            buffer.removeSubrange(buffer.startIndex..<range.upperBound)
-            handleEvent(rawEvent)
+    override func handle(_ fields: [SSELineDecoder.Field]) {
+        // 只关心 data 行，type 在 JSON 里
+        for field in fields {
+            if case .data(let payload) = field { handleEvent(payload) }
         }
     }
 
@@ -130,17 +133,8 @@ final class ChatGPTOAuthProvider: BaseChatProvider {
         // 上游会自动 handleErrorBody，这里不抢
     }
 
-    private func handleEvent(_ event: String) {
-        // 每个 event 可能多行：event: ... / data: ... / id: ...
-        // 我们只关心 `data: {json}` 那一行
-        var jsonLine = ""
-        for line in event.split(separator: "\n") {
-            let s = line.trimmingCharacters(in: .whitespaces)
-            if s.hasPrefix("data:") {
-                jsonLine = String(s.dropFirst(5)).trimmingCharacters(in: .whitespaces)
-                break
-            }
-        }
+    private func handleEvent(_ payload: String) {
+        let jsonLine = payload.trimmingCharacters(in: .whitespaces)
         guard !jsonLine.isEmpty, jsonLine != "[DONE]" else {
             if jsonLine == "[DONE]" {
                 receivedDone = true
@@ -185,6 +179,7 @@ final class ChatGPTOAuthProvider: BaseChatProvider {
         // 错误事件
         if type.contains(".error") {
             if let msg = (obj["error"] as? [String: Any])?["message"] as? String {
+                terminatedByError = true
                 enqueueCallback { self.onError?(msg) }
             }
         }

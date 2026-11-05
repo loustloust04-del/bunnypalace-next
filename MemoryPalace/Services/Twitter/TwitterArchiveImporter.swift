@@ -24,9 +24,9 @@ enum TwitterArchiveImporter {
     /// 媒体落盘根目录。照 `StickerFileManager.stickerDirectory` 的先例：
     /// `Application Support/MemoryPalace/twitter/`，再按 profileId 分子目录。
     static func defaultMediaRoot() -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("MemoryPalace", isDirectory: true)
-            .appendingPathComponent("twitter", isDirectory: true)
+            .appendingPathComponent("twitter", isDirectory: true))
     }
 
     /// 一批写一次库。太小则 save 太频（每次 save 都要落盘），太大则峰值内存高。
@@ -51,7 +51,7 @@ enum TwitterArchiveImporter {
 
         if source.pathExtension.lowercased() == "zip" {
             onProgress?(.unzip, 0)
-            let tmp = fm.temporaryDirectory.appendingPathComponent("tw-unzip-\(UUID().uuidString)")
+            let tmp = AppPaths.temporaryDirectory.appendingPathComponent("tw-unzip-\(UUID().uuidString)")
             try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
             scratch = tmp
             // 不用 ZIPFoundation：它读推特的 ZIP64 包是 0 个文件，见 TwitterZipExtractor 的注释。
@@ -81,7 +81,7 @@ enum TwitterArchiveImporter {
         var result = TwitterImportResult()
 
         // ---- 媒体：先把 tweets_media/ 建成 stem → 文件 的索引，避免逐条扫目录 ----
-        let mediaDir = (mediaRoot ?? defaultMediaRoot()).appendingPathComponent(profileId, isDirectory: true)
+        let mediaDir = AppPaths.checked((mediaRoot ?? defaultMediaRoot()).appendingPathComponent(profileId, isDirectory: true))
         try fm.createDirectory(at: mediaDir, withIntermediateDirectories: true)
         let mediaSource = dataDir.appendingPathComponent("tweets_media", isDirectory: true)
         var mediaByStem: [String: URL] = [:]
@@ -151,7 +151,7 @@ enum TwitterArchiveImporter {
                       })
                 else { return nil }
                 let name = src.lastPathComponent
-                let dest = mediaDir.appendingPathComponent(name)
+                let dest = AppPaths.checked(mediaDir.appendingPathComponent(name))
                 if !fm.fileExists(atPath: dest.path) { try? fm.copyItem(at: src, to: dest) }
                 return name
             }
@@ -189,7 +189,7 @@ enum TwitterArchiveImporter {
                 for m in t.media {
                     guard let src = m.fileNameStems.lazy.compactMap({ mediaByStem[$0] }).first else { continue }
                     let name = src.lastPathComponent
-                    let dest = mediaDir.appendingPathComponent(name)
+                    let dest = AppPaths.checked(mediaDir.appendingPathComponent(name))
                     if !fm.fileExists(atPath: dest.path) { try? fm.copyItem(at: src, to: dest) }
                     context.insert(TweetMedia(profileId: profileId, tweetId: t.id, mediaId: m.id,
                                               kind: m.kind, fileName: name,

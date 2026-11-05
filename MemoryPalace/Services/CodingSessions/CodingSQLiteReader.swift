@@ -11,7 +11,7 @@ enum CodingVirtualPath {
 
     /// 磁盘上不存在的路径剥掉最后一个 `#<id>`；真实存在的原样返回（文件名里本来就可能有 #）
     static func strip(_ path: String) -> String {
-        guard !FileManager.default.fileExists(atPath: path), let hash = path.lastIndex(of: "#") else { return path }
+        guard !FileManager.default.fileExists(atPath: AppPaths.checkedPath(path)), let hash = path.lastIndex(of: "#") else { return path }
         return String(path[..<hash])
     }
 }
@@ -53,18 +53,22 @@ final class CodingSQLiteReader {
     }
 
     static func open(_ url: URL, tag: String) -> CodingSQLiteReader? {
+        let url = AppPaths.checked(url)
+        if BenchIsolation.requested {
+            for suffix in ["-wal", "-shm", "-journal"] { _ = AppPaths.checkedPath(url.path + suffix) }
+        }
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         if let handle = openReadOnly(url.path), probe(handle) {
             return CodingSQLiteReader(db: handle, tmp: nil)
         }
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mp-\(tag)-\(UUID().uuidString)")
+        let tmp = AppPaths.checked(AppPaths.temporaryDirectory.appendingPathComponent("mp-\(tag)-\(UUID().uuidString)"))
         guard (try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)) != nil else { return nil }
         let copy = tmp.appendingPathComponent("db.sqlite")
         guard (try? FileManager.default.copyItem(at: url, to: copy)) != nil else {
             try? FileManager.default.removeItem(at: tmp)
             return nil
         }
-        for suffix in ["-wal", "-shm"] where FileManager.default.fileExists(atPath: url.path + suffix) {
+        for suffix in ["-wal", "-shm"] where FileManager.default.fileExists(atPath: AppPaths.checkedPath(url.path + suffix)) {
             try? FileManager.default.copyItem(at: URL(fileURLWithPath: url.path + suffix), to: URL(fileURLWithPath: copy.path + suffix))
         }
         guard let handle = openReadOnly(copy.path), probe(handle) else {
@@ -153,7 +157,7 @@ final class CodingSQLiteReader {
     /// 行缓存的失效戳：主库与 `-wal` 的 mtime 取新者（新写入常只落 -wal，Wake `db_cache_stamp`）
     static func cacheStamp(_ url: URL) -> Int64 {
         func stamp(_ path: String) -> Int64 {
-            let date = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+            let date = (try? FileManager.default.attributesOfItem(atPath: AppPaths.checkedPath(path)))?[.modificationDate] as? Date
             return CodingParse.mtimeMs(date)
         }
         return max(stamp(url.path), stamp(url.path + "-wal"))

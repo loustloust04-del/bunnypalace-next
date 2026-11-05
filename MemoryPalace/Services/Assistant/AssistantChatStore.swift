@@ -13,9 +13,9 @@ struct AssistantChatStore: Sendable {
     }
 
     static var defaultURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        AppPaths.checked(AppPaths.applicationSupport
             .appendingPathComponent("AssistantChat", isDirectory: true)
-            .appendingPathComponent("history.json")
+            .appendingPathComponent("history.json"))
     }
 
     func load() -> [AssistantChatMessage] {
@@ -39,4 +39,23 @@ struct AssistantChatStore: Sendable {
 
     /// wire 上下文窗口：最近 30 轮 ≈ 60 条
     static let wireWindowMessages = 60
+}
+
+/// 有序写盘（sol #9）：编码写盘都排在这一个 actor 里，带版本号——旧快照晚到直接丢，不会盖掉已经落盘的新快照
+actor AssistantChatWriter {
+    private let store: AssistantChatStore
+    private var written = 0
+
+    init(store: AssistantChatStore) {
+        self.store = store
+    }
+
+    /// 返回这一份落没落盘（比已写的旧就不写）
+    @discardableResult
+    func save(_ messages: [AssistantChatMessage], version: Int) -> Bool {
+        guard version > written else { return false }
+        written = version
+        store.save(messages)
+        return true
+    }
 }

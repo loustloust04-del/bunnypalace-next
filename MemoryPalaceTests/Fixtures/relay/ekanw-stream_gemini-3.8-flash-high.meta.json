@@ -1,0 +1,20 @@
+{
+ "source": "2026-10-16 中转实测原文（ekanw，new-api v1.0.0-rc.25），id 已固定化",
+ "path": "/v1/chat/completions",
+ "status": 200,
+ "content_type": "text/event-stream",
+ "request_body": {
+  "model": "gemini-3.8-flash-high",
+  "messages": [
+   {
+    "role": "user",
+    "content": "1+1=?"
+   }
+  ],
+  "max_tokens": 1024,
+  "stream": true,
+  "stream_options": {
+   "include_usage": true
+  }
+ }
+}

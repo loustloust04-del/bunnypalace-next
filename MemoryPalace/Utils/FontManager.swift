@@ -36,8 +36,8 @@ enum FontManager {
 
     /// Directory for user-imported fonts
     static var fontsDirectory: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("MemoryPalace/Fonts", isDirectory: true)
+        let appSupport = AppPaths.applicationSupport
+        let dir = AppPaths.checked(appSupport.appendingPathComponent("MemoryPalace/Fonts", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -129,7 +129,7 @@ enum FontManager {
         #else
         defer { IOSMarkdownFontCache.invalidate() }
         #endif
-        let dest = fontsDirectory.appendingPathComponent(sourceURL.lastPathComponent)
+        let dest = AppPaths.checked(fontsDirectory.appendingPathComponent(sourceURL.lastPathComponent))
 
         if !FileManager.default.fileExists(atPath: dest.path) {
             do {

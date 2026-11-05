@@ -21,7 +21,8 @@ struct SubscriptionQuotaCard: View {
                 }
             }
             if store.quotas.isEmpty {
-                Text(store.loaded ? "没找到已登录的 Claude Code / Codex" : "正在读取额度…")
+                Text(BenchIsolation.active ? "性能测量包不可读取订阅额度" :
+                     store.loaded ? "没找到已登录的 Claude Code / Codex" : "正在读取额度…")
                     .font(.system(size: Theme.F.caption))
                     .foregroundColor(Theme.textMuted)
             } else {
@@ -37,6 +38,7 @@ struct SubscriptionQuotaCard: View {
             }
         }
         .task {
+            if BenchIsolation.active { return }
             while !Task.isCancelled {
                 await store.refresh()
                 try? await Task.sleep(nanoseconds: 60_000_000_000)

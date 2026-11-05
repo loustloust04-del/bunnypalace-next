@@ -46,8 +46,8 @@ enum MetaTools {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         func hit(_ name: String, _ desc: String) -> Bool { q.isEmpty || name.lowercased().contains(q) || desc.lowercased().contains(q) }
         let hidden = reserved.union(builtins.map(\.name))
-        // #089 P3-b：收起的内建工具一句话和系统提示〔更多工具〕同源（tuckedBlurbs），两处不会改了一处忘了另一处
-        func blurb(_ d: ToolDefinition) -> String { ToolRegistry.tuckedBlurbs[d.name] ?? d.description }
+        // #089 P3-b：收起的内建工具一句话和系统提示〔更多工具〕同源（ToolRegistry.blurb），两处不会改了一处忘了另一处
+        func blurb(_ d: ToolDefinition) -> String { ToolRegistry.blurb(for: d) }
         let builtinHits = builtins.filter { hit($0.name, $0.description) || hit($0.name, blurb($0)) }
         let hits = catalog.filter { !hidden.contains($0.tool.name) && hit($0.tool.name, $0.tool.description) }
         if hits.isEmpty && builtinHits.isEmpty {
@@ -62,7 +62,11 @@ enum MetaTools {
     /// 把模型可能带装饰的 name 归一化到 catalog 里的真实工具名。
     /// 容错：去空格 / 去 [...] / 去 mcp:server 前缀 / 大小写 / 包含。
     static func resolve(_ raw: String, catalog: [MCPResolvedTool]) -> String? {
-        let names = catalog.map(\.tool.name)
+        resolve(raw, names: catalog.map(\.tool.name))
+    }
+
+    /// 同上，直接给名字表（历史回放判断包着的工具这一轮还调不调得到用，#093）
+    static func resolve(_ raw: String, names: [String]) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if names.contains(trimmed) { return trimmed }
         // 取空格或 '[' 之前的裸名

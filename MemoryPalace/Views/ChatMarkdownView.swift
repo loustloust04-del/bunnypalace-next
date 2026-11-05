@@ -41,6 +41,7 @@ struct ChatMarkdownView: View {
     let text: String
     var fontName: String = ""
     var scale: CGFloat = 1.2
+    var preparedDocument: RenderableDocument? = nil
     var animated: Bool = false
     /// 划线锚定的消息节点；nil = 无划线功能（浮条不出划线子菜单）。
     var nodeId: String? = nil
@@ -55,6 +56,12 @@ struct ChatMarkdownView: View {
     /// 正文按角色取字色（plan-theme-decouple M1 三格）。默认 `.global` = 主文字，
     /// 非聊天调用方（文件库预览等）不用传；聊天由 `CardFlowView.markdownBody` 按 `isUser` 给。
     var role: ChatTextRole = .global
+    /// 气泡正文专用；显式传参，避免排版覆盖随 environment 漏进弹出的 sheet。
+    var lineSpacingScaleOverride: Double? = nil
+    /// 调用方自带的划线（小芽台词里的马克笔概念词，§12-E）：跟本节点划线一起画、一起进缓存键
+    var extraHighlights: [TextHighlight] = []
+    /// 点到 extraHighlights 里的词（小芽马克笔概念词 → 弹释义 sheet）；nil = 点了不管
+    var onExtraHighlightTap: ((String) -> Void)? = nil
 
     #if os(macOS)
     // ms0911 R8 B3 / R8b N2：设置「外观 › 排版」两根滑杆 mac 自己读（key/默认值与 CardFlowView 同名键一致），
@@ -65,7 +72,7 @@ struct ChatMarkdownView: View {
 
     // R9 I2：气泡模式行内固定排版覆盖（BubbleModeRow 注入；普通模式/思考表为 nil 读全局滑杆）。
     @Environment(\.chatSpacingOverride) private var spacingOverride
-    private var effectiveLineSpacingScale: Double { spacingOverride?.lineSpacing ?? lineSpacingScale }
+    private var effectiveLineSpacingScale: Double { lineSpacingScaleOverride ?? spacingOverride?.lineSpacing ?? lineSpacingScale }
     private var effectiveParagraphSpacingScale: Double { spacingOverride?.paragraphSpacing ?? paragraphSpacingScale }
     #endif
 
@@ -151,7 +158,7 @@ struct ChatMarkdownView: View {
         if let flash = flashQuote, flashing {
             highlights.append(TextHighlight(quote: flash, color: flashHighlightColor))
         }
-        return highlights
+        return highlights + extraHighlights
     }
 
     /// 对话内查找高亮：按 hitRanges 规则从正文取出实际写法的子串当 quote（划线层按原文精确匹配）
@@ -186,7 +193,7 @@ struct ChatMarkdownView: View {
         // 排版滑杆仍只 mac 进 key（R8b N1：iOS 调滑杆不换缓存键，fork 渲染器不吃）
         return base + "|ls\(effectiveLineSpacingScale)|ps\(effectiveParagraphSpacingScale)"
         #else
-        return base
+        return base + (lineSpacingScaleOverride.map { "|ls\($0)" } ?? "")
         #endif
     }
 
@@ -206,6 +213,7 @@ struct ChatMarkdownView: View {
         return .memoryPalace(fontName: fontName, scale: scale, animated: animated,
                              contextMenu: contextMenu,
                              textHighlights: renderHighlights,
+                             lineSpacingScale: lineSpacingScaleOverride,
                              textColor: role.color,
                              mergesTextRuns: mergesTextRuns)
         #endif
@@ -238,7 +246,8 @@ struct ChatMarkdownView: View {
                 handleMenuTap(id: id, selected: selected, blockText: blockText)
             },
             // perf L1c：刚流完的这条首见未命中也同步解析，翻回静态不闪空
-            syncOnMiss: !animated && nodeId.map { MarkdownRenderCache.shared.isFreshlyStreamed($0) } == true
+            syncOnMiss: !animated && nodeId.map { MarkdownRenderCache.shared.isFreshlyStreamed($0) } == true,
+            preparedDocument: preparedDocument
         )
         #if PERSONAL_APPS
         // ticker:// 拦在最内层；不认识的 URL 必须 .systemAction 往外传（citation 反查在外层）
@@ -308,6 +317,10 @@ struct ChatMarkdownView: View {
         }
         #endif
         #endif
+        if id == "highlight.tap", let onExtraHighlightTap, extraHighlights.contains(where: { $0.quote == selected }) {
+            onExtraHighlightTap(selected)
+            return
+        }
         guard id.hasPrefix("highlight."), let nodeId else { return }
         if id == "highlight.tap" {
             // 查找高亮 / 闪词不是划线：点它不出小窗（同一段也划过线的除外）

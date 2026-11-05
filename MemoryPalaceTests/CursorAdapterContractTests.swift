@@ -51,6 +51,25 @@ final class CursorAdapterContractTests: XCTestCase {
         XCTAssertEqual(CursorAdapter.decodeSlug("no-such-dir-here"), "/no/such/dir/here")
     }
 
+    func testBenchScopedCursorScansAndDecodesOnlyItsProjectNamespace() throws {
+        let fm = FileManager.default
+        let bench = fm.temporaryDirectory.appendingPathComponent("mp-cursor-bench-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: bench) }
+        let project = bench.appendingPathComponent("image-translate", isDirectory: true)
+        try fm.createDirectory(at: project, withIntermediateDirectories: true)
+        let slug = String(project.path.dropFirst()).replacingOccurrences(of: "/", with: "-")
+        let projects = bench.appendingPathComponent("home/.cursor/projects", isDirectory: true)
+        let session = projects.appendingPathComponent("\(slug)/agent-transcripts/33333333-aaaa-bbbb-cccc-000000000003", isDirectory: true)
+        try fm.createDirectory(at: session, withIntermediateDirectories: true)
+        let source = try XCTUnwrap(CursorAdapter(root: root).listSessionFiles().first)
+        try fm.copyItem(at: URL(fileURLWithPath: source.filePath), to: session.appendingPathComponent("33333333-aaaa-bbbb-cccc-000000000003.jsonl"))
+        let adapter = CursorAdapter(root: projects, projectSearchRoot: bench)
+        let parsed = try adapter.parseSession(try XCTUnwrap(adapter.listSessionFiles().first))
+        XCTAssertEqual(parsed.meta.projectPath, project.path)
+        XCTAssertEqual(parsed.meta.title, "把二维码扫描组件抽出来,注意 useEffect() 的清理")
+        XCTAssertEqual(CursorAdapter.decodeSlug("Users-outside-project", within: bench), "")
+    }
+
     func testSubagentFilesAreNotSessions() {
         let adapter = CursorAdapter(root: root)
         XCTAssertNil(adapter.fileRef(URL(fileURLWithPath: "/x/.cursor/projects/p/agent-transcripts/u/subagents/a.jsonl")))

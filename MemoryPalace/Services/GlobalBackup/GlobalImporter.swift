@@ -542,6 +542,9 @@ enum GlobalImporter {
             try fm.copyItem(at: cardLibrarySrc, to: StagingPaths.stagingCardLibraryRoot)
         }
 
+        // assistant/ → assistant-staging/（小芽对话 + 账本；旧包没有这段 = 本机现有的不动，见 PendingImportApplier）
+        try stageAssistantChat(workspace: workspace)
+
         // filelibrary/{pid}/ → floors-staging/{slug}/（按 manifest.floorSlugs 复建 slug）
         let flSrc = workspace.appendingPathComponent("filelibrary", isDirectory: true)
         if fm.fileExists(atPath: flSrc.path) {
@@ -555,6 +558,12 @@ enum GlobalImporter {
                 try fm.copyItem(at: pidSrc, to: dst)
             }
         }
+    }
+
+    static func stageAssistantChat(workspace: URL, to staging: URL = StagingPaths.stagingAssistantRoot) throws {
+        let src = workspace.appendingPathComponent("assistant", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: src.path) else { return }
+        try FileManager.default.copyItem(at: src, to: staging)
     }
 
     // MARK: - C.1.7 commitPendingImport

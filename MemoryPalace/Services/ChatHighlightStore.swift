@@ -106,13 +106,13 @@ final class ChatHighlightStore {
 
     init(dir: URL = ChatHighlightStore.defaultDir) {
         self.dir = dir
-        let url = dir.appendingPathComponent("chat-highlights.json")
+        let url = AppPaths.checked(dir.appendingPathComponent("chat-highlights.json"))
         let data = try? Data(contentsOf: url)
         let loaded = Self.load(dir: dir)
         let isEmptyArray = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [Any])?.isEmpty == true
         if loaded.isEmpty, let data, !data.isEmpty, !isEmptyArray {
             let stamp = Int(Date().timeIntervalSince1970)
-            try? data.write(to: dir.appendingPathComponent("chat-highlights.unreadable-\(stamp).json"))
+            try? data.write(to: AppPaths.checked(dir.appendingPathComponent("chat-highlights.unreadable-\(stamp).json")))
             writesBlocked = true
         }
         // 老数据迁移：单条批注搬进 content（时间线第一条）；缺 id 的在解码时补了，这里落盘让 id 固定下来
@@ -131,15 +131,31 @@ final class ChatHighlightStore {
     }
 
     nonisolated static var defaultDir: URL {
+        #if os(iOS)
+        if TestHostIsolation.active {
+            // active 只会在临时家建好后设为 true，不能回退到真实高亮库。
+            guard let home = TestHostIsolation.home else {
+                preconditionFailure("测试宿主没有隔离目录")
+            }
+            let dir = home.appendingPathComponent("Library/Application Support/MemoryPalace", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            return dir
+        }
+        #endif
+        #if os(macOS)
+        let dir = AppPaths.checked(AppPaths.applicationSupport
+            .appendingPathComponent("MemoryPalace", isDirectory: true))
+        #else
         let dir = URL.applicationSupportDirectory
             .appendingPathComponent("MemoryPalace", isDirectory: true)
+        #endif
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
     /// 缺文件 / 坏 JSON → []（划线是增强功能，存储坏了不炸 app）。
     nonisolated static func load(dir: URL) -> [ChatHighlight] {
-        let url = dir.appendingPathComponent("chat-highlights.json")
+        let url = AppPaths.checked(dir.appendingPathComponent("chat-highlights.json"))
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         guard let data = try? Data(contentsOf: url),
@@ -149,7 +165,7 @@ final class ChatHighlightStore {
 
     private func persist() {
         guard !writesBlocked else { return }
-        let url = dir.appendingPathComponent("chat-highlights.json")
+        let url = AppPaths.checked(dir.appendingPathComponent("chat-highlights.json"))
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

@@ -45,7 +45,7 @@ enum ChatSkinImporter {
         guard size <= maxZipBytes else { throw ImportError.tooLarge("\(size / 1024 / 1024)MB > 20MB") }
 
         let fm = FileManager.default
-        let tmp = fm.temporaryDirectory.appendingPathComponent("skin_\(UUID().uuidString)")
+        let tmp = AppPaths.temporaryDirectory.appendingPathComponent("skin_\(UUID().uuidString)")
         try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: tmp) }
 

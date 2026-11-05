@@ -38,5 +38,31 @@ extension WKWebView {
         objc_registerClassPair(newClass)
         object_setClass(target, newClass)
     }
+
+    /// 只给统一编辑器调用；在当前动态子类上叠加，保留 inputAccessoryView 的覆盖。
+    func disableSystemEditingGestures() {
+        let targets: [UIView] = [self] + scrollView.subviews.filter {
+            String(describing: type(of: $0)).contains("WKContent")
+        }
+        let selector = #selector(getter: UIResponder.editingInteractionConfiguration)
+        for target in targets {
+            if target.editingInteractionConfiguration == .none { continue }
+            guard let baseClass = object_getClass(target),
+                  let method = class_getInstanceMethod(baseClass, selector),
+                  let types = method_getTypeEncoding(method) else { continue }
+            let className = "_MP_NoEditingGestures_" + String(describing: baseClass)
+            if let existing = NSClassFromString(className) {
+                object_setClass(target, existing)
+                continue
+            }
+            guard let subclass = objc_allocateClassPair(baseClass, className, 0) else { continue }
+            let imp: @convention(block) (Any) -> Int = { _ in
+                UIEditingInteractionConfiguration.none.rawValue
+            }
+            class_addMethod(subclass, selector, imp_implementationWithBlock(imp), types)
+            objc_registerClassPair(subclass)
+            object_setClass(target, subclass)
+        }
+    }
 }
 #endif

@@ -7,6 +7,7 @@ struct ChatContentEdgeBlur: UIViewRepresentable {
     let inputBarBottom: CGFloat
     let keyboardVisible: Bool
     let enabled: Bool
+    var topFadeEnd: CGFloat = 130
 
     func makeUIView(context: Context) -> AttachmentView {
         let view = AttachmentView()
@@ -19,6 +20,7 @@ struct ChatContentEdgeBlur: UIViewRepresentable {
         view.inputBarBottom = inputBarBottom
         view.keyboardVisible = keyboardVisible
         view.enabled = enabled
+        view.topFadeEnd = topFadeEnd
         view.attach()
     }
 
@@ -31,6 +33,7 @@ struct ChatContentEdgeBlur: UIViewRepresentable {
         var inputBarBottom: CGFloat = 0
         var keyboardVisible = false
         var enabled = false
+        var topFadeEnd: CGFloat = 130
         private weak var scrollView: UIScrollView?
         private weak var targetView: UIView?
         private var boundsObservation: NSKeyValueObservation?
@@ -46,6 +49,7 @@ struct ChatContentEdgeBlur: UIViewRepresentable {
             let radius: CGFloat
             let barBottom: CGFloat
             let keyboardVisible: Bool
+            let topFadeEnd: CGFloat
         }
 
         override func didMoveToWindow() {
@@ -131,7 +135,8 @@ struct ChatContentEdgeBlur: UIViewRepresentable {
             let top = (target.convert(CGPoint(x: target.bounds.midX, y: target.bounds.minY), to: host).y * 2).rounded() / 2
             let bottom = (target.convert(CGPoint(x: target.bounds.midX, y: target.bounds.maxY), to: host).y * 2).rounded() / 2
             let geometry = Geometry(height: target.bounds.height, topY: top, bottomY: bottom,
-                                    radius: radius, barBottom: inputBarBottom, keyboardVisible: keyboardVisible)
+                                    radius: radius, barBottom: inputBarBottom, keyboardVisible: keyboardVisible,
+                                    topFadeEnd: topFadeEnd)
             guard geometry != lastGeometry else { return }
             let end = inputBarBottom > 0 ? inputBarBottom + (keyboardVisible ? 10 : 40) : host.bounds.maxY
             let start = end - (keyboardVisible ? 60 : 120)
@@ -142,7 +147,7 @@ struct ChatContentEdgeBlur: UIViewRepresentable {
                 for row in 0..<rows {
                     let fraction = CGFloat(row) / CGFloat(rows - 1)
                     let visualY = top + (bottom - top) * fraction
-                    let t = min(1, max(0, (130 - visualY) / 130))
+                    let t = min(1, max(0, (topFadeEnd - visualY) / topFadeEnd))
                     let b = min(1, max(0, (visualY - start) / (end - start)))
                     // 匹配原渐进半径与 smoothstep 混合的方差；只过滤消息层，不采样壁纸。
                     let topAmount = t * sqrt(t * t * (3 - 2 * t)) / 3

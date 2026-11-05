@@ -140,7 +140,7 @@ private struct AccessibilityLabelIfPresent: ViewModifier {
 
 /// presetId → 品牌资产的**纯派生**映射。
 ///
-/// 硬红线：不碰 API 卡片逻辑——`APIProvider` / `APICredential` 不加字段，
+/// 只读派生：图标不碰 API 卡片逻辑——只读 `APIProvider.id` / `name`（预设表的字段由 plan-provider-presets 管），
 /// `CredentialEmoji` 池和迁移代码零改动。emoji 仍是「这张 key 卡」的身份（可编辑、全局唯一），
 /// logo 只是「这张卡连的是哪家」的品牌派生显示，两者并存。
 enum ProviderIcon {
@@ -176,7 +176,7 @@ enum ProviderIcon {
         return assetByPresetId[presetId]
     }
 
-    /// 兜底首字：预设走预设名（Groq→G / SiliconFlow→S / 豆包→豆），
+    /// 兜底首字：预设走预设名（Groq→G / SiliconFlow→S / 火山方舟（豆包）→火），
     /// 自定义卡走传进来的昵称首字——不然同一家不同昵称的卡会得到不同字母。
     static func monogram(presetId: String?, fallbackName: String) -> String {
         if let presetId, let preset = APIProvider.presets.first(where: { $0.id == presetId }) {

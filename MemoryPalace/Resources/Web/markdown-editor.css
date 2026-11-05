@@ -8,7 +8,8 @@
   --mp-accent-strong: #cfdcd8;
   --mp-text: #3f332b;
   --mp-muted: #8a7b71;
-  --mp-caret: #5f7f76;
+  /* 光标天空蓝（粟粟 10-15：原来 1.2px 墨绿看不见）；Swift 按深浅色注入 FileEditorCaret 的值，这里是首帧兜底 */
+  --mp-caret: #3fa3e0;
   --mp-selection: rgba(95, 127, 118, 0.22);
 }
 
@@ -102,8 +103,12 @@ body {
   border-right: 1px solid rgba(207, 220, 216, 0.72);
 }
 
-.cm-cursor {
-  border-left-color: var(--mp-caret) !important;
+/* CodeMirror 自己画的光标：2.5px、圆头。margin 抵掉半宽，光标仍居字缝中间 */
+.cm-cursor,
+.cm-dropCursor {
+  border-left: 2.5px solid var(--mp-caret) !important;
+  border-radius: 1.5px;
+  margin-left: -1.25px !important;
 }
 
 .cm-focused .cm-matchingBracket,

@@ -129,13 +129,17 @@ final class LocalTerminalStore {
     #if DEBUG
     /// 截图用（`--mp-open-terminal-demo`）：一个 tab 跑 vim 看 TUI 渲染，一个 tab 跑软链成 `claude` 的系统 sleep 看徽章；都在家目录（不碰 ~/Desktop 的 TCC）
     func debugDemo() {
-        let bin = FileManager.default.temporaryDirectory.appendingPathComponent("mp-terminal-demo")
+        if BenchIsolation.active {
+            present(directory: nil, command: nil, title: "bench 合成输出（非 L-term）", origin: .shell)
+            return
+        }
+        let bin = AppPaths.temporaryDirectory.appendingPathComponent("mp-terminal-demo")
         try? FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         let fake = bin.appendingPathComponent("claude")
         if !FileManager.default.fileExists(atPath: fake.path) {
             try? FileManager.default.createSymbolicLink(atPath: fake.path, withDestinationPath: "/bin/sleep")   // 拷贝会被启动约束杀掉
         }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let home = AppPaths.home.path
         // vim 那个后开：选中的 tab 才画得出东西（sleep 那个 tab 一直是空屏——`-c` 跑命令不回显、也没提示符）
         present(directory: home, command: CodingShellQuote.single(fake.path) + " 600", title: nil, origin: .shell)
         open(directory: home, command: "vim -u NONE /etc/shells")
@@ -144,13 +148,17 @@ final class LocalTerminalStore {
     /// 阶段 B 实拍用（`--mp-bind-terminal-demo`）：给某条会话挂一个「正在跑」的假 tab，详情页就会显示「回到终端」。
     /// 跑的是软链成 `claude` 的系统 sleep，**不碰她真正的 agent**
     func debugBind(key: String, agent: CodingAgent) {
-        let bin = FileManager.default.temporaryDirectory.appendingPathComponent("mp-terminal-demo")
+        if BenchIsolation.active {
+            open(directory: nil, command: nil, title: "bench 合成输出（非 L-term）", origin: .shell)
+            return
+        }
+        let bin = AppPaths.temporaryDirectory.appendingPathComponent("mp-terminal-demo")
         try? FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         let fake = bin.appendingPathComponent("claude")
         if !FileManager.default.fileExists(atPath: fake.path) {
             try? FileManager.default.createSymbolicLink(atPath: fake.path, withDestinationPath: "/bin/sleep")
         }
-        open(directory: FileManager.default.homeDirectoryForCurrentUser.path,
+        open(directory: AppPaths.home.path,
              command: CodingShellQuote.single(fake.path) + " 600", title: nil,
              origin: .codingSession(key: key, agent: agent))
     }

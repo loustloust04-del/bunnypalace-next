@@ -6,25 +6,27 @@ import Foundation
 /// 壳里；transcript 不含 cwd，从有损 slug 目录名按磁盘真实目录 DFS 反推；工具结果不落盘（output 恒空）。IDE chats（加密）不做
 struct CursorAdapter: CodingSessionAdapter {
     let root: URL
+    private let projectSearchRoot: URL?
 
     init(home: URL) {
         root = home.appendingPathComponent(".cursor/projects", isDirectory: true)
+        projectSearchRoot = BenchIsolation.root
     }
 
-    init(root: URL) {
+    init(root: URL, projectSearchRoot: URL? = BenchIsolation.root) {
         self.root = root
+        self.projectSearchRoot = projectSearchRoot
     }
 
     var agent: CodingAgent { .cursor }
     var dataRoots: [URL] { [root] }
 
     func listSessionFiles() -> [CodingSessionFileRef] {
-        let fm = FileManager.default
         var refs: [CodingSessionFileRef] = []
-        for project in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+        for project in (try? AppPaths.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
             let transcripts = project.appendingPathComponent("agent-transcripts", isDirectory: true)
-            for session in (try? fm.contentsOfDirectory(at: transcripts, includingPropertiesForKeys: nil)) ?? [] {
-                for file in (try? fm.contentsOfDirectory(at: session, includingPropertiesForKeys: CodingParse.refKeys)) ?? []
+            for session in (try? AppPaths.contentsOfDirectory(at: transcripts, includingPropertiesForKeys: nil)) ?? [] {
+                for file in (try? AppPaths.contentsOfDirectory(at: session, includingPropertiesForKeys: CodingParse.refKeys)) ?? []
                 where file.pathExtension == "jsonl" {
                     if let ref = CodingParse.defaultFileRef(.cursor, file) { refs.append(ref) }
                 }
@@ -53,7 +55,7 @@ struct CursorAdapter: CodingSessionAdapter {
         let parsed = try CodingImageBudget.decoding { try Self.parse(URL(fileURLWithPath: ref.filePath)) }
         // subagents/ 与 Claude 同构，但无 meta 边车、主线 Task 调用无 id，挂不上具体 tool_use——只列出来供导出携带
         let subagents = Self.subagentsDir(ref)
-        let sidechains = ((try? FileManager.default.contentsOfDirectory(atPath: subagents.path)) ?? [])
+        let sidechains = ((try? AppPaths.contentsOfDirectory(atPath: subagents.path)) ?? [])
             .filter { $0.hasSuffix(".jsonl") }
             .map { CodingSidechain(id: String($0.dropLast(6))) }
         return CodingParsedTranscript(meta: meta(ref, parsed), mainline: parsed.messages, sidechains: sidechains, unknownLines: parsed.unknown)
@@ -61,7 +63,7 @@ struct CursorAdapter: CodingSessionAdapter {
 
     func loadSidechain(_ ref: CodingSessionFileRef, id: String) throws -> [CodingMessage] {
         let file = Self.subagentsDir(ref).appendingPathComponent("\(id).jsonl")
-        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        guard FileManager.default.fileExists(atPath: AppPaths.checkedPath(file.path)) else { return [] }
         return try CodingImageBudget.decoding { try Self.parse(file).messages }
     }
 
@@ -195,8 +197,27 @@ struct CursorAdapter: CodingSessionAdapter {
 
     /// "Users-corey-Github-image-translate" → "/Users/corey/Github/image-translate"：`-` 既可能是路径分隔也可能是目录名字符，
     /// 按磁盘真实存在的目录 DFS（优先短段）；项目目录已删时回退直译
-    static func decodeSlug(_ slug: String) -> String {
-        let parts = slug.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
+    static func decodeSlug(_ slug: String, within searchRoot: URL? = BenchIsolation.root) -> String {
+        var start = "/"
+        var suffix = slug
+        if let searchRoot {
+            start = AppPaths.checked(searchRoot).path
+            func remainder(_ path: String) -> String? {
+                let encoded = String(path.dropFirst()).replacingOccurrences(of: "/", with: "-")
+                if slug == encoded { return "" }
+                guard slug.hasPrefix(encoded + "-") else { return nil }
+                return String(slug.dropFirst(encoded.count + 1))
+            }
+            var remaining = remainder(start)
+            if remaining == nil, start.hasPrefix("/private/tmp/") {
+                remaining = remainder(String(start.dropFirst("/private".count)))
+            }
+            guard let remaining else { return "" }
+            suffix = remaining
+            if suffix.isEmpty { return start }
+        }
+        let parts = suffix.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
+        if searchRoot != nil, parts.contains(where: { $0 == "." || $0 == ".." || $0.contains("/") }) { return "" }
         func dfs(_ base: String, _ rest: ArraySlice<String>) -> String? {
             if rest.isEmpty { return base }
             var segment = ""
@@ -204,21 +225,21 @@ struct CursorAdapter: CodingSessionAdapter {
                 segment += (i == rest.startIndex ? "" : "-") + rest[i]
                 let candidate = (base == "/" ? "" : base) + "/" + segment
                 var isDir: ObjCBool = false
-                if FileManager.default.fileExists(atPath: candidate, isDirectory: &isDir), isDir.boolValue,
+                if FileManager.default.fileExists(atPath: AppPaths.checkedPath(candidate), isDirectory: &isDir), isDir.boolValue,
                    let hit = dfs(candidate, rest[(i + 1)...]) {
                     return hit
                 }
             }
             return nil
         }
-        return dfs("/", parts[...]) ?? "/" + slug.replacingOccurrences(of: "-", with: "/")
+        return dfs(start, parts[...]) ?? (start == "/" ? "/" : start + "/") + suffix.replacingOccurrences(of: "-", with: "/")
     }
 
     private func meta(_ ref: CodingSessionFileRef, _ p: Parse) -> CodingSessionMeta {
         // …/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl → slug
         let slug = URL(fileURLWithPath: ref.filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().lastPathComponent
-        let cwd = slug.isEmpty ? "" : Self.decodeSlug(slug)
+        let cwd = slug.isEmpty ? "" : Self.decodeSlug(slug, within: projectSearchRoot)
         return CodingSessionMeta(
             key: "cursor:\(ref.nativeId)", nativeId: ref.nativeId, agent: .cursor,
             title: CodingParse.titleFromMessages(p.messages) ?? CodingLimits.untitled,
@@ -233,7 +254,7 @@ extension CursorAdapter {
     /// 选中 `~/.cursor`（含 projects/）或直接选中 projects 目录都认
     func withCustomRoot(_ dir: URL) -> CodingSessionAdapter {
         let nested = dir.appendingPathComponent("projects", isDirectory: true)
-        return CursorAdapter(root: CodingLocations.isDirectory(nested) ? nested : dir)
+        return CursorAdapter(root: CodingLocations.isDirectory(nested) ? nested : dir, projectSearchRoot: projectSearchRoot)
     }
 }
 #endif

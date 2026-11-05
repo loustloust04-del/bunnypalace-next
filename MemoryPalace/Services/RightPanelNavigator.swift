@@ -31,4 +31,9 @@ final class RightPanelNavigator {
     var cardLibraryWorldBookTarget: String? = nil
     /// 设置搜索跳卡库「设置」页签用的 pendingTarget id（tool = "cardLibrary"）
     static let cardLibrarySettingsTargetId = "tab:settings"
+    /// 设置搜索跳卡库「世界书」/「正则」页签
+    static let cardLibraryWorldBookTabTargetId = "tab:worldBook"
+    static let cardLibraryRegexTabTargetId = "tab:regex"
+    /// 只切页签、不指向某张卡的 target（卡墙别把它当卡 id 消费掉）
+    static let cardLibraryTabTargetIds: Set<String> = [cardLibrarySettingsTargetId, cardLibraryWorldBookTabTargetId, cardLibraryRegexTabTargetId]
 }

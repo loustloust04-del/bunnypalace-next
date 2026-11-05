@@ -1,5 +1,8 @@
 import SwiftUI
 import WebKit
+#if DEBUG
+import os.log
+#endif
 #if os(macOS)
 import AppKit
 #else
@@ -19,6 +22,7 @@ enum LocalMode {
 struct WebViewHost: View {
     let htmlResourceName: String
     var payload: [String: Any] = [:]
+    var editorDocument: MarkdownWebEditorReplacement? = nil
     /// 卡库第二批 B2：注册 `mp-card://lib/`（内置 jQuery / lodash / Font Awesome），卡聊天的网页用
     var servesCardLibrary = false
     /// iOS：页面加载完摘掉 WKWebView 键盘上方自带的 ↑ ↓ ✓ 表单条（md 编辑器用自己的浮条）。默认不动
@@ -29,6 +33,7 @@ struct WebViewHost: View {
         PlatformWebViewHost(
             htmlResourceName: htmlResourceName,
             payload: payload,
+            editorDocument: editorDocument,
             servesCardLibrary: servesCardLibrary,
             hidesKeyboardAccessory: hidesKeyboardAccessory,
             onMessage: onMessage
@@ -78,6 +83,7 @@ func openExternalWebViewLink(_ href: String?) {
     }
 
     #if os(macOS)
+    guard CodingSessionResume.handoffError == nil else { return }
     NSWorkspace.shared.open(url)
     #else
     UIApplication.shared.open(url)
@@ -88,6 +94,7 @@ func openExternalWebViewLink(_ href: String?) {
 private struct PlatformWebViewHost: NSViewRepresentable {
     let htmlResourceName: String
     let payload: [String: Any]
+    let editorDocument: MarkdownWebEditorReplacement?
     let servesCardLibrary: Bool
     let hidesKeyboardAccessory: Bool
     let onMessage: (WebViewBridgeMessage) -> Void
@@ -102,6 +109,7 @@ private struct PlatformWebViewHost: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onMessage = onMessage
+        context.coordinator.send(document: editorDocument, to: webView)
         context.coordinator.send(payload: payload, to: webView)
     }
 }
@@ -109,6 +117,7 @@ private struct PlatformWebViewHost: NSViewRepresentable {
 private struct PlatformWebViewHost: UIViewRepresentable {
     let htmlResourceName: String
     let payload: [String: Any]
+    let editorDocument: MarkdownWebEditorReplacement?
     let servesCardLibrary: Bool
     let hidesKeyboardAccessory: Bool
     let onMessage: (WebViewBridgeMessage) -> Void
@@ -123,15 +132,37 @@ private struct PlatformWebViewHost: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.onMessage = onMessage
+        context.coordinator.send(document: editorDocument, to: webView)
         context.coordinator.send(payload: payload, to: webView)
     }
 }
+
+#if os(iOS)
+private final class MarkdownEditorWebView: WKWebView {
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if scrollView.contentInset != .zero { scrollView.contentInset = .zero }
+        if scrollView.contentOffset != .zero { scrollView.setContentOffset(.zero, animated: false) }
+    }
+}
+#endif
 #endif
 
 private extension PlatformWebViewHost {
     func makeWebView(context: Context) -> WKWebView {
         let userContentController = WKUserContentController()
         userContentController.add(context.coordinator, name: "memoryPalace")
+        #if DEBUG
+        let probeEnabled = htmlResourceName == "markdown-editor"
+            && ProcessInfo.processInfo.environment["MP_EDITOR_PROBE"] == "1"
+        if probeEnabled {
+            userContentController.addUserScript(WKUserScript(
+                source: "window.__mpEditorProbeEnabled = true;",
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            ))
+        }
+        #endif
 
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = userContentController
@@ -143,7 +174,18 @@ private extension PlatformWebViewHost {
             configuration.setURLSchemeHandler(handler, forURLScheme: HTMLEmbedSchemeHandler.scheme)
         }
 
+        #if os(iOS)
+        let webView = htmlResourceName == "markdown-editor"
+            ? MarkdownEditorWebView(frame: .zero, configuration: configuration)
+            : WKWebView(frame: .zero, configuration: configuration)
+        if htmlResourceName == "markdown-editor" {
+            webView.scrollView.isScrollEnabled = false
+            webView.scrollView.bounces = false
+            webView.scrollView.contentInsetAdjustmentBehavior = .never
+        }
+        #else
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        #endif
         webView.navigationDelegate = context.coordinator
         context.coordinator.webView = webView
         context.coordinator.hidesKeyboardAccessory = hidesKeyboardAccessory
@@ -153,6 +195,12 @@ private extension PlatformWebViewHost {
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
+        context.coordinator.disablesSystemEditingGestures = htmlResourceName == "markdown-editor"
+        #endif
+        #if DEBUG
+        if probeEnabled {
+            context.coordinator.editorProbe = EditorDebugProbe(webView: webView)
+        }
         #endif
 
         if let url = Bundle.main.url(forResource: htmlResourceName, withExtension: "html", subdirectory: "Web")
@@ -170,13 +218,96 @@ private extension PlatformWebViewHost {
     }
 }
 
+#if DEBUG
+private final class EditorDebugProbe {
+    private static let log = OSLog(subsystem: "com.susu.MemoryPalace.editor-probe", category: "viewport-history")
+    private weak var webView: WKWebView?
+    private let instance = UUID().uuidString
+    private var observations: [NSKeyValueObservation] = []
+    #if os(iOS)
+    private var keyboardObservers: [NSObjectProtocol] = []
+    #endif
+
+    init(webView: WKWebView) {
+        self.webView = webView
+        observations.append(webView.observe(\.bounds, options: [.new]) { [weak self] _, _ in
+            self?.record(event: "native.webViewBounds")
+        })
+        #if os(iOS)
+        let scrollView = webView.scrollView
+        observations.append(scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
+            self?.record(event: "native.contentOffset")
+        })
+        observations.append(scrollView.observe(\.contentInset, options: [.new]) { [weak self] _, _ in
+            self?.record(event: "native.contentInset")
+        })
+        observations.append(scrollView.observe(\.adjustedContentInset, options: [.new]) { [weak self] _, _ in
+            self?.record(event: "native.adjustedContentInset")
+        })
+        observations.append(scrollView.observe(\.bounds, options: [.new]) { [weak self] _, _ in
+            self?.record(event: "native.scrollViewBounds")
+        })
+        for name in [
+            UIResponder.keyboardWillShowNotification, UIResponder.keyboardDidShowNotification,
+            UIResponder.keyboardWillHideNotification, UIResponder.keyboardDidHideNotification,
+            UIResponder.keyboardWillChangeFrameNotification, UIResponder.keyboardDidChangeFrameNotification
+        ] {
+            keyboardObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                self?.record(event: "native.\(note.name.rawValue)")
+            })
+        }
+        #endif
+        record(event: "native.start")
+    }
+
+    deinit {
+        #if os(iOS)
+        for observer in keyboardObservers { NotificationCenter.default.removeObserver(observer) }
+        #endif
+    }
+
+    func record(event: String, javaScript: [String: Any]? = nil) {
+        guard let webView else { return }
+        let frame = webView.frame
+        var sample: [String: Any] = [
+            "event": event,
+            "instance": instance,
+            "nativeTimeMs": Date().timeIntervalSince1970 * 1000,
+            "nativeUptimeMs": ProcessInfo.processInfo.systemUptime * 1000,
+            "webViewFrame": ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height]
+        ]
+        #if os(iOS)
+        let scrollView = webView.scrollView
+        let inset = scrollView.contentInset
+        let adjusted = scrollView.adjustedContentInset
+        sample["contentOffset"] = ["x": scrollView.contentOffset.x, "y": scrollView.contentOffset.y]
+        sample["contentInset"] = ["top": inset.top, "left": inset.left, "bottom": inset.bottom, "right": inset.right]
+        sample["adjustedContentInset"] = ["top": adjusted.top, "left": adjusted.left, "bottom": adjusted.bottom, "right": adjusted.right]
+        sample["scrollViewBounds"] = ["width": scrollView.bounds.width, "height": scrollView.bounds.height]
+        #endif
+        if let javaScript { sample["js"] = javaScript }
+        guard let data = try? JSONSerialization.data(withJSONObject: sample, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else { return }
+        os_log("%{public}@", log: Self.log, type: .info, json)
+    }
+}
+#endif
+
 private final class WebViewCoordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     var onMessage: (WebViewBridgeMessage) -> Void
     weak var webView: WKWebView?
     var cardLibrary: HTMLEmbedSchemeHandler?
     var hidesKeyboardAccessory = false
+    #if os(iOS)
+    var disablesSystemEditingGestures = false
+    #endif
+    #if DEBUG
+    var editorProbe: EditorDebugProbe?
+    #endif
     private var latestPayloadJSON: String?
     private var pendingPayloadJSON: String?
+    private var latestDocumentRevision: Int?
+    private var pendingDocumentJSON: String?
     private var isReady = false
 
     init(onMessage: @escaping (WebViewBridgeMessage) -> Void) {
@@ -190,6 +321,12 @@ private final class WebViewCoordinator: NSObject, WKScriptMessageHandler, WKNavi
               var bridgeMessage = WebViewBridgeMessage(body: message.body) else {
             return
         }
+        #if DEBUG
+        if bridgeMessage.type == "editorProbe" {
+            editorProbe?.record(event: "javascript", javaScript: bridgeMessage.raw)
+            return
+        }
+        #endif
         bridgeMessage.reply = { [weak self] payload in
             if self == nil { cardBridgeLog.info("reply dropped: coordinator gone") }
             self?.evaluate(payload)
@@ -197,12 +334,34 @@ private final class WebViewCoordinator: NSObject, WKScriptMessageHandler, WKNavi
 
         if bridgeMessage.type == "ready" {
             isReady = true
+            if let pendingDocumentJSON {
+                self.pendingDocumentJSON = nil
+                send(json: pendingDocumentJSON, to: webView)
+            }
             if let pendingPayloadJSON {
+                self.pendingPayloadJSON = nil
                 send(json: pendingPayloadJSON, to: webView)
             }
         }
 
         onMessage(bridgeMessage)
+    }
+
+    func send(document: MarkdownWebEditorReplacement?, to webView: WKWebView) {
+        guard let document, document.nativeRevision != latestDocumentRevision else { return }
+        let payload: [String: Any] = [
+            "type": "replaceDocument",
+            "content": document.content,
+            "nativeRevision": document.nativeRevision
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else { return }
+        latestDocumentRevision = document.nativeRevision
+        if isReady {
+            send(json: json, to: webView)
+        } else {
+            pendingDocumentJSON = json
+        }
     }
 
     func send(payload: [String: Any], to webView: WKWebView) {
@@ -223,7 +382,7 @@ private final class WebViewCoordinator: NSObject, WKScriptMessageHandler, WKNavi
         }
     }
 
-    /// 单发一条（不走 payload 去重、不碰待发的 setContent）
+    /// 单发一条（不走 payload 去重、不碰待发配置或正文操作）
     private func evaluate(_ payload: [String: Any]) {
         if !isReady || webView == nil { cardBridgeLog.info("evaluate dropped ready=\(self.isReady) webView=\(self.webView != nil)") }
         guard isReady, let webView, JSONSerialization.isValidJSONObject(payload),
@@ -236,7 +395,6 @@ private final class WebViewCoordinator: NSObject, WKScriptMessageHandler, WKNavi
 
     private func send(json: String, to webView: WKWebView?) {
         guard let webView else { return }
-        pendingPayloadJSON = nil
         webView.evaluateJavaScript("window.memoryPalaceNative && window.memoryPalaceNative.receive(\(json));") { [weak self] _, error in
             guard let error else { return }
             self?.onMessage(WebViewBridgeMessage(
@@ -279,6 +437,7 @@ private final class WebViewCoordinator: NSObject, WKScriptMessageHandler, WKNavi
         #if os(iOS)
         // WKContentView 页面起来才在（Page2ChatWebView 同款时机）
         if hidesKeyboardAccessory { webView.disableKeyboardInputAccessory() }
+        if disablesSystemEditingGestures { webView.disableSystemEditingGestures() }
         #endif
     }
 

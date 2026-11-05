@@ -62,21 +62,21 @@ enum CalendarInjection {
         var text: String?
         /// 只有时间轴那段
         var timeline: String?
-        /// 这一轮注进去的时间轴条目（发送时记账用）
-        var entries: [TimelineEntry]
+        /// 这一轮注进去的时间轴单位（一天的主调行 / 一项 / 一条老条目；发送时记账用）
+        var units: [TimelineStore.Unit]
     }
 
-    /// 时间轴插槽：时间轴（v4-1：当前窗口还在历史窗口里的条目不注，见 `TimelineStore.injectable`）+ 快到的纪念日。
-    /// 返回文字和选中的条目，实发与检查器同一行代码
+    /// 时间轴插槽：A4 一天一条（今天、昨天带各时段，再往前只带主调；当前窗口还在历史窗口里的项不注，见 `TimelineStore.injection`）
+    /// + 待续一段 + 快到的纪念日。返回文字和注进去的单位，实发与检查器同一行代码；文字和时间轴页那几行一字不差
     static func timelineSlot(profileId: String, currentConversationId: String = "", windowIds: Set<String> = [],
                              now: Date = MemoryClock.now) -> TimelineSlot {
-        let entries = TimelineConsolidator.enabled
-            ? TimelineStore.recent(profileId: profileId, now: now) {
-                !TimelineStore.injectable($0, currentConversationId: currentConversationId, windowIds: windowIds)
-            }
-            : []
-        let timeline = TimelineStore.injectionText(entries)
-        let parts = [timeline, anniversaryText(profileId: profileId)].compactMap { $0 }
-        return TimelineSlot(text: parts.isEmpty ? nil : parts.joined(separator: "\n\n"), timeline: timeline, entries: entries)
+        // v5【开窗口】A4 那一勾（没写过跟 mem_content_timeline = 今天）。
+        // 待续：迁移过的楼层带 PendingStore 里「没做完」的；没迁移照读老条目里的老字段。组 prompt 在主线程：只读缓存不碰盘
+        let injection = MemoryOpenWindow.injects(.a4)
+            ? TimelineStore.injection(profileId: profileId, now: now, currentConversationId: currentConversationId, windowIds: windowIds,
+                                      openPending: { PendingStore.openByConversationCached(profileId: profileId) })
+            : TimelineStore.Injection(text: nil, units: [])
+        let parts = [injection.text, anniversaryText(profileId: profileId)].compactMap { $0 }
+        return TimelineSlot(text: parts.isEmpty ? nil : parts.joined(separator: "\n\n"), timeline: injection.text, units: injection.units)
     }
 }

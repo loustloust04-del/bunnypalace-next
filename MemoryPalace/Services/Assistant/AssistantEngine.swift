@@ -39,6 +39,8 @@ final class AssistantEngine {
     /// 舞台表情（plan-小芽-v2 §3.2）：生成状态 + 有没有待盖章的卡 + 上一轮失败没 → 主状态；feedback 压在上面
     let feedback = XiaoyaFeedbackClock()
     let ledger: AssistantLedger
+    /// 引导剧本（plan-onboarding-xiaoya-impl §4.2）：进度存 history.json 同目录的 script.json
+    let script: XiaoyaScriptRunner
     private var readingLabel: String?
     private var lastRunFailed = false
 
@@ -47,6 +49,7 @@ final class AssistantEngine {
     /// 这一次是不是本地大脑在答（舞台小票上带个叶子）
     private(set) var usingLocalBrain = false
     @ObservationIgnored private let store: AssistantChatStore
+    @ObservationIgnored private let writer: AssistantChatWriter
     @ObservationIgnored private let packDefaults: UserDefaults
     private static let maxRounds = 6
     /// 本轮对话（一次 send）收集到的提案
@@ -59,12 +62,21 @@ final class AssistantEngine {
     @ObservationIgnored private var saveToken = 0
     @ObservationIgnored private var profileObserver: NSObjectProtocol?
 
-    init(store: AssistantChatStore = AssistantChatStore(), ledger: AssistantLedger? = nil, packDefaults: UserDefaults = .standard) {
+    /// 全 App 只一个（plan-onboarding-xiaoya-impl P1b）：mac 右栏、page2 app 都用它，
+    /// 不再各开一个实例各读各写同一份 history.json。测试走下面的注入 init
+    static let shared = AssistantEngine()
+
+    init(store: AssistantChatStore = AssistantChatStore(), ledger: AssistantLedger? = nil, packDefaults: UserDefaults = .standard,
+         scriptPacing: XiaoyaScriptPacing = .live) {
         self.store = store
+        self.writer = AssistantChatWriter(store: store)
         self.ledger = ledger ?? AssistantLedger()
         self.packDefaults = packDefaults
+        self.script = XiaoyaScriptRunner(store: XiaoyaScriptStore(directory: store.fileURL.deletingLastPathComponent()),
+                                         defaults: packDefaults, pacing: scriptPacing)
         XiaoyaModelChoice.migrateLegacy(packDefaults)
         messages = store.load()
+        script.bind(self)
         profileObserver = NotificationCenter.default.addObserver(forName: .profileWillSwitch, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.cancel(quietly: true) }
         }
@@ -85,7 +97,7 @@ final class AssistantEngine {
         } else {
             base = .idle
         }
-        return XiaoyaStageState(base: base, feedback: feedback.feedback)
+        return XiaoyaStageState(base: base, feedback: feedback.feedback, scripted: script.mood)
     }
 
     // MARK: - 对话
@@ -93,7 +105,14 @@ final class AssistantEngine {
     func send(_ text: String, env: AssistantEnv) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isGenerating else { return }
-        let model = resolveModel(env: env)
+        // 「配钥匙 / 建一个 Ta / 连电脑 / 导卡」整句：剧本出卡，不发给模型（§7-4）
+        if script.intercept(trimmed) { return }
+        script.userSpoke()
+        var model = resolveModel(env: env)
+        // 引导中还没存钥匙：强制本地（新装时主模型可能是示例卡 / 桥卡，第一句别撞报错，§4.3）
+        if script.isActive, script.progress?.keySaved != true || !(model.map { env.providerManager.isModelUsable(id: $0.id) } ?? false) {
+            model = nil
+        }
         if let model, env.providerManager.credential(for: model)?.type == .localMLX {
             backend = AssistantLocalBackend(modelId: model.modelId)
             usingLocalBrain = true
@@ -102,7 +121,8 @@ final class AssistantEngine {
             usingLocalBrain = false
         } else {
             messages.append(AssistantChatMessage(isUser: true, text: trimmed))
-            messages.append(AssistantChatMessage(isUser: false, text: "我还没接模型呢——去「设置 → API」选一个聊天模型，或者在「设置 → 小芽」给我装个本地大脑，再来找我 🥺"))
+            messages.append(AssistantChatMessage(isUser: false, text: Self.noModelReply))
+            script.replyFinished()
             return
         }
         messages.append(AssistantChatMessage(isUser: true, text: trimmed))
@@ -116,6 +136,9 @@ final class AssistantEngine {
         originProfileId = env.profileId
         runRound(env: env, toolTurns: [], round: 0, run: runId)
     }
+
+    /// 没接模型时的兜底（H10 口径；「配钥匙」由剧本按关键词接）
+    static let noModelReply = "我还没接模型呢——先在「设置 › 模型和API」接一把钥匙，或者跟我说「配钥匙」🥺"
 
     func cancel() { cancel(quietly: false) }
 
@@ -132,6 +155,7 @@ final class AssistantEngine {
         isGenerating = false
         readingLabel = nil
         if !quietly { feedback.flash(.stopped) }
+        script.replyFinished()
     }
 
     // MARK: - 盖章 / 丢弃 / 撤销（唯一落地入口，astra B4）
@@ -185,9 +209,16 @@ final class AssistantEngine {
         return messages[index...].flatMap(\.actions).filter { $0.status == .approved }.count
     }
 
-    /// 这句起往后全删，返回原文给输入框；生成中 / 找不到返回 nil
+    /// 能不能改这句：剧本生成的气泡不能改；后面出过引导卡的也不能（删了剧本就接不上了）
+    func canRewind(_ messageId: UUID) -> Bool {
+        guard !isGenerating, let index = messages.firstIndex(where: { $0.id == messageId && $0.isUser }),
+              messages[index].source == nil else { return false }
+        return !messages[index...].contains { $0.card != nil }
+    }
+
+    /// 这句起往后全删，返回原文给输入框；生成中 / 找不到 / 不能改返回 nil
     func rewind(to messageId: UUID) -> String? {
-        guard !isGenerating, let index = messages.firstIndex(where: { $0.id == messageId && $0.isUser }) else { return nil }
+        guard canRewind(messageId), let index = messages.firstIndex(where: { $0.id == messageId && $0.isUser }) else { return nil }
         let text = messages[index].text
         messages.removeSubrange(index...)
         lastRunFailed = false
@@ -241,10 +272,18 @@ final class AssistantEngine {
 
     /// wire 历史：30 轮滑动窗口 + 每张提案卡的处理结果（按持久化状态，重启后模型也知道，astra C5）
     /// 处理结果挂在下一句用户话前面，不拼进小芽自己的话：拼进去模型会当成回复格式照抄，不调工具就自己写「已盖章」
+    /// 引导剧本（§4.5）：剧本说的话、点卡生成的气泡、卡片都不进；交接分隔线换成一句系统备注，只挂一次（窗口里最后那条）
     func wireHistory() -> [(role: String, content: String)] {
         var notes: [String] = []
         var wire: [(role: String, content: String)] = []
-        for msg in messages.suffix(AssistantChatStore.wireWindowMessages) {
+        let window = messages.suffix(AssistantChatStore.wireWindowMessages)
+        let lastHandoff = window.last { $0.source == .handoff }?.id
+        for msg in window {
+            if msg.source == .handoff {
+                if msg.id == lastHandoff { notes.append(script.handoffNote()) }
+                continue
+            }
+            if msg.source == .script || msg.source == .divider || msg.card != nil { continue }
             var text = msg.text
             if msg.isUser {
                 if !notes.isEmpty {
@@ -297,16 +336,16 @@ final class AssistantEngine {
         return "提案「\(name)」\(state)"
     }
 
-    /// 0.5 s 合并一次，编码写盘都在后台（astra C1）
+    /// 0.5 s 合并一次，编码写盘都在后台（astra C1）；交给同一个有序写入器，旧快照不会后到盖掉新的（sol #9）
     private func scheduleSave() {
         saveToken += 1
         let token = saveToken
         let snapshot = messages
-        let store = store
+        let writer = writer
         Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(500))
             guard let self, self.saveToken == token else { return }
-            await Task.detached(priority: .utility) { store.save(snapshot) }.value
+            await writer.save(snapshot, version: token)
         }
     }
 
@@ -314,7 +353,8 @@ final class AssistantEngine {
         guard let backend else { return }
         let history = usingLocalBrain ? localHistory() : wireHistory()
         let request = AssistantBackendRequest(
-            system: AssistantPrompts.systemPrompt(compact: usingLocalBrain),
+            system: AssistantPrompts.systemPrompt(compact: usingLocalBrain,
+                                                  about: script.aboutUser(taFloors: env.profileManager.profiles.map(\.name))),
             history: history,
             tools: usingLocalBrain
                 ? AssistantTools.localDefinitions(for: history.map(\.content).joined(separator: "\n"), page: AssistantContext.shared.page)
@@ -392,5 +432,6 @@ final class AssistantEngine {
         streamingText = ""
         isGenerating = false
         readingLabel = nil
+        script.replyFinished()
     }
 }

@@ -57,6 +57,27 @@ enum ToolCallPreflight {
                        message: "\(name) 缺少必填参数：\(missing.joined(separator: "、"))。未执行——请带上完整参数重新调用（缺参数时不要执行写入类操作）。")
     }
 
+    /// 中转会往工具参数里塞没声明的顶层键（`_call` / `reason`，R8）：执行前按 schema 去掉。
+    /// 只管执行；回给模型 / 存进历史的调用记录照原样。查不到 schema、没有 properties、additionalProperties 为 true → 原样
+    static func droppingUndeclared(_ argumentsJSON: String, schema: [String: Any]?) -> String {
+        let schema = (schema?["input_schema"] as? [String: Any]) ?? schema
+        guard let declared = schema?["properties"] as? [String: Any], schema?["additionalProperties"] as? Bool != true,
+              let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any],
+              args.keys.contains(where: { declared[$0] == nil }) else { return argumentsJSON }
+        let kept = args.filter { declared[$0.key] != nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: kept, options: [.sortedKeys]) else { return argumentsJSON }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// 工具的参数 schema：内建 → 注册表；MCP → server 的 tool schema；查不到 → nil
+    @MainActor
+    static func schema(for name: String, mcpServerIds: [String]) -> [String: Any]? {
+        if let d = ToolRegistry.all.first(where: { $0.definition.name == name })?.definition {
+            return ["type": "object", "properties": d.properties, "required": d.required]
+        }
+        return MCPProvider.shared.enabledTools(for: mcpServerIds).first(where: { $0.tool.name == name })?.tool.schemaAny()
+    }
+
     /// 取某个工具的 required 约束：内建 → 注册表；MCP → server 的 tool schema；查不到 → nil（只校 JSON）。
     @MainActor
     static func requiredFields(for name: String, mcpServerIds: [String]) -> [String]? {

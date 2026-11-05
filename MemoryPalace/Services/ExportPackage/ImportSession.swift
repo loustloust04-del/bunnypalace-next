@@ -250,7 +250,7 @@ final class ImportSession {
     /// 上次崩溃 / 被杀留下的 staging：打开导入页时后台清一次
     nonisolated static func cleanupStaleStaging() {
         Task.detached(priority: .utility) {
-            ExportPackageScanner.cleanupStale(in: FileManager.default.temporaryDirectory)
+            ExportPackageScanner.cleanupStale(in: AppPaths.temporaryDirectory)
         }
     }
 

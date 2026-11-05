@@ -32,12 +32,40 @@ enum BudgetPreflight {
         let estimatedCost: Double
     }
 
+    /// thinking 回传 astra #3：当轮回传的思考块按输入计费，签名是密文不能按字估。
+    /// 知道那一次回复的 thinking_tokens 就直接加；不知道的记签名字数（能官方计数就强制计，不能就按 4 字 1 token 保守估）
+    struct EchoedThinking: Equatable {
+        var knownTokens = 0
+        var unknownSignatureChars = 0
+        var hasUnknown: Bool { unknownSignatureChars > 0 }
+        var conservativeTokens: Int { knownTokens + unknownSignatureChars / 4 }
+
+        init(knownTokens: Int = 0, unknownSignatureChars: Int = 0) {
+            self.knownTokens = knownTokens
+            self.unknownSignatureChars = unknownSignatureChars
+        }
+
+        init(_ turns: [ToolTurn]) {
+            for turn in turns where turn.thinkingBlockCount > 0 {
+                if let tokens = turn.thinkingTokens {
+                    knownTokens += tokens
+                } else {
+                    unknownSignatureChars += (turn.assistantContent ?? []).filter(ReplyBlock.isThinking).reduce(0) { n, block in
+                        n + max(1, (block["signature"] as? String ?? block["data"] as? String ?? "").count)
+                    }
+                }
+            }
+        }
+    }
+
     /// 不支持官方计数的端点没有等待步骤，按当前余额同步完成最终 gate。
-    static func immediateDecision(_ request: URLRequest, state: () -> State = { State.current }) -> Decision? {
+    static func immediateDecision(_ request: URLRequest, echoed: EchoedThinking = EchoedThinking(),
+                                  state: () -> State = { State.current }) -> Decision? {
         guard !OfficialTokenCounter.supports(request.url) else { return nil }
         guard let usage = estimate(request) else { return Decision(allowed: true, estimatedCost: 0) }
         let rate = PricingCatalog.price(for: usage.model) ?? PricingCatalog.budgetFallback
-        let estimated = rate.cost(promptTokens: usage.input, completionTokens: usage.output, cacheReadTokens: 0, cacheWriteTokens: 0)
+        let estimated = rate.cost(promptTokens: usage.input + echoed.conservativeTokens, completionTokens: usage.output,
+                                  cacheReadTokens: 0, cacheWriteTokens: 0)
         return finalDecision(estimatedCost: estimated, current: state())
     }
 
@@ -60,7 +88,8 @@ enum BudgetPreflight {
                     return [text(dict["content"] ?? ""), text(dict["text"] ?? ""), text(dict["tool_calls"] ?? [])]
                         .filter { !$0.isEmpty }.joined(separator: "\n")
                 }
-                return dict.filter { !["data", "url", "image_url", "source", "role", "type", "cache_control"].contains($0.key) }
+                // signature（思考块签名）是密文，不当正文估字数（thinking 回传 Q9-A）
+                return dict.filter { !["data", "url", "image_url", "source", "role", "type", "cache_control", "signature"].contains($0.key) }
                     .sorted { $0.key < $1.key }.map { text($0.value) }.joined(separator: "\n")
             }
             return ""
@@ -70,18 +99,31 @@ enum BudgetPreflight {
             inputText += String(decoding: data, as: UTF8.self)
         }
         let output = min(body["max_completion_tokens"] as? Int ?? body["max_tokens"] as? Int ?? OutputTokenCap.budgetExpected,
-                         OutputTokenCap.budgetExpected)
+                         OutputTokenCap.budgetExpected + thinkingHeadroom(body, model: model))
         return (model, HeuristicEstimator().estimate(inputText), output)
     }
 
+    /// 开思考时期望输出加这一档余量（Q9-A）：output_config.effort / budget_tokens / adaptive 没写档 = 官方默认档
+    static func thinkingHeadroom(_ body: [String: Any], model: String) -> Int {
+        guard let thinking = body["thinking"] as? [String: Any] else { return 0 }
+        if let budget = thinking["budget_tokens"] as? Int { return budget }
+        if let effort = (body["output_config"] as? [String: Any])?["effort"] as? String {
+            return ReasoningEffort.headroom(effort) ?? 0
+        }
+        return ReasoningEffort.headroom(ModelLineage.defaultEffort(model)) ?? 0
+    }
+
     @MainActor static func decision(_ request: URLRequest, counter: OfficialTokenCounter = OfficialTokenCounter(),
+                                    echoed: EchoedThinking = EchoedThinking(),
                                     state: () -> State = { State.current }) async -> Decision {
         guard let usage = estimate(request) else { return Decision(allowed: true, estimatedCost: 0) }
         let initial = state()
         let rate = PricingCatalog.price(for: usage.model) ?? PricingCatalog.budgetFallback
-        var estimated = rate.cost(promptTokens: usage.input, completionTokens: usage.output, cacheReadTokens: 0, cacheWriteTokens: 0)
+        var estimated = rate.cost(promptTokens: usage.input + echoed.conservativeTokens, completionTokens: usage.output,
+                                  cacheReadTokens: 0, cacheWriteTokens: 0)
+        // 回传了不知道 token 数的思考块：不看离额度近不近，一律走官方计数（count_tokens 认思考块）
         if OfficialTokenCounter.supports(request.url),
-           shouldRefine(enabled: initial.enabled, budget: initial.effectiveBudget, spent: initial.spentUSD, estimated: estimated),
+           (initial.enabled && echoed.hasUnknown) || shouldRefine(enabled: initial.enabled, budget: initial.effectiveBudget, spent: initial.spentUSD, estimated: estimated),
            let exact = await counter.count(request) {
             estimated = rate.cost(promptTokens: exact, completionTokens: usage.output, cacheReadTokens: 0, cacheWriteTokens: 0)
         }

@@ -25,15 +25,30 @@ struct PersonaSettingsTab: View {
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(ProviderManager.self) private var providerManager: ProviderManager?
     @Environment(PresetManager.self) private var presetManager: PresetManager?
+    @Environment(RightPanelNavigator.self) private var navigator: RightPanelNavigator?
 
-    @AppStorage("personaEditMode") private var personaEditMode = "simple"
+    @AppStorage("personaEditMode") private var storedPersonaEditMode = "simple"
+    /// 报错「去改」跳到采样参数 / Prefill 那一行时临时用插槽模式显示（SettingsJump）；不写她存的模式，离开页面就没了
+    @State private var jumpModeOverride: String? = nil
+    /// 页面实际显示的模式；她自己切模式时去掉临时覆盖、写回偏好
+    private var personaEditMode: String {
+        get { jumpModeOverride ?? storedPersonaEditMode }
+        nonmutating set {
+            jumpModeOverride = nil
+            storedPersonaEditMode = newValue
+        }
+    }
     @State private var showPresetImporter = false
     /// 修全局卡顿：Prompt 页检查器用的预览（实发同一条组装路径）不再在 body 里同步算——输入变了防抖 0.25 秒后在 task 里算一次
     @State private var promptPreview: TurnPreview? = nil
+    @State private var wikiPreviewRevision = 0
     /// #089 P0-c：「请求」页看哪份——sent = 上一次真实发出的（默认）/ preview = 下一轮预览
     @State private var requestSource = "sent"
     /// #00207 返工：预览只在 Prompt 页真被看着时算——page2 切走 / 回聊天时页面还挂着、不会 onDisappear（Air 上每 2–4 秒一次 0.5–1 秒）
     @State private var promptPageOnScreen = false
+    /// #093 工具抽屉：入口行的数字（和抽屉页同一个 CVM.previewTools，入口行自己防抖）/ 右栏、page2 用 sheet 打开
+    @State private var toolDrawerPreview: ToolDrawerPreview? = nil
+    @State private var showToolDrawer = false
     @Environment(\.scenePhase) private var promptPreviewScenePhase
     #if os(iOS)
     @Environment(\.page2AppActive) private var promptPreviewAppActive
@@ -45,7 +60,7 @@ struct PersonaSettingsTab: View {
     @State private var samplingExpanded = false
     @State private var expandedSegmentIndices: Set<Int> = []
     @AppStorage("selectedChatModel") private var selectedChatModelId = ""
-    @State private var selectedSlotIndex: Int? = nil
+    @State private var selectedSlotId: String? = nil
     @State private var showFullEditor = false
     @State private var fullEditLabel = ""
     @State private var fullEditText = ""
@@ -55,6 +70,10 @@ struct PersonaSettingsTab: View {
     @State private var renamingPresetName = ""
     @State private var iOSSimpleDrafts: [String: String] = [:]
     @State private var iOSSimpleDraftPresetId: String? = nil
+    /// 这次真改过的栏：保存只提交它们，别的栏跟着实例刷新（文件库「Prompt」同源编辑，第 5 段）
+    @State private var iOSSimpleDirty: Set<String> = []
+    /// 简单模式保存没成（写盘失败 / 槽没了）：弹一次，草稿和 dirty 都留着
+    @State private var iOSSimpleSaveError: String? = nil
     @State private var iOSSimpleSaveTask: Task<Void, Never>? = nil
     @State private var iOSSimpleFocusedSlotId: String? = nil
     @State private var iOSSimpleScrollRequest = 0
@@ -109,6 +128,7 @@ struct PersonaSettingsTab: View {
 
     var body: some View {
         iOSPromptPage
+            .modifier(SaveFailedAlert(message: $iOSSimpleSaveError))
     }
 
     // MARK: - Preset Export / Import
@@ -272,9 +292,13 @@ struct PersonaSettingsTab: View {
             }
         )
         let modelOutputLimit = providerManager?.model(byId: selectedChatModelId).flatMap { OutputTokenCap.modelLimit($0.modelId) }
-        // 直连 Anthropic 的 Opus 4.7+ / 5 系不收这三项，请求里不带（ChatService Anthropic buildRequestBody）
-        let samplingIgnored = providerManager?.model(byId: selectedChatModelId).map { model in
-            providerManager?.provider(for: model)?.type == .anthropic && ReasoningEffort.needsAdaptive(model.modelId)
+        // #094：所有端点都按 ParamCompat 判断（学到的 / models.dev 目录 / 血统），请求里不带（ProviderRouter.adaptedSampling）；
+        // 推理档那条不算（只在开着推理强度时才不收）
+        let samplingIgnored = providerManager?.model(byId: selectedChatModelId).flatMap { model -> Bool? in
+            guard let provider = providerManager?.provider(for: model),
+                  provider.type == .openaiCompatible || provider.type == .anthropic else { return nil }
+            return !ParamCompat.resolve(providerType: provider.type, baseURL: provider.baseURL, modelId: model.modelId,
+                                        reasoningEffort: ReasoningEffort.auto).sendsSampling
         } ?? false
         let topKBinding = Binding<Double>(
             get: { Double(preset.sampling.topK) },
@@ -362,6 +386,7 @@ struct PersonaSettingsTab: View {
             VStack(alignment: .leading, spacing: 12) {
                 ParameterRow(label: "Temperature", value: tempBinding, range: 0...2, step: 0.1)
                 ParameterRow(label: "上下文深度", value: contextBinding, range: 5...200, step: 5, intMode: true)
+                    .searchAnchor(SettingsJump.contextDepthAnchor)
                 ParameterRow(label: "Top P", value: topPBinding, range: 0...1, step: 0.05, format: "%.2f")
                 VStack(alignment: .leading, spacing: 6) {
                     Toggle(isOn: maxTokensAutoBinding) {
@@ -445,6 +470,11 @@ struct PersonaSettingsTab: View {
                         .font(m.body)
                         .foregroundColor(Theme.textMuted)
                 }
+                // Q6-A：报「不收预填」时另一个来源在插槽里
+                Text("预设里深度 0 的 assistant 段也算预填，在插槽列表里开关")
+                    .font(m.secondary)
+                    .foregroundColor(Theme.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -464,10 +494,14 @@ struct PersonaSettingsTab: View {
     @ViewBuilder
     private func personaSimpleMode(preset: Preset, psm: PresetManager) -> some View {
         ForEach(Self.iOSSimplePromptFields) { field in
+            let preview = cardFieldPreview(field.slotId)
             Section(field.label) {
                 personaSlotField(preset: preset, slotId: field.slotId,
-                                 placeholder: field.placeholder, psm: psm,
+                                 placeholder: preview?.text ?? field.placeholder, psm: psm,
                                  height: Self.macSimpleFieldHeights[field.slotId] ?? 40)
+                if let hint = preview?.hint {
+                    Text(hint).font(ShellStyle.secondaryFont).foregroundColor(Theme.textMuted)
+                }
             }
         }
         Section {
@@ -502,6 +536,7 @@ struct PersonaSettingsTab: View {
                 Text(placeholder)
                     .font(ShellStyle.bodyFont.weight(.regular))
                     .foregroundColor(Theme.textMuted.opacity(0.5))
+                    .lineLimit(max(1, Int(height / 18)))
                     .padding(.leading, 10)
                     .padding(.top, 10)
                     .allowsHitTesting(false)
@@ -693,7 +728,7 @@ struct PersonaSettingsTab: View {
     /// Marker 插槽编辑器（直接编辑 slot content，和简单模式同步）
     private func slotMarkerEditor(slot: PromptSlot, index: Int, preset: Preset, psm: PresetManager) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            if slot.id == PromptSlot.memoryInjectionId || slot.id == PromptSlot.chatHistoryId || slot.id == PromptSlot.contextSummaryId || slot.id == PromptSlot.userProfileId {
+            if slot.isAutoFilled {
                 Text("此插槽由系统自动填充")
                     .font(ShellStyle.secondaryFont)
                     .foregroundColor(Theme.textMuted)
@@ -1026,6 +1061,33 @@ struct PersonaSettingsTab: View {
                 #endif
                 .tint(Theme.branchIndicator)
 
+                // 缓存保留时长（粟粟 10-15：默认 1 小时，能改回 5 分钟）；只在缓存命中优化开着时有意义
+                if preset.sampling.cacheFriendly == true {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("缓存保留")
+                            .font(m.label)
+                            .foregroundColor(Theme.textMuted)
+                        Picker("", selection: Binding(
+                            get: { preset.sampling.cacheLongTTL ?? true },
+                            set: { val in
+                                var p = preset
+                                p.sampling.cacheLongTTL = val
+                                psm.save(p)
+                            }
+                        )) {
+                            Text("1 小时").tag(true)
+                            Text("5 分钟").tag(false)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 180)
+                        Text("Claude 系模型（直连和 OpenRouter）的缓存能留多久。1 小时：隔一阵再回也能读到，写入按输入价 2 倍；5 分钟：写入 1.25 倍，隔 5 分钟以上再发就整段重写。中转不认 1 小时会自动改用 5 分钟。")
+                            .font(m.caption)
+                            .foregroundColor(Theme.textMuted.opacity(0.7))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
                 Divider().opacity(0.15)
 
                 // AI 工具清单（粟粟：我都不知道 AI 现在能用哪些工具）——previewTurn 与实发同一条取模型 / 取工具路径，所见即所发
@@ -1053,7 +1115,7 @@ struct PersonaSettingsTab: View {
                             .font(m.body)
                             .foregroundColor(Theme.textPrimary)
                         if toolNames.isEmpty {
-                            Text("当前不下发任何工具（\(toolsAbsentText(turn.toolsAbsentReason))）")
+                            Text("当前不下发任何工具（\(Self.toolsAbsentText(turn.toolsAbsentReason))）")
                                 .font(m.caption)
                                 .foregroundColor(Theme.textMuted)
                         } else {
@@ -1066,9 +1128,18 @@ struct PersonaSettingsTab: View {
                             if !metaNames.isEmpty { statLine("元工具", metaNames.joined(separator: " ") + "（查 / 调下面收起来的工具）") }
                             if !turn.tuckedTools.isEmpty { statLine("更多工具", turn.tuckedTools.joined(separator: " ") + "（不在清单里，经元工具调）") }
                             if !mcpNames.isEmpty { statLine("MCP", mcpNames.joined(separator: " ")) }
-                            Text("开关：文件库→设置·文件库｜回忆·心声→设置·记忆｜MCP→设置·MCP")
-                                .font(m.caption)
-                                .foregroundColor(Theme.textMuted.opacity(0.7))
+                            if useSheetNavigation {
+                                Button { showToolDrawer = true } label: {
+                                    Text("逐个开关：工具抽屉 ›")
+                                        .font(m.caption)
+                                        .foregroundColor(Theme.textSecondary)
+                                }
+                                .buttonStyle(.plain)
+                            } else {
+                                Text("逐个开关：下面的「工具抽屉」")
+                                    .font(m.caption)
+                                    .foregroundColor(Theme.textMuted.opacity(0.7))
+                            }
                         }
                     }
                 } else {
@@ -1081,7 +1152,7 @@ struct PersonaSettingsTab: View {
     }
 
     /// ④：工具为空按真实原因说（与 toolInjection 过滤链一一对应）
-    private func toolsAbsentText(_ reason: ToolsAbsentReason?) -> String {
+    static func toolsAbsentText(_ reason: ToolsAbsentReason?) -> String {
         switch reason {
         case .cardNotFound: return "找不到这张卡"
         case .cardToolsOff: return "这张卡关了工具调用"
@@ -1207,10 +1278,11 @@ struct PersonaSettingsTab: View {
         guard let turn else {
             return ("// 设置页没有绑定对话——到聊天右栏「Prompt 工具」看这一轮实发", nil)
         }
-        guard let body = turn.requestBody(providerManager: pm) else {
+        let preview = turn.requestBodyAndPlacementNote(providerManager: pm)
+        guard let body = preview.body else {
             return ("// 当前 provider（cc-bridge）不走标准请求体，无法预览", nil)
         }
-        let note = turn.placementNote(providerManager: pm)
+        let note = preview.placementNote
         guard let data = try? JSONSerialization.data(withJSONObject: Self.redactingImageData(body), options: [.prettyPrinted, .sortedKeys]),
               let str = String(data: data, encoding: .utf8) else {
             return ("// JSON 序列化失败", note)
@@ -1409,6 +1481,19 @@ private struct PromptPreviewKey: Equatable {
     let preset: Data
     let wantsPreview: Bool
     let model: String
+    /// #093：工具抽屉一改 / MCP 开关一变，仪表盘「AI 工具」和组装 / 请求页跟着重算
+    let toolDrawer: Int
+    let mcpTools: Int
+    let wikiRevision: Int
+}
+
+/// 工具抽屉入口行的重算条件（只在 Prompt 页看得见时算）
+private struct ToolDrawerEntryKey: Equatable {
+    let drawer: Int
+    let mcpTools: Int
+    let model: String
+    let conversationId: String?
+    let active: Bool
 }
 
 // MARK: - Prompt 页主干（合流后两端共用；原 iOS 真身 iOSPromptPage）
@@ -1424,6 +1509,115 @@ extension PersonaSettingsTab {
         guard let pm = providerManager else { return nil }
         return viewModel?.previewTurn(profile: profile, preset: preset, providerManager: pm,
                                       globalModelId: selectedChatModelId, context: modelContext)
+    }
+
+    // MARK: B2 正在编辑哪个楼层 / 哪张卡
+
+    func promptEditingContext(profile: Profile) -> some View {
+        let card = CharacterFloorService.boundCard(profileId: profile.id, cards: profileManager?.characterCardManager?.cards ?? [])
+        // 只有挂在右栏 / page2 的 Prompt 工具（带聊天 VM）能直接把卡库开出来；设置页里卡库会开在设置后面，只显示不跳
+        let open: (() -> Void)? = viewModel == nil ? nil : card.map { card in
+            { navigator?.pendingTarget = .init(tool: "cardLibrary", id: card.id) }
+        }
+        return PromptEditingContextRow(floorName: profile.name, cardName: card?.name, onOpenCard: open)
+    }
+
+    /// 槽空着时组装退回楼层上的卡字段：灰着当占位显示，标签旁说明写了会替换
+    func cardFieldPreview(_ slotId: String) -> (text: String, hint: String)? {
+        guard let profile = profileManager?.currentProfile else { return nil }
+        return TavernSync.cardFieldPreview(slotId: slotId, profile: profile)
+    }
+
+    // MARK: #093 工具抽屉入口
+
+    @ViewBuilder
+    var toolDrawerEntry: some View {
+        let active = promptPageOnScreen && promptPreviewAppActive && promptPreviewScenePhase == .active
+        Group {
+            if useSheetNavigation {
+                Button { showToolDrawer = true } label: {
+                    toolDrawerEntryLabel(chevron: true)
+                }
+                .buttonStyle(.plain)
+                .sheet(isPresented: $showToolDrawer) { toolDrawerSheet }
+            } else {
+                SettingsNavRow(.toolDrawer) {
+                    ToolDrawerPage(viewModel: viewModel)
+                } label: {
+                    toolDrawerEntryLabel(chevron: false)
+                }
+            }
+        }
+        .task(id: ToolDrawerEntryKey(drawer: ToolDrawerStore.shared.version,
+                                     mcpTools: MCPProvider.shared.enabledTools(for: MCPProvider.shared.activeServerIds).count,
+                                     model: selectedChatModelId,
+                                     conversationId: viewModel?.selectedConversation?.id, active: active)) {
+            guard active, let pm = providerManager, let viewModel else { return }
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            toolDrawerPreview = viewModel.previewTools(providerManager: pm, globalModelId: selectedChatModelId)
+        }
+    }
+
+    private func toolDrawerEntryLabel(chevron: Bool) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "wrench.and.screwdriver")
+                .font(.system(size: 16))
+                .foregroundColor(Theme.textSecondary)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("工具抽屉")
+                    .font(m.body)
+                    .foregroundColor(Theme.textPrimary)
+                Text(toolDrawerEntrySubtitle)
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            if chevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Theme.textMuted)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+
+    private var toolDrawerEntrySubtitle: String {
+        guard viewModel?.selectedConversation != nil, let p = toolDrawerPreview else { return "逐个开关 AI 能用的工具" }
+        if let reason = p.absentReason { return "当前不下发工具（\(Self.toolsAbsentText(reason))）" }
+        return "下发 \(p.toolCount) · 收起 \(p.tuckedCount) · 约 \(ToolDrawerPage.tokenText(p.definitionTokens + p.hintTokens)) token"
+    }
+
+    @ViewBuilder
+    private var toolDrawerSheet: some View {
+        #if os(macOS)
+        VStack(spacing: 0) {
+            HStack {
+                Text("工具抽屉")
+                    .font(m.body.weight(.semibold))
+                    .foregroundColor(Theme.textPrimary)
+                Spacer()
+                Button("完成") { showToolDrawer = false }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            ToolDrawerPage(viewModel: viewModel)
+        }
+        .frame(minWidth: 480, idealWidth: 540, minHeight: 560, idealHeight: 680)
+        .background(Theme.mainBg)
+        #else
+        NavigationStack {
+            ToolDrawerPage(viewModel: viewModel)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成") { showToolDrawer = false }
+                    }
+                }
+        }
+        #endif
     }
 
     var iOSPersonaEditModeSelection: Binding<String> {
@@ -1451,6 +1645,10 @@ extension PersonaSettingsTab {
                     .onChange(of: profile.presetId) { _, newPresetId in
                         syncSimpleDraftsIfSimple(psm.preset(byId: newPresetId) ?? preset)
                     }
+                    .onChange(of: preset.prompts) { _, _ in
+                        guard iOSSimpleDraftPresetId == preset.id else { return }
+                        iOSSimpleDrafts = Self.refreshedSimpleDrafts(iOSSimpleDrafts, dirty: iOSSimpleDirty, from: preset)
+                    }
                     .onChange(of: personaEditMode) { _, newMode in
                         expandedSegmentIndices.removeAll()
                         if newMode == "simple" || newMode.isEmpty {
@@ -1460,7 +1658,7 @@ extension PersonaSettingsTab {
                             // B11 astra R5b-I2 ②：先 flush 再让草稿会话失效——之后的离页 / 切预设 /
                             // 复制 / 导出都 flush 不动旧稿（插槽内联仍直写，不会被简单模式的旧快照盖回去）
                             flushIOSSimpleDraftSave(presetId: profile.presetId, psm: psm)
-                            invalidateIOSSimpleDrafts()
+                            if iOSSimpleDirty.isEmpty { invalidateIOSSimpleDrafts() }
                             iOSSimpleVisibilityTask?.cancel()
                             iOSSimpleVisibilityTask = nil
                             iOSSimpleFocusedSlotId = nil
@@ -1473,7 +1671,7 @@ extension PersonaSettingsTab {
                     }
                     #if os(iOS)
                     .modifier(SlotNavigationModifier(
-                        selectedSlotIndex: $selectedSlotIndex,
+                        selectedSlotId: $selectedSlotId,
                         useSheet: useSheetNavigation,
                         presetManager: presetManager,
                         profileManager: profileManager
@@ -1596,10 +1794,20 @@ extension PersonaSettingsTab {
         // sortedKeys：预设里有字典，同一份内容每次编出来的顺序可能不同 → key 抖动 → 反复重算
         let presetEncoder: JSONEncoder = { let e = JSONEncoder(); e.outputFormatting = .sortedKeys; return e }()
         let previewKey = PromptPreviewKey(profile: profile, preset: (try? presetEncoder.encode(preset)) ?? Data(),
-                                          wantsPreview: wantsPreview, model: selectedChatModelId)
+                                          wantsPreview: wantsPreview, model: selectedChatModelId,
+                                          toolDrawer: ToolDrawerStore.shared.version,
+                                          mcpTools: MCPProvider.shared.enabledTools(for: MCPProvider.shared.activeServerIds).count,
+                                          wikiRevision: wikiPreviewRevision)
 
         return ScrollViewReader { proxy in
             SettingsSectionList(.list) {
+                // ── H8（plan-onboarding-xiaoya-impl §4.6）：Ta 叫什么 / 叫你什么，只读一行，点了去通用页那两个框 ──
+                Section {
+                    PromptNamesRow()
+                }
+                .listRowBackground(Theme.mainBg)
+                .listRowSeparator(.hidden)
+
                 // ── 共享：预设 ──
                 Section("预设") {
                     iOSPromptPresetSectionContent(profile: profile, preset: preset, pm: pm, psm: psm)
@@ -1615,6 +1823,14 @@ extension PersonaSettingsTab {
                 .listRowBackground(Theme.mainBg)
                 .listRowSeparator(.hidden)
 
+                // ── #093 工具抽屉入口（仪表盘和模式选择器之间）──
+                Section {
+                    toolDrawerEntry
+                        .searchAnchor("leaf-persona-tool-drawer")
+                }
+                .listRowBackground(Theme.mainBg)
+                .listRowSeparator(.hidden)
+
                 // ── 共享：模式选择器 ──
                 Section {
                     iOSPromptModePicker
@@ -1624,6 +1840,11 @@ extension PersonaSettingsTab {
 
                 // ── 内容按模式切换 ──
                 if isSimple {
+                    Section {
+                        promptEditingContext(profile: profile)
+                    }
+                    .listRowBackground(Theme.mainBg)
+                    .listRowSeparator(.hidden)
                     // 输入框控件两端不同（mac 无 UIKit 自增高编辑器，第 4 类）；草稿链是同一条（B11）
                     #if os(macOS)
                     personaSimpleMode(preset: preset, psm: psm)
@@ -1638,11 +1859,13 @@ extension PersonaSettingsTab {
                         Section {
                             DisclosureGroup(isExpanded: $samplingExpanded) {
                                 personaSamplingSection(preset: preset, profile: profile, pm: pm, psm: psm)
+                                    .searchAnchor(SettingsJump.prefillAnchor)
                             } label: {
                                 Text("采样参数")
                                     .font(m.body.weight(.medium))
                                     .foregroundColor(Theme.textPrimary)
                             }
+                            .searchAnchor(SettingsJump.samplingAnchor)
                         }
                         .listRowBackground(Theme.mainBg)
                         .listRowSeparator(.hidden)
@@ -1696,6 +1919,15 @@ extension PersonaSettingsTab {
             #endif
             // 搜索锚点：复用这里已有的 ScrollViewReader proxy
             .settingsAnchorScroll(proxy)
+            // 报错「去改」（SettingsJump）：那两行在采样参数折叠组里，只有插槽 / 原始模式有 → 这一次临时按插槽模式显示、展开、再滚
+            .settingsJumpTarget(accepts: { $0.tab == .persona }) { target in
+                guard case .persona(let anchor) = target else { return }
+                if personaEditMode != "slots" && personaEditMode != "raw" { jumpModeOverride = "slots" }
+                samplingExpanded = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    SettingsSearchRouter.shared.request(anchor: anchor)
+                }
+            }
             #if os(iOS)
             .onChange(of: iOSSimpleScrollRequest) { _, _ in
                 guard isSimple, let target = iOSSimpleFocusedSlotId else { return }
@@ -1720,6 +1952,9 @@ extension PersonaSettingsTab {
         }
         .onAppear { promptPageOnScreen = true }
         .onDisappear { promptPageOnScreen = false }
+        .onReceive(NotificationCenter.default.publisher(for: WikiInjectionCache.didRebuild)) { _ in
+            wikiPreviewRevision += 1
+        }
         .task(id: previewKey) {
             guard wantsPreview else {
                 if !showsPreview { promptPreview = nil }   // 只是看不见：留着上次的结果，回来先显示旧的再重算
@@ -1755,11 +1990,13 @@ extension PersonaSettingsTab {
     func iOSSimpleFieldsSections(preset: Preset, psm: PresetManager) -> some View {
         Section {
             ForEach(Self.iOSSimplePromptFields) { field in
+                let preview = cardFieldPreview(field.slotId)
                 iOSSimpleField(
                     field.label,
                     preset: preset,
                     slotId: field.slotId,
-                    placeholder: field.placeholder,
+                    placeholder: preview?.text ?? field.placeholder,
+                    cardHint: preview?.hint,
                     psm: psm,
                     onBeganEditing: {
                         requestIOSSimpleFieldVisibility(field.slotId)
@@ -1793,11 +2030,13 @@ extension PersonaSettingsTab {
         Section {
             DisclosureGroup(isExpanded: $samplingExpanded) {
                 personaSamplingSection(preset: preset, profile: profile, pm: pm, psm: psm)
+                    .searchAnchor(SettingsJump.prefillAnchor)
             } label: {
                 Text("采样参数")
                     .font(m.body.weight(.medium))
                     .foregroundColor(Theme.textPrimary)
             }
+            .searchAnchor(SettingsJump.samplingAnchor)
         }
         .listRowBackground(Theme.mainBg)
         .listRowSeparator(.hidden)
@@ -1808,7 +2047,7 @@ extension PersonaSettingsTab {
             personaSlotsMode(preset: preset, psm: psm)
             #else
             ForEach(Array(preset.prompts.enumerated()), id: \.element.id) { index, slot in
-                Button { selectedSlotIndex = index } label: {
+                Button { selectedSlotId = slot.id } label: {
                     HStack(spacing: 10) {
                         if !slot.isLocked {
                             Toggle("", isOn: Binding(
@@ -1872,7 +2111,7 @@ extension PersonaSettingsTab {
                             Label("删除", systemImage: "trash")
                         }
                     }
-                    Button { selectedSlotIndex = index } label: {
+                    Button { selectedSlotId = slot.id } label: {
                         Label("编辑", systemImage: "pencil")
                     }
                     .tint(Theme.branchIndicator)
@@ -2076,6 +2315,7 @@ extension PersonaSettingsTab {
         preset: Preset,
         slotId: String,
         placeholder: String,
+        cardHint: String? = nil,
         psm: PresetManager,
         onBeganEditing: @escaping () -> Void = {},
         onEndedEditing: @escaping () -> Void = {},
@@ -2088,6 +2328,12 @@ extension PersonaSettingsTab {
                 Text(label)
                     .font(.system(size: Theme.F.label, weight: .medium))
                     .foregroundColor(Theme.textSecondary)
+                if let cardHint {
+                    Text(cardHint)
+                        .font(.system(size: Theme.F.caption))
+                        .foregroundColor(Theme.textMuted)
+                        .lineLimit(1)
+                }
                 Spacer()
                 Button {
                     fullEditLabel = label
@@ -2152,10 +2398,12 @@ extension PersonaSettingsTab {
     /// 草稿会话失效（B11 astra R5b-I2 ②）：只在**已经 flush 过**之后调。
     /// 之后 `persistIOSSimpleDrafts` 的 `iOSSimpleDraftPresetId == presetId` 守卫不成立 → 旧稿不再被重放。
     func invalidateIOSSimpleDrafts() {
+        guard iOSSimpleDirty.isEmpty else { return }
         iOSSimpleSaveTask?.cancel()
         iOSSimpleSaveTask = nil
         iOSSimpleDraftPresetId = nil
         iOSSimpleDrafts = [:]
+        iOSSimpleDirty = []
     }
 
     func syncIOSSimpleDrafts(from preset: Preset, force: Bool = false) {
@@ -2164,8 +2412,14 @@ extension PersonaSettingsTab {
         }
         iOSSimpleSaveTask?.cancel()
         iOSSimpleSaveTask = nil
+        // 同一份预设还有没存上的栏（保存失败 / 槽没了 / 防抖被打断）：那几栏留着，别的跟实例刷新
+        if iOSSimpleDraftPresetId == preset.id, !iOSSimpleDirty.isEmpty {
+            iOSSimpleDrafts = Self.refreshedSimpleDrafts(iOSSimpleDrafts, dirty: iOSSimpleDirty, from: preset)
+            return
+        }
         iOSSimpleDraftPresetId = preset.id
-        iOSSimpleDrafts = iOSSimpleDraftSnapshot(from: preset)
+        iOSSimpleDrafts = Self.iOSSimpleDraftSnapshot(from: preset)
+        iOSSimpleDirty = []
     }
 
     func applyIOSSimpleDraft(slotId: String, text: String, presetId: String) {
@@ -2173,6 +2427,7 @@ extension PersonaSettingsTab {
             iOSSimpleDraftPresetId = presetId
         }
         iOSSimpleDrafts[slotId] = text
+        iOSSimpleDirty.insert(slotId)
     }
 
     func scheduleIOSSimpleDraftSave(presetId: String, psm: PresetManager) {
@@ -2191,26 +2446,45 @@ extension PersonaSettingsTab {
     }
 
     func persistIOSSimpleDrafts(presetId: String, psm: PresetManager) {
-        guard iOSSimpleDraftPresetId == presetId else { return }
-        guard var preset = psm.preset(byId: presetId) else { return }
-
-        var didChange = false
-        for slotId in Self.iOSSimplePromptSlotIds {
-            guard let text = iOSSimpleDrafts[slotId],
-                  let idx = preset.prompts.firstIndex(where: { $0.id == slotId }),
-                  preset.prompts[idx].content != text else {
-                continue
-            }
-            preset.prompts[idx].content = text
-            didChange = true
-        }
-
-        if didChange {
-            psm.save(preset)
-        }
+        guard iOSSimpleDraftPresetId == presetId, !iOSSimpleDirty.isEmpty else { return }
+        let result = Self.commitSimpleDrafts(iOSSimpleDrafts, dirty: iOSSimpleDirty, presetId: presetId, psm: psm)
+        iOSSimpleDirty = result.pending
+        if let error = result.error { iOSSimpleSaveError = error }
     }
 
-    func iOSSimpleDraftSnapshot(from preset: Preset) -> [String: String] {
+    /// 只把真改过的栏写进最新实例（没改的栏不拿旧快照去盖别处 / 文件库新改的内容），走可抛错的持久入口。
+    /// 返回还没存上的栏：写盘失败 = 全部留着；槽没了 = 那几栏留着；其余存上了才清
+    static func commitSimpleDrafts(_ drafts: [String: String], dirty: Set<String>, presetId: String,
+                                   psm: PresetManager) -> (pending: Set<String>, error: String?) {
+        guard let preset = psm.preset(byId: presetId) else { return (dirty, "当前预设已经不在了，改动没保存。") }
+        var next = preset
+        var missing = Set<String>()
+        for slotId in iOSSimplePromptSlotIds where dirty.contains(slotId) {
+            guard let text = drafts[slotId] else { continue }
+            guard let idx = next.prompts.firstIndex(where: { $0.id == slotId }) else {
+                missing.insert(slotId)
+                continue
+            }
+            next.prompts[idx].content = text
+        }
+        if next.prompts != preset.prompts {
+            do { try psm.persistNew(next) } catch {
+                return (dirty, "改动没保存：\(error.localizedDescription)。字还在，稍后会再试。")
+            }
+        }
+        return (missing, missing.isEmpty ? nil : "有一栏对应的插槽已不在当前预设里，那一栏的改动没保存。")
+    }
+
+    /// 实例在别处改了：没在编辑的栏换成最新内容，正在编辑的留着
+    static func refreshedSimpleDrafts(_ drafts: [String: String], dirty: Set<String>, from preset: Preset) -> [String: String] {
+        var drafts = drafts
+        for (slotId, text) in iOSSimpleDraftSnapshot(from: preset) where !dirty.contains(slotId) {
+            drafts[slotId] = text
+        }
+        return drafts
+    }
+
+    static func iOSSimpleDraftSnapshot(from preset: Preset) -> [String: String] {
         var snapshot: [String: String] = [:]
         for slotId in Self.iOSSimplePromptSlotIds {
             snapshot[slotId] = preset.prompts.first(where: { $0.id == slotId })?.content ?? ""
@@ -2278,16 +2552,38 @@ struct ParameterRow: View {
     }
 }
 
+/// Prompt 页保存没成：弹原因，字留在页面上
+private struct SaveFailedAlert: ViewModifier {
+    @Binding var message: String?
+
+    func body(content: Content) -> some View {
+        content.alert("保存失败", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
+            Button("好", role: .cancel) { message = nil }
+        } message: {
+            Text(message ?? "")
+        }
+    }
+}
+
 // MARK: - Slot Edit Page (iOS)
 
 #if os(iOS)
 struct SlotEditPage: View {
-    let slot: PromptSlot
-    let index: Int
+    let slotId: String
     let preset: Preset
     let psm: PresetManager
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+    /// 打开时钉住楼层 + 预设 + 插槽和当时的值（之后删槽 / 重排 / 换预设都写不到别的槽）
+    @State private var session: PromptSlotEdit?
+    @State private var saveError: String?
+
+    /// 显示用：按 id 现找；槽没了就显示打开时的样子（保存会报「已不在」）
+    private var slot: PromptSlot {
+        psm.preset(byId: session?.presetId ?? preset.id)?.prompts.first { $0.id == slotId }
+            ?? session?.baseline ?? PromptSlot(id: slotId, name: "")
+    }
 
     @State private var editName: String = ""
     @State private var editRole: String = ""
@@ -2303,36 +2599,23 @@ struct SlotEditPage: View {
     @State private var pendingDelete = false
 
     private func refreshDirty() {
-        isDirty = editName != slot.name ||
-            editRole != slot.role ||
-            editContent != slot.content ||
-            (Int(editDepth) ?? 0) != slot.injectionDepth
+        guard let base = session?.baseline else { isDirty = false; return }
+        isDirty = editName != base.name ||
+            editRole != base.role ||
+            editContent != base.content ||
+            (Int(editDepth) ?? 0) != base.injectionDepth
     }
 
-    /// 从 psm 读最新 preset 写回，避免用创建时的旧快照互相覆盖
-    private func patch(_ mutate: (inout PromptSlot) -> Void) {
-        guard var p = psm.preset(byId: preset.id), index < p.prompts.count else { return }
-        mutate(&p.prompts[index])
-        psm.save(p)
-    }
-
+    /// 只提交改过的字段，正文按打开时的 baseline 查冲突；存上了才退出，没存上弹原因、字留着
     private func saveAndExit() {
-        let autoFilled = slot.id == PromptSlot.memoryInjectionId || slot.id == PromptSlot.chatHistoryId || slot.id == PromptSlot.contextSummaryId || slot.id == PromptSlot.userProfileId
-        if !slot.isMarker {
-            patch {
-                $0.name = editName
-                $0.role = editRole
-                $0.content = editContent
-                SlotOrder.setDepth(Int(editDepth) ?? 0, of: &$0)
-            }
-        } else {
-            patch {
-                $0.name = editName
-                $0.role = editRole
-                if !autoFilled { $0.content = editContent }
-            }
+        guard let session, let profiles = profileManager else { return }
+        do {
+            try session.commit(name: editName, role: editRole, content: editContent, depth: Int(editDepth) ?? 0,
+                               profiles: profiles, presets: psm)
+            dismiss()
+        } catch {
+            saveError = error.localizedDescription
         }
-        dismiss()
     }
 
     /// 自定义顶栏：复刻聊天页 iOSChatTopBar 的玻璃返回键 + 标题 + 玻璃保存胶囊。
@@ -2404,7 +2687,7 @@ struct SlotEditPage: View {
             .listRowBackground(Theme.mainBg)
 
             Section("内容") {
-                if slot.id == PromptSlot.memoryInjectionId || slot.id == PromptSlot.chatHistoryId || slot.id == PromptSlot.contextSummaryId || slot.id == PromptSlot.userProfileId {
+                if slot.isAutoFilled {
                     Text("此插槽由系统自动填充")
                         .font(.system(size: Theme.F.body))
                         .foregroundColor(Theme.textMuted)
@@ -2456,16 +2739,20 @@ struct SlotEditPage: View {
         .navigationBarBackButtonHidden(true)
         .confirmationDialog("删除插槽？", isPresented: $pendingDelete, titleVisibility: .visible) {
             Button("删除", role: .destructive) {
-                deletePromptSlot(presetId: preset.id, slotId: slot.id, psm: psm)
+                deletePromptSlot(presetId: session?.presetId ?? preset.id, slotId: slotId, psm: psm)
                 dismiss()
             }
             Button("取消", role: .cancel) { pendingDelete = false }
         }
+        .modifier(SaveFailedAlert(message: $saveError))
         .onAppear {
-            editName = slot.name
-            editRole = slot.role
-            editContent = slot.content
-            editDepth = "\(slot.injectionDepth)"
+            guard session == nil else { return }
+            let opened = slot
+            session = PromptSlotEdit(profileId: profileManager?.currentProfile.id ?? "", presetId: preset.id, baseline: opened)
+            editName = opened.name
+            editRole = opened.role
+            editContent = opened.content
+            editDepth = "\(opened.injectionDepth)"
             refreshDirty()
         }
         .onChange(of: editName) { _, _ in refreshDirty() }
@@ -2479,7 +2766,7 @@ struct SlotEditPage: View {
 
 /// 右栏用 sheet 弹出插槽编辑，设置页用 navigationDestination push
 struct SlotNavigationModifier: ViewModifier {
-    @Binding var selectedSlotIndex: Int?
+    @Binding var selectedSlotId: String?
     let useSheet: Bool
 
     // 两种初始化：直接传 preset 或从 environment 读
@@ -2488,15 +2775,15 @@ struct SlotNavigationModifier: ViewModifier {
     var presetManager: PresetManager?
     var profileManager: ProfileManager?
 
-    init(selectedSlotIndex: Binding<Int?>, useSheet: Bool, preset: Preset, psm: PresetManager) {
-        self._selectedSlotIndex = selectedSlotIndex
+    init(selectedSlotId: Binding<String?>, useSheet: Bool, preset: Preset, psm: PresetManager) {
+        self._selectedSlotId = selectedSlotId
         self.useSheet = useSheet
         self.preset = preset
         self.psm = psm
     }
 
-    init(selectedSlotIndex: Binding<Int?>, useSheet: Bool, presetManager: PresetManager?, profileManager: ProfileManager?) {
-        self._selectedSlotIndex = selectedSlotIndex
+    init(selectedSlotId: Binding<String?>, useSheet: Bool, presetManager: PresetManager?, profileManager: ProfileManager?) {
+        self._selectedSlotId = selectedSlotId
         self.useSheet = useSheet
         self.presetManager = presetManager
         self.profileManager = profileManager
@@ -2516,25 +2803,60 @@ struct SlotNavigationModifier: ViewModifier {
         if useSheet {
             content
                 .sheet(isPresented: Binding(
-                    get: { selectedSlotIndex != nil },
-                    set: { if !$0 { selectedSlotIndex = nil } }
+                    get: { selectedSlotId != nil },
+                    set: { if !$0 { selectedSlotId = nil } }
                 )) {
-                    if let idx = selectedSlotIndex,
-                       let preset = resolvedPreset, let psm = resolvedPsm,
-                       idx < preset.prompts.count {
+                    if let id = selectedSlotId, let preset = resolvedPreset, let psm = resolvedPsm {
                         NavigationStack {
-                            SlotEditPage(slot: preset.prompts[idx], index: idx, preset: preset, psm: psm)
+                            SlotEditPage(slotId: id, preset: preset, psm: psm)
                         }
                     }
                 }
         } else {
             content
-                .navigationDestination(item: $selectedSlotIndex) { idx in
-                    if let preset = resolvedPreset, let psm = resolvedPsm, idx < preset.prompts.count {
-                        SlotEditPage(slot: preset.prompts[idx], index: idx, preset: preset, psm: psm)
+                .navigationDestination(item: $selectedSlotId) { id in
+                    if let preset = resolvedPreset, let psm = resolvedPsm {
+                        SlotEditPage(slotId: id, preset: preset, psm: psm)
                     }
                 }
         }
     }
 }
 #endif
+
+// MARK: - Prompt 页顶：Ta 叫 X · 叫你 Y（H8）
+/// 名字读通用页同一对键（切楼层时由楼层写入）；改在通用页，这里只给个看得见的入口
+private struct PromptNamesRow: View {
+    @AppStorage("assistantName") private var assistantName = "助手"
+    @AppStorage("userName") private var userName = "你"
+    @Environment(\.settingsMetrics) private var m
+    @State private var editing = false
+
+    var body: some View {
+        Button { editing = true } label: {
+            HStack(spacing: 6) {
+                Text("Ta 叫 \(assistantName) · 叫你 \(userName)")
+                    .font(m.body)
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Theme.textMuted)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .sheet(isPresented: $editing) {
+            NavigationStack {
+                GeneralPage()
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) { Button("完成") { editing = false } }
+                    }
+            }
+            #if os(macOS)
+            .frame(minWidth: 440, minHeight: 480)
+            #endif
+        }
+    }
+}

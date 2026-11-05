@@ -146,7 +146,6 @@ struct CharacterWallView: View {
         .sheet(item: $editingCard) { card in
             CharacterCardEditor(card: card) { updated in
                 try cardManager?.update(updated)
-                editingCard = nil
             } onCancel: { editingCard = nil }
         }
         .confirmationDialog("删除角色卡", isPresented: Binding(get: { deletingCard != nil }, set: { if !$0 { deletingCard = nil } }), titleVisibility: .visible) {
@@ -317,7 +316,7 @@ struct CharacterWallView: View {
 
     private func consumeTarget(_ target: RightPanelNavigator.Target?) {
         guard isActive, let target, target.tool == "cardLibrary",
-              target.id != RightPanelNavigator.cardLibrarySettingsTargetId else { return }
+              !RightPanelNavigator.cardLibraryTabTargetIds.contains(target.id) else { return }
         searchText = ""
         filter = .all
         // 定位只滚动高亮，不触发进入或物化。

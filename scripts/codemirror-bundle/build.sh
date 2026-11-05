@@ -24,7 +24,7 @@ node -e "
 (0, eval)(require('fs').readFileSync(process.argv[1], 'utf8'));
 const m = globalThis.MPCodeMirror;
 if (!m) { console.error('MPCodeMirror 全局未生成'); process.exit(1); }
-const want = ['EditorState','EditorView','HighlightStyle','SearchQuery','StateField','basicSetup','bracketMatching','defaultHighlightStyle','foldGutter','foldKeymap','indentOnInput','keymap','markdown','markdownLanguage','minimalSetup','searchExtensions','setSearchQuery','replaceNext','replaceAll','syntaxHighlighting','tags','Decoration','ViewPlugin','RangeSetBuilder','WidgetType'];
+const want = ['EditorState','EditorView','HighlightStyle','SearchQuery','StateField','basicSetup','bracketMatching','defaultHighlightStyle','foldGutter','foldKeymap','indentOnInput','keymap','markdown','markdownLanguage','minimalSetup','searchExtensions','setSearchQuery','replaceNext','replaceAll','syntaxHighlighting','tags','Decoration','ViewPlugin','RangeSetBuilder','WidgetType','Transaction','undo','redo','undoDepth','redoDepth','isolateHistory'];
 const missing = want.filter(k => !(k in m));
 if (missing.length) { console.error('缺导出:', missing.join(', ')); process.exit(1); }
 console.log('导出齐全 ✅ (' + want.length + ' 个)');

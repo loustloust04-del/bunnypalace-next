@@ -12,8 +12,8 @@
 // 接受的视觉降级（D8 + codex 补充）：blockquote chrome / unordered bullet 色 /
 // inline code dotted underline 阴影 / table 交替行 / thematicBreak 样式 /
 // code block 圆角 20pt + bundled HighlightSwift CSS / HTMLArtifactCard 降级——以上两端同。
-// 块距/行距分端：iOS 吃库默认 block spacing 30 / paragraph lineSpacing 5（不可控）；
-// mac 由 memoryPalace 的 lineSpacingScale/paragraphSpacingScale 参数换算覆盖（ms0911 R8 B3）。
+// iOS 默认块距30 / 额外行距5，气泡正文显式覆盖行距为0；
+// mac 的 lineSpacingScale/paragraphSpacingScale 继续接受排版滑杆。
 import Foundation
 import SwiftUI
 #if os(iOS)
@@ -30,7 +30,7 @@ extension MarkdownRenderConfig {
     /// - parameter scale: 字号 scale（FontManager.fontScale，默认 1.2）。
     /// - parameter animated: 逐词淡入（ParagraphUIView.animatedByWord）。只有流式路径传 true——
     ///   静态渲染开它会让历史消息滚动重建时整段 alpha 淡入闪变（ParagraphView.makeUIView）。
-    /// - parameter lineSpacingScale / paragraphSpacingScale: ms0911 R8 B3 排版滑杆换算（mac 传，iOS 永 nil 吃库默认）。
+    /// - parameter lineSpacingScale / paragraphSpacingScale: 排版比例（mac 滑杆；iOS 仅气泡正文传行距0）。
     ///   R9b 走查 4 起口径：默认滑杆值 = iOS 数值，滑杆按比例缩放——
     ///   行距 = 5 × s/1.45、块距 = 30 × s/1.65（5/30 是 fork BlockView iOS 分支写死值，1.45/1.65 是滑杆默认）。
     /// - parameter contextMenu: 选段浮条自定义项（R2-4b 正文划词收生词；nil = 只有系统项）
@@ -141,16 +141,14 @@ extension MarkdownRenderConfig {
                 backgroundColor: mainBgUI
             ),
 
-            // R9b 走查 4：换算对齐 iOS——默认滑杆 = iOS 数值，滑杆按比例缩放（5/30 = fork BlockView
-            // iOS 分支写死值；1.45/1.65 = 滑杆默认）。旧公式对齐的是 MarkdownUI（默认 9.87pt/19.8pt，
-            // mac 行更松段更挤正好反了）。闭包体 iOS 永不执行（iOS 传 nil）——iOS 行为零变化。
+            // 默认比例对应行距5 / 块距30；气泡正文传行距0，其余iOS调用保持nil。
             blockSpacing: paragraphSpacingScale.map { s in
                 let iOSBlockSpacing = 30.0      // fork BlockView iOS 分支写死的块距
                 let sliderDefault = 1.65        // 「外观 › 排版」段落间距滑杆默认（AppStorage 同名键）
                 return CGFloat(iOSBlockSpacing * s / sliderDefault)
             },
             paragraphLineSpacing: lineSpacingScale.map { s in
-                let iOSParagraphLineSpacing = 5.0   // fork BlockView iOS 分支写死的行距
+                let iOSParagraphLineSpacing = 5.0   // fork 段落额外行距默认值
                 let sliderDefault = 1.45            // 行间距滑杆默认
                 return CGFloat(iOSParagraphLineSpacing * s / sliderDefault)
             },

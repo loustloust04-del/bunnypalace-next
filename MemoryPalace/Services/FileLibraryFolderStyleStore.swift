@@ -27,7 +27,7 @@ enum FileLibraryFolderStyleStore {
     }
 
     static func fileURL(profileId: String) -> URL {
-        FileLibraryStore.metadataDirectory(profileId: profileId).appendingPathComponent(fileName)
+        AppPaths.checked(FileLibraryStore.metadataDirectory(profileId: profileId).appendingPathComponent(fileName))
     }
 
     static func load(profileId: String) -> [String: FileLibraryFolderLook] {
@@ -46,10 +46,16 @@ enum FileLibraryFolderStyleStore {
 
     static func diskState(at url: URL) -> DiskState {
         let fm = FileManager.default
-        let placeholder = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).icloud")
+        let placeholder = AppPaths.checked(url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).icloud"))
         if fm.fileExists(atPath: placeholder.path) { return .notDownloaded }
         guard fm.fileExists(atPath: url.path) else { return .missing }
-        if let status = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]).ubiquitousItemDownloadingStatus,
+        #if os(macOS)
+        let cloudAvailable = !BenchIsolation.active
+        #else
+        let cloudAvailable = true
+        #endif
+        if cloudAvailable,
+           let status = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]).ubiquitousItemDownloadingStatus,
            status != .current {
             return .notDownloaded
         }
@@ -72,6 +78,9 @@ enum FileLibraryFolderStyleStore {
         case .table(let current):
             folders = current
         case .notDownloaded:
+            #if os(macOS)
+            if BenchIsolation.active { return .notDownloaded }
+            #endif
             try? FileManager.default.startDownloadingUbiquitousItem(at: url)
             return .notDownloaded
         case .unreadable:

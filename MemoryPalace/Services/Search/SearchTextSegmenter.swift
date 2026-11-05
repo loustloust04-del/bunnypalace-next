@@ -5,11 +5,15 @@ import Foundation
 /// 拉丁 / 数字沿用 unicode61 的词边界。查询时整段当短语，末 token 走前缀。
 enum SearchTextSegmenter {
 
-    static func segment(_ text: String) -> String {
+    static func normalized(_ text: String) -> String {
         // Foundation 的 precomposedStringWithCompatibilityMapping 不合成半角浊点（ｶﾞ → カ + U+3099），拆两步才是真 NFKC
         let normalized = text.utf8.allSatisfy { $0 < 0x80 } ? text
             : text.decomposedStringWithCompatibilityMapping.precomposedStringWithCanonicalMapping
-        let folded = normalized.lowercased()
+        return normalized.lowercased()
+    }
+
+    static func segment(_ text: String) -> String {
+        let folded = normalized(text)
         var out = String.UnicodeScalarView()
         out.reserveCapacity(folded.unicodeScalars.count + 16)
         for scalar in folded.unicodeScalars {
@@ -34,6 +38,46 @@ enum SearchTextSegmenter {
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
         return "\"\(body)\"*"
+    }
+
+    /// C3 原文召回保留连续汉字段作为完整短语；其他文字沿用词面分词，无词面时保留原词供扫描。
+    static func catalogTerms(_ terms: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for term in terms {
+            let word = normalized(term).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !word.isEmpty else { continue }
+            var parts: [String] = []
+            var run = String.UnicodeScalarView()
+            var han = false
+            func flush() {
+                guard !run.isEmpty else { return }
+                let text = String(run).trimmingCharacters(in: .whitespacesAndNewlines)
+                if han {
+                    parts.append(text)
+                } else {
+                    let tokens = MemoryBM25.tokens(text)
+                    if !tokens.isEmpty {
+                        parts.append(contentsOf: tokens)
+                    } else if text.unicodeScalars.contains(where: isTokenScalar) {
+                        parts.append(text)
+                    }
+                }
+                run.removeAll(keepingCapacity: true)
+            }
+            for scalar in word.unicodeScalars {
+                let isHan = scalar.properties.isIdeographic
+                if !run.isEmpty && isHan != han { flush() }
+                han = isHan
+                run.append(scalar)
+            }
+            flush()
+            if parts.isEmpty { parts.append(word) }
+            for part in parts where seen.insert(part).inserted {
+                result.append(part)
+            }
+        }
+        return result
     }
 
     /// 与 unicode61 默认 `categories 'L* N* Co'` 一致：字母、数字、私用区是 token 字符，其余都是分隔符

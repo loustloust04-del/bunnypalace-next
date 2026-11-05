@@ -8,7 +8,7 @@
 import { TmuxCommandError, TmuxUncertainError, type WriteFate } from "./tmux-control"
 import {
   channelIds, hasMarker, PASTE_PLACEHOLDER_RE, TranscriptScanner, withMarker,
-  type ActiveOp, type EditArea, type Outcome, type SendMarker, type SendStatusBook, type TranscriptCursor,
+  type ActiveOp, type EditArea, type Outcome, type SendCtx, type SendMarker, type SendStatusBook, type TranscriptCursor,
 } from "./send-verify"
 
 /// 一次完整发送（注入 + 回车 + 原有核对）的结果。注入失败照旧抛：TmuxCommandError = 确定没执行，TmuxUncertainError = 不明
@@ -34,8 +34,8 @@ export interface TrackDeps {
   generation(session: string): number | undefined
   /// 会话已经不在了：清就绪态，下一条消息走重新拉起
   sessionGone(session: string): void
-  /// 重发途中会话没了：交回原有发送路径（重新拉起 + 排队），身份留在账上
-  requeue(session: string, text: string): void
+  /// 重发途中会话没了：交回原有发送路径（重新拉起 + 排队），身份留在账上（发送上下文跟着带回去，A1 R5）
+  requeue(session: string, text: string, sc?: SendCtx): void
   legacyError(session: string, messageId: string | undefined, reason: string): void
   sleep(ms: number): Promise<void>
   now(): number
@@ -64,8 +64,8 @@ interface Ctx {
   text: string
   marker: SendMarker
   messageId?: string
-  /// 第几次发送（channel 标签的 ts）
-  attempt?: string
+  /// 这次发送的上下文（A1 R5：身份 = hub 内部序号，app attempt 随它带着；没经 WS 登记的发送没有）
+  sc?: SendCtx
   op?: ActiveOp
   cursor?: TranscriptCursor
   scanner: TranscriptScanner
@@ -96,23 +96,24 @@ export class SendTracker {
     }, this.t.retryMaxMs).unref?.()
   }
 
-  /// 接受了的重发在注入前就失败（附件落盘、组帧…）
-  abortRetry(messageId: string, reason: string): void {
-    const op = this.book.active.get(messageId)
-    if (op?.retry) this.book.finish(op, { status: "failed", retryable: true, reason })
+  /// 接受了的重发在注入前就失败（附件落盘、组帧…）：结束准入时拿到的那个 op（A1 R5：不按 message_id 重查 active）
+  abortRetry(op: ActiveOp, reason: string): void {
+    if (op.retry) this.book.finish(op, { status: "failed", retryable: true, reason })
   }
 
-  /// 发一条（在 chainSessionSend 里）。正常发送：只多记一次 transcript 位置，注入 / 回车与原来逐字相同，不发 send_status
-  async send(raw: string, session: string): Promise<void> {
+  /// 发一条（在 chainSessionSend 里）。正常发送：只多记一次 transcript 位置，注入 / 回车与原来逐字相同，不发 send_status。
+  /// sc = 这次发送的上下文（A1 R5）：身份和 app attempt 都从它来，不从标签的 ts 推
+  async send(raw: string, session: string, sc?: SendCtx): Promise<void> {
     const { text, marker } = withMarker(raw)
-    const { chatId = "", messageId, ts } = channelIds(text)
+    const { chatId = "", messageId } = channelIds(text)
     const gen = this.deps.generation(session)
     const live = messageId !== undefined ? this.book.active.get(messageId) : undefined
-    const retryOp = live?.retry && !live.started ? live : undefined
+    // 被接受的重发只由它自己那次发送接手（带上下文时核身份：同 id 更早排着的别的发送不许顶替它）
+    const retryOp = live?.retry && !live.started && (sc === undefined || live.attempt === sc.key) ? live : undefined
     if (retryOp) retryOp.started = true
     const cursor = await this.deps.cursor(session)
     const ctx: Ctx = {
-      session, text, marker, messageId, attempt: ts, op: retryOp, cursor, scanner: new TranscriptScanner(retryOp?.cursor ?? cursor, marker),
+      session, text, marker, messageId, sc, op: retryOp, cursor, scanner: new TranscriptScanner(retryOp?.cursor ?? cursor, marker),
       gen, paste: false, settled: true, resent: false,
     }
     this.verifying.set(session, (this.verifying.get(session) ?? 0) + 1)
@@ -150,7 +151,7 @@ export class SendTracker {
 
   /// 进账（有 message_id 才进）→ 跑核对 → 终态 → 必要时堵着会话
   private async track(ctx: Ctx, chatId: string, run: () => Promise<{ done: Outcome; hold: boolean }>): Promise<void> {
-    if (ctx.messageId !== undefined && !ctx.op) ctx.op = this.book.begin(ctx.messageId, chatId, ctx.session, ctx.cursor, ctx.attempt)
+    if (ctx.messageId !== undefined && !ctx.op) ctx.op = this.book.begin(ctx.messageId, chatId, ctx.session, ctx.cursor, ctx.sc?.key, ctx.sc?.appAttempt)
     const r = await run()
     await this.conclude(ctx, r.done, r.hold)
   }
@@ -259,7 +260,7 @@ export class SendTracker {
       ctx.op!.requeued = true
       ctx.op!.started = false
       console.warn(`[hub] 重发 ${ctx.messageId}：会话不在了 → 交回原有路径重新拉起（${ea.detail.split("\n")[0]}）`)
-      this.deps.requeue(ctx.session, ctx.text)
+      this.deps.requeue(ctx.session, ctx.text, ctx.sc)
       return "requeued"
     }
     // 之后照常注入；transcript 改从这次发送前的位置看

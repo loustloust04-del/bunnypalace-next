@@ -15,9 +15,6 @@ struct AssistantProposalCard: View {
     let onUndo: () -> Void
 
     @State private var confirmDestructive = false
-    /// 旧提案提示里的名字读 AssistantPrompts。B-8（plan-paging-decouple B-0 表 1）：翻页不再重交 rootView 后，这个值要自带失效通道——声明即订阅
-    @AppStorage(AssistantPrompts.nameKey) private var xiaoyaNameSubscription = ""
-    @AppStorage("settings.proMode") private var proModeSubscription = false
     private static let fieldLimit = 600
 
     var body: some View {

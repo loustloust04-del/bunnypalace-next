@@ -52,6 +52,9 @@ struct TabbedToolPanel: View {
                 ForEach(tabs, id: \.self) { id in
                     RightPanelToolContent(toolId: id, selectedToolId: .constant(id),
                                           viewModel: viewModel, stickerVM: stickerVM)
+                        #if (DEBUG || PERF_BENCH) && os(macOS)
+                        .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "panel:\(id)") } }
+                        #endif
                         #if os(macOS)
                         .opacity(id == current && layout.macFlightTargets[id] == nil ? 1 : 0)
                         .accessibilityHidden(id != current || collapsed)

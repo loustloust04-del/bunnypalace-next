@@ -4,6 +4,9 @@ import SwiftUI
 /// 思考过程 / 想起来了 / 工具调用 三家共用；标题走英文微标签例外（粟粟拍）。
 struct DisclosureSheet<Content: View>: View {
     let title: String
+    var detent: PresentationDetent = .fraction(0.72)
+    /// false = 正文自己会滚（整理记录 sheet 里的原生只读文本视图），壳不再套 ScrollView
+    var scrolls = true
     @ViewBuilder let content: () -> Content
     @Environment(\.dismiss) private var dismiss
 
@@ -35,16 +38,23 @@ struct DisclosureSheet<Content: View>: View {
             .padding(.top, 18)
             .padding(.bottom, 10)
 
-            ScrollView {
+            if scrolls {
+                ScrollView {
+                    content()
+                        .padding(.horizontal, 20)
+                        .padding(.top, 8)
+                        .padding(.bottom, 32)
+                }
+            } else {
                 content()
                     .padding(.horizontal, 20)
                     .padding(.top, 8)
-                    .padding(.bottom, 32)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }
         .background(Theme.mainBg)
         #if os(iOS)
-        .presentationDetents([.fraction(0.72), .large])
+        .presentationDetents([detent, .large])
         .presentationDragIndicator(.visible)
         #else
         .frame(minWidth: 480, minHeight: 420)

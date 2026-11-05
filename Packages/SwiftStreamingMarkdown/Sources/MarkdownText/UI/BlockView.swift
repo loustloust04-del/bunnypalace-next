@@ -60,16 +60,9 @@ struct SingleBlockView: View {
           .transition(.opacity)
           .accessibilityAddTraits(.isHeader)
       case .paragraph(_, let contents):
-        #if os(macOS)
-        // MP fork mac: mac 的排版滑杆经 config 覆盖段落行距；iOS 保持上游常量 5
         ParagraphView(contents: contents, lineSpacing: config.paragraphLineSpacing ?? 5)
           .fixedSize(horizontal: false, vertical: true)
           .transition(.opacity)
-        #else
-        ParagraphView(contents: contents, lineSpacing: 5)
-          .fixedSize(horizontal: false, vertical: true)
-          .transition(.opacity)
-        #endif
       case .latex(_, let latexString):
         ScrollView(.horizontal) {
           HStack(spacing: 0) {
@@ -102,13 +95,8 @@ struct SingleBlockView: View {
         if let card = standaloneLinkRenderer?(url, label) {
           card
         } else {
-          #if os(macOS)
           ParagraphView(contents: contents, lineSpacing: config.paragraphLineSpacing ?? 5)
             .fixedSize(horizontal: false, vertical: true)
-          #else
-          ParagraphView(contents: contents, lineSpacing: 5)
-            .fixedSize(horizontal: false, vertical: true)
-          #endif
         }
       case .details(_, let summary, let isOpen, let children):
         DetailsBlockView(summary: summary, initiallyOpen: isOpen, children: children)

@@ -96,28 +96,28 @@ final class AssistantModelStore {
     }
 
     nonisolated static var defaultRoot: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("XiaoyaModels", isDirectory: true)
+        AppPaths.checked(AppPaths.applicationSupport
+            .appendingPathComponent("XiaoyaModels", isDirectory: true))
     }
 
     /// 装好了才返回目录（只看最终目录在不在：半截的 .partial 永远不算）。
     /// nonisolated：API 卡列表 / 路由在哪个线程都能问
     nonisolated static func installedDirectory(modelId: String) -> URL? {
         guard AssistantLocalModel.catalog.contains(where: { $0.id == modelId }) else { return nil }
-        let url = defaultRoot.appendingPathComponent(modelId, isDirectory: true)
+        let url = AppPaths.checked(defaultRoot.appendingPathComponent(modelId, isDirectory: true))
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     func state(_ model: AssistantLocalModel) -> State { states[model.id] ?? .notInstalled }
 
-    func installedURL(_ model: AssistantLocalModel) -> URL { root.appendingPathComponent(model.id, isDirectory: true) }
-    private func partialURL(_ model: AssistantLocalModel) -> URL { root.appendingPathComponent(model.id + ".partial", isDirectory: true) }
+    func installedURL(_ model: AssistantLocalModel) -> URL { AppPaths.checked(root.appendingPathComponent(model.id, isDirectory: true)) }
+    private func partialURL(_ model: AssistantLocalModel) -> URL { AppPaths.checked(root.appendingPathComponent(model.id + ".partial", isDirectory: true)) }
 
     private func partialBytes(_ model: AssistantLocalModel) -> Int64? {
         let dir = partialURL(model)
         guard FileManager.default.fileExists(atPath: dir.path) else { return nil }
         return model.files.reduce(Int64(0)) { sum, file in
-            sum + ((try? FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent(file.name).path)[.size] as? Int64) ?? 0)
+            sum + ((try? FileManager.default.attributesOfItem(atPath: AppPaths.checked(dir.appendingPathComponent(file.name)).path)[.size] as? Int64) ?? 0)
         }
     }
 
@@ -168,7 +168,7 @@ final class AssistantModelStore {
 
         for file in model.files {
             try Task.checkCancellation()
-            let dest = partial.appendingPathComponent(file.name)
+            let dest = AppPaths.checked(partial.appendingPathComponent(file.name))
             try await fetchVerified(model, file, to: dest, allowCellular: allowCellular)
         }
         // 全部核对通过才整体换名：半截的 partial 永远不会被当成装好的

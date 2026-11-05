@@ -29,9 +29,10 @@ final class MacWorkspacePreferences {
     }
 
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let stanchRTab: Bool
     private(set) var dockItems: [DockItem]?
     var showCodingSessions: Bool { didSet { if oldValue != showCodingSessions { persist() } } }
-    /// 左栏面板组（「对话 | Code」）上次选中的 tab；启动时据此恢复。Code 关掉时读出来一律当「对话」
+    /// 保留上次手动选中的 tab；启动恢复另由 restoredLeftPanelTab 决定。
     var leftPanelTab: MacLeftPanelTab { didSet { if oldValue != leftPanelTab { persist() } } }
     /// 菜单栏快看（research-magpie §2.6）显不显示；默认开
     var showMenuBarExtra: Bool { didSet { if oldValue != showMenuBarExtra { persist() } } }
@@ -40,6 +41,7 @@ final class MacWorkspacePreferences {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        stanchRTab = defaults.object(forKey: "mp.stanch.R-tab") as? Bool ?? true
         let snapshot = defaults.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Snapshot.self, from: $0) }
         dockItems = snapshot?.dockItems.map(Self.unique)
         showCodingSessions = snapshot?.showCodingSessions ?? true
@@ -50,8 +52,10 @@ final class MacWorkspacePreferences {
     /// 左栏面板组此刻有哪几个 tab（PS 面板组 = tab 栏 + 内容）。Code 开关关掉 → 只剩「对话」
     var leftPanelTabs: [MacLeftPanelTab] { showCodingSessions ? MacLeftPanelTab.allCases : [.chats] }
 
-    /// 启动该恢复到哪个 tab：存的是 Code 但开关关了 → 对话
-    var restoredLeftPanelTab: MacLeftPanelTab { leftPanelTabs.contains(leftPanelTab) ? leftPanelTab : .chats }
+    /// 止血默认启动回对话；NO恢复旧策略，Code隐藏时仍不能恢复到Code。
+    var restoredLeftPanelTab: MacLeftPanelTab {
+        !stanchRTab && leftPanelTabs.contains(leftPanelTab) ? leftPanelTab : .chats
+    }
 
     static let homeID = "home"
     static let modeID = "mac.workspace.mode"
