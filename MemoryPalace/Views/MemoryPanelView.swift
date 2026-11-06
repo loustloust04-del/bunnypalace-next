@@ -141,6 +141,8 @@ struct RightPanelToolContent: View {
             RegexPage()
         case "twitter":
             TwitterPanelView(profileId: profileManager?.currentProfile.id ?? "")
+        case "bunnyConsole":   // [Bunny patch BP-007]
+            BunnyConsoleView()
         case "study":
             StudyPanelView(viewModel: viewModel)
         #if PERSONAL_APPS

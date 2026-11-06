@@ -211,6 +211,7 @@ final class RightPanelToolManager {
         RightPanelTool(id: "twitter",     name: "推特",    icon: "bird",                           order: 20),
         // page2「学堂」（plan-study-zero-engine）：内置学习说明的文件夹 + 开课；两端都上。21 是 Debug 的「开发」
         RightPanelTool(id: "study",       name: "学堂",    icon: "graduationcap",                  order: 22),
+        RightPanelTool(id: "bunnyConsole", name: "Caelum's Console", icon: "house", order: 24),   // [Bunny patch BP-007]
         ]
         #if PERSONAL_APPS
         tools += [
