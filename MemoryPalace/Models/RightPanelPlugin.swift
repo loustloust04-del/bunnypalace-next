@@ -25,6 +25,7 @@ final class RightPanelToolManager {
             "calendar", "memory", "sticker",
             "health", "reading", "vocab",
             "xiaoya",   // 小芽助手：创作门槛恰恰压在 lite 用户身上（plan-小芽助手 Q2）
+            "bunnyConsole",   // [Bunny patch BP-007] Caelum's Console：lite 模式也要看得见
             "study",    // 学堂：点一下就能开课，lite 新用户也要看得见（plan-study-zero-engine P4）
         ]
         #if PERSONAL_APPS

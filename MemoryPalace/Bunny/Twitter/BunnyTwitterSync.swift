@@ -36,6 +36,8 @@ enum BunnyTwitterSync {
         UserDefaults.standard.set(Date(), forKey: lastRunKey)
         guard count > 0 else { return "没有新推文" }
 
+        if full { purgePulledTweets(profileId: profileId, context: context) }
+
         let fm = FileManager.default
         let dir = fm.temporaryDirectory.appendingPathComponent("bunny-twitter-pull-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -47,5 +49,18 @@ enum BunnyTwitterSync {
         try? context.save()
         if let latest { UserDefaults.standard.set(latest, forKey: sinceKey) }
         return "拉到 \(count) 条，新增 \(r.tweetsImported) 条，已存在 \(r.tweetsSkipped) 条"
+    }
+
+    /// 整包重同步前清掉「只从网关拉来」的推文：只动占位账号（pull- 前缀）名下的推文，
+    /// 导过官方存档的真账号不受影响。用于修正早期网关接口的编号错误（11-07：回复推文撞号）。
+    private static func purgePulledTweets(profileId: String, context: ModelContext) {
+        let pid = profileId
+        let all = (try? context.fetch(FetchDescriptor<TweetEntry>(predicate: #Predicate { $0.profileId == pid }))) ?? []
+        var removed = 0
+        for t in all where t.accountId.hasPrefix(TwitterPullImporter.pulledAccountPrefix) {
+            context.delete(t); removed += 1
+        }
+        if removed > 0 { try? context.save() }
+        UserDefaults.standard.removeObject(forKey: sinceKey)
     }
 }
