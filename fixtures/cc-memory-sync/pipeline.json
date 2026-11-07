@@ -1,0 +1,36 @@
+{
+  "note": "合成夹具（人名都是编的）。hub 测试（cc-bridge/cc-memory-sync.test.ts）按 files + symlinks 建目录，断言发出去的快照 == expected；app 测试（MemoryPalaceTests/CCMemorySyncTests.swift）把 expected 当 hub 发来的清单和文件，外加把 leaked 当成 hub 漏发的私人文件，过 app 落盘再过种子读取，断言 markers 一个都不出现。",
+  "files": {
+    "MEMORY.md": "# 索引\n- [岚舟](project_lanzhou.md) — 钥匙存日记本\n- [私有仓库](project_private_repo.md) — 私有仓库方向\n- [星砚](./project_xingyan.md#近况 \"星砚近况\")\n- [私密](./PRIVATE_xingyan.md#a) — SYNTH_INDEX_UPPER_MARKER\n- [编码](private%5Fcoded.md) — SYNTH_INDEX_CODED_MARKER\n- [钥匙][k]\n- [链](<my_diary.md> \"标题\") — SYNTH_INDEX_LINK_MARKER\n- [旧](sub/../private_gone.md) — SYNTH_INDEX_GONE_MARKER\n\n[k]: <private_key.md> \"SYNTH_INDEX_REF_MARKER\"\n",
+    "project_lanzhou.md": "---\nname: 岚舟日记本\ntype: project\n---\n岚舟把钥匙存在日记本里。\n",
+    "project_xingyan.md": "# 星砚\n星砚每周三去旧书市。\n",
+    "project_private_repo.md": "# 私有仓库\n岚舟的项目放在私有仓库里。\n",
+    "private_key.md": "SYNTH_PRIVATE_KEY_MARKER",
+    "PRIVATE_xingyan.md": "SYNTH_PRIVATE_UPPER_MARKER",
+    "Private_z.md": "SYNTH_PRIVATE_MIXED_MARKER"
+  },
+  "symlinks": {
+    "my_diary.md": "private_key.md"
+  },
+  "expected": {
+    "MEMORY.md": "# 索引\n- [岚舟](project_lanzhou.md) — 钥匙存日记本\n- [私有仓库](project_private_repo.md) — 私有仓库方向\n- [星砚](./project_xingyan.md#近况 \"星砚近况\")\n\n",
+    "project_lanzhou.md": "---\nname: 岚舟日记本\ntype: project\n---\n岚舟把钥匙存在日记本里。\n",
+    "project_xingyan.md": "# 星砚\n星砚每周三去旧书市。\n",
+    "project_private_repo.md": "# 私有仓库\n岚舟的项目放在私有仓库里。\n"
+  },
+  "leaked": {
+    "PRIVATE_xingyan.md": "SYNTH_PRIVATE_UPPER_MARKER",
+    "Private_z.md": "SYNTH_PRIVATE_MIXED_MARKER",
+    "Private_key.md": "SYNTH_PRIVATE_KEY_MARKER"
+  },
+  "markers": [
+    "SYNTH_PRIVATE_KEY_MARKER",
+    "SYNTH_PRIVATE_UPPER_MARKER",
+    "SYNTH_PRIVATE_MIXED_MARKER",
+    "SYNTH_INDEX_UPPER_MARKER",
+    "SYNTH_INDEX_CODED_MARKER",
+    "SYNTH_INDEX_LINK_MARKER",
+    "SYNTH_INDEX_GONE_MARKER",
+    "SYNTH_INDEX_REF_MARKER"
+  ]
+}

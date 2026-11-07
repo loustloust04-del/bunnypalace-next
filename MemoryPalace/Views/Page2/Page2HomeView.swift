@@ -229,7 +229,7 @@ struct Page2HomeView: View {
             guard let tools else { return }
             home.bootstrap(toolIDs: tools.pinnedTools.map(\.id), dockIDs: Page2DesktopManager.shared.dockToolIds ?? Array(tools.pinnedTools.prefix(4).map(\.id)))
             home.ensureBoard(columns: columns, rows: rows)
-            BunnyDesktopMigration.runIfNeeded(tools: tools)   // [Bunny patch BP-007] 老用户桌面补 Console 图标
+            BunnyLaunchHooks.onHomeAppear(tools: tools, profiles: profiles)   // [Bunny patch BP-007] 补 Console 图标 + 后台同步
         }
         .onChange(of: dynamicType) { _, _ in capacityChanged() }
         .onChange(of: profiles?.currentProfile.id) { _, _ in cancelDrag() }

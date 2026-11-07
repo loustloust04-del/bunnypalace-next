@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记忆评测场</title>
+<style>
+:root {
+  --bg: #FFFBF6;
+  --panel: #E7EEEC;
+  --card: #FFFFFF;
+  --mint: #8EBD9F;
+  --mint-soft: #D5E6DC;
+  --rose: #EBDDD7;
+  --text: #3B3430;
+  --text2: #6E645D;
+  --muted: #9C928A;
+  --line: #D9DEDA;
+  --danger: #C2635A;
+  --ok: #4F8D66;
+  --on-mint: #22302A;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1E1C1A; --panel: #2A302E; --card: #2B2826; --mint: #8EBD9F; --mint-soft: #34463C; --rose: #4A3B37;
+    --text: #EFE8E1; --text2: #C4BAB1; --muted: #8E857D; --line: #3C423F; --danger: #E08A80; --ok: #8EBD9F; --on-mint: #1B241F;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1E1C1A; --panel: #2A302E; --card: #2B2826; --mint: #8EBD9F; --mint-soft: #34463C; --rose: #4A3B37;
+  --text: #EFE8E1; --text2: #C4BAB1; --muted: #8E857D; --line: #3C423F; --danger: #E08A80; --ok: #8EBD9F; --on-mint: #1B241F;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 16px/1.7 -apple-system, "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+}
+main { max-width: 780px; margin: 0 auto; padding: 32px 16px 64px; }
+h1 { font-size: 26px; margin: 0 0 6px; }
+h2 { font-size: 20px; margin: 44px 0 10px; }
+h3 { font-size: 16px; margin: 18px 0 6px; }
+p { margin: 8px 0; }
+.lede { color: var(--text2); }
+.note { color: var(--muted); font-size: 14px; }
+.box { background: var(--panel); border-radius: 18px; padding: 16px; margin: 14px 0; }
+blockquote { margin: 12px 0; padding: 10px 14px; border-left: 4px solid var(--mint); background: var(--card); border-radius: 0 14px 14px 0; color: var(--text2); }
+
+/* 审计台方块 */
+.phone { width: 310px; max-width: 100%; margin: 16px auto; background: var(--panel); border-radius: 36px; padding: 18px 14px 20px; border: 1px solid var(--line); }
+.phone .bar { text-align: center; font-size: 13px; color: var(--text2); margin-bottom: 12px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tile { aspect-ratio: 1; border-radius: 20px; padding: 12px; display: flex; flex-direction: column; justify-content: space-between; }
+.tile b { font-size: 15px; }
+.tile .num { font-size: 26px; font-weight: 700; line-height: 1.1; }
+.tile small { font-size: 11px; color: var(--text2); line-height: 1.4; }
+.tile .ic { align-self: flex-end; font-size: 18px; margin-top: -18px; }
+.t1 { background: linear-gradient(160deg, var(--mint-soft), var(--mint)); }
+.t1 small { color: var(--text); }
+.t2 { background: var(--rose); }
+.t3 { background: var(--card); border: 1.5px solid var(--mint); }
+.t4 { background: var(--card); opacity: .5; }
+.t5 { background: transparent; border: 1.5px dashed var(--line); color: var(--muted); align-items: center; justify-content: center; text-align: center; font-size: 12px; }
+.tabbar { display: flex; justify-content: space-around; margin-top: 14px; font-size: 11px; color: var(--muted); }
+.tabbar .on { color: var(--text); font-weight: 600; }
+
+/* 名词 */
+.terms { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin: 12px 0; }
+.term { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; }
+.term b { display: block; }
+.term span { font-size: 14px; color: var(--text2); }
+
+/* 流程 */
+.flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 14px 0; }
+@media (max-width: 600px) { .flow { grid-template-columns: 1fr 1fr; } }
+.step { background: var(--panel); border-radius: 14px; padding: 10px; position: relative; }
+.step .n { display: inline-flex; width: 24px; height: 24px; border-radius: 50%; background: var(--mint); color: var(--on-mint); font-weight: 700; font-size: 13px; align-items: center; justify-content: center; }
+.step b { display: block; margin-top: 4px; }
+.step span { font-size: 13px; color: var(--text2); line-height: 1.5; display: block; }
+
+/* 成绩表 */
+.score { width: 100%; border-collapse: collapse; background: var(--card); border-radius: 14px; overflow: hidden; font-size: 14px; }
+.score th, .score td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); }
+.score th { color: var(--text2); font-weight: 600; background: var(--panel); }
+.score td.big { font-size: 20px; font-weight: 700; }
+.up { color: var(--ok); font-size: 12px; }
+.down { color: var(--danger); font-size: 12px; }
+
+/* 历次条形 */
+.hist { background: var(--card); border-radius: 14px; padding: 12px 14px; margin: 12px 0; }
+.bar-row { display: grid; grid-template-columns: 9.5em 1fr 3.2em; gap: 8px; align-items: center; font-size: 13px; margin: 6px 0; }
+.bar-row .track { background: var(--panel); border-radius: 6px; height: 14px; overflow: hidden; }
+.bar-row .fill { background: var(--mint); height: 100%; border-radius: 6px; }
+.bar-row .v { text-align: right; font-weight: 600; }
+
+/* 结果卡 */
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 10px 0; }
+@media (max-width: 600px) { .cards { grid-template-columns: 1fr; } }
+.rc { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px; font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
+.rc .hd { font-size: 11px; color: var(--muted); }
+.rc .body { font-size: 14px; line-height: 1.6; }
+.rc .item { padding: 4px 6px; border-radius: 6px; background: var(--panel); }
+.rc .item.bad { background: color-mix(in srgb, var(--danger) 18%, var(--card)); }
+.rc .tag { font-size: 11px; font-weight: 600; }
+.rc .tag.ok { color: var(--ok); }
+.rc .tag.bad { color: var(--danger); }
+.rc .foot { font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 5px; }
+.rc.stored { background: var(--panel); }
+
+.wtable { width: 100%; border-collapse: collapse; font-size: 14px; background: var(--card); border-radius: 14px; overflow: hidden; }
+.wtable th, .wtable td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.wtable th { background: var(--panel); color: var(--text2); }
+.wtable td:first-child { font-weight: 700; white-space: nowrap; }
+.wtable .later { color: var(--muted); }
+.tablewrap { overflow-x: auto; }
+
+.q { border-left: 4px solid var(--mint); background: var(--card); border-radius: 0 14px 14px 0; padding: 12px 14px; margin: 14px 0; }
+.q .rec { color: var(--ok); font-weight: 600; }
+ul { padding-left: 1.2em; }
+li { margin: 4px 0; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>审计台 = 记忆的评测场</h1>
+<p class="lede">你说的那几个台都放进「记忆 › 审计台」。审计台变成一格一格的方块，点一块进一个台。试写台不是「改改提示词看一眼」，而是拿固定的考卷给每个写记忆的环节打分，改一次考一次，分数记下来，看是涨了还是跌了。先做到「你判得准」，以后再让它自己跑、自己改。</p>
+<blockquote>auto research 为什么牛逼，rsi 为什么牛逼，不就是因为能找到想要优化的那个东西吗。</blockquote>
+
+<h2>一、审计台长这样</h2>
+<p>一块一个台，块上那个大数字是这个台现在最该看的数。台以后还能接着加，不限四个。</p>
+
+<div class="phone" role="img" aria-label="审计台方块首页示意">
+  <div class="bar">记忆</div>
+  <div class="grid">
+    <div class="tile t1"><b>整理台</b><div><div class="num">12</div><small>条没看过</small></div><span class="ic">▤</span></div>
+    <div class="tile t2"><b>wiki</b><div><div class="num">3</div><small>条整理提案待批</small></div><span class="ic">❐</span></div>
+    <div class="tile t3"><b>试写台</b><div><div class="num">86%</div><small>C2 上次的分</small></div><span class="ic">✎</span></div>
+    <div class="tile t4"><b>召回测试台</b><div><small>以后做：测翻得准不准、有没有用、塞在哪</small></div><span class="ic">◎</span></div>
+    <div class="tile t5">以后加的台<br>放这里</div>
+  </div>
+  <div class="tabbar"><span>记忆</span><span>窗口总结</span><span>时间轴</span><span class="on">审计台</span></div>
+</div>
+<ul>
+  <li><b>整理台</b>：就是现在审碎片的卡片页，你人工整理。</li>
+  <li><b>wiki</b>：翻 wiki 页，整理提案也挪到这里；记忆格里那组「wiki · N 页」拿掉。</li>
+  <li><b>试写台</b>：下面细说。</li>
+  <li><b>召回测试台</b>：先灰着。</li>
+</ul>
+
+<h2>二、试写台里的几个词</h2>
+<div class="terms">
+  <div class="term"><b>测试集</b><span>一份固定的考卷：一组输入，加上答案。输入定下来就不变，所以前后几次的分能比。</span></div>
+  <div class="term"><b>答案 / 标签</b><span>「这条该记」「这条不该记」「这段必须写到 X」。你判过一次就记下来，下次自动用上。</span></div>
+  <div class="term"><b>配方</b><span>被考的东西：提示词（两份都能改）+ 管线里能调的数。</span></div>
+  <div class="term"><b>模型</b><span>同一个配方换 Haiku、换 Sonnet，分别考一次。</span></div>
+  <div class="term"><b>分</b><span>打分是能换的插件。先放一个最简单的：你判过的条里，对的占几成。格式这种死规矩自动算；对不对，你判。</span></div>
+</div>
+
+<h2>三、一个台里怎么走</h2>
+<div class="flow">
+  <div class="step"><span class="n">1</span><b>选考卷</b><span>比如「C2 质量探针」：12 段编的聊天，每段都写好了该记什么、不该记什么。</span></div>
+  <div class="step"><span class="n">2</span><b>选考谁</b><span>勾几个配方 × 几个模型。按钮上先写「12 段 × 2 × 2 = 48 次 · 约 $0.31」，太多会提示你少勾。</span></div>
+  <div class="step"><span class="n">3</span><b>看分数</b><span>每个「配方 × 模型」一行，大字是主分；点进去看每段写出了什么。</span></div>
+  <div class="step"><span class="n">4</span><b>历次对比</b><span>同一份考卷的每次成绩连成一条线，改一次提示词，看分是涨是跌。</span></div>
+</div>
+
+<h3>分数长这样（用 C2 探针真跑过的数）</h3>
+<table class="score">
+  <tr><th>配方 × 模型</th><th>准确率（主分）</th><th>写了几条</th><th>判错</th></tr>
+  <tr><td>修过 subject 的版本 · Sonnet</td><td class="big">100%</td><td>31</td><td>0</td></tr>
+  <tr><td>修过 subject 的版本 · Haiku</td><td class="big">86% <span class="down">比 Sonnet 低 14</span></td><td>29</td><td>4</td></tr>
+</table>
+<p class="note">准确率 = 判对的条数 ÷ 写出的条数。Haiku 那 4 条错：把扮演里「公主怕水」当成了真事；一次性的建议记成了承诺；助手回答的话记成了你自己说的；临时安排当成了长期目标。</p>
+
+<h3>历次对比长这样</h3>
+<div class="hist" role="img" aria-label="同一份考卷历次成绩条形图">
+  <div class="note" style="margin-bottom:6px">C2 探针 · 副分「subject 写成干净名字的比例」· Sonnet</div>
+  <div class="bar-row"><span>10-22 修之前</span><span class="track"><span class="fill" style="width:39%;display:block"></span></span><span class="v">约 39%</span></div>
+  <div class="bar-row"><span>10-22 修之后</span><span class="track"><span class="fill" style="width:100%;display:block"></span></span><span class="v">100%</span></div>
+  <div class="bar-row"><span>下一次改了再跑…</span><span class="track"></span><span class="v"></span></div>
+</div>
+<p class="note">这就是 10-22 那次「subject 别写成『X 的 Y』」改出来的效果，以后每次改都会这样留一行。</p>
+
+<h3>点进一段，看它写了什么</h3>
+<p>同一段聊天，几个「配方 × 模型」的结果并排（手机上横着翻）。<b>写出来的东西是主角</b>，检查和花费是底下的一行小字。没配上答案的那条标「待你判」，你点一下对 / 错，分数当场重算，这个判断也记成答案，下次自动用上。</p>
+<div class="cards">
+  <div class="rc">
+    <div class="hd">第 08 段 · 修过的版本 · Sonnet</div>
+    <div class="body">
+      <div class="item">岚舟每周六下午去旧书店「半盏」看书 <span class="tag ok">应记 ✓</span></div>
+    </div>
+    <div class="foot">格式全过 · 输入 2.1k / 输出 180 token · $0.009</div>
+  </div>
+  <div class="rc">
+    <div class="hd">第 08 段 · 修过的版本 · Haiku</div>
+    <div class="body">
+      <div class="item">岚舟每周六下午去旧书店「半盏」看书 <span class="tag ok">应记 ✓</span></div>
+      <div class="item bad">岚舟害怕水 <span class="tag bad">不该记 ✗ 是扮演里的戏</span></div>
+    </div>
+    <div class="foot">格式全过 · 输入 2.1k / 输出 210 token · $0.002</div>
+  </div>
+  <div class="rc stored">
+    <div class="hd">答案（这一段）</div>
+    <div class="body">
+      <div class="item">应记：每周六去旧书店「半盏」</div>
+      <div class="item">不该记：扮演里「公主怕水」</div>
+    </div>
+    <div class="foot">你 10-23 判过</div>
+  </div>
+</div>
+<p class="note">示意：「岚舟」「半盏」都是探针里编的；卡片底下的 token 和钱是随手填的样子，不是真数。</p>
+
+<h2>四、每个写记忆的环节，考什么、答案是什么、分是什么</h2>
+<p>共用一套架子，每种写手自己定考卷。最右一列「最想提高的数」只是<b>以后的候选</b>（你说先别细究），这一步所有写手先用同一个最简单的分。</p>
+<div class="tablewrap">
+<table class="wtable">
+  <tr><th></th><th>考卷（输入）</th><th>答案</th><th>最想提高的数（候选）</th></tr>
+  <tr><td>A2 上下文摘要</td><td>你真聊天里的一段</td><td>你为这段列 2–5 个「必须记下的事」</td><td>必须记下的事写到了几成（另外自动看：原话是不是逐字抄的、格式过没过）</td></tr>
+  <tr><td>A3 窗口总结</td><td>一个窗口当时的全部 A2</td><td>你列这个窗口的几个「弯」</td><td>弯画到了几成（另外自动看：长度在不在档、有没有写待续）</td></tr>
+  <tr><td>A4 时间轴</td><td>一天的 A2 标题</td><td>这天必须提到的事</td><td>你看了觉得「能用」的天数占几成</td></tr>
+  <tr><td>C2 碎片池</td><td>一截聊天（探针 12 段；以后也从整理台导入）</td><td>该记 / 不该记，加上你判过的对错</td><td>写出的条里对的占几成（专抓「该丢的没丢」）</td></tr>
+  <tr><td class="later">C3 种子</td><td class="later">真测试集A（你的 CC 记忆）</td><td class="later">你对目录和正文的批 / 改 / 驳</td><td class="later">不用改就能批的占几成 · 第二步做</td></tr>
+  <tr><td class="later">C3 日常整理</td><td class="later">一个主题当时的原料</td><td class="later">你对提案的批 / 改 / 驳</td><td class="later">不用改就能批的占几成 · 第二步做</td></tr>
+  <tr><td class="later">B 线</td><td class="later" colspan="3">先留个位置（心声 / 小克自记是聊天里调工具；日记 / 做梦还没做）</td></tr>
+</table>
+</div>
+<p class="note">你在整理台删掉的碎片、在 wiki 里驳回的提案，都能一键变成考卷和答案，不用为了测专门再标一遍。只有你点了才变，不会偷偷收。</p>
+
+<h2>五、你 10-23 定下的三件事</h2>
+<div class="q">
+  <p><b>1. 每种写手「最想提高的那个数」</b></p>
+  <p>你说：「这个暂时不知道准确数，因为比较主观。你先别细究这个，弄个架子就行。」</p>
+  <p class="rec">所以：打分做成能换的插件，这一步先放一个最简单的（判过的条里对的占几成），能算、能存、能比就行。上面表里那些数先当「以后的候选」，你哪天想清楚了再换上，以前的成绩不会丢。</p>
+</div>
+<div class="q">
+  <p><b>2. 跑完要你判多少</b></p>
+  <p class="rec">按推荐：程序先拿你以前判过的对一对，对上的自动填好，你只判没对上的。判过一次就记成答案。</p>
+</div>
+<div class="q">
+  <p><b>3. A 线改版上线前，新格式的提示词能不能「设为正在用」</b></p>
+  <p class="rec">按推荐：能点，但先弹一句话说清楚后果（新 A3 会存不进去、新 A2 的【关键词】会混进【原话】），默认按钮是「先不设」。</p>
+</div>
+
+<h2>六、先做多大</h2>
+<div class="box">
+  <p><b>这一刀</b>：审计台方块；整理台、wiki 台；试写台的架子；先接 C2（考卷和答案现成）和 A2 / A3 / A4（A 线改版要用）。满意的提示词能「设为正在用」，随时能恢复默认。</p>
+  <p><b>下一刀</b>：C3 种子（用真测试集A）和 C3 日常整理；整理台和 wiki 里你做过的决定批量变成答案。</p>
+  <p><b>再往后</b>：召回测试台；让程序自己跑考卷、自己改提示词、留下分高的。考卷、配方、成绩这一刀就存成程序能读的样子，路已经留好。</p>
+  <p class="note">你的真聊天做成考卷，只存在这层楼本机的文件夹里（和记忆文件夹挨着，助手看不到），不进 git、不上传；内置的考卷只用编出来的聊天。试写不碰你的记忆，花的钱记在写入预算里，单列一类「试写」。</p>
+</div>
+
+</main>
+</body>
+</html>

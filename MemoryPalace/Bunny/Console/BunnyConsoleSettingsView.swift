@@ -16,6 +16,8 @@ struct BunnyConsoleSettingsView: View {
     @State private var pinging = false
     @State private var syncText: String?
     @State private var syncing = false
+    @State private var medsText: String?
+    @State private var medsSyncing = false
 
     private var profileId: String { profileManager?.currentProfile.id ?? "" }
 
@@ -62,6 +64,21 @@ struct BunnyConsoleSettingsView: View {
                 Text("To World · 推特")
             } footer: {
                 Text("把网关同步到的推文放进「推特」App。重复同步不会出现重复推文；之后再导入官方存档，会自动补全原文、回复和图片。「整包重新同步」会先清掉从网关拉来的推文再重拉（导入过官方存档的不受影响）。")
+            }
+            Section {
+                Button(medsSyncing ? "同步中…" : "立即同步药品柜") {
+                    medsSyncing = true
+                    Task {
+                        medsText = await BunnyMedsSync.run(context: modelContext, profileId: profileId)
+                        medsSyncing = false
+                    }
+                }
+                .disabled(medsSyncing || !BunnyGateway.isConfigured)
+                if let medsText { Text(medsText).font(.caption).foregroundStyle(.secondary) }
+            } header: {
+                Text("CARE · 药品柜")
+            } footer: {
+                Text("粟粟的「药物」↔ 网关药品柜（Caelum 看的就是这份）。打卡双向同步；库存与补货仍由网关管。回到桌面时会自动同步。")
             }
         }
         .navigationTitle("Console 设置")
