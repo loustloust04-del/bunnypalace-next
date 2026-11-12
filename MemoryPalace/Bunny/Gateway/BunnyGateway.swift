@@ -54,6 +54,27 @@ enum BunnyGateway {
         }
     }
 
+    /// JSON POST（返回响应体；非 2xx 抛错）
+    static func post(_ path: String, json: [String: Any], timeout: TimeInterval = 30) async throws -> Data {
+        guard isConfigured else { throw GatewayError.notConfigured }
+        let base = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
+        guard let url = URL(string: base + path), url.scheme == "https" || url.scheme == "http" else { throw GatewayError.badURL }
+        var req = URLRequest(url: url, timeoutInterval: timeout)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: json)
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let h = resp as? HTTPURLResponse, !(200..<300).contains(h.statusCode) { throw GatewayError.http(h.statusCode) }
+            return data
+        } catch let e as GatewayError {
+            throw e
+        } catch {
+            throw GatewayError.network(error.localizedDescription)
+        }
+    }
+
     /// 测连通：拿最近 1 条推文（任何已登录口令都能读）
     static func ping() async throws {
         _ = try await get("/api/tweets?limit=1", timeout: 15)

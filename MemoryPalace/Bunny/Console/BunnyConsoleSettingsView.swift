@@ -17,6 +17,8 @@ struct BunnyConsoleSettingsView: View {
     @State private var syncText: String?
     @State private var syncing = false
     @State private var stallCopied = false
+    @State private var cycleText: String?
+    @State private var cycleSyncing = false
     @State private var medsText: String?
     @State private var medsSyncing = false
 
@@ -76,8 +78,17 @@ struct BunnyConsoleSettingsView: View {
                 }
                 .disabled(medsSyncing || !BunnyGateway.isConfigured)
                 if let medsText { Text(medsText).font(.caption).foregroundStyle(.secondary) }
+                Button(cycleSyncing ? "同步中…" : "立即同步经期") {
+                    cycleSyncing = true
+                    Task {
+                        cycleText = await BunnyCycleSync.run(context: modelContext, profileId: profileId)
+                        cycleSyncing = false
+                    }
+                }
+                .disabled(cycleSyncing || !BunnyGateway.isConfigured)
+                if let cycleText { Text(cycleText).font(.caption).foregroundStyle(.secondary) }
             } header: {
-                Text("CARE · 药品柜")
+                Text("CARE · 药品柜 / 经期")
             } footer: {
                 Text("粟粟的「药物」↔ 网关药品柜（Caelum 看的就是这份）。打卡双向同步；库存与补货仍由网关管。回到桌面时会自动同步。")
             }
