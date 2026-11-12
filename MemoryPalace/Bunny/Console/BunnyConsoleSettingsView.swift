@@ -19,6 +19,8 @@ struct BunnyConsoleSettingsView: View {
     @State private var stallCopied = false
     @State private var cycleText: String?
     @State private var cycleSyncing = false
+    @State private var intimacyText: String?
+    @State private var intimacySyncing = false
     @State private var medsText: String?
     @State private var medsSyncing = false
 
@@ -87,10 +89,19 @@ struct BunnyConsoleSettingsView: View {
                 }
                 .disabled(cycleSyncing || !BunnyGateway.isConfigured)
                 if let cycleText { Text(cycleText).font(.caption).foregroundStyle(.secondary) }
+                Button(intimacySyncing ? "同步中…" : "立即同步刻痕") {
+                    intimacySyncing = true
+                    Task {
+                        intimacyText = await BunnyIntimacySync.run(context: modelContext, profileId: profileId)
+                        intimacySyncing = false
+                    }
+                }
+                .disabled(intimacySyncing || !BunnyGateway.isConfigured)
+                if let intimacyText { Text(intimacyText).font(.caption).foregroundStyle(.secondary) }
             } header: {
-                Text("CARE · 药品柜 / 经期")
+                Text("CARE · 药品柜 / 经期 / 刻痕")
             } footer: {
-                Text("粟粟的「药物」↔ 网关药品柜（Caelum 看的就是这份）。打卡双向同步；库存与补货仍由网关管。回到桌面时会自动同步。")
+                Text("粟粟的「药物」↔ 网关药品柜（Caelum 看的就是这份）。打卡双向同步；库存与补货仍由网关管。经期按「这一次从哪天到哪天」同步；刻痕以网关为准拉回来，新兔里新记的日子会推给网关。回到桌面时会自动同步。粟粟的经期、亲密记录默认隐藏，要在健康设置里打开。")
             }
             Section {
                 let rec = BunnyStallWatch.recent()
