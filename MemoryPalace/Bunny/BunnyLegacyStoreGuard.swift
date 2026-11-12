@@ -17,6 +17,7 @@ enum BunnyLegacyStoreGuard {
                                      "ZTICKERENTRY", "ZTRADEENTRY"]
 
     static func runIfNeeded() {
+        BunnyStallWatch.start()   // 卡死黑匣子：借这个启动最早的兔兔入口挂上（App.init，主线程），不另加上游补丁
         let fm = FileManager.default
         let store = ProfileManager.unifiedStorePath
         guard fm.fileExists(atPath: store.path) else { return }

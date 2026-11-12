@@ -16,6 +16,7 @@ struct BunnyConsoleSettingsView: View {
     @State private var pinging = false
     @State private var syncText: String?
     @State private var syncing = false
+    @State private var stallCopied = false
     @State private var medsText: String?
     @State private var medsSyncing = false
 
@@ -79,6 +80,25 @@ struct BunnyConsoleSettingsView: View {
                 Text("CARE · 药品柜")
             } footer: {
                 Text("粟粟的「药物」↔ 网关药品柜（Caelum 看的就是这份）。打卡双向同步；库存与补货仍由网关管。回到桌面时会自动同步。")
+            }
+            Section {
+                let rec = BunnyStallWatch.recent()
+                Text(rec.count == 0 ? "还没有记录到卡死" : "记录到 \(rec.count) 次卡死").font(.subheadline)
+                Button("复制最近的记录") {
+                    #if os(iOS)
+                    UIPasteboard.general.string = rec.text
+                    #else
+                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(rec.text, forType: .string)
+                    #endif
+                    stallCopied = true
+                }
+                .disabled(rec.text.isEmpty)
+                if stallCopied { Text("已复制，可以粘贴发给 Claude").font(.caption).foregroundStyle(.secondary) }
+                Button("清空记录", role: .destructive) { BunnyStallWatch.clear(); stallCopied = false }
+            } header: {
+                Text("卡死黑匣子")
+            } footer: {
+                Text("App 连续 4 秒没反应时，会记下当时卡在哪段代码（只有函数名，不含聊天内容）。卡死后划掉重开，回到这里复制记录。")
             }
         }
         .navigationTitle("Console 设置")
