@@ -10,8 +10,15 @@ import SwiftData
 //                流量记「中等」、备注「网关同步」——流量是占位，她可以在健康里改。
 // 不同步删除。来潮日差 2 天以内视为同一次（App 与 Caelum 记的日子可能差一点）。
 
-@MainActor
-enum BunnyCycleSync {
+enum BunnyCycleSync {   // [Bunny 11-13] 去掉 @MainActor：由后台上下文调用
+
+    /// [Bunny 11-13] 在后台上下文里跑：写库与 WAL 检查点不再落在主线程（黑匣子记录到主线程保存卡 11 秒）
+    static func runInBackground(container: ModelContainer, profileId: String) async -> String {
+        await Task.detached(priority: .utility) {
+            let ctx = ModelContext(container)
+            return await run(context: ctx, profileId: profileId)
+        }.value
+    }
     static var lastRunAt: Date? { UserDefaults.standard.object(forKey: "bunny.cycle.lastRunAt") as? Date }
 
     static func runIfDue(context: ModelContext, profileId: String, minInterval: TimeInterval = 10 * 60) async {

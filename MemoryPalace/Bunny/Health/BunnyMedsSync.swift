@@ -15,8 +15,15 @@ import SwiftData
 //   5. 本地打卡推给网关（只推启用同步之后的；推之前先和网关今日打卡比对 60 秒，避免重复扣库存）。
 // 不同步删除（与大肥兔一致）：本地归档 / 删药不会删网关的药，避免误删库存记录。
 
-@MainActor
-enum BunnyMedsSync {
+enum BunnyMedsSync {   // [Bunny 11-13] 去掉 @MainActor：由后台上下文调用
+
+    /// [Bunny 11-13] 在后台上下文里跑：写库与 WAL 检查点不再落在主线程（黑匣子记录到主线程保存卡 11 秒）
+    static func runInBackground(container: ModelContainer, profileId: String) async -> String {
+        await Task.detached(priority: .utility) {
+            let ctx = ModelContext(container)
+            return await run(context: ctx, profileId: profileId)
+        }.value
+    }
     private static func key(_ name: String, _ pid: String) -> String { "bunny.meds.\(name).\(pid)" }
 
     private static func links(_ pid: String) -> [String: String] {

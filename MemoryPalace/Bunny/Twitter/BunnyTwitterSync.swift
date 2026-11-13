@@ -7,8 +7,15 @@ import SwiftData
 // twitter-pull.json，原样交给上游导入器：按真实 tweetId 幂等，之后再导官方存档会补全正文/回复/图片（上游逻辑）。
 // 增量：记住上次拿到的最新记忆库时间（UTC），下次带 ?since=。
 
-@MainActor
-enum BunnyTwitterSync {
+enum BunnyTwitterSync {   // [Bunny 11-13] 去掉 @MainActor：由后台上下文调用
+
+    /// [Bunny 11-13] 后台上下文版本（导入上千条推文不占主线程）
+    static func runInBackground(container: ModelContainer, profileId: String, full: Bool = false) async throws -> String {
+        try await Task.detached(priority: .utility) {
+            let ctx = ModelContext(container)
+            return try await run(profileId: profileId, context: ctx, full: full)
+        }.value
+    }
     static let sinceKey = "bunny.twitter.lastLatestTs"
     static let lastRunKey = "bunny.twitter.lastRunAt"
 

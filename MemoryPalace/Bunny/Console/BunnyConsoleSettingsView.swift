@@ -17,6 +17,7 @@ struct BunnyConsoleSettingsView: View {
     @State private var syncText: String?
     @State private var syncing = false
     @State private var showFullSettings = false
+    @AppStorage("settings.proMode") private var proMode = false
     @State private var stallCopied = false
     @State private var cycleText: String?
     @State private var cycleSyncing = false
@@ -39,6 +40,12 @@ struct BunnyConsoleSettingsView: View {
                 }
             } footer: {
                 Text("粟粟新版把设置分到了几处（左上字标 →「我」、右上头像胶囊 → 人页、桌面「设置」App）。这里直接打开原来那棵完整的设置树，带搜索。")
+            }
+
+            Section {
+                Toggle("Pro 模式（显示全部功能与设置）", isOn: $proMode)
+            } footer: {
+                Text("和完整设置右上角的「简洁 / Pro」是同一个开关。")
             }
 
             #if os(iOS) && PERSONAL_APPS
@@ -94,7 +101,7 @@ struct BunnyConsoleSettingsView: View {
                 Button(medsSyncing ? "同步中…" : "立即同步药品柜") {
                     medsSyncing = true
                     Task {
-                        medsText = await BunnyMedsSync.run(context: modelContext, profileId: profileId)
+                        medsText = await BunnyMedsSync.runInBackground(container: modelContext.container, profileId: profileId)
                         medsSyncing = false
                     }
                 }
@@ -103,7 +110,7 @@ struct BunnyConsoleSettingsView: View {
                 Button(cycleSyncing ? "同步中…" : "立即同步经期") {
                     cycleSyncing = true
                     Task {
-                        cycleText = await BunnyCycleSync.run(context: modelContext, profileId: profileId)
+                        cycleText = await BunnyCycleSync.runInBackground(container: modelContext.container, profileId: profileId)
                         cycleSyncing = false
                     }
                 }
@@ -112,7 +119,7 @@ struct BunnyConsoleSettingsView: View {
                 Button(intimacySyncing ? "同步中…" : "立即同步刻痕") {
                     intimacySyncing = true
                     Task {
-                        intimacyText = await BunnyIntimacySync.run(context: modelContext, profileId: profileId)
+                        intimacyText = await BunnyIntimacySync.runInBackground(container: modelContext.container, profileId: profileId)
                         intimacySyncing = false
                     }
                 }
@@ -154,7 +161,7 @@ struct BunnyConsoleSettingsView: View {
         syncing = true
         syncText = nil
         Task {
-            do { syncText = try await BunnyTwitterSync.run(profileId: profileId, context: modelContext, full: full) }
+            do { syncText = try await BunnyTwitterSync.runInBackground(container: modelContext.container, profileId: profileId, full: full) }
             catch { syncText = "❌ \(error.localizedDescription)" }
             syncing = false
         }

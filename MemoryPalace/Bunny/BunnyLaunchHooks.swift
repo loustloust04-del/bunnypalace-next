@@ -12,9 +12,10 @@ enum BunnyLaunchHooks {
         BunnyDesktopMigration.runIfNeeded(tools: tools)
         if let profiles { BunnyVoiceResume.attach(profiles) }   // Caelum 语音条：回前台续跑卡住的「生成中」
         guard let profiles, BunnyGateway.isConfigured else { return }
-        let context = profiles.container.mainContext
+        let container = profiles.container
         let pid = profiles.currentProfile.id
-        Task { @MainActor in
+        Task.detached(priority: .utility) {   // [Bunny 11-13] 后台上下文：不在主线程写库
+            let context = ModelContext(container)
             await BunnyMedsSync.runIfDue(context: context, profileId: pid)
             await BunnyCycleSync.runIfDue(context: context, profileId: pid)
             await BunnyIntimacySync.runIfDue(context: context, profileId: pid)

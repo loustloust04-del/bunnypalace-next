@@ -830,14 +830,18 @@ final class ConversationViewModel {
             }
             return
         }
-        let desc = FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> { $0.conversationId == chatId })
         #if (DEBUG || PERF_BENCH) && os(macOS)
         if Thread.isMainThread { PerfCountMac.hit(.mainFetch) }
         #endif
-        guard let nodes = try? context.fetch(desc) else { return }
-        let node = nodes.first(where: { $0.ccMessageId == ccMessageId })
-            ?? nodes.filter({ $0.role == "assistant" })
-                .max(by: { ($0.createTime ?? .distantPast) < ($1.createTime ?? .distantPast) })
+        // [Bunny patch BP-010] 原写法把整段对话的节点全取进内存再找：大肥兔迁来的长对话（QQ 线上万条）在主线程卡 10 秒以上
+        // （黑匣子 11-13 记录）。改为在 SQL 里按 ccMessageId 精确取 1 条；取不到再按时间倒序取最近 1 条助手回复。语义不变。
+        let cid = ccMessageId
+        var exact = FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> { $0.conversationId == chatId && $0.ccMessageId == cid })
+        exact.fetchLimit = 1
+        var latest = FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> { $0.conversationId == chatId && $0.role == "assistant" },
+                                                  sortBy: [SortDescriptor(\.createTime, order: .reverse)])
+        latest.fetchLimit = 1
+        let node = (try? context.fetch(exact))?.first ?? (try? context.fetch(latest))?.first
         if let node, node.ccThinking != content {
             node.ccThinking = content
             try? context.save()

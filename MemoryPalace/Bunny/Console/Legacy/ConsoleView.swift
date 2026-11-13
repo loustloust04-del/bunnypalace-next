@@ -119,7 +119,7 @@ struct ConsoleView: View {
     private func refreshAll() async {
             // 健康数据双向同步（本地 SwiftData ↔ Gateway 药品柜 ↔ Caelum）
             if let pid = profileManager?.currentProfile.id {
-                await BunnyMedsSync.run(context: modelContext, profileId: pid)   // [Bunny] 原 HealthSyncService
+                _ = await BunnyMedsSync.runInBackground(container: modelContext.container, profileId: pid)   // [Bunny] 原 HealthSyncService
             }
             loadVitals()
             allContexts = await BunnyDailyContexts.load(keeping: allContexts)   // [Bunny] 原 @Query DailyContext + VitalsSyncService：从网关组装

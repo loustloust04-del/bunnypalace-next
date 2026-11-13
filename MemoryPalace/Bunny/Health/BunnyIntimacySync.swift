@@ -12,8 +12,15 @@ import CryptoKit
 //     同步来的记录在本地被改过，不回推——避免拼接文本覆盖网关里分好字段的原文。
 // 不同步删除。上游的亲密记录隐私开关默认关闭，数据会写入但要她自己打开才显示。
 
-@MainActor
-enum BunnyIntimacySync {
+enum BunnyIntimacySync {   // [Bunny 11-13] 去掉 @MainActor：由后台上下文调用
+
+    /// [Bunny 11-13] 在后台上下文里跑：写库与 WAL 检查点不再落在主线程（黑匣子记录到主线程保存卡 11 秒）
+    static func runInBackground(container: ModelContainer, profileId: String) async -> String {
+        await Task.detached(priority: .utility) {
+            let ctx = ModelContext(container)
+            return await run(context: ctx, profileId: profileId)
+        }.value
+    }
     static var lastRunAt: Date? { UserDefaults.standard.object(forKey: "bunny.intimacy.lastRunAt") as? Date }
 
     static func runIfDue(context: ModelContext, profileId: String, minInterval: TimeInterval = 10 * 60) async {
