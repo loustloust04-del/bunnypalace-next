@@ -16,6 +16,7 @@ struct BunnyConsoleSettingsView: View {
     @State private var pinging = false
     @State private var syncText: String?
     @State private var syncing = false
+    @State private var showFullSettings = false
     @State private var stallCopied = false
     @State private var cycleText: String?
     @State private var cycleSyncing = false
@@ -31,6 +32,25 @@ struct BunnyConsoleSettingsView: View {
             Section {
                 Text("网关连接与推特同步").font(.subheadline).foregroundStyle(.secondary)
             }
+
+            Section {
+                Button { showFullSettings = true } label: {
+                    Label("打开完整设置（全部设置 + 搜索）", systemImage: "gearshape.2")
+                }
+            } footer: {
+                Text("粟粟新版把设置分到了几处（左上字标 →「我」、右上头像胶囊 → 人页、桌面「设置」App）。这里直接打开原来那棵完整的设置树，带搜索。")
+            }
+
+            #if os(iOS) && PERSONAL_APPS
+            if SkinState.shared.unlocked {
+                Section {
+                    Toggle("兔兔皮肤", isOn: Binding(get: { SkinState.shared.enabled },
+                                                   set: { SkinState.shared.enabled = $0 }))
+                } footer: {
+                    Text("和「App 设置 › caelumbunny」里的总开关是同一个；关掉当场回到普通皮肤，再打开不用重输暗号。")
+                }
+            }
+            #endif
 
             Section {
                 TextField("网关地址，如 https://example.com", text: $baseURL)
@@ -124,6 +144,7 @@ struct BunnyConsoleSettingsView: View {
             }
         }
         .navigationTitle("Console 设置")
+        .sheet(isPresented: $showFullSettings) { SettingsView() }   // [Bunny] 完整设置树的统一入口
         .task {
             if let msg = await BunnyTwitterSync.runIfDue(profileId: profileId, context: modelContext) { syncText = msg }
         }
