@@ -26,7 +26,8 @@ struct StudyStartSheet: View {
     }
 
     private var mainModel: ProviderModel? {
-        providerManager?.resolveModel(conversationModelId: nil, globalFallbackId: globalModelId)
+        providerManager?.resolveModel(conversationModelId: nil, profileModelId: profileManager?.currentProfile.preferredModel,
+                                      globalFallbackId: globalModelId)
     }
 
     /// 默认候选卡（有 key / 已装模型，不含 Code 桥——Claude Code 能上课但默认仍优先这些）：claude -p 优先，其次直连 API，本机模型垫底；
@@ -179,6 +180,7 @@ struct StudyStartSheet: View {
         #if os(macOS)
         .frame(minWidth: 420, minHeight: 440)
         #endif
+        .overlay(alignment: .top) { GlobalToastOverlay() }   // sheet 盖住了根上的 toast 层，这里自己再挂一层
     }
 
     private func start() {
@@ -202,6 +204,7 @@ struct StudyStartSheet: View {
         let text: String
         var attachments: [PendingChatAttachment] = []
         if claudeCode {
+            CCHubRegistry.shared.bindNewCCConversation(draft)
             draft.ccBridgeSessionName = StudyTemplate.ccSessionName(conversationId: draft.id)
             attachments = [StudyTemplate.ccAttachment(body: StudyTemplate.teachingBody(of: folder.instructions),
                                                       userName: profile.userName, charName: profile.assistantName)]

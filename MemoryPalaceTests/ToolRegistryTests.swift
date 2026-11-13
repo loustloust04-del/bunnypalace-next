@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -27,8 +28,7 @@ final class ToolRegistryTests: XCTestCase {
         return out
     }
 
-    /// Golden：注册表渲染输出与迁移基线逐字节一致（唯一已审计 diff = inner_voice anthropic 补齐
-    /// reason.description，手写双份时代的漂移，fixture 已随之更新——见 review-toolbase-phase0.md）
+    /// 双家工具契约金样；有意变更通过下方录制入口更新，review记录变更原因。
     @MainActor
     func testSchemaMatchesGoldenFixture() throws {
         // 重生成入口：TEST_RUNNER_REGEN_TOOLS_GOLDEN=1 跑本用例 → 写 /tmp/tools-schema-golden.json，人工拷回 Fixtures/（源码路径受 TCC 沙箱限制写不了）。
@@ -55,10 +55,12 @@ final class ToolRegistryTests: XCTestCase {
         XCTAssertEqual(Set(actualAnthropic.keys), Set(goldenAnthropic.keys), "anthropic 工具集合漂移")
 
         for (name, schema) in actualOpenAI {
-            XCTAssertEqual(try canonical(schema), try canonical(goldenOpenAI[name]!), "openai/\(name) schema 漂移")
+            let goldenSchema = try XCTUnwrap(goldenOpenAI[name], "openai/\(name) 缺少 golden schema")
+            XCTAssertEqual(try canonical(schema), try canonical(goldenSchema), "openai/\(name) schema 漂移")
         }
         for (name, schema) in actualAnthropic {
-            XCTAssertEqual(try canonical(schema), try canonical(goldenAnthropic[name]!), "anthropic/\(name) schema 漂移")
+            let goldenSchema = try XCTUnwrap(goldenAnthropic[name], "anthropic/\(name) 缺少 golden schema")
+            XCTAssertEqual(try canonical(schema), try canonical(goldenSchema), "anthropic/\(name) schema 漂移")
         }
         XCTAssertEqual(try canonical(WebSearchToolService.anthropicServerTool()),
                        try canonical(goldenServer), "anthropic server 搜索工具漂移")
@@ -82,6 +84,38 @@ final class ToolRegistryTests: XCTestCase {
         XCTAssertFalse(anthropic.contains(BrowseURLTool.toolName), "anthropic 不发 browse_url")
     }
 
+    /// 关参与窗（`memoryWriteTools = false`）不下发五个写工具；recall 照发。默认 true 时全在
+    @MainActor
+    func testMemoryWriteToolsGate() {
+        let d = UserDefaults.standard
+        let keys = ["mem_master", "mem_write_b4", "mem_content_timeline", "mem_write_c3", "mem_content_convhistory"]
+        let saved = keys.map { d.object(forKey: $0) }
+        defer { for (k, v) in zip(keys, saved) { if let v { d.set(v, forKey: k) } else { d.removeObject(forKey: k) } } }
+        for k in keys { d.set(true, forKey: k) }
+
+        let writeTools = [SelfMemoryTool.rememberName, SelfMemoryTool.editName, SelfMemoryTool.forgetName,
+                          PendingNotesTool.toolName, WikiSuggestTool.toolName]
+        let on = ToolRegistry.enabledDefinitions(.init(family: .openAI, deferMCP: false)).map(\.name)
+        for name in writeTools { XCTAssertTrue(on.contains(name), "默认全开：\(name)") }
+
+        let off = ToolRegistry.enabledDefinitions(.init(family: .openAI, deferMCP: false, memoryWriteTools: false)).map(\.name)
+        XCTAssertTrue(off.contains(RecallTool.toolName), "recall 照发")
+        for name in writeTools { XCTAssertFalse(off.contains(name), "关参与窗不下发 \(name)") }
+    }
+
+    /// 建议 1：关参与窗里五个写工具被拒，文案要说清是本窗关了参与（不是抽屉里关着）；别的工具照旧
+    func testMemoryWriteRejectionMessageNamesParticipation() {
+        for name in ToolRegistry.memoryWriteNames {
+            let msg = ConversationViewModel.toolUnavailableMessage(name: name, memoryParticipationOff: true)
+            XCTAssertTrue(msg.hasPrefix("\(name)："), "名字按实际被拒的那个写：\(msg)")
+            XCTAssertTrue(msg.contains("关了记忆参与"), msg)
+        }
+        XCTAssertFalse(ConversationViewModel.toolUnavailableMessage(name: "fs_read", memoryParticipationOff: true).contains("关了记忆参与"),
+                       "非写工具不套记忆参与文案")
+        XCTAssertFalse(ConversationViewModel.toolUnavailableMessage(name: SelfMemoryTool.rememberName).contains("关了记忆参与"),
+                       "参与开着照旧通用文案")
+    }
+
     /// 门控：文件库总开关拦 fs_* 9 件（含资料卡搭车）
     @MainActor
     func testFileLibraryGate() {
@@ -92,21 +126,67 @@ final class ToolRegistryTests: XCTestCase {
             else { UserDefaults.standard.removeObject(forKey: key) }
         }
 
-        PermissionCenter.setLevel(.bypass, for: .fileLibrary)
+        PermissionCenter.setDefaultLevel(.bypass, for: .fileLibrary)
         let on = ToolRegistry.enabledDefinitions(.init(family: .openAI, deferMCP: false)).map(\.name)
         XCTAssertTrue(on.contains("fs_read"))
         XCTAssertTrue(on.contains(ProfileCardTool.toolName))
 
-        PermissionCenter.setLevel(.askOnce, for: .fileLibrary)
+        PermissionCenter.setDefaultLevel(.askOnce, for: .fileLibrary)
         let ask = ToolRegistry.enabledDefinitions(.init(family: .openAI, deferMCP: false)).map(\.name)
         XCTAssertTrue(ask.contains("fs_read"), "askOnce = 下发工具，真调用时问")
 
-        PermissionCenter.setLevel(.notAllowed, for: .fileLibrary)
+        PermissionCenter.setDefaultLevel(.notAllowed, for: .fileLibrary)
         let off = ToolRegistry.enabledDefinitions(.init(family: .openAI, deferMCP: false)).map(\.name)
         XCTAssertFalse(off.contains(where: { $0.hasPrefix("fs_") }))
         XCTAssertFalse(off.contains(ProfileCardTool.toolName))
         UserDefaults.standard.removeObject(forKey: PermissionDomain.fileLibrary.storageKey)
         UserDefaults.standard.removeObject(forKey: key)
+    }
+
+    /// atrium P3⑤0：文件库按 ctx.profileId 那一层——默认允许、A 层不允许、B 层跟默认；没层（nil）= 默认
+    @MainActor
+    func testFileLibraryGateFollowsFloor() {
+        let sandbox = PermissionSandbox()
+        defer { sandbox.leave() }
+        PermissionCenter.setDefaultLevel(.bypass, for: .fileLibrary)
+        PermissionCenter.setFloorLevel(.notAllowed, for: .fileLibrary, profileId: "xctest-a")
+        func names(_ pid: String?) -> [String] {
+            ToolRegistry.enabledDefinitions(.init(family: .openAI, deferMCP: false, profileId: pid)).map(\.name)
+        }
+        XCTAssertFalse(names("xctest-a").contains { $0.hasPrefix("fs_") })
+        XCTAssertFalse(names("xctest-a").contains(ProfileCardTool.toolName))
+        XCTAssertTrue(names("xctest-b").contains("fs_read"))
+        XCTAssertTrue(names(nil).contains("fs_read"))
+        XCTAssertEqual(ToolRegistry.availability(of: "fs_read", .init(family: .openAI, deferMCP: false, profileId: "xctest-a")), false)
+        XCTAssertEqual(ToolRegistry.availability(of: "fs_read", .init(family: .openAI, deferMCP: false, profileId: "xctest-b")), true)
+        // 工具总开关只全局：层上有值也不看
+        sandbox.defaults.set(PermissionFloors(floors: ["xctest-b": ["toolsMaster": PermissionLevel.notAllowed.rawValue]]).encoded(),
+                             forKey: PermissionCenter.floorsKey)
+        XCTAssertEqual(ToolRegistry.availability(of: "fs_read", .init(family: .openAI, deferMCP: false, profileId: "xctest-b")), true)
+    }
+
+    /// atrium P3⑥a：A 层卸了文件库 App → 档位允许也不下发 fs_* / 资料卡；推特同理；B 跟默认都有
+    @MainActor
+    func testUninstalledAppDropsToolsPerFloor() {
+        let perm = PermissionSandbox()
+        let apps = Page2AppsSandbox()
+        defer { apps.leave(); perm.leave() }
+        PermissionCenter.setDefaultLevel(.bypass, for: .fileLibrary)
+        PermissionCenter.setDefaultLevel(.bypass, for: .twitter)
+        Page2Apps.setFloor(false, for: "fileLibrary", profileId: "xctest-a")
+        Page2Apps.setFloor(false, for: "twitter", profileId: "xctest-a")
+        func ctx(_ pid: String) -> ToolGateContext { .init(family: .openAI, deferMCP: false, profileId: pid) }
+        let inlineA = ToolRegistry.inlineDefinitions(ctx("xctest-a")).map(\.name)
+        let inlineB = ToolRegistry.inlineDefinitions(ctx("xctest-b")).map(\.name)
+        XCTAssertFalse(inlineA.contains { $0.hasPrefix("fs_") })
+        XCTAssertTrue(inlineB.contains("fs_read"))
+        let allA = ToolRegistry.enabledDefinitions(ctx("xctest-a")).map(\.name)
+        let allB = ToolRegistry.enabledDefinitions(ctx("xctest-b")).map(\.name)
+        XCTAssertFalse(allA.contains(ProfileCardTool.toolName))
+        XCTAssertFalse(allA.contains(TwitterAITool.toolName), "推特（收在更多工具里）也不给")
+        XCTAssertTrue(allB.contains(TwitterAITool.toolName))
+        XCTAssertEqual(ToolRegistry.availability(of: "fs_read", ctx("xctest-a")), false)
+        XCTAssertEqual(ToolRegistry.availability(of: "fs_read", ctx("xctest-b")), true)
     }
 
     /// #069 执行前复查：开关关着的内建工具 = 不可用；MCP（不在注册表）= nil
@@ -118,7 +198,7 @@ final class ToolRegistryTests: XCTestCase {
         let saved = keys.map { d.object(forKey: $0) }
         defer { for (k, v) in zip(keys, saved) { if let v { d.set(v, forKey: k) } else { d.removeObject(forKey: k) } } }
 
-        PermissionCenter.setLevel(.bypass, for: .toolsMaster)
+        PermissionCenter.setDefaultLevel(.bypass, for: .toolsMaster)
         d.set(true, forKey: "mem_master")
         d.set(true, forKey: "mem_content_convhistory")
         XCTAssertEqual(ToolRegistry.availability(of: SelfMemoryTool.rememberName, ctx), true)
@@ -142,7 +222,7 @@ final class ToolRegistryTests: XCTestCase {
         XCTAssertEqual(ToolRegistry.availability(of: AskUserTool.toolName, drawerCtx), false, "抽屉里关了直接叫也要拒")
         XCTAssertEqual(ToolRegistry.availability(of: DiceTool.toolName, drawerCtx), true)
 
-        PermissionCenter.setLevel(.notAllowed, for: .toolsMaster)
+        PermissionCenter.setDefaultLevel(.notAllowed, for: .toolsMaster)
         XCTAssertEqual(ToolRegistry.availability(of: AskUserTool.toolName, ctx), false, "工具总开关关了全拒")
     }
 
@@ -150,6 +230,8 @@ final class ToolRegistryTests: XCTestCase {
     @MainActor
     func testExportNeutralSchemaJSON() throws {
         var entries = ToolRegistry.all
+        entries.removeAll { $0.definition.name == TurnStatusTool.toolName }
+        entries.removeAll { ChromeBridgeTools.names.contains($0.definition.name) }   // 本身就是请 hub 跑 opencli，导回 hub 是绕圈（plan-opencli-in-app）
         #if PERSONAL_APPS
         entries.removeAll { $0.definition.name == DeathScaleAITool.toolName }   // 私有工具不导进 cc-bridge
         #endif
@@ -162,10 +244,11 @@ final class ToolRegistryTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: URL(fileURLWithPath: "/tmp/tools-schema.json"))
         #if PERSONAL_APPS
-        XCTAssertEqual(ToolRegistry.all.count, 42)   // + suggest_wiki_direction（C2/C3 v2 第 4 段）；+ pending_notes（记忆 v5 待续）；+ remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；+ death_scale（死亡天平，按楼层门控）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
+        XCTAssertEqual(ToolRegistry.all.count, 45)   // + chrome_read / site_query（plan-opencli-in-app，不导出）；+ set_turn_status（气泡状态行，本轮内存，不导出）；+ suggest_wiki_direction（C2/C3 v2 第 4 段）；+ pending_notes（记忆 v5 待续）；+ remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；+ death_scale（死亡天平，按楼层门控）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
         #else
-        XCTAssertEqual(ToolRegistry.all.count, 41)   // + suggest_wiki_direction（C2/C3 v2 第 4 段）；+ pending_notes（记忆 v5 待续）；+ remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
+        XCTAssertEqual(ToolRegistry.all.count, 44)   // + chrome_read / site_query（plan-opencli-in-app，不导出）；+ set_turn_status（气泡状态行，本轮内存，不导出）；+ suggest_wiki_direction（C2/C3 v2 第 4 段）；+ pending_notes（记忆 v5 待续）；+ remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
         #endif
         XCTAssertEqual(tools.count, 41)   // 导出不含私有工具
+        XCTAssertFalse(tools.contains { $0["name"] as? String == TurnStatusTool.toolName }, "本轮内存工具不能暴露给CC")
     }
 }

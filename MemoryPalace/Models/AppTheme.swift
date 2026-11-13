@@ -234,6 +234,13 @@ struct ThemeTokenSet: Codable, Hashable {
     /// 你的气泡渐变第二色（plan-bubble-gradient）：`nil` = 单色照旧；设了 = 「userBubble → 它」自上而下、锚在聊天区的渐变
     /// （画法见 `UserBubbleFill`）。只有你的气泡有，AI 泡不做。老 JSON 没这格，optional 合成 Codable 解成 nil，零迁移。
     var userBubbleGradient: ThemeColorValue?
+    /// 气泡模式专用色（共存第一步）：只在聊天页气泡模式下盖住同名普通色，`nil` = 跟随普通色。
+    /// 覆盖只在 `applyingBubbleModeColors()` 一处做；老 JSON 没这几格，合成 Codable 解成 nil。
+    var bubbleModeUserBubble: ThemeColorValue?
+    var bubbleModeUserBubbleGradient: ThemeColorValue?
+    var bubbleModeAssistantBubble: ThemeColorValue?
+    var bubbleModeUserText: ThemeColorValue?
+    var bubbleModeAssistantText: ThemeColorValue?
     var assistantBubble: ThemeColorValue
     var accent: ThemeColorValue
     var textPrimary: ThemeColorValue
@@ -278,6 +285,48 @@ struct ThemeTokenSet: Codable, Hashable {
         branchIndicator: ThemeColorValue(hex: 0x7FB993)
     )
 
+    /// iMessage 配色（主题库里普通的一套）。浅色：用户泡 #007AFF 蓝底白字、AI 泡 #E9E9EB 浅灰底黑字；
+    /// 深色：对应 iMessage 深色（用户泡 #0A84FF、AI 泡 #2C2C2E）。气泡模式色填同一组蓝灰。
+    static let iMessageLight = ThemeTokenSet(
+        mainBg: ThemeColorValue(hex: 0xFFFFFF),
+        sidebarBg: ThemeColorValue(hex: 0xF2F2F7),
+        userBubble: ThemeColorValue(hex: 0x007AFF),
+        bubbleModeUserBubble: ThemeColorValue(hex: 0x007AFF),
+        bubbleModeAssistantBubble: ThemeColorValue(hex: 0xE9E9EB),
+        bubbleModeUserText: ThemeColorValue(hex: 0xFFFFFF),
+        bubbleModeAssistantText: ThemeColorValue(hex: 0x000000),
+        assistantBubble: ThemeColorValue(hex: 0xE9E9EB),
+        accent: ThemeColorValue(hex: 0x007AFF),
+        textPrimary: ThemeColorValue(hex: 0x000000),
+        textSecondary: ThemeColorValue(hex: 0x3C3C43),
+        textMuted: ThemeColorValue(hex: 0x8E8E93),
+        userText: ThemeColorValue(hex: 0xFFFFFF),
+        assistantText: ThemeColorValue(hex: 0x000000),
+        favorite: ThemeColorValue(hex: 0xFFCC00),
+        danger: ThemeColorValue(hex: 0xFF3B30),
+        branchIndicator: ThemeColorValue(hex: 0x007AFF)
+    )
+
+    static let iMessageDark = ThemeTokenSet(
+        mainBg: ThemeColorValue(hex: 0x000000),
+        sidebarBg: ThemeColorValue(hex: 0x1C1C1E),
+        userBubble: ThemeColorValue(hex: 0x0A84FF),
+        bubbleModeUserBubble: ThemeColorValue(hex: 0x0A84FF),
+        bubbleModeAssistantBubble: ThemeColorValue(hex: 0x2C2C2E),
+        bubbleModeUserText: ThemeColorValue(hex: 0xFFFFFF),
+        bubbleModeAssistantText: ThemeColorValue(hex: 0xFFFFFF),
+        assistantBubble: ThemeColorValue(hex: 0x2C2C2E),
+        accent: ThemeColorValue(hex: 0x0A84FF),
+        textPrimary: ThemeColorValue(hex: 0xFFFFFF),
+        textSecondary: ThemeColorValue(hex: 0xEBEBF5),
+        textMuted: ThemeColorValue(hex: 0x8E8E93),
+        userText: ThemeColorValue(hex: 0xFFFFFF),
+        assistantText: ThemeColorValue(hex: 0xFFFFFF),
+        favorite: ThemeColorValue(hex: 0xFFD60A),
+        danger: ThemeColorValue(hex: 0xFF453A),
+        branchIndicator: ThemeColorValue(hex: 0x0A84FF)
+    )
+
     var previewColors: [Color] {
         [
             mainBg.color,
@@ -289,6 +338,22 @@ struct ThemeTokenSet: Codable, Hashable {
 
     func tokens(for scheme: ColorScheme) -> ThemeTokenSet {
         self
+    }
+
+    /// 气泡模式：bubbleMode* 盖住同名普通色（nil 不盖）。聊天页取色唯一的覆盖点，由 `ThemeManager.currentChatTokenSet` 调。
+    /// 渐变：设了气泡模式渐变就用它；没设但泡底被换了 → 单色（不拿普通渐变第二色去配新泡底）；两个都没设 → 跟随普通渐变。
+    func applyingBubbleModeColors() -> ThemeTokenSet {
+        var copy = self
+        copy.userBubble = bubbleModeUserBubble ?? userBubble
+        if let gradient = bubbleModeUserBubbleGradient {
+            copy.userBubbleGradient = gradient
+        } else if bubbleModeUserBubble != nil {
+            copy.userBubbleGradient = nil
+        }
+        copy.assistantBubble = bubbleModeAssistantBubble ?? assistantBubble
+        copy.userText = bubbleModeUserText ?? userText
+        copy.assistantText = bubbleModeAssistantText ?? assistantText
+        return copy
     }
 
     func applyingPureBackground(for scheme: ColorScheme) -> ThemeTokenSet {
@@ -341,6 +406,11 @@ struct ThemeTokenSet: Codable, Hashable {
             sidebarBg: sidebarBg.adjustedBrightness(0.12, saturation: 0.12),
             userBubble: userBubble.adjustedBrightness(0.15, saturation: 0.10),
             userBubbleGradient: userBubbleGradient?.adjustedBrightness(0.15, saturation: 0.10),
+            bubbleModeUserBubble: bubbleModeUserBubble?.adjustedBrightness(0.15, saturation: 0.10),
+            bubbleModeUserBubbleGradient: bubbleModeUserBubbleGradient?.adjustedBrightness(0.15, saturation: 0.10),
+            bubbleModeAssistantBubble: bubbleModeAssistantBubble?.adjustedBrightness(0.18, saturation: 0.12),
+            bubbleModeUserText: bubbleModeUserText?.adjustedBrightness(0.92, saturation: 0.10),
+            bubbleModeAssistantText: bubbleModeAssistantText?.adjustedBrightness(0.92, saturation: 0.10),
             assistantBubble: assistantBubble.adjustedBrightness(0.18, saturation: 0.12),
             accent: accent.adjustedBrightness(0.24, saturation: 0.20),
             textPrimary: textPrimary.adjustedBrightness(0.92, saturation: 0.10),
@@ -472,9 +542,21 @@ struct AppThemeDefinition: Identifiable, Codable, Hashable {
         backgroundStyle: nil
     )
 
+    /// iMessage 内置主题（主题库里普通的一套）。isBuiltIn = true，不可编辑、不可删除。
+    static let iMessageTheme = AppThemeDefinition(
+        id: "imessage",
+        name: "iMessage",
+        isBuiltIn: true,
+        light: .iMessageLight,
+        dark: .iMessageDark,
+        backgroundImageFileName: nil,
+        backgroundStyle: nil
+    )
+
     static let seedThemes: [AppThemeDefinition] = [
         .defaultTheme,
-        .customTheme
+        .customTheme,
+        .iMessageTheme
     ]
 
     var previewColors: [Color] {

@@ -89,7 +89,7 @@ enum ConfigExporter {
 
         // 4) 把 section 嵌进 root，但跳过空 section 不污染输出
         for (name, dict) in sections where !dict.isEmpty {
-            root[name] = dict
+            root[name] = stripTokenQuery(dict)
         }
 
         // 5) 边界提示
@@ -102,6 +102,24 @@ enum ConfigExporter {
             "swiftdata": "对话 / 消息 / 记忆 / 贴纸 — 用「数据与备份」单独导出"
         ]
         return root
+    }
+
+    /// 带 `token=` query 的 URL 去掉 token 再导出（例：ccBridge 卡的 baseURL 跟着 hub 地址走，手填地址可能夹带口令）
+    private static func stripTokenQuery(_ value: Any) -> Any {
+        switch value {
+        case let s as String:
+            guard s.contains("token="), var c = URLComponents(string: s), c.scheme != nil, c.host != nil,
+                  let items = c.queryItems, items.contains(where: { $0.name == "token" }) else { return s }
+            let kept = items.filter { $0.name != "token" }
+            c.queryItems = kept.isEmpty ? nil : kept
+            return c.string ?? ""
+        case let d as [String: Any]:
+            return d.mapValues(stripTokenQuery)
+        case let a as [Any]:
+            return a.map(stripTokenQuery)
+        default:
+            return value
+        }
     }
 
     private static func serialize(_ root: [String: Any]) -> Data {

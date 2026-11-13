@@ -36,11 +36,13 @@ final class TwitterCCBridgeTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    private func send(_ input: [String: Any], chatId: String? = nil, enabled: Bool = true) -> [String: Any] {
+    private func send(_ input: [String: Any], chatId: String? = nil, enabled: Bool = true,
+                      levels: [String: PermissionLevel] = [:]) -> [String: Any] {
         var frame: [String: Any] = ["type": "twitter_cmd", "id": "req-1", "input": input]
         if let chatId { frame["chat_id"] = chatId }
         return TwitterCCBridge.handle(frame, profiles: profiles, currentProfileId: floorA,
-                                      context: context, mediaRoot: mediaRoot, enabled: enabled)
+                                      context: context, mediaRoot: mediaRoot,
+                                      level: { levels[$0] ?? (enabled ? .bypass : .notAllowed) })
     }
 
     func testPostsOnTheCurrentFloorAsThatFloorsAI() throws {
@@ -64,6 +66,44 @@ final class TwitterCCBridgeTests: XCTestCase {
         XCTAssertEqual(send(["action": "fly"])["ok"] as? Bool, false)
         let off = send(["action": "timeline"], enabled: false)
         XCTAssertEqual(off["ok"] as? Bool, false)
-        XCTAssertTrue((off["result"] as? String ?? "").contains("关掉"))
+        XCTAssertTrue((off["result"] as? String ?? "").contains("没允许 A 楼 用推特"))
+    }
+
+    /// atrium P3⑤0：先按 chat_id 找楼层，再查那一层的推特权限（不看当前层）
+    func testPermissionFollowsTheChatsFloor() throws {
+        let bOff = send(["action": "post", "text": "B 不许"], chatId: "chat-b", levels: [floorA: .bypass, floorB: .notAllowed])
+        XCTAssertEqual(bOff["ok"] as? Bool, false)
+        XCTAssertTrue((bOff["result"] as? String ?? "").contains("没允许 B 楼 用推特"))
+        XCTAssertTrue(try context.fetch(TwitterQueries.localTimeline(profileId: floorB)).isEmpty)
+
+        let aOff = send(["action": "post", "text": "B 可以"], chatId: "chat-b", levels: [floorA: .notAllowed, floorB: .bypass])
+        XCTAssertEqual(aOff["ok"] as? Bool, true, aOff["result"] as? String ?? "")
+        XCTAssertEqual(try context.fetch(TwitterQueries.localTimeline(profileId: floorB)).first?.text, "B 可以")
+
+        // 不带 chat_id = 当前层（A）
+        XCTAssertEqual(send(["action": "timeline"], levels: [floorA: .notAllowed, floorB: .bypass])["ok"] as? Bool, false)
+        // ⑤a：电脑那边没法问，askOnce 按不允许，文案说清
+        let ask = send(["action": "post", "text": "问不了"], levels: [floorA: .askOnce])
+        XCTAssertEqual(ask["ok"] as? Bool, false)
+        XCTAssertTrue((ask["result"] as? String ?? "").contains("每次询问"))
+        XCTAssertTrue(try context.fetch(TwitterQueries.localTimeline(profileId: floorA)).isEmpty, "askOnce 不执行")
+    }
+
+    /// atrium P3⑥a：chat_id 在 B 层、B 卸了推特 App → 档位允许也拒，文案说「没装 / 没开」；A 照旧
+    func testUninstalledTwitterAppRejectsWithReason() throws {
+        let perm = PermissionSandbox()
+        let apps = Page2AppsSandbox()
+        defer { apps.leave(); perm.leave() }
+        Page2Apps.setFloor(false, for: "twitter", profileId: floorB)
+        func handle(_ chatId: String?) -> [String: Any] {
+            var frame: [String: Any] = ["type": "twitter_cmd", "id": "req-1", "input": ["action": "post", "text": "装了吗"]]
+            if let chatId { frame["chat_id"] = chatId }
+            return TwitterCCBridge.handle(frame, profiles: profiles, currentProfileId: floorA, context: context, mediaRoot: mediaRoot)
+        }
+        let b = handle("chat-b")
+        XCTAssertEqual(b["ok"] as? Bool, false)
+        XCTAssertTrue((b["result"] as? String ?? "").contains("B 楼 的\(PermissionCenter.notInstalledLabel("twitter"))"), b["result"] as? String ?? "")
+        XCTAssertTrue(try context.fetch(TwitterQueries.localTimeline(profileId: floorB)).isEmpty)
+        XCTAssertEqual(handle(nil)["ok"] as? Bool, true, "A 跟默认装着")
     }
 }

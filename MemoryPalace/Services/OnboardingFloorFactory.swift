@@ -139,14 +139,15 @@ struct OnboardingFloorFactory {
         profiles.updateProfile(profile)
     }
 
-    /// 三问「想让我叫你什么」：写目标楼层的称呼 + 默认称呼（同起名卡）。空 = 不动；不回写已有的记忆
-    func applyUserName(_ name: String, profileId: String) {
+    /// 三问首次接受答案时写目标楼层的称呼；落盘成功后才更新默认称呼。空 = 不动，不回写已有记忆
+    func applyUserName(_ name: String, profileId: String) throws {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
-        DefaultUserName.set(name, defaults: defaults)
-        guard var profile = profiles.profiles.first(where: { $0.id == profileId }), profile.userName != name else { return }
+        try profiles.ensureWritable()
+        guard var profile = profiles.profiles.first(where: { $0.id == profileId }) else { throw Failure.floorMissing }
         profile.userName = name
-        profiles.updateProfile(profile)
+        try profiles.updateProfileChecked(profile)
+        DefaultUserName.set(name, defaults: defaults)
     }
 
     /// 出口卡「＋ 导入世界书」：落到 Ta 楼层（新书 profileId = Ta，挂进 Ta 的 linkedWorldBookIDs）

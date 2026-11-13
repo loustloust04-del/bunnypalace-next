@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 import NaturalLanguage
@@ -364,7 +365,7 @@ enum MemoryFlags {
 
     /// 记忆系统总开关（设置-记忆）。关 = 不注入不提取不强化，数据不动。
     static var masterEnabled: Bool {
-        (UserDefaults.standard.object(forKey: "mem_master") as? Bool) ?? true
+        (MemoryReadEnvironment.defaults.object(forKey: "mem_master") as? Bool) ?? true
     }
 
     /// M8 热度衰减开关。paramecium 实测删了衰减（冷者愈冷）、kiwi 留着——用户自己选。
@@ -378,14 +379,10 @@ enum MemoryFlags {
     }
 
     /// A2 上下文摘要写不写（设置-记忆-写入 A2）。默认开；受 mem_master 连坐。v5 起只管写：
-    /// 注入和历史窗口锚定看【开窗口】A2 那一勾（`contextSummaryInjected`）；已有摘要文件保留不删。
     /// fs 工具读记忆树（memory/）跟文件库开关走，不归这里管。
     static var contextSummaryEnabled: Bool {
         masterEnabled && ((UserDefaults.standard.object(forKey: "mem_content_summary") as? Bool) ?? true)
     }
-
-    /// A2 带不带进 prompt（【开窗口】A2）：关 = 不注入、历史窗口不锚定（退滑动窗）
-    static var contextSummaryInjected: Bool { MemoryOpenWindow.injects(.a2) }
 
     /// A3 窗口总结写不写（v5 拆开；没写过跟老键）
     static var windowSummaryEnabled: Bool { MemoryWriterSettings.writes(.a3) }
@@ -399,7 +396,7 @@ enum MemoryFlags {
     /// SC-B3 目录式注入开关（默认关 = 现状全文）。开 = volatile 命中层只注入一行式目录，
     /// 细节模型自己 recall 取回；stable 常驻层保持全文（人格地基不瘦身）。
     static var catalogInjection: Bool {
-        UserDefaults.standard.bool(forKey: "mem_inject_catalog")
+        MemoryReadEnvironment.defaults.bool(forKey: "mem_inject_catalog")
     }
 
     /// 原子事实开关（设置-记忆 ①感知）。修复第一刀·刀5 接线：关 = 不再提取新的，已有的照常注入
@@ -442,6 +439,23 @@ struct InjectionHit: Codable, Equatable {
     let retrieverId: String   // "persistent" | "keyword" | "vector" | "graph" | "fullFallback"
     let catalog: Bool
     var vote: Int? = nil      // 用户反馈：+1 / -1 / nil（存进 MessageNode blob，防重复投）
+}
+
+/// 实际拼进 volatile 的一段（P2 账的旁录口径，plan-memory-receipt §2.2）：文本就是拼进 `lines` 的那一块。
+struct InjectedVolatileLine: Equatable {
+    /// nil = 内层过期提醒（不是某条记忆的行）
+    let memoryId: UUID?
+    let text: String
+    /// 仅过期提醒：它点名的那几条钉住项
+    let expiredIds: [UUID]
+}
+
+/// `buildInjectionSplit` 的产出；`volatileLines` = 拼进 `volatile` 的每行，顺序 = wire 顺序（提醒在最前）。
+struct InjectionSplit {
+    let stable: String
+    let volatile: String
+    let hits: [InjectionHit]
+    var volatileLines: [InjectedVolatileLine] = []
 }
 
 /// 一路检索：从候选记忆里挑 (记忆, 分数)，降序返回。纯函数——不碰预算、不去重，那是组装器的事。
@@ -496,97 +510,6 @@ struct MemoryRetrievalDocument: Sendable {
         embeddingRevision == revision && embeddingData.map {
             !$0.isEmpty && $0.count.isMultiple(of: MemoryLayout<Float>.stride)
         } == true
-    }
-}
-
-enum MemoryBM25 {
-    static func tokens(_ text: String) -> [String] {
-        let text = SearchTextSegmenter.normalized(text)
-        var words: [String] = []
-        var previous: Unicode.Scalar?
-        var needsWordTokenizer = false
-        // 汉字取相邻双字，不依赖词典切专名；不生成单字，也不跨空格、标点拼接。
-        for scalar in text.unicodeScalars {
-            if scalar.properties.isIdeographic {
-                if let previous {
-                    var pair = String(previous)
-                    pair.unicodeScalars.append(scalar)
-                    words.append(pair)
-                }
-                previous = scalar
-            } else {
-                previous = nil
-                if !needsWordTokenizer && (scalar.properties.isAlphabetic || scalar.properties.numericType != nil) {
-                    needsWordTokenizer = true
-                }
-            }
-        }
-        guard needsWordTokenizer else { return words }
-        let tokenizer = NLTokenizer(unit: .word)
-        tokenizer.string = text
-        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
-            let word = text[range]
-            if word.count >= 2 && !word.unicodeScalars.allSatisfy({ $0.properties.isIdeographic }) {
-                words.append(String(word))
-            }
-            return true
-        }
-        return words
-    }
-
-    static func document(content: String, keywords: [String]) -> [String] {
-        let keys = keywords.flatMap { tokens($0) }
-        return tokens(content) + keys + keys
-    }
-
-    static func scores(documents: [[String]], query: String, cancel: CatalogCancel? = nil) -> [Double] {
-        guard !documents.isEmpty else { return [] }
-        var groups: [(terms: Set<String>, requiresAll: Bool, dropsCommon: Bool)] = []
-        for segment in SearchTextSegmenter.catalogTerms([query]) {
-            let han = segment.unicodeScalars.allSatisfy { $0.properties.isIdeographic }
-            let terms: Set<String> = han ? Set(tokens(segment)) : (segment.count >= 2 ? [segment] : [])
-            guard !terms.isEmpty else { continue }
-            groups.append((terms, han && (3...6).contains(segment.count),
-                           han && segment.count >= 7 && documents.count >= 20))
-        }
-        guard !groups.isEmpty else { return Array(repeating: 0, count: documents.count) }
-        let k1 = 1.2
-        let b = 0.75
-        let n = Double(documents.count)
-        var df: [String: Int] = [:]
-        for doc in documents {
-            if cancel?.isCancelled == true { return [] }
-            for term in Set(doc) { df[term, default: 0] += 1 }
-        }
-        for index in groups.indices where groups[index].dropsCommon {
-            groups[index].terms = groups[index].terms.filter { Double(df[$0, default: 0]) <= n * 0.5 }
-        }
-        groups.removeAll { $0.terms.isEmpty }
-        guard !groups.isEmpty else { return Array(repeating: 0, count: documents.count) }
-        let avgLen = max(1.0, Double(documents.reduce(0) { $0 + $1.count }) / n)
-        var scores: [Double] = []
-        scores.reserveCapacity(documents.count)
-        var tf: [String: Int] = [:]
-        var matchedTerms = Set<String>()
-        for doc in documents {
-            if cancel?.isCancelled == true { return [] }
-            tf.removeAll(keepingCapacity: true)
-            matchedTerms.removeAll(keepingCapacity: true)
-            for term in doc { tf[term, default: 0] += 1 }
-            for group in groups {
-                if group.requiresAll && !group.terms.allSatisfy({ tf[$0] != nil }) { continue }
-                for term in group.terms where tf[term] != nil { matchedTerms.insert(term) }
-            }
-            var score = 0.0
-            for term in matchedTerms {
-                guard let f = tf[term], let d = df[term] else { continue }
-                let idf = log(1 + (n - Double(d) + 0.5) / (Double(d) + 0.5))
-                let freq = Double(f)
-                score += idf * (freq * (k1 + 1)) / (freq + k1 * (1 - b + b * Double(doc.count) / avgLen))
-            }
-            scores.append(score)
-        }
-        return scores
     }
 }
 
@@ -783,7 +706,7 @@ struct MemoryInjector {
 
     /// 注入预算（token）。刀4 粟粟拍板：全量注入上限 10000，不限条。
     static var tokenBudget: Int {
-        let v = UserDefaults.standard.integer(forKey: "mem_inject_budget")
+        let v = MemoryReadEnvironment.defaults.integer(forKey: "mem_inject_budget")
         return v > 0 ? v : 10_000
     }
 
@@ -819,20 +742,47 @@ struct MemoryInjector {
         return "- [\(catalogDateFormatter.string(from: m.createdAt))·\(label)] \(snippet)"
     }
 
+    /// One rendered source block, shared by fresh selection and zero-search Active Set retention.
+    static func injectionPayload(_ m: Memory, stable: Bool, catalog: Bool, now: Date) -> (text: String, cost: Int) {
+        let validity = stable && m.isUserExplicit
+            ? m.validUntil.map { "（有效到 \(MemoryDay.key($0.addingTimeInterval(-1)))）" } ?? "" : ""
+        let expired = !stable && WikiInjection.isExpired(m, now: now) ? "（已过期）" : ""
+        let label = categoryLabels[m.category] ?? m.category
+        let text = (catalog ? catalogLine(m) : "- \(m.content)\(validity) [\(label)]") + expired
+        let cost = injectedCost(m, catalog: catalog) + (validity.isEmpty ? 0 : Memory.estimateTokens(validity))
+            + (expired.isEmpty ? 0 : Memory.estimateTokens(expired))
+        return (text, cost)
+    }
+
+    static func expiredPinnedReminder(_ memories: [Memory], budget: Int) -> (text: String, cost: Int) {
+        let title = "[已过期的钉住项]"
+        var lines: [String] = []
+        var used = 0
+        for memory in memories {
+            let snippet = String(memory.content.prefix(40)).replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
+            let line = "- \(snippet)（已过期）"
+            let cost = Memory.estimateTokens(line) + (lines.isEmpty ? Memory.estimateTokens(title + "\n") : 0)
+            guard used + cost <= budget else { continue }
+            lines.append(line)
+            used += cost
+        }
+        return (lines.isEmpty ? "" : title + "\n" + lines.joined(separator: "\n"), used)
+    }
+
     /// 注入记忆：常驻人格层（始终）+ 关键词检索层（命中对话才注）。开关见「设置-记忆」。
     static func buildInjection(memories: [Memory], recentMessages: [String] = [], budget: Int = tokenBudget) -> String {
-        let (stable, volatile, _) = buildInjectionSplit(memories: memories, recentMessages: recentMessages, budget: budget)
-        if stable.isEmpty { return volatile }
-        if volatile.isEmpty { return stable }
-        return stable + "\n" + volatile
+        let split = buildInjectionSplit(memories: memories, recentMessages: recentMessages, budget: budget)
+        if split.stable.isEmpty { return split.volatile }
+        if split.volatile.isEmpty { return split.stable }
+        return split.stable + "\n" + split.volatile
     }
 
     /// 按开关组装检索器队伍。改开关组合只动这里——加新检索路（tag 等）= 往对应 tier 加一员。
     /// M2 起：开 keyword 或 vector 任一 = 智能模式（常驻层启用，全量变兜底）；两个都开 = 同 tier RRF 双路召回。
     static func activeRetrievers() -> [MemoryRetriever] {
-        let useKeyword = UserDefaults.standard.bool(forKey: "mem_inject_keyword")
-        let useFull = (UserDefaults.standard.object(forKey: "mem_inject_full") as? Bool) ?? true
-        let useVector = UserDefaults.standard.bool(forKey: "mem_inject_vector")
+        let useKeyword = MemoryReadEnvironment.defaults.bool(forKey: "mem_inject_keyword")
+        let useFull = (MemoryReadEnvironment.defaults.object(forKey: "mem_inject_full") as? Bool) ?? true
+        let useVector = MemoryReadEnvironment.defaults.bool(forKey: "mem_inject_vector")
         if useKeyword || useVector {
             var list: [MemoryRetriever] = [PersistentRetriever(explicitOnly: false)]
             if useKeyword { list.append(KeywordRetriever()) }
@@ -852,6 +802,15 @@ struct MemoryInjector {
         let archiveBudget: Int
         /// C 勾着时的 wiki 快照（根索引 + 触发词扫描用）；C 没勾 / 记忆关着 = nil
         var wiki: WikiInjectionSnapshot? = nil
+        var fullText: RecallFullTextCandidates? = nil
+        /// 段④：这一轮带不带档案根索引（本窗 Z6）。nil = 手搭的旧输入，照开窗口页「档案」那一勾
+        var rootIndex: Bool? = nil
+        /// 本窗冻结的上窗（Z7 开、参与着、源窗复核过才有）；单独按 tokenBudget 渲染，不扣档案预算。
+        var previousWindow: PreviousWindowSnapshot? = nil
+        /// 来源窗隐藏集（`isTrashed || !memoryEnabled`，plan-memory-participation §2.4）：碎片按来源窗挡；空 = 不过滤
+        var hiddenSources: Set<String> = []
+        /// 候选数：勾着却被来源窗挡掉的碎片条数（同一趟 filter 里数；勾关 / 参与关恒 0）
+        var hiddenFragmentCount: Int = 0
     }
 
     /// C 那一勾带哪些档案（plan-memory-c3-catalog 第六节）：她钉住的照带；其余只带碎片池里审计台点过「留下」的，
@@ -860,40 +819,64 @@ struct MemoryInjector {
         m.supersededAt == nil && (m.isUserExplicit || (m.isFragment && m.reviewedAt != nil))
     }
 
-    /// 总开关关 = 全局不注入；开了再看对话级 memoryEnabled。
+    /// 来源窗过滤（plan-memory-participation §2.2）：来源窗已删 / 关参与的不带；钉住（她亲手钉 / 改过）豁免——
+    /// 那是更晚、更强的意愿。来源窗不存在 / `sourceConversationId` 为 nil / 空串都照带（隐藏集语义）。
+    /// 实发 `roundInputs` 和检查器 `MemoryResident.summary` 的灰显兜底共用这一条。
+    static func passesSourceWindow(_ m: Memory, hidden: Set<String>) -> Bool {
+        m.isUserExplicit || !(m.sourceConversationId.map(hidden.contains) ?? false)
+    }
+
+    /// 这一轮带不带只读 `EffectiveMemoryParticipation`（一处算、处处传，plan-memory-participation §2.3）。
     /// 刀4：listActive 全量在场（未失效即注入）；第二刀 B3：AI 自己的记忆先装，档案用剩下的预算
-    static func roundInputs(profileId: String, conversationMemoryEnabled: Bool,
+    static func roundInputs(profileId: String, participation: EffectiveMemoryParticipation,
                             store: MemoryStore, context: ModelContext, wikiStore: WikiStore? = nil,
                             warmedWiki: WikiInjectionCache.WarmedSnapshot? = nil,
-                            useCachedWiki: Bool = true) -> RoundInputs {
-        let shouldInject = MemoryFlags.masterEnabled && conversationMemoryEnabled
-        let cOn = shouldInject && MemoryOpenWindow.isChecked(.c)
-        // v5【开窗口】：B4 / C 各一勾（默认开 = 今天）
+                            useCachedWiki: Bool = true,
+                            previousWindow: PreviousWindowSnapshot? = nil,
+                            hiddenSources: Set<String> = []) -> RoundInputs {
+        // v5【开窗口】：B4 / C 各一勾（默认开 = 今天）；段④ 钉住单独一勾
+        let cOn = participation.archive
+        let pinnedOn = participation.pinned
+        let triggerOn = participation.pages
+        // 来源窗已删 / 关参与的碎片不带；钉住的豁免（来源窗不存在的照带——plan-memory-participation §2.1 / §2.2）
+        // 挡掉的条数在同一趟 filter 里数（账的候选口径，plan-memory-receipt §2.1）
+        var hiddenFragmentCount = 0
         let memories: [Memory] = AirTimedSection.run("composePrompt.memory") {
-            cOn ? store.listActive(profileId: profileId, context: context).filter(isInjectable) : []
+            guard cOn || pinnedOn else { return [] }
+            return store.listActive(profileId: profileId, context: context).filter {
+                guard isInjectable($0), $0.isUserExplicit ? pinnedOn : cOn else { return false }
+                if passesSourceWindow($0, hidden: hiddenSources) { return true }
+                hiddenFragmentCount += 1
+                return false
+            }
         }
-        let wiki = cOn ? (warmedWiki?.snapshot ?? (useCachedWiki
+        var wiki = cOn || triggerOn ? (warmedWiki?.snapshot ?? (useCachedWiki
             ? WikiInjectionCache.shared.snapshot(profileId: profileId, store: wikiStore) : nil)) : nil
+        if !cOn { wiki?.indexLines = [] }
+        if !triggerOn { wiki?.pages = [] }
         let selfMemory: SelfMemoryInjection.Built? = AirTimedSection.run("composePrompt.selfMemory") {
-            shouldInject && MemoryOpenWindow.isChecked(.b4)
-                ? SelfMemoryInjection.build(SelfMemoryStore.list(profileId: profileId),
+            participation.selfMemory
+                ? SelfMemoryInjection.build(SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked),
                                             recentCount: MemoryFlags.selfRecentCount,
                                             budget: tokenBudget * MemoryFlags.selfBudgetPercent / 100)
                 : nil
         }
         return RoundInputs(memories: memories, selfMemory: selfMemory,
-                           archiveBudget: max(0, tokenBudget - (selfMemory?.tokens ?? 0)), wiki: wiki)
+                           archiveBudget: max(0, tokenBudget - (selfMemory?.tokens ?? 0)), wiki: wiki,
+                           fullText: participation.fullText ? warmedWiki?.fullText : nil, rootIndex: cOn,
+                           previousWindow: participation.previousWindow ? previousWindow : nil, hiddenSources: hiddenSources,
+                           hiddenFragmentCount: hiddenFragmentCount)
     }
 
     /// 拆层版本（cacheFriendly 用）：stable=常驻层（逐轮不变，可进缓存前缀），volatile=检索命中/兜底层（每轮可变）。
     /// 两段拼接 == buildInjection 输出，预算共享。
     /// M1 起为检索 pipeline：各检索器产候选 → stable 依序 / volatile 按 tier（同 tier 多路 RRF）→ 共享预算去重。
     static func buildInjectionSplit(memories: [Memory], recentMessages: [String] = [], budget: Int = tokenBudget,
-                                    now: Date = MemoryClock.now) -> (stable: String, volatile: String, hits: [InjectionHit]) {
-        guard !memories.isEmpty else { return ("", "", []) }
+                                    now: Date = MemoryClock.now) -> InjectionSplit {
+        guard !memories.isEmpty else { return InjectionSplit(stable: "", volatile: "", hits: []) }
 
         let retrievers = activeRetrievers()
-        guard !retrievers.isEmpty else { return ("", "", []) }   // 全量/关键词都关 → 空注入
+        guard !retrievers.isEmpty else { return InjectionSplit(stable: "", volatile: "", hits: []) }   // 全量/关键词都关 → 空注入
 
         var stableLines: [String] = []
         var volatileLines: [String] = []
@@ -901,31 +884,22 @@ struct MemoryInjector {
         var injected = Set<UUID>()
         var hits: [InjectionHit] = []
         var expiredPinned: [Memory] = []
+        // 拼进 volatile 的每行旁录（拼接同一处 append）；返回值按 wire 顺序收
+        var volatileUnits: [InjectedVolatileLine] = []
 
         // 目录模式（SC-B3）：volatile 层换一行式目录，按目录行实际 token 计费（省 token 本体）
         let catalogMode = MemoryFlags.catalogInjection
         var catalogCount = 0
         var catalogSavedTokens = 0   // 全文 token - 目录行 token，CacheDiagLog 用
 
-        func tryAppend(_ m: Memory, to lines: inout [String], stable: Bool = false, catalog: Bool = false, retriever: String, score: Double?) {
-            guard !injected.contains(m.id) else { return }
-            let line: String
-            let cost: Int
-            let validity = stable && m.isUserExplicit
-                ? m.validUntil.map { "（有效到 \(MemoryDay.key($0.addingTimeInterval(-1)))）" } ?? ""
-                : ""
-            if catalog {
-                guard catalogCount < maxCatalogEntries else { return }
-                line = catalogLine(m)
-            } else {
-                let label = categoryLabels[m.category] ?? m.category
-                line = "- \(m.content)\(validity) [\(label)]"
-            }
-            let expired = !stable && WikiInjection.isExpired(m, now: now)
-            cost = injectedCost(m, catalog: catalog) + (validity.isEmpty ? 0 : Memory.estimateTokens(validity))
-                + (expired ? Memory.estimateTokens("（已过期）") : 0)
-            guard usedTokens + cost <= budget else { return }
-            lines.append(expired ? line + "（已过期）" : line)
+        @discardableResult
+        func tryAppend(_ m: Memory, to lines: inout [String], stable: Bool = false, catalog: Bool = false, retriever: String, score: Double?) -> String? {
+            guard !injected.contains(m.id) else { return nil }
+            if catalog { guard catalogCount < maxCatalogEntries else { return nil } }
+            let payload = injectionPayload(m, stable: stable, catalog: catalog, now: now)
+            let cost = payload.cost
+            guard usedTokens + cost <= budget else { return nil }
+            lines.append(payload.text)
             if stable, m.isUserExplicit, WikiInjection.isExpired(m, now: now) { expiredPinned.append(m) }
             usedTokens += cost
             injected.insert(m.id)
@@ -936,6 +910,7 @@ struct MemoryInjector {
                 catalogCount += 1
                 catalogSavedTokens += max(0, m.tokenCount - cost)
             }
+            return payload.text
         }
 
         // stable 层：依序产出（目前只有常驻一路）
@@ -945,16 +920,8 @@ struct MemoryInjector {
             contributions.append("\(r.id) \(out.count)")
             for s in out { tryAppend(s.memory, to: &stableLines, stable: true, retriever: r.id, score: s.score) }
         }
-        var expiredPinnedLines: [String] = []
-        let expiredPinnedTitle = "[已过期的钉住项]"
-        for m in expiredPinned {
-            let snippet = String(m.content.prefix(40)).replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
-            let line = "- \(snippet)（已过期）"
-            let cost = Memory.estimateTokens(line) + (expiredPinnedLines.isEmpty ? Memory.estimateTokens(expiredPinnedTitle + "\n") : 0)
-            guard usedTokens + cost <= budget else { continue }
-            expiredPinnedLines.append(line)
-            usedTokens += cost
-        }
+        let expiredReminder = expiredPinnedReminder(expiredPinned, budget: max(0, budget - usedTokens))
+        usedTokens += expiredReminder.cost
         // volatile 层：tier 升序；同 tier 单路直通，多路 RRF 融合（keyword+vector 双路召回）
         let volatileRetrievers = retrievers.filter { $0.layer == .volatile }
         // 命中元数据（展示分）：各路原始分，多路命中同条时 vector 优先（余弦可解释）
@@ -978,7 +945,7 @@ struct MemoryInjector {
             }
             var ranked: [Memory] = outputs.count == 1 ? outputs[0].map(\.memory) : rrfFuse(outputs)
             // M3 一跳扩展：命中记忆的邻居打折跟进（排在命中之后 = 自然折扣）
-            if tier == 1, UserDefaults.standard.bool(forKey: "mem_inject_graph") {
+            if tier == 1, MemoryReadEnvironment.defaults.bool(forKey: "mem_inject_graph") {
                 let byId = Dictionary(uniqueKeysWithValues: memories.map { ($0.id, $0) })
                 var present = Set(ranked.map(\.id)).union(injected)
                 var neighbors: [Memory] = []
@@ -997,7 +964,9 @@ struct MemoryInjector {
             }
             for m in ranked {
                 let info = meta[m.id] ?? (retriever: group.first?.id ?? "fullFallback", score: nil)
-                tryAppend(m, to: &volatileLines, catalog: catalogMode, retriever: info.retriever, score: info.score)
+                if let text = tryAppend(m, to: &volatileLines, catalog: catalogMode, retriever: info.retriever, score: info.score) {
+                    volatileUnits.append(InjectedVolatileLine(memoryId: m.id, text: text, expiredIds: []))
+                }
             }
         }
 
@@ -1006,12 +975,15 @@ struct MemoryInjector {
         if catalogMode && !volatileLines.isEmpty && RecallTool.enabled {
             volatileText += Self.recallCatalogHint
         }
-        if !expiredPinnedLines.isEmpty {
-            let expiredText = expiredPinnedTitle + "\n" + expiredPinnedLines.joined(separator: "\n")
-            volatileText = volatileText.isEmpty ? expiredText : expiredText + "\n\n" + volatileText
+        if !expiredReminder.text.isEmpty {
+            volatileText = volatileText.isEmpty ? expiredReminder.text : expiredReminder.text + "\n\n" + volatileText
+            volatileUnits.insert(InjectedVolatileLine(memoryId: nil, text: expiredReminder.text,
+                                                      expiredIds: expiredPinned.map(\.id)), at: 0)
         }
 
-        let result = (stable: stableLines.joined(separator: "\n"), volatile: volatileText, hits: hits)
+        let result = InjectionSplit(stable: stableLines.joined(separator: "\n"), volatile: volatileText, hits: hits,
+                                    volatileLines: volatileUnits)
+        if MemoryReadEnvironment.preferences != nil { return result }
         // 检索贡献可见（验收"每一路真的在干活"）。S1 预览也走这里会刷屏 → 连续重复行去重
         var line = "记忆检索: \(contributions.joined(separator: " · ")) → 注入 \(injected.count) 条"
         if catalogMode && catalogCount > 0 {
@@ -1246,28 +1218,6 @@ enum MemoryGraph {
     }
 }
 
-// MARK: - 记忆写手共用的小件（v5 C2 换掉了 AUDN 提取，旧的提示词 / 解析 / 执行已删）
-
-struct MemoryExtractor {
-    /// 楼层真名（空的话：对方叫「用户」，自己叫「我」）。人设里的 {{user}} / {{char}} 宏也换成真名
-    struct Names: Equatable {
-        let user: String
-        let char: String
-
-        init(userName: String, assistantName: String) {
-            let u = userName.trimmingCharacters(in: .whitespacesAndNewlines)
-            let c = assistantName.trimmingCharacters(in: .whitespacesAndNewlines)
-            user = u.isEmpty ? "用户" : u
-            char = c.isEmpty ? "我" : c
-        }
-
-        func apply(_ text: String) -> String {
-            text.replacingOccurrences(of: "{{user}}", with: user, options: .caseInsensitive)
-                .replacingOccurrences(of: "{{char}}", with: char, options: .caseInsensitive)
-        }
-    }
-}
-
 // MARK: - 记忆健康状态（plan-memory-usable 刀1）
 
 /// 提取/做梦的生死可见：持久化最近成功/失败，设置页常驻展示。
@@ -1309,16 +1259,21 @@ enum MemoryHealthStore {
         d.set(Date().timeIntervalSince1970, forKey: key(kind, "ok", profileId))
         d.set(0, forKey: key(kind, "streak", profileId))
         d.set(modelName, forKey: key(kind, "model", profileId))
-        MemoryWriteLog.record(kind, profileId: profileId, ok: true, note: note, model: modelName, rejected: rejected)
+        MemoryWriteLog.record(kind, profileId: profileId, ok: true, note: note, model: modelName, rejected: rejected, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
     }
 
     static func recordError(_ kind: Kind, profileId: String, message: String, modelName: String, rejected: Int? = nil) {
         let d = UserDefaults.standard
         d.set(Date().timeIntervalSince1970, forKey: key(kind, "err", profileId))
         d.set(String(message.prefix(200)), forKey: key(kind, "errmsg", profileId))
-        d.set(failStreak(kind, profileId: profileId) + 1, forKey: key(kind, "streak", profileId))
+        let streak = failStreak(kind, profileId: profileId) + 1
+        d.set(streak, forKey: key(kind, "streak", profileId))
         d.set(modelName, forKey: key(kind, "model", profileId))
-        MemoryWriteLog.record(kind, profileId: profileId, ok: false, note: String(message.prefix(200)), model: modelName, rejected: rejected)
+        MemoryWriteLog.record(kind, profileId: profileId, ok: false, note: String(message.prefix(200)), model: modelName, rejected: rejected, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
+        // needsAttention 由假变真：小芽横幅喊一声（plan-status-panel §7.7）
+        if streak == 3 {
+            DispatchQueue.main.async { XiaoyaNoticeCenter.shared.noteMemoryFailing(kind, profileId: profileId, streak: streak) }
+        }
     }
 
     static func failStreak(_ kind: Kind, profileId: String) -> Int {

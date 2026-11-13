@@ -12,7 +12,8 @@ enum PerfChatCore {}
 extension PerfChatCore {
     enum PinType: String { case bool, double, string, data, theme }
 
-    /// 模式键 chatBubbleMode 在前，其后是 M1 钉成粟粟 Air 值的显示设置（主题要连同定义与深浅色一起钉才生效）
+    /// 模式键 chatBubbleMode 在前（全局开关已下线，它只是测量的启动参数，PerfHarness.applyRunDisplayMode 写进 bench 对话的 displayMode），
+    /// 其后是 M1 钉成粟粟 Air 值的显示设置（主题要连同定义与深浅色一起钉才生效）
     static let pinnedKeys: [(key: String, type: PinType)] = [
         ("chatBubbleMode", .bool),
         ("blurRadius", .double), ("bubbleModeCornerRadius", .double), ("bubblePaddingH", .double), ("bubblePaddingV", .double),

@@ -95,6 +95,27 @@ final class PairingEndpointTests: XCTestCase {
         XCTAssertNil(PairingEndpoint.ready(port: 1, token: "t").failureText)
     }
 
+    /// recheck1 N1：外部 hub 的 /pair 口令只用跟本机外部 hub 绑定的（plist / 配的就是本机 7890 时的主 hub 本机副本），
+    /// 旧 cc-bridge 被 iCloud 改成别台口令也不影响；确认不了就不发请求（missingToken）
+    func testExternalHubTokenNeverComesFromLegacyEntry() {
+        let local7890 = [URL(string: "ws://127.0.0.1:7890/cc")!]
+        let remote = [URL(string: "ws://10.0.0.1:7890/cc")!]
+        XCTAssertEqual(PairingEndpoint.externalHubToken(plistToken: "plist-B", pairedPrimaryToken: "paired-A", primaryURLs: remote), "plist-B",
+                       "plist 优先：/pair 带的是本机 hub 自己的口令")
+        XCTAssertEqual(PairingEndpoint.externalHubToken(plistToken: nil, pairedPrimaryToken: "paired", primaryURLs: local7890), "paired",
+                       "没 plist、主 hub 配的就是本机 7890：用主 hub 本机副本")
+        XCTAssertNil(PairingEndpoint.externalHubToken(plistToken: nil, pairedPrimaryToken: "paired-A", primaryURLs: remote),
+                     "主 hub 配的是别的电脑：不用它的口令")
+        XCTAssertNil(PairingEndpoint.externalHubToken(plistToken: nil, pairedPrimaryToken: "paired", primaryURLs: [URL(string: "ws://127.0.0.1:51234/cc")!]),
+                     "本机别的端口（内嵌 hub）不算外部 hub")
+        XCTAssertNil(PairingEndpoint.externalHubToken(plistToken: "", pairedPrimaryToken: nil, primaryURLs: local7890))
+        let none = PairingEndpoint.resolve(externalHub: true,
+                                           externalToken: PairingEndpoint.externalHubToken(plistToken: nil, pairedPrimaryToken: "paired-A", primaryURLs: remote),
+                                           embeddedPort: nil, embeddedToken: nil)
+        XCTAssertEqual(none, .missingToken, "不发请求，页面给现有失败文案")
+        XCTAssertNotNil(none.failureText)
+    }
+
     func testExternalGate() {
         XCTAssertTrue(ExternalHub.isExternal(plistExists: true, healthResponds: false, embeddedPort: nil))
         XCTAssertTrue(ExternalHub.isExternal(plistExists: false, healthResponds: true, embeddedPort: nil))

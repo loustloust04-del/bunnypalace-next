@@ -14,7 +14,7 @@ enum DeathScaleGate {
     }
 
     static func setVisible(_ on: Bool, tools: RightPanelToolManager?) {
-        tools?.setEnabled(toolId, on)
+        tools?.setEnabled(toolId, on, target: .defaults)
         #if os(iOS)
         let home = Page2HomeStore.shared
         let placed = home.layout.items.filter { $0.kind == "app" && $0.toolID == toolId }.map(\.id)

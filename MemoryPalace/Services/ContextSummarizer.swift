@@ -1,13 +1,8 @@
+import MemoryCore
 import Foundation
 
 // MARK: - Context Summary Model
 
-/// 注入 + 历史窗口锚定看到的样子。第三刀起由窗口摘要（memory/sessions/）拼出来：summary = 注入文本，coveredCount = 压缩锚点
-struct ContextSummary: Codable {
-    let summary: String
-    let coveredCount: Int      // 摘要覆盖的旧消息条数
-    let updatedAt: Date
-}
 
 // MARK: - Context Summarizer
 
@@ -19,14 +14,14 @@ struct ContextSummarizer {
 
     /// 没有新文件就退回改造前的累计摘要（当第 0 段），注入和锚定跟以前一样
     static func load(conversationId: String, profileId: String) -> ContextSummary? {
-        let s = SessionSummaryStore.loadOrSeed(conversationId: conversationId, profileId: profileId, title: "")
+        let s = SessionSummaryStore.loadOrSeed(conversationId: conversationId, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), title: "")
         guard let text = SessionSummaryStore.injectionText(s, fullCount: SessionCloseout.fullSegmentCount) else { return nil }
         return ContextSummary(summary: text, coveredCount: s.compressedCount, updatedAt: s.updatedAt)
     }
 
     static func clear(conversationId: String, profileId: String) {
-        SummaryFileStore.clear(conversationId: conversationId, profileId: profileId)
-        SessionSummaryStore.clear(conversationId: conversationId, profileId: profileId)
+        SummaryFileStore.clear(conversationId: conversationId, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
+        SessionSummaryStore.clear(conversationId: conversationId, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
     }
 
     // MARK: - 判断是否需要压缩

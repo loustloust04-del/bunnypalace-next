@@ -91,7 +91,7 @@ final class SlotOrderTests: XCTestCase {
         let slots = SlotOrder.normalized(baseSlots())
         var preset = Preset(name: "t")
         preset.prompts = slots
-        let before = PromptAssembler.assemble(preset: preset, profile: profile(), memories: [], chatHistory: history)
+        let before = PromptMessage.legacyShape(PromptAssembler.assembleOrdered(preset: preset, profile: profile(), memories: [], chatHistory: history).messages)
         let sp0 = try XCTUnwrap(before.systemPrompt)
         XCTAssertLessThan(try XCTUnwrap(sp0.range(of: "自定义段")).lowerBound, try XCTUnwrap(sp0.range(of: "后置段")).lowerBound)
 
@@ -102,7 +102,7 @@ final class SlotOrderTests: XCTestCase {
         XCTAssertEqual(preset.prompts.first { $0.id == "custom" }?.injectionOrder, 30, "拖动不改 injectionOrder")
         let segs = PromptAssembler.assembleTagged(preset: preset, profile: profile(), memories: [], chatHistory: history).segments
         XCTAssertGreaterThan(try XCTUnwrap(index(segs, "自定义段")), try XCTUnwrap(lastHistory(segs)), "拖到历史后 → 注入到历史后")
-        let after = PromptAssembler.assemble(preset: preset, profile: profile(), memories: [], chatHistory: history)
+        let after = PromptMessage.legacyShape(PromptAssembler.assembleOrdered(preset: preset, profile: profile(), memories: [], chatHistory: history).messages)
         let sp1 = try XCTUnwrap(after.systemPrompt)
         XCTAssertGreaterThan(try XCTUnwrap(sp1.range(of: "自定义段")).lowerBound, try XCTUnwrap(sp1.range(of: "后置段")).lowerBound,
                              "实发 systemPrompt 里的先后也跟着变")
@@ -200,23 +200,23 @@ final class SlotOrderTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(index(segs, "旧深度")) + 1, index(segs, "第二句"), "旧 depth=2 仍按倒数第 2 条之前")
         XCTAssertLessThan(try XCTUnwrap(index(segs, "相对段")), try XCTUnwrap(segs.firstIndex { $0.source == .chatHistory }))
 
-        // 实发层（assemble）：user 角色的 depth=0 就是 messages 最后一条
+        // 实发层（legacyShape）：user 角色的 depth=0 就是 messages 最后一条
         var preset = Preset(name: "t")
         preset.prompts = slots
-        let sent = PromptAssembler.assemble(preset: preset, profile: profile(), memories: [], chatHistory: history)
+        let sent = PromptMessage.legacyShape(PromptAssembler.assembleOrdered(preset: preset, profile: profile(), memories: [], chatHistory: history).messages)
         XCTAssertEqual(sent.messages.last?.content, "尾注段")
         XCTAssertEqual(sent.messages.suffix(3).map(\.content), ["最新一句", "更早尾注", "尾注段"])
     }
 
-    /// 现状记录（④b 修）：assemble() 把所有 system 段抽成前缀，absolute system 段也进 systemPrompt，不在 messages 里
-    func testAbsoluteSystemSegmentIsStillHoistedByAssemble() throws {
+    /// 现状记录：legacyShape 把所有 system 段抽成前缀，absolute system 段也进 systemPrompt，不在 messages 里
+    func testAbsoluteSystemSegmentIsHoistedByLegacyShape() throws {
         var slots = baseSlots()
         slots.append(slot("sysTail", "系统尾注", role: "system", depth: 0, position: .absolute))
         let segs = tagged(slots)
         XCTAssertEqual(index(segs, "系统尾注"), try XCTUnwrap(lastHistory(segs)) + 1, "检查器分段位置正确")
         var preset = Preset(name: "t")
         preset.prompts = slots
-        let sent = PromptAssembler.assemble(preset: preset, profile: profile(), memories: [], chatHistory: history)
+        let sent = PromptMessage.legacyShape(PromptAssembler.assembleOrdered(preset: preset, profile: profile(), memories: [], chatHistory: history).messages)
         XCTAssertTrue(sent.systemPrompt?.contains("系统尾注") == true)
         XCTAssertFalse(sent.messages.contains { $0.content.contains("系统尾注") })
     }

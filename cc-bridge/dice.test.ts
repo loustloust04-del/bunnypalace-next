@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { blockText, parseDice, rollDice } from "./dice"
-import { CARD_GUIDE, CARD_GUIDE_INDEX } from "./card-guide"
+import { CARD_GUIDE, MCP_INSTRUCTIONS } from "./card-guide"
 
 describe("parseDice", () => {
   test("合法", () => {
@@ -110,8 +110,8 @@ describe("mcp-server roll_dice（完整 CallTool 分支）", () => {
     const client = new Client({ name: "dice-test", version: "0" })
     await client.connect(transport)
     try {
-      // 10-03 起 instructions 只放目录，完整写法走 card_guide 工具
-      expect(client.getInstructions()).toBe(CARD_GUIDE_INDEX)
+      // 10-03 起 instructions 只放目录，完整写法走 card_guide 工具；2a 加了 [贴表情] 段（MCP_INSTRUCTIONS）
+      expect(client.getInstructions()).toBe(MCP_INSTRUCTIONS)
       const tools = await client.listTools()
       expect(tools.tools.some(t => t.name === "roll_dice")).toBe(true)
       expect(tools.tools.some(t => t.name === "card_guide")).toBe(true)

@@ -31,12 +31,10 @@ enum TopicResponder {
         return (systemPrompt: system, messages: [(role: "user", content: user)])
     }
 
-    /// 楼层当前聊天模型；没配返回 nil。
+    /// 楼层当前聊天模型；没配、或者发不出非流式请求（没 key / 桥卡 / 本机卡）返回 nil。
     @MainActor
     static func resolveChatModel(providerManager: ProviderManager) -> ProviderModel? {
-        let chatId = UserDefaults.standard.string(forKey: "selectedChatModel") ?? ""
-        guard !chatId.isEmpty else { return nil }
-        return providerManager.model(byId: chatId)
+        providerManager.sideModel(ids: [UserDefaults.standard.string(forKey: "selectedChatModel") ?? ""])
     }
 
     @MainActor
@@ -45,31 +43,13 @@ enum TopicResponder {
         guard let model = resolveChatModel(providerManager: providerManager) else { return nil }
 
         let request = buildRequest(card: card, userName: userName, assistantName: assistantName)
-
-        if let provider = providerManager.provider(for: model) {
-            let inputTok = HeuristicEstimator().estimate(request.systemPrompt + request.messages[0].content)
-            let estimated = BudgetCalculator.actualCost(
-                provider: provider, modelId: model.modelId,
-                usage: TokenUsage(inputTokens: inputTok, outputTokens: 512)
-            )
-            if case .blocked = providerManager.budgetGate(providerId: provider.id, estimatedCost: estimated),
-               !BudgetPreflight.mayDeferEarlyGate(provider: provider, estimated: estimated) {
-                return nil
-            }
-        }
-
         let router = ProviderRouter(usageContext: UsageContext(kind: .topic))
-        guard let (response, usage) = try? await router.sendNonStreaming(
+        guard let r = try? await router.sideCall(
             model: model, messages: request.messages,
             systemPrompt: request.systemPrompt, providerManager: providerManager
-        ) else { return nil }
+        ), !r.hitOutputLimit else { return nil }
 
-        if let usage, let provider = providerManager.provider(for: model) {
-            let cost = BudgetCalculator.actualCost(provider: provider, modelId: model.modelId, usage: usage)
-            providerManager.commitSpend(providerId: provider.id, amount: cost, usage: usage)
-        }
-
-        let text = response.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = r.text.trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
     }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 #if os(macOS)
 import AppKit
 #else
@@ -65,7 +66,7 @@ struct HTMLArtifactPreviewSheet: View {
                 refreshToken: refreshToken,
                 onPageTitle: { pageTitle = $0 },
                 onLoadingChanged: { isLoading = $0 },
-                onOpenLink: { browseTarget = BrowseTarget(url: $0) },
+                onOpenLink: { openWebLink($0) },
                 card: card
             )
             .ignoresSafeArea()
@@ -161,9 +162,6 @@ struct HTMLArtifactPreviewSheet: View {
             }
         }
         .onDisappear { cleanupTempFile() }
-        .sheet(item: $browseTarget) { target in
-            MiniBrowserView(initialURL: target.url)
-        }
         .alert("已保存到文件库", isPresented: Binding(get: { savedPath != nil }, set: { if !$0 { savedPath = nil } })) {
             Button("好") { savedPath = nil }
         } message: {
@@ -202,6 +200,12 @@ struct HTMLArtifactPreviewSheet: View {
                             Button("保存到文件库") {
                                 savedPath = saveArtifactToLibrary(content: content, title: pageTitle, profileId: profileId)
                             }
+                            Button("保存到文件…") { saveToFile() }
+                            ShareLink("分享", item: content)
+                            Button("复制源码") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(content, forType: .string)
+                            }
                         } label: {
                             Image(systemName: "ellipsis")
                                 .foregroundColor(Theme.textMuted)
@@ -220,6 +224,17 @@ struct HTMLArtifactPreviewSheet: View {
         }
         #endif
     }
+
+    #if os(macOS)
+    private func saveToFile() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.html]
+        panel.nameFieldStringValue = (pageTitle.isEmpty ? "网页" : MarkdownExporter.sanitizedFileName(pageTitle)) + ".html"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try content.write(to: url, atomically: true, encoding: .utf8) }
+        catch { ToastCenter.shared.show("保存失败：\(error.localizedDescription)") }
+    }
+    #endif
 
     #if os(iOS)
     private func prepareTempFile() -> URL? {

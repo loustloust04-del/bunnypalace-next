@@ -12,7 +12,7 @@ struct XiaoyaCardContext {
     var userName: String
     #if os(iOS)
     /// 扫码落地：P4 接 XiaoyaPairOutcome.applying(providerManager:)（= CCPairingApply.apply）
-    var applyPairing: (CCPairPayload) -> XiaoyaPairOutcome
+    var applyPairing: @MainActor (CCPairPayload) async -> XiaoyaPairOutcome
     #endif
     /// 挑名字卡随机时躲开的名字（楼层里已有的 Ta 名 / 称呼）
     var takenNames: [String] = []

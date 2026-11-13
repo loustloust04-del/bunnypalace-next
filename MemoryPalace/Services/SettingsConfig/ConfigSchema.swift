@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 // MARK: - Config Schema (粟粟批了 C-D1~D6：JSON / 不含 Keychain / 全替换 / base64 / 直接上 / 存文件库)
@@ -37,10 +38,8 @@ enum ConfigSchema {
         // MARK: general
         .init("userName",                    .string, .general),
         .init("assistantName",               .string, .general),
-        .init("selectedFont",                .string, .general),
-        .init("fontScale",                   .double, .general),
-        .init("lineSpacingScale",            .double, .general),
-        .init("paragraphSpacingScale",       .double, .general),
+        // selectedFont / fontScale / lineSpacingScale / paragraphSpacingScale 和下面 bubble* 五个 atrium P3④b 起按人存
+        //（Profile.chatAppearance，随楼层进备份），老键只是当前层的镜像，导入了也会被下次镜像盖掉 → 不进导出表
         .init("blurRadius",                  .double, .general),
         .init("gardenSceneEnabled",          .bool,   .general),
         .init("feedbackGestureEnabled",      .bool,   .general),
@@ -53,13 +52,7 @@ enum ConfigSchema {
         .init("hideActionBar",               .bool,   .appearance),
         .init("showFlagBlocks",              .bool,   .appearance),
         .init("showMessageUsage",            .bool,   .appearance),
-        .init("chatBubbleMode",              .string, .appearance),
         .init("disableAutoTransparentBubblesOnWallpaper", .bool, .appearance),
-        .init("bubbleCornerRadius",          .double, .appearance),
-        .init("bubbleModeCornerRadius",      .double, .appearance),
-        .init("bubblePaddingH",              .double, .appearance),
-        .init("bubblePaddingV",              .double, .appearance),
-        .init("bubbleSpacing",               .double, .appearance),
         .init("showStyleChip",               .bool,   .appearance),
         // 日历（按楼层的隐私开关 calendar.*.{pid} 不进导出：楼层 id 换机不通用）
         .init("calendar_monthStyle",         .string, .appearance),
@@ -232,16 +225,16 @@ enum ConfigSchema {
         .init("ccTerminalKeys",              .claudeCode),  // CC terminal 自定义键
         // 语音服务列表（厂商 / 地址 / 专有参数；key 走加密导出的 voice.<id>）
         .init(VoiceServiceStore.listKey,     .tts),
+        // 读侧参数按显式楼层 ID 保存，随设置/全量备份及导入回滚复制。
+        .init(RecallTuningStore.storageKey,   .memory),
         // 注意：savedCharacterCards / globalWorldBooks 是【内容】不是设置，不导（粟粟 2026-06-14）
     ]
 
     /// 标量 UserDefaults（不是 @AppStorage 但也是配置；与 @AppStorage 走同一通道）
     static let extraScalarKeys: [AppStorageEntry] = [
-        // CC Bridge URL override 是 UserDefaults 直接读写的
-        .init("ccBridgeBaseURLOverride",     .string, .claudeCode),
-        .init("ccBridgeBaseURLBackup",       .string, .claudeCode),
-        .init("ccBridgeRelayURL",            .string, .claudeCode),   // #068 自建中继 wss 地址
-        .init("ccBridgeRelayPin",            .string, .claudeCode),   // #068 中继自签证书 SPKI pin（不是口令）
+        // hub 配对四键（CCBridgeEndpoints 的主 / 备 / 中继地址 + 中继 pin）不进导出也不进导入：
+        // 配对是每台设备自己的，口令留本机；导入别的设备的地址 = 拿本机口令去连别人的 hub（plan-multi-hub B-pre）。
+        // 老导出文件里带这四个键，导入只按本表取值，自然忽略。
         // 全局预算（spent 不导，避免还原后金额不对）
         .init("globalBudgetEnabled",         .bool,   .api),
         .init("globalBudgetUSD",             .double, .api),

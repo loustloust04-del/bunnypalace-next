@@ -108,6 +108,36 @@ final class HealthInjectionTests: XCTestCase {
                        "别的楼层看不到本楼层数据")
     }
 
+    /// atrium P3⑤0：默认体重不允许、本楼层单独允许 → 只有本楼层带体重段
+    func testWeightFollowsFloor() {
+        let sandbox = PermissionSandbox()
+        defer { sandbox.leave() }
+        let other = "xctest-health-inject-other"
+        seedWeightToday(52.3)
+        HealthLogStore.upsertWeight(context: context, profileId: other, date: Date(), weightKg: 60.1)
+        PermissionCenter.setFloorLevel(.bypass, for: .healthWeight, profileId: pid)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.healthWeight), .notAllowed)
+        let now = Calendar.current.startOfDay(for: Date()).addingTimeInterval(9 * 3600)
+        XCTAssertEqual(HealthLogStore.composedHealthSummary(context: context, profileId: pid, now: now), "今天体重 52.3 公斤。")
+        XCTAssertEqual(HealthLogStore.composedHealthSummary(context: context, profileId: other, now: now), "", "跟默认（不允许）")
+    }
+
+    /// atrium P3⑥a：A 层体重档位单独允许，但卸了健康 App → 没有体重段；B 同档位装着 → 有
+    func testUninstalledHealthAppDropsSummary() {
+        let sandbox = PermissionSandbox()
+        let apps = Page2AppsSandbox()
+        defer { apps.leave(); sandbox.leave() }
+        let other = "xctest-health-inject-other"
+        seedWeightToday(52.3)
+        HealthLogStore.upsertWeight(context: context, profileId: other, date: Date(), weightKg: 52.3)
+        PermissionCenter.setFloorLevel(.bypass, for: .healthWeight, profileId: pid)
+        PermissionCenter.setFloorLevel(.bypass, for: .healthWeight, profileId: other)
+        Page2Apps.setFloor(false, for: "health", profileId: pid)
+        let now = Calendar.current.startOfDay(for: Date()).addingTimeInterval(9 * 3600)
+        XCTAssertEqual(HealthLogStore.composedHealthSummary(context: context, profileId: pid, now: now), "", "没装健康 App")
+        XCTAssertEqual(HealthLogStore.composedHealthSummary(context: context, profileId: other, now: now), "今天体重 52.3 公斤。")
+    }
+
     // MARK: cycle 闸（默认关！）
 
     func testCycleGateDefaultOffAnchor() {

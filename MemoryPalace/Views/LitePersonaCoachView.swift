@@ -45,15 +45,8 @@ struct LitePersonaCoachView: View {
     /// 教练用的模型解析：🌛副模型 → 当前聊天模型 → 任意可用模型，全程跳过 ccBridge
     /// （桥是 WS 直发，不支持非流式调用，路由进去必报错）。
     static func resolveCoachModel(providerManager pm: ProviderManager) -> ProviderModel? {
-        func usable(_ m: ProviderModel?) -> ProviderModel? {
-            guard let m, pm.provider(for: m)?.type != .ccBridge else { return nil }
-            return m
-        }
-        let extractId = UserDefaults.standard.string(forKey: "memoryExtractModelId") ?? ""
-        if !extractId.isEmpty, let m = usable(pm.model(byId: extractId)) { return m }
-        let chatId = UserDefaults.standard.string(forKey: "selectedChatModel") ?? ""
-        if !chatId.isEmpty, let m = usable(pm.model(byId: chatId)) { return m }
-        return pm.availableModels.first(where: { pm.provider(for: $0)?.type != .ccBridge })
+        let d = UserDefaults.standard
+        return pm.sideModel(ids: [d.string(forKey: "memoryExtractModelId") ?? "", d.string(forKey: "selectedChatModel") ?? ""])
     }
 
     var body: some View {

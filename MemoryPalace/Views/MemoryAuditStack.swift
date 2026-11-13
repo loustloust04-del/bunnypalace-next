@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -23,6 +24,11 @@ struct MemoryAuditCardContent: View {
     let onImportance: (Int) -> Void
 
     @Environment(\.settingsMetrics) private var m
+    @Environment(\.modelContext) private var context
+    @Environment(ProfileManager.self) private var profiles: ProfileManager?
+    @State private var pageNotice: String?
+    @State private var resetPage: String?
+    @State private var error: String?
 
     var body: some View {
         let alive = memory.supersededAt == nil
@@ -42,6 +48,16 @@ struct MemoryAuditCardContent: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+            if let pageNotice {
+                HStack {
+                    Text(pageNotice).font(m.caption).foregroundColor(Theme.textMuted)
+                    if alive && !locked {
+                        Button("重新整理") { resetPage = memory.organizedPage }
+                            .font(m.caption)
+                            .buttonStyle(.borderless)
+                    }
+                }
+            }
             if expanded {
                 MemoryAuditSourceView(memory: memory)
                 HStack(spacing: 16) {
@@ -58,6 +74,50 @@ struct MemoryAuditCardContent: View {
             }
             if showsImportance {
                 MemoryAuditImportance(value: memory.importance, disabled: locked || !alive, onCommit: onImportance)
+            }
+        }
+        .task(id: memory.organizedPage) { await checkPage() }
+        .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in Task { await checkPage() } }
+        .confirmationDialog("重新整理这条碎片？", isPresented: Binding(get: { resetPage != nil }, set: { if !$0 { resetPage = nil } }), titleVisibility: .visible) {
+            Button("解除归页标记") { releaseOrganization() }
+            Button("取消", role: .cancel) { resetPage = nil }
+        } message: {
+            Text("只解除这条碎片的整理页与整理时间，重新按现有资格筛选；不会自动播种，也不会撤回批准。")
+        }
+        .alert("重新整理失败", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("好", role: .cancel) { error = nil }
+        } message: { Text(error ?? "") }
+    }
+
+    private func checkPage() async {
+        guard let page = memory.organizedPage else { pageNotice = nil; return }
+        let pid = memory.profileId
+        let notice = await Task.detached(priority: .utility) {
+            WikiStore(profileId: pid).unavailablePageMessage(page)
+        }.value
+        guard profiles?.currentProfile.id == pid, memory.organizedPage == page else { return }
+        pageNotice = notice
+    }
+
+    private func releaseOrganization() {
+        guard let page = resetPage else { return }
+        resetPage = nil
+        let pid = memory.profileId
+        Task {
+            do {
+                let wiki = await Task.detached(priority: .utility) { WikiStore(profileId: pid) }.value
+                try await WikiProposalReview.exclusive(wiki: wiki) {
+                    let missing = await Task.detached(priority: .utility) { !wiki.pageExists(page) }.value
+                    guard missing else { throw WikiStore.WikiError.conflict(page, "目标页已恢复，不必重新整理") }
+                    guard profiles?.currentProfile.id == pid else { return }
+                    try CatalogMaterial.releaseOrganization(memory, expectedPage: page, profileId: pid, context: context)
+                }
+                guard profiles?.currentProfile.id == pid else { return }
+                pageNotice = nil
+                NotificationCenter.default.post(name: .memoryDidChange, object: nil)
+            } catch {
+                guard profiles?.currentProfile.id == pid else { return }
+                self.error = error.localizedDescription
             }
         }
     }

@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 
 // Portions adapted from rootshell (MIT, Copyright (c) 2026 Rootshell LLC, Kit Knox) — see THIRD_PARTY_LICENSES.md
@@ -51,6 +52,31 @@ struct SettingsSearchEntry: Identifiable, Hashable {
     }
 
     var isPlaceholder: Bool { tab == nil }
+
+    static func memorySubpage(for anchor: String) -> SettingsRoute? {
+        if anchor.hasPrefix("leaf-mem-tuning-"),
+           let field = RecallTuning.Field(rawValue: String(anchor.dropFirst("leaf-mem-tuning-".count))) {
+            if field == .maximumPages { return nil }
+            switch field.page {
+            case .archiveTrigger: return .memoryArchiveTrigger
+            case .recallBrowse: return .memoryRecallBrowse
+            case .openWindow: return .memoryOpenWindow
+            }
+        }
+        switch anchor {
+        case "page-mem-archivetrigger", "leaf-mem-fulltextfallback", "leaf-mem-archivereset":
+            return .memoryArchiveTrigger
+        case "page-mem-recallbrowse", "leaf-mem-readcharacters", "leaf-mem-datepage", "leaf-mem-windowpage",
+             "leaf-mem-searchpage", "leaf-mem-wikipage", "leaf-mem-originalpage", "leaf-mem-browsereset":
+            return .memoryRecallBrowse
+        case "leaf-mem-catalog", "leaf-mem-rootindex", "leaf-mem-previouswindow", "leaf-mem-pinned", "leaf-mem-opennote":
+            return .memoryOpenWindow
+        case "leaf-mem-a3-rewrite":
+            return .memoryWriterA3
+        default:
+            return nil
+        }
+    }
 
     private var searchBlob: String {
         ([title, subtitle] + keywords)
@@ -109,49 +135,15 @@ extension SettingsSearchEntry {
     }
 }
 
-// MARK: - 折叠组
+// MARK: - 锚点页
 
 extension SettingsSearchEntry {
-    /// 目标页在 pro 根列表的哪个折叠组里（`SettingsFoldRow` 的 AppStorage key，`SettingsView.swift:104-137`）。
-    /// 搜索直接跳进折叠组内的页面时要顺手把组展开——否则用户返回根列表会发现刚去过的按钮「消失」了。
-    /// 根级页面 / 子应用目录里的页 / 无根入口的页面（主题·附件·正则·世界书）返回 nil。
-    static func foldStorageKey(for tab: SettingsView.SettingsTab) -> String? {
-        switch tab {
-        #if os(macOS)
-        case .macWorkspace: return nil
-        #endif
-        #if os(iOS)
-        case .subApps: return nil
-        #endif
-        case .tts, .mcp:
-            return "settingsFold.aiExt"
-        case .claudeCode, .codex, .agent, .terminal, .myComputer:
-            return "settingsFold.devTools"
-        #if PERSONAL_APPS
-        case .trading: return nil
-        #endif
-        case .fileLibrary, .sandbox:
-            return "settingsFold.storage"
-        case .general, .permissions, .data, .config, .appearance, .persona,
-             .memory, .api, .usage, .rightPanel, .debug, .manual, .about,
-             .theme, .attachment, .regex, .worldBook, .xiaoya,
-             .sticker, .health, .calendar, .reading, .vocab, .groupChat:
-            return nil
-        }
-    }
-
     /// 铺了锚点的长页面（plan §八：内容 >1.5 屏才值得滚，短页跳页即可）。
     /// 带 anchor 的条目必属这几页——单测锁住，别往短页偷偷加。
     static let anchoredTabs: Set<SettingsView.SettingsTab> = [
         .appearance, .memory, .persona, .claudeCode,
         .data, .permissions, .vocab, .fileLibrary, .manual, .reading, .tts, .usage, .api
     ]
-
-    /// 跳转前的准备：把目标页所在折叠组展开。赋值 `selectedSettingsTab` 由调用方做。
-    static func expandFoldGroup(for tab: SettingsView.SettingsTab) {
-        guard let key = foldStorageKey(for: tab) else { return }
-        UserDefaults.standard.set(true, forKey: key)
-    }
 }
 
 // MARK: - Registry
@@ -192,7 +184,7 @@ extension SettingsSearchEntry {
             .init(id: "page-general", title: "通用", subtitle: "设置", systemImage: "gearshape",
                   tab: .general, keywords: ["楼层", "名字", "昵称", "general", "profile", "floor"]),
             .init(id: "page-permissions", title: "权限", subtitle: "设置", systemImage: "lock.shield",
-                  tab: .permissions, keywords: ["隐私", "授权", "档位", "本地模式", "permission", "privacy", "access"],
+                  tab: .permissions, keywords: ["隐私", "授权", "档位", "本地模式", "默认", "permission", "privacy", "access"],
                   isSuggested: true),
             .init(id: "page-data", title: "数据与备份", subtitle: "设置", systemImage: "archivebox",
                   tab: .data, keywords: ["导入", "导出", "备份", "恢复", "同步", "时间机器", "backup", "export", "import", "sync"],
@@ -207,7 +199,7 @@ extension SettingsSearchEntry {
             .init(id: "page-persona", title: "Prompt", subtitle: "设置", systemImage: "text.bubble",
                   tab: .persona, keywords: ["预设", "人格", "插槽", "AI 性格", "提示词", "persona", "preset", "prompt", "slot"],
                   isSuggested: true),
-            .init(id: "page-xiaoya", title: "小芽", subtitle: "设置", systemImage: "xiaoya-cameo",
+            .init(id: "page-xiaoya", title: "小芽", subtitle: toolSettings("小芽 App › ⚙", mac: "设置"), systemImage: "xiaoya-cameo",
                   tab: .xiaoya, keywords: ["助手", "人设", "创作", "写卡", "assistant", "xiaoya", "芽"]),
             .init(id: "page-worldbook", title: "世界书", subtitle: "卡库 › 世界书", systemImage: "book.closed",
                   tab: .worldBook, keywords: ["世界观", "设定", "绑定", "lore", "worldbook", "world info"],
@@ -229,25 +221,25 @@ extension SettingsSearchEntry {
                   tab: .tts, keywords: ["朗读", "念", "声音", "语速", "tts", "speech", "voice", "read aloud"]),
             .init(id: "page-mcp", title: "MCP", subtitle: "设置 › AI 连接与拓展", systemImage: "point.3.connected.trianglepath.dotted",
                   tab: .mcp, keywords: ["工具", "连接器", "server", "tool", "connector", "mcp"]),
-            .init(id: "page-claudecode", title: "Claude Code", subtitle: "设置 › 编程工具", systemImage: "ri-claude",
+            .init(id: "page-claudecode", title: "Claude Code", subtitle: toolSettings("终端 App › 点吉祥物", mac: "设置 › 编程工具"), systemImage: "ri-claude",
                   tab: .claudeCode, keywords: ["cc", "桥接", "hub", "推送", "思考", "bridge", "claude", "push"]),
-            .init(id: "page-codex", title: "Codex", subtitle: "设置 › 编程工具", systemImage: "ri-openai",
+            .init(id: "page-codex", title: "Codex", subtitle: toolSettings("终端 App › 点吉祥物", mac: "设置 › 编程工具"), systemImage: "ri-openai",
                   tab: .codex, keywords: ["配对", "扫码", "codex", "openai", "pairing"]),
-            .init(id: "page-mycomputer", title: SettingsView.SettingsTab.myComputer.rawValue, subtitle: "设置 › 编程工具",
+            .init(id: "page-mycomputer", title: SettingsView.SettingsTab.myComputer.rawValue, subtitle: toolSettings("终端 App › 连接我的电脑", mac: "设置 › 编程工具"),
                   systemImage: "laptopcomputer.and.iphone", tab: .myComputer,
                   keywords: ["配对", "我的电脑", "让手机连这台 Mac", "工作目录", "干活目录", "hub", "扫码", "二维码", "电脑", "Mac",
                              "tmux", "连接", "重新连接", "pairing", "computer", "workdir", "connect"]),
             .init(id: "page-agent", title: "Agent", subtitle: "设置 › 编程工具", systemImage: "ri-robot-2",
                   tab: .agent, keywords: ["自主任务", "共读", "预算", "自动", "agent", "autonomy", "budget"]),
-            .init(id: "page-terminal", title: "终端", subtitle: "设置 › 编程工具", systemImage: "terminal",
+            .init(id: "page-terminal", title: "终端", subtitle: toolSettings("终端 App › 键盘条 ⚙", mac: "设置 › 编程工具"), systemImage: "terminal",
                   tab: .terminal, keywords: ["快捷键", "按键", "工具条", "命令行", "keyboard", "terminal", "shortcut"]),
-            .init(id: "page-rightpanel", title: "右栏", subtitle: "设置", systemImage: "sidebar.right",
-                  tab: .rightPanel, keywords: ["桌面", "小组件", "工具管理", "panel", "desktop", "widget"]),
+            .init(id: "page-rightpanel", title: rightPanelTitle, subtitle: toolSettings("主屏 › 设置 App", mac: "设置"), systemImage: "sidebar.right",
+                  tab: .rightPanel, keywords: ["桌面", "小组件", "工具管理", "默认", "按人", "装", "卸", "主屏上的 App", "panel", "desktop", "widget"] + gardenOSKeywords),
             .init(id: "page-sticker", title: "贴纸", subtitle: "设置 › 子应用", systemImage: "ri-emoji-sticker",
                   tab: .sticker, keywords: ["便签", "贴纸包", "画布", "sticker", "note", "canvas"]),
             .init(id: "page-health", title: "健康", subtitle: "设置 › 子应用", systemImage: "heart.text.square",
                   tab: .health, keywords: ["苹果健康", "步数", "睡眠", "心率", "健身", "health", "steps", "sleep", "heart"]),
-            .init(id: "page-calendar", title: "日历", subtitle: "设置 › 子应用", systemImage: "calendar",
+            .init(id: "page-calendar", title: "日历", subtitle: toolSettings("日历 App › 设置", mac: "设置 › 子应用"), systemImage: "calendar",
                   tab: .calendar, keywords: ["月历", "日记", "纪念日", "倒数日", "铅笔", "星孔", "calendar", "journal", "anniversary"]),
         ]
         #if PERSONAL_APPS
@@ -257,28 +249,27 @@ extension SettingsSearchEntry {
         ]
         #endif
         entries += [
-            .init(id: "page-reading", title: "书房", subtitle: "设置 › 子应用", systemImage: "books.vertical",
+            .init(id: "page-reading", title: "书房", subtitle: toolSettings("书房 App › ⚙", mac: "设置 › 子应用"), systemImage: "books.vertical",
                   tab: .reading, keywords: ["读书", "读书模型", "共读", "书", "阅读", "书摘", "reading", "book", "study"]),
-            .init(id: "page-vocab", title: "单词", subtitle: "设置 › 子应用", systemImage: "abc",
+            .init(id: "page-vocab", title: "单词", subtitle: toolSettings("单词 App › ⚙", mac: "设置 › 子应用"), systemImage: "abc",
                   tab: .vocab, keywords: ["背单词", "复习", "生词", "词卡", "vocab", "word", "review", "flashcard"]),
             .init(id: "page-groupchat", title: "群聊", subtitle: "设置 › 子应用", systemImage: "person.2",
                   tab: .groupChat, keywords: ["中庭", "多人", "发言", "agora", "group", "chat"]),
             .init(id: "page-filelibrary", title: "文件库", subtitle: "设置 › 储存与文件", systemImage: "folder.fill",
                   tab: .fileLibrary, keywords: ["文件", "icloud", "存储位置", "file", "library", "storage"]),
-            .init(id: "page-sandbox", title: "手机里的小电脑", subtitle: "设置 › 储存与文件", systemImage: "shippingbox",
+            .init(id: "page-sandbox", title: "手机里的小电脑", subtitle: toolSettings("终端 App › 小电脑状态", mac: "设置 › 储存与文件"), systemImage: "shippingbox",
                   tab: .sandbox, keywords: ["小电脑", "沙箱", "alpine", "linux", "命令", "重置沙箱", "sandbox", "ish", "rootfs", "shell"]),
             .init(id: "page-debug", title: "开发调试", subtitle: "设置", systemImage: "ladybug",
                   tab: .debug, keywords: ["调试", "日志", "诊断", "调音台", "debug", "log", "diagnostic"]),
             .init(id: "page-manual", title: "文档", subtitle: "设置 · App 说明书", systemImage: "book",
                   tab: .manual, keywords: ["文档", "说明书", "帮助", "教程", "手册", "manual", "help", "docs", "guide"]),
             .init(id: "page-about", title: "关于记忆花园", subtitle: "设置", systemImage: "leaf",
-                  tab: .about, keywords: ["关于", "版本", "构建", "更新", "报告问题", "反馈",
-                                          "about", "version", "build", "update", "feedback"])
+                  tab: .about, keywords: Self.aboutKeywords)
         ]
 
         #if os(iOS)
-        entries.append(.init(id: "page-subapps", title: "子应用", subtitle: "设置", systemImage: "square.grid.3x3",
-            tab: .subApps, keywords: ["聊天（css自定义）", "css", "皮肤", "装修", "KakaoTalk", "ktheme", "Page2", "skin"]))
+        entries.append(.init(id: "page-subapps", title: "App 设置", subtitle: "gardenOS 设置", systemImage: "square.grid.3x3",
+            tab: .subApps, keywords: ["子应用", "聊天（css自定义）", "css", "皮肤", "装修", "KakaoTalk", "ktheme", "Page2", "skin"]))
         #endif
         #if os(macOS)
         entries.append(.init(id: "page-mac-workspace", title: "Mac 工作区", subtitle: "设置", systemImage: "sidebar.left",
@@ -313,15 +304,18 @@ extension SettingsSearchEntry {
             .init(id: "leaf-mac-workspace-code-sources", title: "会话来源与远程主机…", subtitle: "Mac 工作区 › 编程会话", systemImage: "folder.badge.gearshape",
                   tab: .macWorkspace, keywords: ["code", "编程", "会话来源", "扫描位置", "路径", "远程主机", "locations"]),
             .init(id: "leaf-mac-software-update", title: "软件更新", subtitle: "Mac 工作区 › 软件更新", systemImage: "arrow.down.circle",
-                  tab: .macWorkspace, keywords: ["更新", "检查更新", "自动更新", "自动下载", "版本", "sparkle", "update"])
+                  tab: .macWorkspace, keywords: ["更新", "检查更新", "自动更新", "自动下载", "版本", "sparkle", "update"]),
+            .init(id: "leaf-cc-opencli", title: "让 AI 用这台 Mac 的 Chrome 登录态", subtitle: "\(ccPage) › Chrome 登录态", systemImage: "globe",
+                  tab: .claudeCode, keywords: ["Chrome", "登录态", "opencli", "chrome_read", "site_query", "字幕", "知乎", "login"],
+                  anchor: "leaf-cc-opencli"),
         ] + leafPersonal
         #else
-        return entries + leafSubApps + leafPersonal
+        return entries + leafSubApps + leafPersonal + gardenOSLeaves
         #endif
     }
 
     #if PERSONAL_APPS
-    private static var leafPersonal: [SettingsSearchEntry] { leafDeathScale }
+    private static var leafPersonal: [SettingsSearchEntry] { leafDeathScale + leafTutuSkin }
 
     /// 死亡天平开关只在解锁过之后登记（plan-death-scale ⧫：不暴露这个应用）
     private static var leafDeathScale: [SettingsSearchEntry] {
@@ -329,34 +323,49 @@ extension SettingsSearchEntry {
         #if os(macOS)
         let tab = SettingsView.SettingsTab.macWorkspace, page = "Mac 工作区"
         #else
-        let tab = SettingsView.SettingsTab.subApps, page = "子应用"
+        let tab = SettingsView.SettingsTab.subApps, page = "App 设置"
         #endif
         return [.init(id: "leaf-death-scale", title: "Mort sans sépulture", subtitle: "\(page) › Mort sans sépulture",
                       systemImage: "scalemass", tab: tab, keywords: ["mort", "sépulture", "balance", "显示", "隐藏"])]
+    }
+
+    private static var leafTutuSkin: [SettingsSearchEntry] {
+        #if os(iOS)
+        guard SkinState.shared.unlocked else { return [] }
+        return [
+            .init(id: "leaf-tutu-skin", title: "caelumbunny", subtitle: "App 设置 › caelumbunny",
+                  systemImage: "hare", tab: .subApps, keywords: ["兔兔", "皮肤", "skin"]),
+            .init(id: "leaf-tutu-page0-style", title: "page0 列表", subtitle: "App 设置 › caelumbunny",
+                  systemImage: "rectangle.on.rectangle", tab: .subApps,
+                  keywords: ["兔兔", "列表", "纸", "液态玻璃", "试做", "paper", "liquid", "glass", "page0"])
+        ]
+        #else
+        return []
+        #endif
     }
     #else
     private static var leafPersonal: [SettingsSearchEntry] { [] }
     #endif
 
     #if os(iOS)
-    /// 子应用 › 聊天（css自定义）：二级页，只跳到「子应用」页不滚
+    /// App 设置（原子应用）› 聊天（css自定义）：二级页，只跳到「App 设置」页不滚
     private static var leafSubApps: [SettingsSearchEntry] {
         [
-            .init(id: "leaf-study-layout", title: "书房布局", subtitle: "书房 › 书房", systemImage: "books.vertical",
+            .init(id: "leaf-study-layout", title: "书房布局", subtitle: "\(readingPage) › 书房", systemImage: "books.vertical",
                   tab: .reading, keywords: ["书格", "书单", "3D", "书架", "布局", "layout", "shelf"], anchor: "leaf-study-layout"),
-            .init(id: "leaf-study-quote-style", title: "书摘样式", subtitle: "书房 › 书摘", systemImage: "text.quote",
+            .init(id: "leaf-study-quote-style", title: "书摘样式", subtitle: "\(readingPage) › 书摘", systemImage: "text.quote",
                   tab: .reading, keywords: ["展签", "书页", "书签条", "书摘卡", "quote", "style"], anchor: "leaf-study-quote-style"),
-            .init(id: "leaf-study-quote-art", title: "书摘底图", subtitle: "书房 › 书摘", systemImage: "photo.artframe",
+            .init(id: "leaf-study-quote-art", title: "书摘底图", subtitle: "\(readingPage) › 书摘", systemImage: "photo.artframe",
                   tab: .reading, keywords: ["名画", "花园", "背景", "底图", "background", "art"], anchor: "leaf-study-quote-art"),
-            .init(id: "leaf-study-my-images", title: "我的图片", subtitle: "书房 › 我的图片", systemImage: "photo.badge.plus",
+            .init(id: "leaf-study-my-images", title: "我的图片", subtitle: "\(readingPage) › 我的图片", systemImage: "photo.badge.plus",
                   tab: .reading, keywords: ["导入", "书摘底图", "自己的图", "import", "photo"], anchor: "leaf-study-my-images"),
-            .init(id: "leaf-csschat-font", title: "聊天字号", subtitle: "子应用 › 聊天（css自定义）", systemImage: "textformat.size",
+            .init(id: "leaf-csschat-font", title: "聊天字号", subtitle: "App 设置 › 聊天（css自定义）", systemImage: "textformat.size",
                   tab: .subApps, keywords: ["css", "字号", "字体大小", "font size"]),
-            .init(id: "leaf-csschat-bg", title: "背景图", subtitle: "子应用 › 聊天（css自定义）", systemImage: "photo",
+            .init(id: "leaf-csschat-bg", title: "背景图", subtitle: "App 设置 › 聊天（css自定义）", systemImage: "photo",
                   tab: .subApps, keywords: ["css", "背景", "壁纸", "透明度", "background", "wallpaper"]),
-            .init(id: "leaf-csschat-css", title: "CSS", subtitle: "子应用 › 聊天（css自定义）", systemImage: "chevron.left.forwardslash.chevron.right",
+            .init(id: "leaf-csschat-css", title: "CSS", subtitle: "App 设置 › 聊天（css自定义）", systemImage: "chevron.left.forwardslash.chevron.right",
                   tab: .subApps, keywords: ["css", "皮肤", "样式", "装修", "skin", "style"]),
-            .init(id: "leaf-csschat-import", title: "导入皮肤…", subtitle: "子应用 › 聊天（css自定义）", systemImage: "square.and.arrow.down",
+            .init(id: "leaf-csschat-import", title: "导入皮肤…", subtitle: "App 设置 › 聊天（css自定义）", systemImage: "square.and.arrow.down",
                   tab: .subApps, keywords: ["KakaoTalk", "ktheme", "mpskin", "皮肤", "import", "theme"]),
         ]
     }
@@ -368,7 +377,14 @@ extension SettingsSearchEntry {
     // leaf-debug-feedback 不过滤：mac 的反馈入口在侧栏底（A4），跳到任意页都看得见那一行（R6b S7）
     // leaf-appear-ipadwidth：正文栏宽度是 iOS-only 行（F3 不并）；leaf-persona-related：mac Prompt 页不加「相关」组（A2）——跳过去都没有那一行（R6c S3）
     // leaf-terminal-*：终端页只管键盘工具条，mac 没有工具条、侧栏也不露这一页（T43）
-    private static let iOSOnlyLeafIds: Set<String> = ["leaf-terminal-layout", "leaf-terminal-drawer", "leaf-terminal-custom", "leaf-terminal-reset", "leaf-rightpanel-style", "leaf-rightpanel-switcher", "leaf-debug-inputfont", "leaf-appear-ipadwidth", "leaf-persona-related", "leaf-appear-groupchat"]
+    // mac 关于页只有版本和致谢：更新在「Mac 工作区 › 软件更新」，反馈在侧栏底
+    private static let aboutKeywords = ["关于", "版本", "构建", "about", "version", "build"]
+    private static let iOSOnlyLeafIds: Set<String> = ["leaf-terminal-layout", "leaf-terminal-drawer", "leaf-terminal-custom", "leaf-terminal-reset", "leaf-rightpanel-style", "leaf-rightpanel-switcher", "leaf-debug-inputfont", "leaf-appear-ipadwidth", "leaf-persona-related", "leaf-appear-groupchat",
+                                                           "leaf-mycomputer-hubs", "leaf-mycomputer-addhub", "leaf-mycomputer-managehub", "leaf-api-linkopen",
+                                                           // 外观 › 对话列表这三行在页面上是 iOS-only 块
+                                                           "leaf-appear-liststyle", "leaf-appear-livebg", "leaf-appear-metalflowers"]
+    #else
+    private static let aboutKeywords = ["关于", "版本", "构建", "更新", "报告问题", "反馈", "about", "version", "build", "update", "feedback"]
     #endif
 
     // MARK: 叶子 · 通用 / 语音 / 附件 / 世界书
@@ -376,7 +392,7 @@ extension SettingsSearchEntry {
     private static var leafGeneral: [SettingsSearchEntry] {
         [
             .init(id: "leaf-general-floor", title: "楼层", subtitle: "通用 › 楼层", systemImage: "building.2",
-                  tab: .general, keywords: ["切换楼层", "新建楼层", "profile", "floor"]),
+                  tab: .general, keywords: ["切换楼层", "新建楼层", "换人", "profile", "floor", "atrium"]),
             .init(id: "leaf-general-username", title: "我的名字", subtitle: "通用 › 气泡标签", systemImage: "person",
                   tab: .general, keywords: ["昵称", "用户名", "称呼", "name", "user"]),
             .init(id: "leaf-general-ainame", title: "AI 的名字", subtitle: "通用 › 气泡标签", systemImage: "person.crop.circle",
@@ -446,11 +462,11 @@ extension SettingsSearchEntry {
                   keywords: ["酒馆", "整包", "导入", "撤回", "导入来源", "导入报告", "备份", "压缩包", "default-user",
                              "sillytavern", "tavern", "import", "zip", "retract"],
                   cardLibraryTarget: RightPanelNavigator.cardLibrarySettingsTargetId),
-            .init(id: "leaf-xiaoya-stage", title: "小芽舞台", subtitle: "小芽 › 舞台", systemImage: "theatermasks",
+            .init(id: "leaf-xiaoya-stage", title: "小芽舞台", subtitle: "\(xiaoyaPage) › 舞台", systemImage: "theatermasks",
                   tab: .xiaoya, keywords: ["剪纸", "剧场", "幕布", "主题", "太阳", "月亮", "薄荷夜场", "胭脂剧场", "粉绿马戏", "拼贴剧场", "stage", "theme"]),
-            .init(id: "leaf-xiaoya-local", title: "小芽本地大脑", subtitle: "小芽 › 本地大脑", systemImage: "cpu",
+            .init(id: "leaf-xiaoya-local", title: "小芽本地大脑", subtitle: "\(xiaoyaPage) › 本地大脑", systemImage: "cpu",
                   tab: .xiaoya, keywords: ["本地", "离线", "模型", "下载", "qwen", "mlx", "local", "offline", "model"]),
-            .init(id: "leaf-xiaoya-packs", title: "小芽能做什么", subtitle: "小芽 › 能做什么", systemImage: "checkmark.shield",
+            .init(id: "leaf-xiaoya-packs", title: "小芽能做什么", subtitle: "\(xiaoyaPage) › 能做什么", systemImage: "checkmark.shield",
                   tab: .xiaoya, keywords: ["权限", "查阅", "创作", "外观", "壁纸", "图标", "盖章", "撤销", "账本", "permission", "approve", "undo", "appearance", "xiaoya"])
         ]
     }
@@ -458,7 +474,13 @@ extension SettingsSearchEntry {
     // MARK: 叶子 · 外观 / 主题库
 
     private static var leafAppearance: [SettingsSearchEntry] {
-        [
+        // atrium P3④a：Mac 外观「主题」节拆成界面两行 + 这一层两行（iOS 单独给人换在人页）
+        #if os(macOS)
+        let themeTitle = "界面主题", chatBackgroundTitle = "聊天背景（这一层）"
+        #else
+        let themeTitle = "主题库", chatBackgroundTitle = "聊天背景"
+        #endif
+        var entries: [SettingsSearchEntry] = [
             .init(id: "leaf-appear-liststyle", title: "列表样式", subtitle: "外观 › 对话列表", systemImage: "list.bullet",
                   tab: .appearance, keywords: ["对话列表", "紧凑", "详细", "纯净", "两行", "预览", "未读", "list", "compact", "detailed", "pure", "clean", "preview"],
                   anchor: "leaf-appear-liststyle"),
@@ -471,33 +493,28 @@ extension SettingsSearchEntry {
             .init(id: "leaf-appear-metalflowers", title: "底部白色小花", subtitle: "外观 › 对话列表", systemImage: "camera.macro",
                   tab: .appearance, keywords: ["小花", "白花", "点点花", "花", "液态金属", "flowers"],
                   anchor: "leaf-appear-metalflowers"),
-            .init(id: "leaf-appear-bubblemode", title: "显示方式", subtitle: "外观 › 聊天样式", systemImage: "bubble.left.and.bubble.right",
-                  tab: .appearance, keywords: ["气泡", "气泡模式", "文章模式", "bubble", "article"],
-                  anchor: "leaf-appear-bubblemode"),
-            .init(id: "leaf-appear-theme", title: "主题库", subtitle: "外观 › 主题", systemImage: "paintpalette",
-                  tab: .appearance, keywords: ["主题", "换肤", "切换主题", "复制一份", "新主题", "theme", "palette"],
+            // 10-29 全局「显示方式」删掉（每个对话自己选，对话菜单里换）；只对一种对话生效的设置分到两块
+            .init(id: "leaf-appear-articlechat", title: "文章对话", subtitle: "外观 › 文章对话", systemImage: "doc.text",
+                  tab: .appearance, keywords: ["文章", "文章模式", "操作按钮", "复制", "收藏", "article", "action bar"],
+                  anchor: "leaf-appear-articlechat"),
+            .init(id: "leaf-appear-theme", title: themeTitle, subtitle: "外观 › 主题", systemImage: "paintpalette",
+                  tab: .appearance, keywords: ["主题", "主题库", "界面主题", "换肤", "切换主题", "复制一份", "新主题", "theme", "palette"],
                   anchor: "leaf-appear-theme"),
             .init(id: "leaf-appear-colors", title: "主题颜色", subtitle: "外观 › 主题", systemImage: "eyedropper",
-                  tab: .appearance, keywords: ["颜色", "配色", "字色", "主文字", "AI 消息文字", "你的消息文字", "气泡底", "纯净背景", "微调", "饱和度", "明度", "color", "text color", "saturation", "brightness"],
+                  tab: .appearance, keywords: ["颜色", "配色", "字色", "主文字", "AI 消息文字", "你的消息文字", "气泡底", "气泡模式颜色", "纯净背景", "微调", "饱和度", "明度", "color", "text color", "saturation", "brightness", "bubble mode color"],
                   anchor: "leaf-appear-colors"),
-            .init(id: "leaf-appear-chatbg", title: "聊天背景", subtitle: "外观 › 主题", systemImage: "photo.on.rectangle.angled",
+            .init(id: "leaf-appear-chatbg", title: chatBackgroundTitle, subtitle: "外观 › 主题", systemImage: "photo.on.rectangle.angled",
                   tab: .appearance, keywords: ["背景图", "壁纸", "透明度", "遮罩", "位置", "气泡半透明", "wallpaper", "background", "opacity", "veil"],
                   anchor: "leaf-appear-chatbg"),
             .init(id: "leaf-appear-opening", title: "花园背景", subtitle: "外观 › 聊天样式", systemImage: "sparkles",
                   tab: .appearance, keywords: ["开场", "开场白", "首屏", "新对话", "花", "星空", "opening", "greeting"],
                   anchor: "leaf-appear-opening"),
-            .init(id: "leaf-appear-text", title: "文本", subtitle: "外观 › 文本", systemImage: "textformat",
-                  tab: .appearance, keywords: ["字号", "行距", "text", "font"],
-                  anchor: "leaf-appear-text"),
-            .init(id: "leaf-appear-font", title: "字体", subtitle: "外观 › 文本", systemImage: "textformat.size",
-                  tab: .appearance, keywords: ["字号", "字形", "font", "typeface"],
-                  anchor: "leaf-appear-font"),
             // 10-02 挪进 高级外观 › 排版（只 iPad），二级页锚点滚不到 → 只跳外观页
             .init(id: "leaf-appear-ipadwidth", title: "正文栏宽度", subtitle: "外观 › 高级外观 › 排版", systemImage: "ipad.landscape",
                   tab: .appearance, keywords: ["iPad", "平板", "宽度", "正文", "栏宽", "横屏", "width", "column", "landscape"]),
             .init(id: "leaf-appear-chatstyle", title: "聊天样式", subtitle: "外观 › 聊天样式", systemImage: "bubble.left",
-                  tab: .appearance, keywords: ["对话样式", "样式", "显示方式", "chat style"]),
-            .init(id: "leaf-appear-timestamp", title: "显示时间戳", subtitle: "外观 › 聊天样式", systemImage: "clock",
+                  tab: .appearance, keywords: ["对话样式", "样式", "chat style"]),
+            .init(id: "leaf-appear-timestamp", title: "显示时间戳", subtitle: "外观 › 气泡对话", systemImage: "clock",
                   tab: .appearance, keywords: ["时间", "timestamp", "time"],
                   anchor: "leaf-appear-timestamp"),
             .init(id: "leaf-appear-msgdisplay", title: "消息显示", subtitle: "外观 › 消息显示", systemImage: "list.bullet.rectangle",
@@ -517,10 +534,6 @@ extension SettingsSearchEntry {
                   anchor: "leaf-appear-thinkingorb"),
             // 以下几条的控件在「高级外观」二级页（AdvancedAppearancePage）或已不在外观页上，
             // 搜索只跳到外观页 → anchor 留 nil
-            .init(id: "leaf-appear-geometry", title: "气泡几何", subtitle: "外观 › 高级外观", systemImage: "square.on.square",
-                  tab: .appearance, keywords: ["圆角", "间距", "宽度", "geometry", "radius"]),
-            .init(id: "leaf-appear-typeset", title: "排版", subtitle: "外观 › 高级外观", systemImage: "text.alignleft",
-                  tab: .appearance, keywords: ["行距", "边距", "typography", "layout"]),
             .init(id: "leaf-appear-wallpaper", title: "边缘模糊", subtitle: "外观 › 高级外观 › 聊天区边缘", systemImage: "rectangle.dashed",
                   tab: .appearance, keywords: ["模糊", "视口", "聊天区边缘", "blur", "viewport"]),
             // 住在二级页（聊天背景）里，锚点滚不到 → 只跳外观页（anchor 规则：必须等于 id 且唯一，别借别人的）
@@ -535,6 +548,31 @@ extension SettingsSearchEntry {
             .init(id: "leaf-theme-save", title: "新建主题", subtitle: "外观 › 主题库", systemImage: "plus",
                   tab: .appearance, keywords: ["添加主题", "存主题", "保存主题", "自定义主题", "复制一份", "另存", "save", "new", "theme"])
         ]
+        #if os(macOS)
+        entries.append(.init(id: "leaf-appear-chattheme", title: "聊天主题（这一层）", subtitle: "外观 › 主题", systemImage: "bubble.left.and.text.bubble.right",
+                             tab: .appearance, keywords: ["聊天主题", "这一层", "楼层", "按人", "跟随界面主题", "配色", "chat theme", "per floor"],
+                             anchor: "leaf-appear-chattheme"))
+        // atrium P3④b：字体字号 / 行距段距 / 气泡几何按人存。iOS 只在人页「气泡 · 字号」改（不是设置页，不进注册表）；
+        // Mac 没人页，外观页「这一层」节（ChatAppearanceSections）带锚点
+        entries += [
+            .init(id: "leaf-appear-font", title: "字体", subtitle: "外观 › 这一层", systemImage: "textformat.size",
+                  tab: .appearance, keywords: ["字号", "字形", "这一层", "按人", "font", "typeface"],
+                  anchor: "leaf-appear-font"),
+            .init(id: "leaf-appear-text", title: "聊天字号", subtitle: "外观 › 这一层", systemImage: "textformat",
+                  tab: .appearance, keywords: ["字号", "字体大小", "放大", "缩小", "这一层", "text", "font size"],
+                  anchor: "leaf-appear-text"),
+            .init(id: "leaf-appear-typeset", title: "行距 · 段距", subtitle: "外观 › 这一层", systemImage: "text.alignleft",
+                  tab: .appearance, keywords: ["行距", "行间距", "段距", "段落间距", "排版", "typography", "line spacing"],
+                  anchor: "leaf-appear-typeset"),
+            .init(id: "leaf-appear-bubblechat", title: "气泡圆角", subtitle: "外观 › 这一层 · 气泡对话", systemImage: "bubble.left.and.bubble.right",
+                  tab: .appearance, keywords: ["气泡", "气泡模式", "气泡圆角", "iMessage", "bubble", "bubble mode"],
+                  anchor: "leaf-appear-bubblechat"),
+            .init(id: "leaf-appear-geometry", title: "气泡几何", subtitle: "外观 › 这一层 · 文章对话", systemImage: "square.on.square",
+                  tab: .appearance, keywords: ["圆角", "内边距", "间距", "宽度", "geometry", "radius"],
+                  anchor: "leaf-appear-geometry"),
+        ]
+        #endif
+        return entries
     }
 
     // MARK: 叶子 · 面板四项（iPad：外观 › 宽屏布局 二级；mac：Mac 工作区 › 面板）
@@ -616,7 +654,7 @@ extension SettingsSearchEntry {
     private static var leafAPI: [SettingsSearchEntry] {
         [
             .init(id: "leaf-api-keys", title: "API Keys", subtitle: "模型和API › API Keys", systemImage: "key",
-                  tab: .api, keywords: ["密钥", "凭证", "供应商", "key", "credential", "provider"]),
+                  tab: .api, keywords: ["密钥", "凭证", "供应商", "工具调用", "后台任务用流式", "key", "credential", "provider", "stream"]),
             .init(id: "leaf-api-models", title: "全部模型", subtitle: "模型和API › API Keys", systemImage: "ri-stack",
                   tab: .api, keywords: ["模型池", "模型列表", "model", "pool"]),
             .init(id: "leaf-api-favorites", title: "☆ 收藏", subtitle: "模型和API › 全部模型", systemImage: "star",
@@ -631,6 +669,9 @@ extension SettingsSearchEntry {
                   tab: .api, keywords: ["超时", "timeout"]),
             .init(id: "leaf-api-blocked", title: "黑名单（AI 不读）", subtitle: "模型和API › 联网搜索", systemImage: "hand.raised.slash",
                   tab: .api, keywords: ["黑名单", "屏蔽", "域名", "blocked", "domain"]),
+            .init(id: "leaf-api-linkopen", title: "链接打开方式", subtitle: "模型和API › 联网搜索", systemImage: "safari",
+                  tab: .api, keywords: ["链接", "浏览器", "Safari", "app 内", "打开方式", "link", "browser", "in-app"],
+                  anchor: "leaf-api-linkopen"),
             .init(id: "leaf-api-stream", title: "流式输出", subtitle: "模型和API › 回复方式", systemImage: "waveform",
                   tab: .api, keywords: ["流式", "假流式", "打字", "整包", "stream", "sse"]),
             .init(id: "leaf-api-budget", title: "预算（全局总闸）", subtitle: "模型和API › 预算", systemImage: "dollarsign.circle",
@@ -649,7 +690,7 @@ extension SettingsSearchEntry {
     // MARK: 叶子 · 记忆
 
     private static var leafMemory: [SettingsSearchEntry] {
-        [
+        let entries: [SettingsSearchEntry] = [
             // 顶上
             .init(id: "leaf-mem-master", title: "记忆系统总开关", subtitle: "记忆", systemImage: "power",
                   tab: .memory, keywords: ["总开关", "启用记忆", "memory", "toggle"],
@@ -671,10 +712,13 @@ extension SettingsSearchEntry {
                   tab: .memory, keywords: ["上下文摘要", "压缩", "尾段", "每 N 回合", "停 N 分钟", "只手动", "触发", "summary", "compress"],
                   anchor: "leaf-mem-w-a2"),
             .init(id: "leaf-mem-w-a3", title: "A3 窗口总结", subtitle: "记忆 › 写入", systemImage: "rectangle.stack",
-                  tab: .memory, keywords: ["窗口总结", "再压", "300 字", "收尾", "静默", "12 小时", "closeout", "window"],
+                  tab: .memory, keywords: ["窗口总结", "窗口·时间轴", "再压", "收尾", "静默", "24 小时", "分档", "重写", "新格式", "closeout", "window"],
                   anchor: "leaf-mem-w-a3"),
+            .init(id: "leaf-mem-a3-rewrite", title: "用新格式重写所有窗口总结", subtitle: "记忆 › 写入 › A3 窗口总结", systemImage: "arrow.triangle.2.circlepath",
+                  tab: .memory, keywords: ["窗口总结", "旧格式", "重写", "新格式", "备份", "rewrite"],
+                  anchor: "leaf-mem-a3-rewrite"),
             .init(id: "leaf-mem-w-a4", title: "A4 时间轴", subtitle: "记忆 › 写入", systemImage: "calendar.day.timeline.left",
-                  tab: .memory, keywords: ["时间轴", "日记", "跨窗口时间轴", "窗口", "timeline", "diary"],
+                  tab: .memory, keywords: ["时间轴", "窗口·时间轴", "日记", "跨窗口时间轴", "窗口", "timeline", "diary"],
                   anchor: "leaf-mem-w-a4"),
             .init(id: "leaf-mem-w-b1", title: "B1 心声", subtitle: "记忆 › 写入", systemImage: "heart.text.square",
                   tab: .memory, keywords: ["独白", "心声", "心声进聊天流", "heartvoice", "monologue"],
@@ -695,8 +739,11 @@ extension SettingsSearchEntry {
                   tab: .memory, keywords: ["碎片池", "记新东西", "提取", "每满几条", "提取提示词", "本机模型", "拒收", "fact", "fragment", "prompt"],
                   anchor: "leaf-mem-w-c2"),
             .init(id: "leaf-mem-w-c3", title: "C3 整理编目", subtitle: "记忆 › 写入", systemImage: "list.bullet.indent",
-                  tab: .memory, keywords: ["整理编目", "wiki", "整理", "每天自动整理", "分拣", "一次最多几个主题", "手动整理最多几轮", "不触发的词", "种子", "播种", "从人设生成基础 wiki", "从 CC 记忆播种", "wiki 体检", "断链", "孤页", "目录漂移", "catalog", "organize", "stop words", "seed"],
+                  tab: .memory, keywords: ["整理编目", "wiki", "整理提案", "审计台", "整理", "每天自动整理", "分拣", "一次最多几个主题", "手动整理最多几轮", "不触发的词", "种子", "播种", "从人设生成基础 wiki", "从 CC 记忆播种", "wiki 体检", "断链", "孤页", "目录漂移", "catalog", "organize", "stop words", "seed"],
                   anchor: "leaf-mem-w-c3"),
+            .init(id: "leaf-mem-ccmemory", title: "同步 CC 的记忆", subtitle: "记忆 › 写入", systemImage: "arrow.triangle.2.circlepath",
+                  tab: .memory, keywords: ["CC", "CC 记忆", "Claude Code", "同步", "memory", "sync"],
+                  anchor: "leaf-mem-ccmemory"),
             // 整理 · 怎么管
             .init(id: "leaf-mem-pending", title: "待续", subtitle: "记忆 › 整理", systemImage: "pin",
                   tab: .memory, keywords: ["待续", "没做完", "做完了", "淡了", "pending", "todo"],
@@ -705,45 +752,88 @@ extension SettingsSearchEntry {
                   tab: .memory, keywords: ["整理台", "审计台", "审", "留", "删", "碎片池", "整理", "去重", "audit", "review"],
                   anchor: "leaf-mem-audit"),
             // 注入 · 塞什么进 prompt
-            .init(id: "leaf-mem-content", title: "注入 · 塞什么进 prompt", subtitle: "记忆 › 注入", systemImage: "doc.text",
-                  tab: .memory, keywords: ["内容", "注入什么", "content"],
+            .init(id: "leaf-mem-content", title: "回想 · 怎么想起来", subtitle: "记忆 › 回想", systemImage: "doc.text",
+                  tab: .memory, keywords: ["内容", "注入什么", "回想", "recall", "content"],
                   anchor: "leaf-mem-content"),
-            .init(id: "leaf-mem-openwindow", title: "开窗口带什么", subtitle: "记忆 › 注入", systemImage: "checklist",
+            .init(id: "leaf-mem-openwindow", title: "开窗口带什么", subtitle: "记忆 › 回想", systemImage: "checklist",
                   tab: .memory, keywords: ["开窗口", "带全文的最近几段", "时间轴天数", "天数", "最近几条", "注入预算比例", "inject", "open window"],
                   anchor: "leaf-mem-openwindow"),
-            .init(id: "leaf-mem-catalog", title: "目录式注入", subtitle: "记忆 › 注入", systemImage: "list.bullet.rectangle.portrait",
-                  tab: .memory, keywords: ["目录", "按需", "catalog"],
+            .init(id: "leaf-mem-catalog", title: "命中的只带一行目录", subtitle: "记忆 › 开窗口带什么", systemImage: "list.bullet.rectangle.portrait",
+                  tab: .memory, keywords: ["目录式注入", "目录", "按需", "catalog"],
                   anchor: "leaf-mem-catalog"),
-            .init(id: "leaf-mem-feedback", title: "召回反馈", subtitle: "记忆 › 注入", systemImage: "hand.thumbsup",
-                  tab: .memory, keywords: ["点赞", "点踩", "权重", "feedback", "recall"],
-                  anchor: "leaf-mem-feedback"),
-            .init(id: "leaf-mem-budget", title: "注入预算", subtitle: "记忆 › 注入", systemImage: "gauge.with.needle",
+            .init(id: "leaf-mem-budget", title: "注入预算", subtitle: "记忆 › 回想", systemImage: "gauge.with.needle",
                   tab: .memory, keywords: ["token", "预算", "budget", "inject"],
                   anchor: "leaf-mem-budget"),
             // 检索 · 怎么挑记忆
-            .init(id: "leaf-mem-inject", title: "检索 · 怎么挑记忆", subtitle: "记忆 › 检索", systemImage: "arrow.down.doc",
+            .init(id: "leaf-mem-inject", title: "自动想起 · 聊到了才带", subtitle: "记忆 › 回想", systemImage: "arrow.down.doc",
                   tab: .memory, keywords: ["注入", "挑选", "策略", "检索", "inject", "strategy"],
                   anchor: "leaf-mem-inject"),
-            .init(id: "leaf-mem-injectfull", title: "全量注入", subtitle: "记忆 › 检索", systemImage: "tray.full",
+            .init(id: "leaf-mem-injectfull", title: "全量注入", subtitle: "记忆 › 回想", systemImage: "tray.full",
                   tab: .memory, keywords: ["全部", "不筛选", "full", "inject"],
                   anchor: "leaf-mem-injectfull"),
-            .init(id: "leaf-mem-injectkeyword", title: "关键词命中", subtitle: "记忆 › 检索", systemImage: "text.magnifyingglass",
+            .init(id: "leaf-mem-injectkeyword", title: "关键词命中", subtitle: "记忆 › 回想", systemImage: "text.magnifyingglass",
                   tab: .memory, keywords: ["关键词", "keyword", "match"],
                   anchor: "leaf-mem-injectkeyword"),
-            .init(id: "leaf-mem-injectvector", title: "按意思找记忆", subtitle: "记忆 › 检索", systemImage: "point.3.filled.connected.trianglepath.dotted",
+            .init(id: "leaf-mem-injectvector", title: "按意思找记忆", subtitle: "记忆 › 回想", systemImage: "point.3.filled.connected.trianglepath.dotted",
                   tab: .memory, keywords: ["向量检索", "向量语义", "语义", "按意思", "embedding", "vector", "semantic"],
                   anchor: "leaf-mem-injectvector"),
-            .init(id: "leaf-mem-injectgraph", title: "关联扩展", subtitle: "记忆 › 检索", systemImage: "circle.hexagonpath",
+            .init(id: "leaf-mem-injectgraph", title: "关联扩展", subtitle: "记忆 › 回想", systemImage: "circle.hexagonpath",
                   tab: .memory, keywords: ["关联", "图谱", "graph", "related"],
                   anchor: "leaf-mem-injectgraph"),
-            .init(id: "leaf-mem-convhistory", title: "对话历史搜索", subtitle: "记忆 › 检索", systemImage: "clock.arrow.circlepath",
+            .init(id: "leaf-mem-convhistory", title: "对话历史搜索", subtitle: "记忆 › 回想", systemImage: "clock.arrow.circlepath",
                   tab: .memory, keywords: ["搜索旧对话", "历史", "history", "search"],
                   anchor: "leaf-mem-convhistory"),
+            .init(id: "leaf-mem-recall", title: "想起来了", subtitle: "记忆 › 回想", systemImage: "rectangle.compress.vertical",
+                  tab: .memory, keywords: ["原地", "弹出", "隐藏", "recall", "disclosure"], anchor: "leaf-mem-recall"),
+            .init(id: "page-mem-archivetrigger", title: "档案触发", subtitle: "记忆 › 回想", systemImage: "archivebox",
+                  tab: .memory, keywords: ["自动想起", "聊到才带", "archive", "trigger"], anchor: "page-mem-archivetrigger"),
+            .init(id: "page-mem-recallbrowse", title: "翻记忆", subtitle: "记忆 › 回想", systemImage: "book",
+                  tab: .memory, keywords: ["对话历史搜索", "翻旧对话", "recall", "browse"], anchor: "page-mem-recallbrowse"),
+            .init(id: "leaf-mem-archivetrigger", title: "档案触发", subtitle: "记忆 › 回想", systemImage: "archivebox",
+                  tab: .memory, keywords: ["总闸", "自动想起", "archive", "trigger"], anchor: "leaf-mem-archivetrigger"),
+            .init(id: "leaf-mem-maximumpages", title: "一轮最多几页", subtitle: "记忆 › 回想", systemImage: "doc.on.doc",
+                  tab: .memory, keywords: ["页数", "上限", "maximum", "pages"], anchor: "leaf-mem-maximumpages"),
+            .init(id: "leaf-mem-cooldown", title: "冷却", subtitle: "记忆 › 回想", systemImage: "pause.circle",
+                  tab: .memory, keywords: ["停几句", "没接茬", "cooldown", "turns"], anchor: "leaf-mem-cooldown"),
+            .init(id: "leaf-mem-rootindex", title: "档案根索引", subtitle: "记忆 › 开窗口带什么", systemImage: "list.bullet",
+                  tab: .memory, keywords: ["档案目录", "每轮都带", "root", "index"], anchor: "leaf-mem-rootindex"),
+            .init(id: "leaf-mem-previouswindow", title: "上一个窗口最后几条", subtitle: "记忆 › 开窗口带什么", systemImage: "clock",
+                  tab: .memory, keywords: ["上窗", "快照", "previous", "window"], anchor: "leaf-mem-previouswindow"),
+            .init(id: "leaf-mem-pinned", title: "钉住的", subtitle: "记忆 › 开窗口带什么", systemImage: "pin",
+                  tab: .memory, keywords: ["钉住", "常驻", "pinned", "stable"], anchor: "leaf-mem-pinned"),
+            .init(id: "leaf-mem-opennote", title: "新开窗口先弹纸条", subtitle: "记忆 › 开窗口带什么", systemImage: "note.text",
+                  tab: .memory, keywords: ["新窗口", "纸条", "窗口透视", "token", "open", "note"], anchor: "leaf-mem-opennote"),
+            .init(id: "leaf-mem-fulltextfallback", title: "页名没对上时搜全文", subtitle: "记忆 › 回想 › 档案触发", systemImage: "doc.text.magnifyingglass",
+                  tab: .memory, keywords: ["一句话最多取几个词", "命中至少几个词", "分量覆盖", "fulltext", "fallback"], anchor: "leaf-mem-fulltextfallback"),
+            .init(id: "leaf-mem-readcharacters", title: "正文最多几个字 3000 · 连目录一共最多几个字 4000", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "textformat",
+                  tab: .memory, keywords: ["字数", "回包", "body", "characters"], anchor: "leaf-mem-readcharacters"),
+            .init(id: "leaf-mem-datepage", title: "时间轴：一页 1 天 · 最多 12 件事", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "calendar",
+                  tab: .memory, keywords: ["时间轴", "分页", "date", "page"], anchor: "leaf-mem-datepage"),
+            .init(id: "leaf-mem-windowpage", title: "窗口总结：一页 10 段", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "rectangle.stack",
+                  tab: .memory, keywords: ["总结", "分页", "window", "segments"], anchor: "leaf-mem-windowpage"),
+            .init(id: "leaf-mem-searchpage", title: "搜索：一页 5 条", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "magnifyingglass",
+                  tab: .memory, keywords: ["结果", "分页", "search", "results"], anchor: "leaf-mem-searchpage"),
+            .init(id: "leaf-mem-wikipage", title: "档案目录：一页 30 行 · 档案页记录：一页 10 条", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "list.bullet.rectangle",
+                  tab: .memory, keywords: ["档案", "记录", "wiki", "records"], anchor: "leaf-mem-wikipage"),
+            .init(id: "leaf-mem-originalpage", title: "原文：一页 8 条消息", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "text.bubble",
+                  tab: .memory, keywords: ["原文", "消息", "original", "messages"], anchor: "leaf-mem-originalpage"),
+            .init(id: "leaf-mem-archivereset", title: "恢复本楼层默认", subtitle: "记忆 › 回想 › 档案触发", systemImage: "arrow.counterclockwise",
+                  tab: .memory, keywords: ["恢复", "楼层", "reset", "defaults"], anchor: "leaf-mem-archivereset"),
+            .init(id: "leaf-mem-browsereset", title: "恢复本楼层默认", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "arrow.counterclockwise",
+                  tab: .memory, keywords: ["恢复", "楼层", "reset", "defaults"], anchor: "leaf-mem-browsereset"),
             // 「手动添加记忆」的输入框在 macOS 的 MacMemoryEntriesSections（MemorySettingsPage.swift），
             // iOS 记忆页上没有这一块 → 无锚点
             .init(id: "leaf-mem-add", title: "手动添加记忆", subtitle: "记忆 › 条目管理", systemImage: "plus.circle",
                   tab: .memory, keywords: ["添加", "手动", "add", "memory"]),
         ]
+        let fields: [RecallTuning.Field] = [.minimumEffectiveLength, .minimumSharedTerms, .activeOverlapThreshold, .cooldownTurns,
+            .identityLookbackMessages, .minimumHanTermLength, .minimumLatinTermLength, .maximumRecallCalls]
+        return entries + fields.map { field in
+                let id = "leaf-mem-tuning-\(field.rawValue)"
+                return .init(id: id, title: field.title, subtitle: "记忆 › 回想 › \(field.page.rawValue)",
+                             systemImage: "slider.horizontal.3", tab: .memory,
+                             keywords: [field.group, field.explanation, field.rawValue, "recall", "tuning"], anchor: id)
+            }
     }
 
     // MARK: 叶子 · 数据与备份 / config
@@ -801,7 +891,7 @@ extension SettingsSearchEntry {
 
     // MARK: 叶子 · Claude Code / Codex / Agent / 终端 / MCP
 
-    private static var myComputerPage: String { SettingsView.SettingsTab.myComputer.rawValue }
+    private static var myComputerPage: String { toolSettings("终端 App › 我的电脑", mac: SettingsView.SettingsTab.myComputer.rawValue) }
 
     /// 配对那一行在两端的界面原文不同：Mac「配对手机」（出二维码）/ iOS「扫码配对」
     private static var pairLeafTitle: String {
@@ -827,28 +917,35 @@ extension SettingsSearchEntry {
                   tab: .myComputer, keywords: ["配对", "扫码", "二维码", "手机", "pairing", "qr"]),
             .init(id: "leaf-mycomputer-workdir", title: "Agent 干活的目录", subtitle: "\(myComputerPage) › Agent 干活的目录",
                   systemImage: "folder", tab: .myComputer, keywords: ["工作目录", "干活目录", "项目", "文件夹", "workdir", "folder", "directory"]),
-            .init(id: "leaf-cc-pushcontent", title: "推送内容", subtitle: "Claude Code › 推送通知", systemImage: "bell.badge",
+            // 多台电脑（plan-multi-hub B4.3 / B4.5）：我的电脑页顶上的电脑列表，iOS 才有
+            .init(id: "leaf-mycomputer-hubs", title: "电脑", subtitle: "\(myComputerPage) › 电脑", systemImage: "desktopcomputer",
+                  tab: .myComputer, keywords: ["电脑列表", "多台电脑", "第二台", "hub", "hubs", "computers"]),
+            .init(id: "leaf-mycomputer-addhub", title: "再接一台电脑…", subtitle: "\(myComputerPage) › 电脑", systemImage: "plus",
+                  tab: .myComputer, keywords: ["添加电脑", "加电脑", "再接一台", "新电脑", "第二台电脑", "扫码", "hub", "add computer"]),
+            .init(id: "leaf-mycomputer-managehub", title: "管理这台", subtitle: "\(myComputerPage) › 电脑 › 点一台", systemImage: "slider.horizontal.3",
+                  tab: .myComputer, keywords: ["管理电脑", "改名", "删除电脑", "重新扫码", "换口令", "换地址", "hub", "manage computer"]),
+            .init(id: "leaf-cc-pushcontent", title: "推送内容", subtitle: "\(ccPage) › 推送通知", systemImage: "bell.badge",
                   tab: .claudeCode, keywords: ["推送", "通知", "预览", "push", "notification"],
                   anchor: "leaf-cc-pushcontent"),
-            .init(id: "leaf-cc-nudge", title: "让 AI 主动找我", subtitle: "Claude Code › 主动找我", systemImage: "bell.and.waves.left.and.right",
+            .init(id: "leaf-cc-nudge", title: "让 AI 主动找我", subtitle: "\(ccPage) › 主动找我", systemImage: "bell.and.waves.left.and.right",
                   tab: .claudeCode, keywords: ["主动", "打扰", "nudge", "proactive"],
                   anchor: "leaf-cc-nudge"),
-            .init(id: "leaf-cc-quiet", title: "休眠时段", subtitle: "Claude Code › 主动找我", systemImage: "moon.zzz",
+            .init(id: "leaf-cc-quiet", title: "休眠时段", subtitle: "\(ccPage) › 主动找我", systemImage: "moon.zzz",
                   tab: .claudeCode, keywords: ["免打扰", "休眠", "quiet", "dnd"],
                   anchor: "leaf-cc-quiet"),
-            .init(id: "leaf-cc-stream", title: "新会话不带终端", subtitle: "Claude Code › 会话传输", systemImage: "rectangle.dashed",
+            .init(id: "leaf-cc-stream", title: "新会话不带终端", subtitle: "\(ccPage) › 会话传输", systemImage: "rectangle.dashed",
                   tab: .claudeCode, keywords: ["终端", "stream", "无终端", "传输", "headless"],
                   anchor: "leaf-cc-stream"),
-            .init(id: "leaf-cc-thinking", title: "显示思考过程", subtitle: "Claude Code › 思考与存档", systemImage: "brain.head.profile",
+            .init(id: "leaf-cc-thinking", title: "显示思考过程", subtitle: "\(ccPage) › 思考与存档", systemImage: "brain.head.profile",
                   tab: .claudeCode, keywords: ["思考", "thinking", "reasoning", "链"],
                   anchor: "leaf-cc-thinking"),
             // 保留时长的 Picker 只在 macOS 分支（CCSettingsView.swift:525 `#if os(macOS)`），iOS 上没这行 → 不给锚点
-            .init(id: "leaf-cc-retention", title: "对话保留时长", subtitle: "Claude Code › 思考与存档", systemImage: "calendar.badge.clock",
+            .init(id: "leaf-cc-retention", title: "对话保留时长", subtitle: "\(ccPage) › 思考与存档", systemImage: "calendar.badge.clock",
                   tab: .claudeCode, keywords: ["保留", "存档", "retention", "archive"]),
-            .init(id: "leaf-cc-pocket", title: "允许 CC 遥控内置浏览器", subtitle: "Claude Code › 遥控浏览器", systemImage: "safari",
+            .init(id: "leaf-cc-pocket", title: "允许 CC 遥控内置浏览器", subtitle: "\(ccPage) › 遥控浏览器", systemImage: "safari",
                   tab: .claudeCode, keywords: ["浏览器", "遥控", "browser", "pocket"],
                   anchor: "leaf-cc-pocket"),
-            .init(id: "leaf-codex-connect", title: "连接", subtitle: "Codex › 连接", systemImage: "link",
+            .init(id: "leaf-codex-connect", title: "连接", subtitle: "\(codexPage) › 连接", systemImage: "link",
                   tab: .codex, keywords: ["扫码", "配对", "connect", "pairing"]),
             .init(id: "leaf-agent-enable", title: "启用自主任务", subtitle: "Agent › 自主任务", systemImage: "ri-robot-2",
                   tab: .agent, keywords: ["自主", "自动", "autonomy", "task"]),
@@ -858,13 +955,13 @@ extension SettingsSearchEntry {
                   tab: .agent, keywords: ["每日预算", "上限", "暂停", "budget", "limit"]),
             .init(id: "leaf-agent-activity", title: "最近活动", subtitle: "Agent › 最近活动", systemImage: "list.bullet.clipboard",
                   tab: .agent, keywords: ["日志", "活动", "activity", "log"]),
-            .init(id: "leaf-terminal-layout", title: "按键布局", subtitle: "终端 › 按键布局", systemImage: "keyboard",
+            .init(id: "leaf-terminal-layout", title: "按键布局", subtitle: "\(terminalPage) › 按键布局", systemImage: "keyboard",
                   tab: .terminal, keywords: ["快捷键", "按键", "工具条", "主行", "抽屉", "拖动", "key", "keyboard", "layout", "toolbar"]),
-            .init(id: "leaf-terminal-drawer", title: "抽屉", subtitle: "终端 › 抽屉", systemImage: "tray",
+            .init(id: "leaf-terminal-drawer", title: "抽屉", subtitle: "\(terminalPage) › 抽屉", systemImage: "tray",
                   tab: .terminal, keywords: ["抽屉", "行数", "展开方式", "叠加", "轮换", "drawer", "stack", "cycle"]),
-            .init(id: "leaf-terminal-custom", title: "自定义键", subtitle: "终端 › 自定义键", systemImage: "plus.rectangle.on.rectangle",
+            .init(id: "leaf-terminal-custom", title: "自定义键", subtitle: "\(terminalPage) › 自定义键", systemImage: "plus.rectangle.on.rectangle",
                   tab: .terminal, keywords: ["加键", "自定义", "宏", "序列", "组合键", "custom", "macro", "sequence"]),
-            .init(id: "leaf-terminal-reset", title: "恢复默认布局", subtitle: "终端 › 恢复默认", systemImage: "arrow.counterclockwise",
+            .init(id: "leaf-terminal-reset", title: "恢复默认布局", subtitle: "\(terminalPage) › 恢复默认", systemImage: "arrow.counterclockwise",
                   tab: .terminal, keywords: ["恢复", "重置", "reset", "default"]),
             .init(id: "leaf-mcp-master", title: "启用工具调用总开关", subtitle: "MCP › 工具", systemImage: "wrench.and.screwdriver",
                   tab: .mcp, keywords: ["工具", "总开关", "tool", "master"]),
@@ -885,6 +982,8 @@ extension SettingsSearchEntry {
                   tab: .sticker, keywords: ["导入贴纸包", "导出贴纸包", "sticker pack", "export"]),
             .init(id: "leaf-sticker-brush", title: "画笔", subtitle: "贴纸 › 画笔", systemImage: "paintbrush.pointed",
                   tab: .sticker, keywords: ["画画", "笔刷", "水彩", "钢笔", "颜色", "纸", "brush", "watercolor", "pen", "color"]),
+            .init(id: "leaf-sticker-meme", title: "AI 看原图", subtitle: "贴纸 › 表情包", systemImage: "face.smiling",
+                  tab: .sticker, keywords: ["表情包", "原图", "看图", "meme", "sticker", "vision"]),
             .init(id: "leaf-sticker-note", title: "便利贴", subtitle: "贴纸 › 便利贴", systemImage: "note.text",
                   tab: .sticker, keywords: ["便签", "便利贴", "字体", "手写", "note", "sticky", "font"]),
             .init(id: "leaf-health-connect", title: "连接", subtitle: "健康 › 连接", systemImage: "heart.circle",
@@ -899,13 +998,13 @@ extension SettingsSearchEntry {
                   tab: .health, keywords: ["亲密", "intimacy"]),
             .init(id: "leaf-health-macro", title: "怎么用", subtitle: "健康 › 怎么用", systemImage: "text.badge.plus",
                   tab: .health, keywords: ["宏", "占位符", "macro", "health"]),
-            .init(id: "leaf-calendar-look", title: "页面样子", subtitle: "日历 › 月历", systemImage: "rectangle.on.rectangle",
+            .init(id: "leaf-calendar-look", title: "页面样子", subtitle: "\(calendarPage) › 月历", systemImage: "rectangle.on.rectangle",
                   tab: .calendar, keywords: ["纸", "iOS", "样子", "外观", "look", "paper", "ios"]),
-            .init(id: "leaf-calendar-style", title: "月历样子", subtitle: "日历 › 月历", systemImage: "square.grid.3x3",
+            .init(id: "leaf-calendar-style", title: "月历样子", subtitle: "\(calendarPage) › 月历", systemImage: "square.grid.3x3",
                   tab: .calendar, keywords: ["铅笔纸", "星孔卡片", "外卡颜色", "小点", "涂深", "pencil", "card"]),
-            .init(id: "leaf-calendar-privacy", title: "能看到我的日记", subtitle: "日历 › 日记与纪念日", systemImage: "eye",
+            .init(id: "leaf-calendar-privacy", title: "能看到我的日记", subtitle: "\(calendarPage) › 日记与纪念日", systemImage: "eye",
                   tab: .calendar, keywords: ["日记", "隐私", "可见", "注入", "纪念日", "journal", "privacy", "ai"]),
-            .init(id: "leaf-calendar-rebuild", title: "重新统计聊天", subtitle: "日历 › 统计", systemImage: "arrow.clockwise",
+            .init(id: "leaf-calendar-rebuild", title: "重新统计聊天", subtitle: "\(calendarPage) › 统计", systemImage: "arrow.clockwise",
                   tab: .calendar, keywords: ["统计", "重建", "热力图", "rebuild", "stats"]),
         ]
         #if PERSONAL_APPS
@@ -916,30 +1015,30 @@ extension SettingsSearchEntry {
                   tab: .trading, keywords: ["关注", "自选", "watchlist"]),
             .init(id: "leaf-trading-visible", title: "AI 会看到", subtitle: "交易 › AI 会看到", systemImage: "eye",
                   tab: .trading, keywords: ["持仓", "可见", "visible", "portfolio"]),
-            .init(id: "leaf-vocab-archeology", title: "考古用", subtitle: "单词 › 考古", systemImage: "scroll",
+            .init(id: "leaf-vocab-archeology", title: "考古用", subtitle: "\(vocabPage) › 考古", systemImage: "scroll",
                   tab: .vocab, keywords: ["考古", "词源", "claude", "archeology"],
                   anchor: "leaf-vocab-archeology"),
         ]
         #endif
         entries += [
-            .init(id: "leaf-reading-model", title: "当前读书模型", subtitle: "书房 › AI 读书", systemImage: "book",
+            .init(id: "leaf-reading-model", title: "当前读书模型", subtitle: "\(readingPage) › AI 读书", systemImage: "book",
                   tab: .reading, keywords: ["读书", "模型", "reading", "model"]),
-            .init(id: "leaf-vocab-order", title: "出词顺序", subtitle: "单词 › 出词顺序", systemImage: "shuffle",
+            .init(id: "leaf-vocab-order", title: "出词顺序", subtitle: "\(vocabPage) › 出词顺序", systemImage: "shuffle",
                   tab: .vocab, keywords: ["随机", "顺序", "order", "shuffle"],
                   anchor: "leaf-vocab-order"),
-            .init(id: "leaf-vocab-review", title: "复习", subtitle: "单词 › 复习", systemImage: "arrow.triangle.2.circlepath",
+            .init(id: "leaf-vocab-review", title: "复习", subtitle: "\(vocabPage) › 复习", systemImage: "arrow.triangle.2.circlepath",
                   tab: .vocab, keywords: ["复习", "sm2", "review"],
                   anchor: "leaf-vocab-review"),
-            .init(id: "leaf-vocab-newquota", title: "每日新卡", subtitle: "单词 › 复习", systemImage: "plus.rectangle.on.folder",
+            .init(id: "leaf-vocab-newquota", title: "每日新卡", subtitle: "\(vocabPage) › 复习", systemImage: "plus.rectangle.on.folder",
                   tab: .vocab, keywords: ["新卡", "配额", "daily new"],
                   anchor: "leaf-vocab-newquota"),
-            .init(id: "leaf-vocab-cap", title: "每日复习上限", subtitle: "单词 › 复习", systemImage: "gauge.with.dots.needle.bottom.50percent",
+            .init(id: "leaf-vocab-cap", title: "每日复习上限", subtitle: "\(vocabPage) › 复习", systemImage: "gauge.with.dots.needle.bottom.50percent",
                   tab: .vocab, keywords: ["上限", "复习量", "daily cap"],
                   anchor: "leaf-vocab-cap"),
-            .init(id: "leaf-vocab-collect", title: "划词收词进复习", subtitle: "单词 › 复习", systemImage: "hand.tap",
+            .init(id: "leaf-vocab-collect", title: "划词收词进复习", subtitle: "\(vocabPage) › 复习", systemImage: "hand.tap",
                   tab: .vocab, keywords: ["划词", "收词", "collect", "highlight"],
                   anchor: "leaf-vocab-collect"),
-            .init(id: "leaf-vocab-template", title: "模板", subtitle: "单词 › 模板", systemImage: "doc.plaintext",
+            .init(id: "leaf-vocab-template", title: "模板", subtitle: "\(vocabPage) › 模板", systemImage: "doc.plaintext",
                   tab: .vocab, keywords: ["模板", "占位符", "template", "placeholder"],
                   anchor: "leaf-vocab-template"),
             .init(id: "leaf-groupchat-enable", title: "群聊（中庭）", subtitle: "群聊", systemImage: "person.2",
@@ -948,12 +1047,12 @@ extension SettingsSearchEntry {
                   tab: .groupChat, keywords: ["发言", "轮流", "speech mode"]),
             .init(id: "leaf-groupchat-pace", title: "AI 发言节奏", subtitle: "群聊", systemImage: "metronome",
                   tab: .groupChat, keywords: ["节奏", "间隔", "pace", "interval"]),
-            .init(id: "leaf-rightpanel-style", title: "桌面样式", subtitle: "右栏 › 桌面样式", systemImage: "square.grid.2x2",
+            .init(id: "leaf-rightpanel-style", title: "桌面样式", subtitle: rightPanelTitle + " › 桌面样式", systemImage: "square.grid.2x2",
                   tab: .rightPanel, keywords: ["手机主屏", "自由摆放", "iOS 26", "经典", "针脚点阵", "desktop", "style"]),
-            .init(id: "leaf-rightpanel-switcher", title: "切换应用", subtitle: "右栏 › 切换应用", systemImage: "rectangle.righthalf.inset.filled",
+            .init(id: "leaf-rightpanel-switcher", title: "切换应用", subtitle: rightPanelTitle + " › 切换应用", systemImage: "rectangle.righthalf.inset.filled",
                   tab: .rightPanel, keywords: ["竖条", "弧线", "后台", "回桌面", "切换", "app switcher", "strip", "arc"]),
-            .init(id: "leaf-rightpanel-tools", title: "工具管理", subtitle: "右栏 › 工具管理", systemImage: "slider.horizontal.3",
-                  tab: .rightPanel, keywords: ["工具", "小组件", "管理", "tool", "widget"])
+            .init(id: "leaf-rightpanel-tools", title: "工具管理", subtitle: toolSettings("gardenOS 设置 › 默认", mac: "右栏 › 工具管理"), systemImage: "slider.horizontal.3",
+                  tab: .rightPanel, keywords: ["工具", "小组件", "管理", "默认", "按人", "装", "卸", "单独改了", "主屏上的 App", "tool", "widget", "install"])
         ]
         return entries
     }
@@ -965,9 +1064,6 @@ extension SettingsSearchEntry {
             .init(id: "leaf-file-enable", title: "启用文件库", subtitle: "文件库", systemImage: "folder",
                   tab: .fileLibrary, keywords: ["文件库", "档位", "file library"],
                   anchor: "leaf-file-enable"),
-            .init(id: "leaf-file-ccmemory", title: "同步 CC 的记忆", subtitle: "文件库", systemImage: "arrow.triangle.2.circlepath",
-                  tab: .fileLibrary, keywords: ["CC", "Claude Code", "同步", "memory", "sync"],
-                  anchor: "leaf-file-ccmemory"),
             .init(id: "leaf-file-compress", title: "聊天图片压缩入库", subtitle: "文件库", systemImage: "photo.badge.arrow.down",
                   tab: .fileLibrary, keywords: ["图片", "压缩", "入库", "compress", "image"],
                   anchor: "leaf-file-compress"),
@@ -983,9 +1079,9 @@ extension SettingsSearchEntry {
             .init(id: "leaf-file-injecttemplate", title: "注入提示词模板", subtitle: "文件库", systemImage: "text.quote",
                   tab: .fileLibrary, keywords: ["注入", "模板", "prompt", "template"],
                   anchor: "leaf-file-injecttemplate"),
-            .init(id: "leaf-sandbox-open-terminal", title: "打开终端", subtitle: "手机里的小电脑", systemImage: "apple.terminal",
+            .init(id: "leaf-sandbox-open-terminal", title: "打开终端", subtitle: sandboxPage, systemImage: "apple.terminal",
                   tab: .sandbox, keywords: ["终端", "小电脑终端", "离线终端", "shell", "linux", "ish", "terminal"]),
-            .init(id: "leaf-sandbox-status", title: "状态", subtitle: "手机里的小电脑 › 状态", systemImage: "info.circle",
+            .init(id: "leaf-sandbox-status", title: "状态", subtitle: "\(sandboxPage) › 状态", systemImage: "info.circle",
                   tab: .sandbox, keywords: ["沙箱状态", "小电脑状态", "rootfs", "ish", "status", "sandbox"]),
             .init(id: "leaf-sandbox-reset", title: "重置小电脑", subtitle: "手机里的小电脑", systemImage: "arrow.counterclockwise",
                   tab: .sandbox, keywords: ["重置", "清空", "重置沙箱", "沙箱", "reset", "sandbox"]),
@@ -1037,6 +1133,9 @@ extension SettingsSearchEntry {
         entries.append(.init(id: "leaf-debug-airprobe", title: "翻页探针", subtitle: "开发调试", systemImage: "waveform.path",
                              tab: .debug, keywords: ["翻页", "滚动", "卡顿", "性能", "Air", "perf", "probe"],
                              anchor: "leaf-debug-airprobe"))
+        entries.append(.init(id: "leaf-debug-stall-sentinel", title: "卡顿哨兵", subtitle: "开发调试", systemImage: "waveform.path",
+                             tab: .debug, keywords: ["卡顿", "卡死", "哨兵", "性能", "主线程", "hang", "stall", "sentinel"],
+                             anchor: "leaf-debug-stall-sentinel"))
         #endif
         // release 里这个 Toggle 不存在（DebugSettingsTab.swift:13 被 #if DEBUG 包），注册表同步
         entries.append(
@@ -1065,19 +1164,25 @@ extension SettingsSearchEntry {
             id: "leaf-perm-secrets", title: "加密值", subtitle: "权限 › 加密值", systemImage: "lock",
             tab: .permissions, keywords: ["加密值", "密码", "secret", "钥匙串", "keychain"], anchor: "leaf-perm-secrets"
         )
+        // 系统权限节（atrium「我 → 系统授权」也单开一页复用它，plan-atrium P2）
+        let system = SettingsSearchEntry(
+            id: "leaf-perm-system", title: "系统授权", subtitle: "权限 › 系统权限", systemImage: "checkmark.shield",
+            tab: .permissions, keywords: ["系统权限", "前往系统设置", "相机", "麦克风", "照片", "通知", "system", "authorization"]
+        )
         let domains: [SettingsSearchEntry] = PermissionDomain.allCases.map { domain in
             .init(
                 id: "leaf-perm-\(domain.rawValue)",
                 title: domain.displayName,
-                subtitle: "权限 › \(permissionSectionTitle(domain))",
+                // atrium P3⑤a：这页是默认；按人改在人页（mac 页顶切「这一层」）
+                subtitle: "权限（默认）› \(permissionSectionTitle(domain))",
                 systemImage: "lock.shield",
                 tab: .permissions,
                 // summary 进 keywords：搜「步数」「剪贴板」这种词能命中对应域
-                keywords: [domain.summary, domain.rawValue],
+                keywords: [domain.summary, domain.rawValue, "默认", "按人", "单独"],
                 anchor: hasPermissionRowOnPage(domain) ? "leaf-perm-\(domain.rawValue)" : nil
             )
         }
-        return [secrets] + domains
+        return [secrets, system] + domains
     }
 
     /// 健康五个子域的行在 `HealthPermissionSubpage`（权限页上只有一条「健康」入口），
@@ -1112,7 +1217,7 @@ extension SettingsSearchEntry {
             return "AI 能看什么"
         #endif
         case .toolsMaster, .webSearch, .voiceProactive, .pocket,
-             .calendar, .reminders, .clipboard, .shell, .twitter:
+             .calendar, .reminders, .clipboard, .shell, .twitter, .browserOperate:
             return "AI 能做什么"
         case .notifications:
             return "AI 自主行为"
@@ -1135,5 +1240,43 @@ extension SettingsSearchEntry {
             .init(id: "todo-mount", title: "挂载和共享文件夹", subtitle: "储存与文件 · 敬请期待", systemImage: "folder.badge.plus",
                   tab: nil, keywords: ["挂载", "共享", "文件夹", "mount", "share", "folder"])
         ]
+    }
+}
+
+// MARK: - 工具设置在哪个 App 里
+
+extension SettingsSearchEntry {
+    /// atrium P4-0：App 里有自己 ⚙ 的工具，iOS 副标题写「在哪个 App 里」（落点仍是设置里这一页）；mac 原样
+    private static func toolSettings(_ iOS: String, mac: String) -> String {
+        #if os(iOS)
+        iOS
+        #else
+        mac
+        #endif
+    }
+
+    private static var calendarPage: String { toolSettings("日历 App", mac: "日历") }
+    private static var terminalPage: String { toolSettings("终端 App", mac: "终端") }
+    private static var readingPage: String { toolSettings("书房 App", mac: "书房") }
+    private static var vocabPage: String { toolSettings("单词 App", mac: "单词") }
+    private static var xiaoyaPage: String { toolSettings("小芽 App", mac: "小芽") }
+    private static var ccPage: String { toolSettings("终端 App › Claude Code", mac: "Claude Code") }
+    private static var codexPage: String { toolSettings("终端 App › Codex", mac: "Codex") }
+    private static var sandboxPage: String { toolSettings("终端 App › 小电脑状态", mac: "手机里的小电脑") }
+
+    /// atrium P4-a：iOS「右栏」那页换成 gardenOS 设置（主屏「设置」App 同一页）；mac 仍是「右栏」
+    private static var rightPanelTitle: String { toolSettings("gardenOS 设置", mac: "右栏") }
+    private static var gardenOSKeywords: [String] {
+        #if os(iOS)
+        ["gardenOS", "主屏", "设置 App", "Dock", "壁纸", "图标"]
+        #else
+        []
+        #endif
+    }
+
+    /// atrium P4-b：设置 App 里「壁纸与图标 ›」（开主屏外观 sheet，落点是 gardenOS 设置那页）。只 iOS 用
+    private static var gardenOSLeaves: [SettingsSearchEntry] {
+        [.init(id: "leaf-gardenos-wallpaper", title: "壁纸与图标", subtitle: "gardenOS 设置", systemImage: "photo.on.rectangle",
+               tab: .rightPanel, keywords: ["壁纸", "图标", "大图标", "图标外观", "主屏外观", "所有人共用", "wallpaper", "icon"])]
     }
 }

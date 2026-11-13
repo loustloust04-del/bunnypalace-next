@@ -128,6 +128,9 @@ final class Page2AppHostingController<Root: View>: UIHostingController<Root> {
     override func viewSafeAreaInsetsDidChange() {
         super.viewSafeAreaInsetsDidChange()
         pinTop()
+        #if DEBUG
+        Page2DesktopProbe.shared.safeAreaChanged(view)
+        #endif
     }
     private func pinTop() {
         guard let window = view.window else { return }

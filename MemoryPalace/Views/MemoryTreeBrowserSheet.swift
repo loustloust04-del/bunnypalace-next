@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 
 // MARK: - 楼层记忆树浏览（文件库首页「记忆」+ 设置里「查看同步过来的文件」共用）
@@ -91,7 +92,7 @@ struct MemoryTreeBrowserSheet: View {
         #endif
         groups = MemoryTreeGroup.group(FileLibraryMemoryFolder.visible(FileLibraryStore.memoryList(profileId: profileId)), onlyFolder: onlyFolder)
         // 活着的在前（新→旧），已失效的放最后
-        let all = onlyFolder == nil ? SelfMemoryStore.list(profileId: profileId) : []
+        let all = onlyFolder == nil ? SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked) : []
         selfMemories = all.filter(\.isActive) + all.filter { !$0.isActive }
     }
 }
@@ -142,15 +143,11 @@ private struct MemoryTreeFileView: View {
     @State private var text = ""
 
     var body: some View {
-        ScrollView {
-            Text(text)
-                .font(.system(size: Theme.F.body))
-                .foregroundColor(Theme.textPrimary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(16)
-        }
-        .background(Theme.sidebarBg)
+        LongTextView(text: text, fontSize: Theme.F.body, monospaced: false)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .background(Theme.sidebarBg)
         .navigationTitle(String(path.split(separator: "/").last ?? ""))
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -275,7 +272,7 @@ struct SelfMemoryEditView: View {
     }
 
     private func load() {
-        guard let m = SelfMemoryStore.list(profileId: profileId).first(where: { $0.slug == slug }) else { memory = nil; return }
+        guard let m = SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked).first(where: { $0.slug == slug }) else { memory = nil; return }
         memory = m
         descriptionText = m.description
         type = m.type
@@ -286,7 +283,7 @@ struct SelfMemoryEditView: View {
     @discardableResult
     private func write(_ m: SelfMemory) -> Bool {
         do {
-            try SelfMemoryStore.save(m, profileId: profileId)
+            try SelfMemoryStore.save(m, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked)
             saveError = nil
             memory = m
             onChange()

@@ -77,10 +77,11 @@ final class ConfigEncryptedExportTests: XCTestCase {
         XCTAssertEqual((header["nonce"] as? String).flatMap { Data(base64Encoded: $0) }?.count, 12)
 
         let dst = makeDefaults()
+        dst.set("当前楼层用户", forKey: "userName")
         let dstStore = MemorySecretStore()
         let result = try ConfigImporter.importAll(data, passphrase: pass, defaults: dst, secrets: dstStore)
 
-        XCTAssertEqual(dst.string(forKey: "userName"), "小禾")
+        XCTAssertEqual(dst.string(forKey: "userName"), "当前楼层用户")
         XCTAssertNotNil(dst.data(forKey: "credentials"))
         XCTAssertEqual(dstStore.items, [
             "cred-a": "sk-secret-a",
@@ -181,6 +182,94 @@ final class ConfigEncryptedExportTests: XCTestCase {
         XCTAssertFalse(String(decoding: plain, as: UTF8.self).contains("refreshToken"))
     }
 
+    // MARK: - hub 配对是每台设备自己的（plan-multi-hub B-pre）
+
+    private let pairingKeys = [CCBridgeEndpoints.overrideKey, CCBridgeEndpoints.backupKey,
+                               CCBridgeEndpoints.relayKey, CCBridgeEndpoints.relayPinKey]
+
+    func testExportOmitsPairingKeys() throws {
+        let (src, srcStore) = seedSource()
+        for key in pairingKeys { src.set("wss://other-hub.example/\(key)", forKey: key) }
+        src.set(true, forKey: "ccShowThinking")
+        let plain = String(decoding: ConfigExporter.exportAll(defaults: src), as: UTF8.self)
+        let sealed = try ConfigExporter.exportWithKeys(passphrase: pass, defaults: src, secrets: srcStore)
+        let unsealed = String(decoding: try ConfigCrypto.open(sealed, passphrase: pass), as: UTF8.self)
+        for text in [plain, unsealed] {
+            XCTAssertFalse(text.contains("other-hub.example"))
+            for key in pairingKeys { XCTAssertFalse(text.contains(key), "\(key) 不导出") }
+            XCTAssertTrue(text.contains("ccShowThinking"), "同段别的 CC 设置照常导出")
+        }
+    }
+
+    func testImportLeavesPairingKeysUntouched() throws {
+        // 老导出文件：claudeCode 段带着别的设备的配对地址
+        let legacy = """
+        {"schema_version": 1, "claudeCode": {"ccBridgeBaseURLOverride": "ws://10.9.9.9:8765/cc", "ccBridgeBaseURLBackup": "ws://10.9.9.8:8765/cc",
+         "ccBridgeRelayURL": "wss://evil-relay.example/cc", "ccBridgeRelayPin": "evil-pin", "ccShowThinking": true}}
+        """
+        let dst = makeDefaults()
+        dst.set("ws://192.168.1.2:8765/cc", forKey: CCBridgeEndpoints.overrideKey)
+        dst.set("wss://my-relay.example/cc", forKey: CCBridgeEndpoints.relayKey)
+        dst.set("my-pin", forKey: CCBridgeEndpoints.relayPinKey)
+        try ConfigImporter.importAll(Data(legacy.utf8), defaults: dst, secrets: MemorySecretStore())
+
+        XCTAssertEqual(dst.string(forKey: CCBridgeEndpoints.overrideKey), "ws://192.168.1.2:8765/cc")
+        XCTAssertNil(dst.object(forKey: CCBridgeEndpoints.backupKey), "本机没配的也不被导入补上")
+        XCTAssertEqual(dst.string(forKey: CCBridgeEndpoints.relayKey), "wss://my-relay.example/cc")
+        XCTAssertEqual(dst.string(forKey: CCBridgeEndpoints.relayPinKey), "my-pin")
+        XCTAssertEqual(dst.object(forKey: "ccShowThinking") as? Bool, true)
+    }
+
+    func testCollectSkipsHubAccounts() {
+        let d = makeDefaults()
+        // 被改过的卡表：hub 口令账户伪装成普通 API 卡
+        let creds: [[String: Any]] = [
+            ["id": "cred-a", "type": "openaiCompatible"],
+            ["id": HubTokenStore.keychainAccount, "type": "openaiCompatible"],
+            ["id": "cc-bridge-hub-token", "type": "anthropic"],
+            ["id": "cc-bridge.hub.vps", "type": "openaiCompatible"],
+        ]
+        d.set(try! JSONSerialization.data(withJSONObject: creds), forKey: "credentials")
+        let store = MemorySecretStore([
+            "cred-a": "sk-a",
+            HubTokenStore.keychainAccount: "hub-token",
+            "cc-bridge-hub-token": "hub-token-2",
+            "cc-bridge.hub.vps": "hub-token-3",
+            "voice.cc-bridge.hub.x": "voice-key",
+        ])
+        XCTAssertEqual(ConfigSecrets.collect(defaults: d, store: store),
+                       ["cred-a": "sk-a", "voice.cc-bridge.hub.x": "voice-key"])
+    }
+
+    func testRestoreSkipsHubAccounts() {
+        let store = MemorySecretStore([HubTokenStore.keychainAccount: "local-hub"])
+        let n = ConfigSecrets.restore([
+            "cred-a": "sk-a",
+            HubTokenStore.keychainAccount: "evil",
+            "cc-bridge-hub-token": "evil-2",
+            "cc-bridge.hub.vps": "evil-3",
+        ], into: store)
+        XCTAssertEqual(n, 1)
+        XCTAssertEqual(store.items, [HubTokenStore.keychainAccount: "local-hub", "cred-a": "sk-a"])
+    }
+
+    func testTokenQueryStrippedFromExportedURLs() throws {
+        let d = makeDefaults()
+        let creds: [[String: Any]] = [
+            ["id": "cc-bridge", "name": "CC", "emoji": "🧩", "type": "ccBridge",
+             "baseURL": "ws://10.0.0.2:8765/cc?token=hub-secret&bundle=x", "extraHeaders": [:], "models": [], "createdAt": 0],
+            ["id": "cred-a", "name": "A", "emoji": "🅰️", "type": "openaiCompatible",
+             "baseURL": "https://a.example/v1?token=only", "extraHeaders": [:], "models": [], "createdAt": 0],
+        ]
+        d.set(try JSONSerialization.data(withJSONObject: creds), forKey: "credentials")
+        d.set("提示里提到 token=abc 不是地址", forKey: "ccNudgeTemplate")
+        let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: ConfigExporter.exportAll(defaults: d)) as? [String: Any])
+        let cards = try XCTUnwrap((root["api"] as? [String: Any])?["credentials"] as? [[String: Any]])
+        XCTAssertEqual(cards[0]["baseURL"] as? String, "ws://10.0.0.2:8765/cc?bundle=x")
+        XCTAssertEqual(cards[1]["baseURL"] as? String, "https://a.example/v1")
+        XCTAssertEqual((root["claudeCode"] as? [String: Any])?["ccNudgeTemplate"] as? String, "提示里提到 token=abc 不是地址", "不是 URL 的字符串原样")
+    }
+
     // MARK: - 旧格式兼容
 
     func testPlainExportUnchangedAndImportsWithoutPassphrase() throws {
@@ -194,21 +283,24 @@ final class ConfigEncryptedExportTests: XCTestCase {
         _ = srcStore
 
         let dst = makeDefaults()
+        dst.set("当前楼层用户", forKey: "userName")
         let dstStore = MemorySecretStore(["cred-a": "local"])
         let result = try ConfigImporter.importAll(data, defaults: dst, secrets: dstStore)
-        XCTAssertEqual(dst.string(forKey: "userName"), "小禾")
+        XCTAssertEqual(dst.string(forKey: "userName"), "当前楼层用户")
         XCTAssertEqual(dstStore.items, ["cred-a": "local"], "明文导入不动 Keychain")
         XCTAssertEqual(result.restoredKeys, 0)
     }
 
     func testLegacyHandWrittenFileStillImports() throws {
         let legacy = """
-        {"schema_version": 1, "app_version": "MemoryPalace 1.0 (1)", "general": {"userName": "旧文件"},
+        {"schema_version": 1, "app_version": "MemoryPalace 1.0 (1)", "general": {"userName": "旧文件", "selectedFont": "旧字体"},
          "_excluded": {"keychain": "API key / OAuth token / CC Hub Token"}}
         """
         let dst = makeDefaults()
+        dst.set("当前楼层用户", forKey: "userName")
         try ConfigImporter.importAll(Data(legacy.utf8), defaults: dst, secrets: MemorySecretStore())
-        XCTAssertEqual(dst.string(forKey: "userName"), "旧文件")
+        XCTAssertEqual(dst.string(forKey: "userName"), "当前楼层用户")
+        XCTAssertEqual(dst.string(forKey: "selectedFont"), "旧字体")
     }
 
     /// 长文折叠已删：旧导出文件里残留的 appearance.expandAllMessages 静默忽略，不报错、不写回

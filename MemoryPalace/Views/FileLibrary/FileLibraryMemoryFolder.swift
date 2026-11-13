@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// 记忆树（memory/，虚拟路径）在文件库里当一个普通文件夹显示（第二刀验收返工，粟粟 10-10）：
@@ -56,16 +57,17 @@ enum FileLibraryMemoryFolder {
         return path.dropFirst(wikiFolder.count + 1).split(separator: "/").contains { $0.hasPrefix(".") }
     }
 
-    /// `memory/wiki/楼层/人/小慧.md` → `楼层/人/小慧`；INDEX.md / 隐藏的 / 不是页 → nil
+    /// `memory/wiki/人/小慧.md` → `人/小慧`；INDEX.md / 隐藏的 / 不是页 → nil
     static func wikiPagePath(_ path: String) -> String? {
         guard path.hasPrefix(wikiFolder + "/"), path.hasSuffix(".md") else { return nil }
         let page = String(path.dropFirst(wikiFolder.count + 1).dropLast(3))
         return WikiStore.isValidPagePath(page) ? page : nil
     }
 
-    /// memory/ 和它下一层子文件夹的中文名；别的路径 nil（走 FileLibraryFolderStyle）
-    static func displayName(_ path: String, assistantName: String) -> String? {
+    /// memory/ 和它下一层子文件夹的中文名、wiki 里本人那组（落盘 {{user}}）显示成用户名；别的路径 nil（走 FileLibraryFolderStyle）
+    static func displayName(_ path: String, assistantName: String, userName: String = "") -> String? {
         if path == root { return "记忆" }
+        if path == wikiFolder + "/" + WikiStore.userBranch { return WikiStore.userLabel(userName) }
         if path == selfFolder { return "\(assistantName)的记忆" }
         if path == runsFolder { return "整理记录" }
         if path == draftsFolder { return "模型原始输出" }

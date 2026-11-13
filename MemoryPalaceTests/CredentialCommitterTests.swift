@@ -74,6 +74,21 @@ final class CredentialCommitterTests: XCTestCase {
         XCTAssertEqual(card?.emoji, "🔑")
     }
 
+    /// 主 hub 口令只由 CCHubRegistry 的配对入口写一次（plan-multi-hub impl1 #10）：卡提交不再写 cc-bridge 第二遍，
+    /// 第二遍写失败（钥匙串先删后写）就删不掉第一遍刚存好的口令；Codex 本地卡的 key 照旧写
+    func testCCBridgeCardCommitDoesNotRewriteHubSecret() {
+        let fake = CCHubRegistryTests.FakeSecrets()
+        fake.values[HubTokenStore.keychainAccount] = "paired"
+        let pm = ProviderManager(keychain: fake)
+        fake.failWrites = true
+        let id = CredentialCommitter.commit(CredentialDraft(presetSelection: HubTokenStore.keychainAccount), key: "paired",
+                                            existing: nil, adopt: .none, providerManager: pm)
+        XCTAssertEqual(id, HubTokenStore.keychainAccount)
+        XCTAssertFalse(fake.writeLog.contains(HubTokenStore.keychainAccount))
+        XCTAssertEqual(fake.values[HubTokenStore.keychainAccount], "paired")
+        XCTAssertEqual(pm.apiKey(for: HubTokenStore.keychainAccount), "paired")
+    }
+
     /// 单例卡 id = 预设 id；ChatGPT 账号卡不动钥匙串；非 HTTP 卡新建时模型用预设自带的
     func testSingletonPresetIdAndNoKeychainWrite() {
         let pm = ProviderManager()

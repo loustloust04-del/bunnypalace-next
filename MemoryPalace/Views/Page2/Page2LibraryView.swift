@@ -25,10 +25,10 @@ struct Page2LibraryView: View {
         Category(title: "生活", ids: ["calendar", "health"] + Self.debugAppIds(["topicBox"]) + ["sticker"]),
         Category(title: "阅读与学习", ids: ["vocab", "reading"] + Self.debugAppIds(["audiobook"]) + ["study", "memory"]),
         Category(title: "创作与资料", ids: ["worldBook", "cardLibrary", "prompt", "fileLibrary"]),
-        Category(title: "工具", ids: Self.toolIds)
+        Category(title: "工具", ids: [RightPanelToolManager.gardenOSToolId] + Self.toolIds)
     ]
     #if PERSONAL_APPS
-    private static var toolIds: [String] { ["browser", "ccTerminal", "warroom", "trading", "cssChat"] + debugToolIds }
+    private static var toolIds: [String] { ["browser", "ccTerminal", "warroom", "trading", "cssChat", "status"] + debugToolIds }
     private static var debugToolIds: [String] {
         #if DEBUG
         ["pmBoard"]
@@ -37,7 +37,7 @@ struct Page2LibraryView: View {
         #endif
     }
     #else
-    private static var toolIds: [String] { ["browser", "ccTerminal", "cssChat"] }
+    private static var toolIds: [String] { ["browser", "ccTerminal", "cssChat", "status"] }
     #endif
     /// 话题盒 / 有声书只进粟粟的 Debug 包（#096）
     private static func debugAppIds(_ ids: [String]) -> [String] {
@@ -72,7 +72,11 @@ struct Page2LibraryView: View {
             search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || Page2LibraryNameKey($0.name).latin.contains(query)
         }
     }
-    private func members(_ category: Category) -> [RightPanelTool] { tools.filter { category.ids.contains($0.id) } }
+    /// 系统 App（设置）排在分类最前，分类卡上是大图标（atrium P4 §7-1）；其余照 order
+    private func members(_ category: Category) -> [RightPanelTool] {
+        let all = tools.filter { category.ids.contains($0.id) }
+        return all.filter { RightPanelToolManager.systemToolIds.contains($0.id) } + all.filter { !RightPanelToolManager.systemToolIds.contains($0.id) }
+    }
     private var animation: Animation? { reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.9) }
     private var scheme: ColorScheme { appearance.displayed.isLightBackdrop ? .light : .dark }
 
@@ -239,6 +243,7 @@ enum Page2WidgetCatalog {
         case "garden": return "记忆花园"
         case "contacts": return "通讯录"
         case "plan": return "今日安排"
+        case "status": return "状态"
         default: return RightPanelToolManager.builtInTools.first { $0.id == kind }?.name ?? "未识别组件"
         }
     }
@@ -255,6 +260,7 @@ enum Page2WidgetCatalog {
         #endif
         #endif
         case "reading": return "从上次停下的地方，继续阅读"
+        case "status": return "检修都通着\n花园自检 都好"
         #if PERSONAL_APPS
         #if DEBUG
         case "audiobook": return "听完这一段故事"

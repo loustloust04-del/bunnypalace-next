@@ -58,6 +58,7 @@ struct BubbleMenuLiftWrapper<Content: View>: View {
     private let content: () -> Content
     private let previewContent: () -> AnyView
     @State private var lifted = false
+    @Environment(\.modelContext) private var modelContext
 
     /// previewContent 不传 = 活副本原样渲 content；传了 = 浮层里渲变体
     /// （气泡模式 block 预览强制带尾巴用，列表原样不动）
@@ -86,7 +87,8 @@ struct BubbleMenuLiftWrapper<Content: View>: View {
                 isUser: isUser,
                 cornerRadius: cornerRadius,
                 tailBackdrop: tailBackdrop,
-                previewBuilder: previewContent,
+                // 浮层挂在 window 上、不在聊天页环境里：带上 modelContext，不然里面的 @Query（表情包）查不到
+                previewBuilder: { [previewContent, modelContext] in AnyView(previewContent().modelContext(modelContext)) },
                 onMenuVisibleChanged: { lifted = $0 }
             ))
         #else

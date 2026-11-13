@@ -38,7 +38,7 @@ enum DeathScaleAITool {
     @MainActor
     static func isAvailable(profileId: String?, store: DeathScaleStore? = nil) -> Bool {
         isAvailable(profileId: profileId,
-                    toolEnabled: RightPanelToolManager.storedTool(DeathScaleGate.toolId)?.isEnabled ?? false,
+                    toolEnabled: Page2Apps.isInstalled(DeathScaleGate.toolId, profileId: profileId),
                     readableProfileIds: (store ?? .shared).readableProfileIds)
     }
 
@@ -46,7 +46,7 @@ enum DeathScaleAITool {
     static func execute(inputJSON: String, profileId: String, store: DeathScaleStore? = nil,
                         toolEnabled: Bool? = nil) -> Result {
         let store = store ?? .shared
-        let enabled = toolEnabled ?? (RightPanelToolManager.storedTool(DeathScaleGate.toolId)?.isEnabled ?? false)
+        let enabled = toolEnabled ?? Page2Apps.isInstalled(DeathScaleGate.toolId, profileId: profileId)
         guard isAvailable(profileId: profileId, toolEnabled: enabled, readableProfileIds: store.readableProfileIds) else {
             return Result(text: "permission_denied: this floor is not allowed to read Mort sans sépulture.", isError: true)
         }

@@ -22,7 +22,7 @@ enum PermissionGate {
             }
             return (.proceed(json), nil)
         case .denied:
-            return (.deny("permission_denied：用户本次未允许「\(domain.displayName)」。可以请用户到 设置→权限 调整。"), false)
+            return (.deny("permission_denied：用户本次未允许「\(domain.displayName)」。\(PermissionCenter.adjustHint)"), false)
         case .deniedOnce:
             return (.deny("permission_denied：用户拒绝了这次「\(domain.displayName)」调用，本次未执行。"), nil)
         case .timedOut:

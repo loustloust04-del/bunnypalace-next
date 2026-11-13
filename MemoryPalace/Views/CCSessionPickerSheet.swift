@@ -8,12 +8,15 @@ import SwiftData
 /// - hub alive 的其它 mp-cc-* sessions（已被占用的灰显 + 🔒）
 /// - "+ 新建 session" 触发 spawn_cc
 ///
-/// 选定后 onPick 回调；调用方负责写回 conversation.ccBridgeSessionName + dismiss 父容器。
+/// 选定后 onPick 回调（带会话所在的那台）；调用方核对话还绑着那台再写回 conversation.ccBridgeSessionName + dismiss 父容器。
 struct CCSessionPickerContent: View {
     let conversation: Conversation
     /// "claude" 列 mp-cc-*（含默认行）；"codex" 列 mp-codex-*（无默认会话概念）
     var engine: String = "claude"
-    var onPick: (String?) -> Void
+    /// 新建的对话（还没发过）：≥2 台电脑时会话列表上面先选在哪台（plan-multi-hub B4.4）
+    var choosesHub = false
+    /// (会话名, 它在哪台)
+    var onPick: (String?, String) -> Void
 
     @Environment(\.modelContext) private var modelContext
 
@@ -28,6 +31,12 @@ struct CCSessionPickerContent: View {
 
     /// 已被其它对话占用的 mp-cc-N session（默认 mp-cc 不算 — 大家共享）
     @State private var sessionOwners: [String: String] = [:]
+    /// 打开时的「上次选的」（选了别台后标记不跟着跳）
+    @State private var lastPicked: String?
+    /// 选台期间旧那台迟到的 list / spawn 回包不认（b4 #2）
+    @State private var requests = CCSessionPickerRequests()
+
+    private var hubId: String { CCHubRegistry.hubId(of: conversation) }
 
     static let badgeColor = Color(red: 0.22, green: 0.94, blue: 0.49)
     private static let defaultSession = "mp-cc"
@@ -45,8 +54,11 @@ struct CCSessionPickerContent: View {
         return true
     }
 
+    private var showsHubChoice: Bool { choosesHub && CCHubTitle.showsHubChoice(hubCount: CCHubRegistry.shared.hubs.count) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if showsHubChoice { hubSection }
             // Section title
             HStack {
                 Text(engine == "codex" ? "Codex Session" : "CC Session")
@@ -54,7 +66,7 @@ struct CCSessionPickerContent: View {
                     .foregroundColor(Theme.textMuted)
                 Spacer()
                 if hasNonDefaultBinding {
-                    Button(action: { onPick(Self.defaultSession) }) {
+                    Button(action: { onPick(Self.defaultSession, hubId) }) {
                         Label("切回默认", systemImage: "arrow.uturn.backward")
                             .font(.system(size: Theme.F.caption))
                     }
@@ -73,7 +85,7 @@ struct CCSessionPickerContent: View {
                 subtitle: hasNonDefaultBinding ? "默认会话 · 点这里切回默认" : "接历史（默认会话）",
                 isBound: currentBound == nil || currentBound == Self.defaultSession,
                 isAlive: aliveSessions.contains(Self.defaultSession),
-                onTap: { onPick(Self.defaultSession) }
+                onTap: { onPick(Self.defaultSession, hubId) }
             )
             }
 
@@ -103,7 +115,7 @@ struct CCSessionPickerContent: View {
                         isAlive: true,
                         isDisabled: ownerTitle != nil,
                         onTap: {
-                            if ownerTitle == nil { onPick(name) }
+                            if ownerTitle == nil { onPick(name, hubId) }
                         }
                     )
                 }
@@ -142,7 +154,84 @@ struct CCSessionPickerContent: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
         }
-        .onAppear { loadOwners(); suggestNextName(); refresh() }
+        .onAppear {
+            // 新对话先按「上次选的」绑上，下面列的会话才是那台的
+            if showsHubChoice {
+                lastPicked = CCHubRegistry.shared.lastHubId
+                CCHubRegistry.shared.bindNewCCConversation(conversation)
+            }
+            loadOwners(); suggestNextName(); refresh()
+        }
+        .onDisappear { requests.invalidate() }
+    }
+
+    // MARK: - 在哪台电脑上（小样第 5 屏）
+
+    private var hubSection: some View {
+        let current = CCHubRegistry.hubId(of: conversation)
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("在哪台电脑上")
+                .font(.system(size: Theme.F.caption, weight: .semibold))
+                .foregroundColor(Theme.textMuted)
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)], spacing: 8) {
+                ForEach(CCHubRegistry.shared.hubs) { hub in
+                    hubCard(hub, selected: hub.id == current)
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+    }
+
+    private func hubCard(_ hub: CCHubRegistry.HubProfile, selected: Bool) -> some View {
+        let status = CCHubTitle.status(of: hub)
+        let detail = (hub.id == lastPicked ? ["上次选的"] : []) + [status.text]
+        return Button { pickHub(hub.id) } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Image(systemName: hub.id == CCHubRegistry.primaryId ? "laptopcomputer" : "desktopcomputer")
+                    .font(.system(size: 17))
+                    .foregroundColor(Theme.textSecondary)
+                    .padding(.bottom, 2)
+                Text(hub.name)
+                    .font(.system(size: Theme.F.body, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .lineLimit(1)
+                Text(detail.joined(separator: " · "))
+                    .font(.system(size: Theme.F.caption))
+                    .foregroundColor(Theme.textMuted)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(selected ? Self.badgeColor.opacity(0.15) : Color.clear)
+                    .overlay(RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(selected ? Self.badgeColor : Theme.textMuted.opacity(0.3), lineWidth: selected ? 1.5 : 1))
+            )
+            .overlay(alignment: .topTrailing) {
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Theme.textPrimary)
+                        .padding(8)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(spawning)
+    }
+
+    /// 选了哪台：记成上次选的、绑上，下面的会话换成那台的（连不上的也能选，等它接上再发）。新建 session 等回包时不让换台
+    private func pickHub(_ id: String) {
+        guard id != hubId, !spawning else { return }
+        requests.invalidate()
+        CCHubTitle.pickForNewConversation(conversation, hubId: id)
+        aliveSessions = []
+        newSessionName = ""
+        loadOwners(); suggestNextName(); refresh()
     }
 
     // MARK: - Row builder
@@ -203,20 +292,30 @@ struct CCSessionPickerContent: View {
     private func loadOwners() {
         let descriptor = FetchDescriptor<Conversation>()
         guard let all = try? modelContext.fetch(descriptor) else { return }
+        sessionOwners = Self.sessionOwners(in: all, excluding: conversation.id, hubId: CCHubRegistry.hubId(of: conversation))
+    }
+
+    /// 会话名 → 占着它的对话标题。只算绑同一台 hub 的对话（plan-multi-hub B2.8；按 CCHubRegistry.hubId(of:)）
+    static func sessionOwners(in all: [Conversation], excluding conversationId: String, hubId: String,
+                              hubOf: (Conversation) -> String = CCHubRegistry.hubId(of:)) -> [String: String] {
         var map: [String: String] = [:]
         for c in all {
-            guard !c.isTrashed, c.id != conversation.id,
+            guard !c.isTrashed, c.id != conversationId, hubOf(c) == hubId,
                   let name = c.ccBridgeSessionName,
                   !name.isEmpty, name != Self.defaultSession else { continue }
             map[name] = c.title
         }
-        sessionOwners = map
+        return map
     }
 
     private func refresh() {
         loading = true
         loadError = nil
-        CCBridgeWebSocketClient.shared.listSessions { result in
+        // 列 / 起会话都在这条对话连的那台上（plan-multi-hub B3.4）；那台用不了就不列、不起，不落到主 hub
+        guard let client = hubClient(onFailure: { loading = false; loadError = $0 }) else { return }
+        let ticket = requests.begin(conversationId: conversation.id, hubId: client.hubId)
+        client.listSessions { result in
+            guard requests.isCurrent(ticket, conversationId: conversation.id, hubId: hubId) else { return }
             loading = false
             switch result {
             case .success(let list): aliveSessions = list
@@ -233,14 +332,24 @@ struct CCSessionPickerContent: View {
         }
         spawning = true
         spawnError = nil
-        CCBridgeWebSocketClient.shared.spawnSession(name) { result in
+        guard let client = hubClient(onFailure: { spawning = false; spawnError = $0 }) else { return }
+        let ticket = requests.begin(conversationId: conversation.id, hubId: client.hubId)
+        client.spawnSession(name) { result in
+            guard requests.isCurrent(ticket, conversationId: conversation.id, hubId: hubId) else { return }
             spawning = false
             switch result {
             case .success:
-                onPick(name)
+                onPick(name, ticket.hubId)
             case .failure(let err):
                 spawnError = "spawn 失败：\(err.reason)"
             }
+        }
+    }
+
+    private func hubClient(onFailure: (String) -> Void) -> CCBridgeWebSocketClient? {
+        switch CCHubRegistry.shared.route(CCHubRegistry.hubId(of: conversation)) {
+        case .success(let client): return client
+        case .failure(let why): onFailure(why.message); return nil
         }
     }
 
@@ -256,5 +365,26 @@ struct CCSessionPickerContent: View {
             i += 1
         }
         newSessionName = "mp-cc-\(i)"
+    }
+}
+
+/// 会话选择器里 list / spawn 请求的代次（b4 #2）：请求记下 (对话, 那台, 代次)，回包三样都对得上才认；选台 / 关掉作废旧的
+struct CCSessionPickerRequests {
+    struct Ticket: Equatable {
+        let conversationId: String
+        let hubId: String
+        let generation: Int
+    }
+
+    private(set) var generation = 0
+
+    func begin(conversationId: String, hubId: String) -> Ticket {
+        Ticket(conversationId: conversationId, hubId: hubId, generation: generation)
+    }
+
+    mutating func invalidate() { generation += 1 }
+
+    func isCurrent(_ ticket: Ticket, conversationId: String, hubId: String) -> Bool {
+        ticket == Ticket(conversationId: conversationId, hubId: hubId, generation: generation)
     }
 }

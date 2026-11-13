@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -53,9 +54,30 @@ final class TimelineInjectionTests: XCTestCase {
                        "老段没有 id 看下标：它盖到的最后一条在窗口里就不注")
     }
 
+    func testWindowSegmentInSessionsNeverEntersZ2OrA2Readers() async throws {
+        let cid = "window-kind-guard"
+        let formal = SessionSegment(kind: .rolling, title: "北门", start: date(10, 10), end: date(10, 11),
+                                    from: 0, to: 6, lastNodeId: "out", story: "走北门", quotes: "", pending: "", format: 2)
+        var window = formal
+        window.kind = .window
+        window.title = "不该注入"
+        window.story = "窗口总结不能冒充上下文"
+        let s = SessionSummary(conversationId: cid, title: "云桥城", compressedCount: 6, segments: [formal, window], updatedAt: date(10, 12))
+        try SessionSummaryStore.save(s, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
+        var loaded = try XCTUnwrap(SessionSummaryStore.load(conversationId: cid, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)))
+        loaded.segments = SessionSummaryStore.injectableSegments(loaded.segments, windowIds: [], windowStart: 100)
+        XCTAssertEqual(loaded.segments, [formal])
+        let z2 = try XCTUnwrap(SessionSummaryStore.injectionText(loaded, fullCount: 2))
+        XCTAssertTrue(z2.contains("走北门"))
+        XCTAssertFalse(z2.contains("不该注入") || z2.contains(window.story))
+        let catalog = await CatalogALineReader.readWindow(cid, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
+        XCTAssertEqual(catalog?.segments.map(\.segment), [formal])
+        XCTAssertEqual(WindowSummaryReader.loadContext(conversationId: cid, profileId: pid)?.a2, [formal])
+    }
+
     /// 记账记下的单位 = 插槽文字里实际出现的那几行（今天算第 1 天：11 号、10 号带各项，9 号往前只带主调）
     func testSlotUnitsMatchText() throws {
-        let tl = TimelineStore.dir(profileId: pid)
+        let tl = TimelineStore.dir(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         func item(_ conv: String, _ d: Int, to: String) -> TimelineDayRecord.Item {
             .init(kind: .segment, conversationId: conv, window: conv, title: "\(conv) 第\(d)天", start: date(d, 10), end: date(d, 11), from: "f", to: to)
         }
@@ -64,13 +86,15 @@ final class TimelineInjectionTests: XCTestCase {
             TimelineDayRecord(date: "2026-10-10", headline: "十号的主调", items: [item("other-0001", 10, to: "o1"), item("cur-00001", 10, to: "gone")]),
             TimelineDayRecord(date: "2026-10-11", headline: "十一号的主调", items: [item("cur-00001", 11, to: "h1")]),
         ], entries: [entry(8, "old-00001", last: "x")]), month: "2026-10", in: tl)
-        let slot = CalendarInjection.timelineSlot(profileId: pid, currentConversationId: "cur-00001", windowIds: ["h1"], now: date(11, 12))
+        let slot = CalendarInjection.timelineSlot(profileId: pid, currentConversationId: "cur-00001", windowIds: ["h1"], now: date(11, 12),
+                                                          participation: .testValue(profileId: pid))
         let text = try XCTUnwrap(slot.timeline)
         for u in slot.units { XCTAssertTrue(text.contains(u.line)) }
         XCTAssertFalse(text.contains("cur-00001 第11天"), "原文还在窗口里的不注")
         XCTAssertFalse(text.contains("other-0001 第9天"), "第 3 天往前只带主调")
         XCTAssertTrue(text.contains("10-08 周四：（旧格式）《old-00001》old-00001 第8天 conv old-0000"), "8 号只有老条目、没有主调：带一行老条目的话题，标旧格式")
-        MemoryInjectionMeter.record(profileId: pid, hits: [], memories: [], timelineKeys: slot.units.map(\.key), contextKeys: ["cur-0000|n1"])
+        MemoryInjectionMeter.record(profileId: pid, record: MemoryInjectionRecord(
+            tokens: 0, stableCount: 0, hitCount: 0, at: Date(), timelineKeys: slot.units.map(\.key), contextKeys: ["cur-0000|n1"]))
         XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid)?.timelineKeys,
                        ["2026-10-08", "2026-10-09", "2026-10-10", "2026-10-10|other-0001|o1", "2026-10-10|cur-00001|gone", "2026-10-11"])
         XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid)?.contextKeys, ["cur-0000|n1"])

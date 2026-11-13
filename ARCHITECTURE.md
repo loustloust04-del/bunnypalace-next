@@ -63,8 +63,9 @@ ConversationViewModel                      (one per open chat)
   └─ ProviderRouter                         picks the backend for the selected model
        ├─ OpenAICompatibleProvider          OpenAI-compatible endpoints (most presets)
        ├─ AnthropicProvider                 Anthropic Messages API
-       ├─ ChatGPT OAuth backend             ChatGPT account sign-in (unofficial)
-       └─ CCBridgeProvider                  a Claude Code / Codex session via the hub
+       └─ ChatGPT OAuth backend             ChatGPT account sign-in (unofficial)
+  (Claude Code / Codex chats skip the router: ConversationViewModel.sendCCFireAndForget
+   sends over the hub WebSocket and replies arrive as proactive messages)
   └─ streaming response → MessageSegments (text / thinking / tool call / tool result)
   └─ tool calls → Services/Tools, results fed back, loop until the turn ends
 ```

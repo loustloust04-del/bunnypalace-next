@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 
 // MARK: - Prompt Editor Page（学 SlotEditPage 样板，单值编辑）
@@ -12,6 +13,7 @@ struct PromptEditorPage: View {
 
     @State private var edited: String = ""
     @State private var initial: String = ""
+    @State private var confirmingDiscard = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.settingsMetrics) private var m
 
@@ -33,7 +35,7 @@ struct PromptEditorPage: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Spacer()
-                Button("取消") { dismiss() }
+                Button("取消") { if isDirty { confirmingDiscard = true } else { dismiss() } }
                     .buttonStyle(MacSettingsButton())
                 Button("保存") { save() }
                     .buttonStyle(MacSettingsButton())
@@ -46,13 +48,14 @@ struct PromptEditorPage: View {
             editor
         }
         .onAppear(perform: load)
+        .discardChangesGuard(isDirty: isDirty, confirming: $confirmingDiscard, onDiscard: { dismiss() })
         #else
         editor
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button("取消") { if isDirty { confirmingDiscard = true } else { dismiss() } }
                         .foregroundColor(Theme.textMuted)
                 }
                 ToolbarItem(placement: .confirmationAction) {
@@ -62,6 +65,8 @@ struct PromptEditorPage: View {
                 }
             }
             .onAppear(perform: load)
+            .navigationBarBackButtonHidden(isDirty)
+            .discardChangesGuard(isDirty: isDirty, confirming: $confirmingDiscard, onDiscard: { dismiss() })
         #endif
     }
 

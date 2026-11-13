@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -53,7 +54,7 @@ final class MemoryAuditTests: XCTestCase {
 
         let organized = mem("进了页", created: now, fragment: true)
         organized.organizedAt = now
-        organized.organizedPage = "楼层/人/小慧"
+        organized.organizedPage = "人/小慧"
         XCTAssertEqual(MemoryAudit.organizeNote(organized), "已整理进《小慧》")
         XCTAssertEqual(MemoryAudit.state(of: organized), .unreviewed)
 
@@ -141,7 +142,7 @@ final class MemoryAuditTests: XCTestCase {
         ctx.insert(Conversation(id: "B", title: "聊记忆", createTime: now, updateTime: now, currentNodeId: "", profileId: pid))
         ctx.insert(Conversation(id: "C", title: "别的楼层", createTime: now, updateTime: now, currentNodeId: "", profileId: "other"))
         try ctx.save()
-        XCTAssertEqual(MemoryAudit.windowTitles(ids: ["A", "B", "C"], profileId: pid, context: ctx), ["A": "聊配色", "B": "聊记忆"])
+        XCTAssertEqual(MemoryAudit.windowTitles(ids: ["A", "B", "C"], profileId: pid, source: SwiftDataConversationSource(container: ctx.container)), ["A": "聊配色", "B": "聊记忆"])
     }
 
     // MARK: - 动作
@@ -275,14 +276,11 @@ final class MemoryAuditTests: XCTestCase {
         ui.passed = [UUID()]
         ui.lastAction = MemoryAudit.Undo(id: UUID(), kind: .trashed)
         XCTAssertNil(ui.station, "默认停在审计台首页")
-        XCTAssertFalse(ui.wikiShowsProposals, "wiki 台默认看页")
         ui.station = .wiki
-        ui.wikiShowsProposals = true
         let gen = ui.deckGeneration
         ui.clear()
         XCTAssertEqual(ui.deckGeneration, gen + 1, "切楼层：飞着的那一下作废")
         XCTAssertNil(ui.station, "切楼层退回首页")
-        XCTAssertFalse(ui.wikiShowsProposals)
         XCTAssertEqual(ui.state, .unreviewed)
         XCTAssertEqual(ui.stackStates, [.unreviewed])
         XCTAssertNil(ui.topId)
@@ -302,9 +300,9 @@ final class MemoryAuditTests: XCTestCase {
         XCTAssertEqual(byId[.wiki]?.isOpen, true)
         XCTAssertNotNil(byId[.wiki]?.pulse)
         XCTAssertEqual(byId[.trial]?.isOpen, false, "试写台第 ③ 段才点亮")
-        XCTAssertEqual(byId[.recall]?.isOpen, false, "召回测试台灰着")
-        XCTAssertEqual(byId[.recall]?.placeholder, "以后做")
-        XCTAssertNil(byId[.recall]?.pulse)
+        XCTAssertEqual(byId[.recall]?.isOpen, true, "召回测试台已点亮")
+        XCTAssertEqual(byId[.recall]?.placeholder, "")
+        XCTAssertNotNil(byId[.recall]?.pulse)
         for s in all { XCTAssertFalse(s.name.isEmpty || s.icon.isEmpty || s.note.isEmpty, "\(s.id) 缺名字 / 图标 / 小字") }
     }
 
@@ -319,15 +317,11 @@ final class MemoryAuditTests: XCTestCase {
                        "只剩待阅：不说成待批（astra P3）")
         XCTAssertEqual(AuditStation.wikiPulse(pending: 0, unread: 0, pages: 9), AuditStationPulse(figure: nil, label: "9 页 · 没有待批"))
         XCTAssertEqual(AuditStation.wikiPulse(pending: 0, unread: 0, pages: 0), AuditStationPulse(figure: nil, label: "还没有页"))
-        XCTAssertEqual(AuditStation.proposalsSegmentTitle(pending: 3, unread: 2), "整理提案 3 · 待阅 2")
-        XCTAssertEqual(AuditStation.proposalsSegmentTitle(pending: 3, unread: 0), "整理提案 3")
-        XCTAssertEqual(AuditStation.proposalsSegmentTitle(pending: 0, unread: 2), "整理提案 · 待阅 2")
-        XCTAssertEqual(AuditStation.proposalsSegmentTitle(pending: 0, unread: 0), "整理提案")
     }
 
     /// 待批 = 还没批的条目；待阅 = 没收进页、还没点「知道了」的内容；点过的不算（存储接口 `pendingItemCount` 不动）
     func testProposalTallySplitsPendingAndUnread() {
-        let change = WikiProposal.Change.appendRecords(path: "楼层/人/小慧", lines: ["a"])
+        let change = WikiProposal.Change.appendRecords(path: "人/小慧", lines: ["a"])
         let stray = WikiProposal.Unapplied(page: nil, raw: "x", reason: "收不进", at: "items[0]")
         let a = WikiProposal(origin: .scheduled, createdAt: now, items: [
             WikiProposal.Item(state: .pending, change: change, baseVersion: nil),

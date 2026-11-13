@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 // MARK: - 同一次提交的来源检查、Coverage、Preservation：三条路（自动写手、手动 agent、种子）共用，只记进运行记录，不拦、不另调模型
@@ -262,7 +263,7 @@ extension CatalogPrompts {
             : "submit_proposal 参数里可以再带 coverage、preservation，写在所有正文字段之后"
         return """
         诊断（\(place)）：
-        coverage：\(input)各写一条，写进了哪儿，或者为什么没写：{"input":"\(seed ? "memory/cc/user_ship.md" : "f3")","at":"楼层/人/豆包 · 记录"}、{"input":"\(seed ? "memory/cc/user_misc.md" : "f4")","why":"只是随口一提"}。\(now)
+        coverage：\(input)各写一条，写进了哪儿，或者为什么没写：{"input":"\(seed ? "memory/cc/user_ship.md" : "f3")","at":"人/星砚 · 记录"}、{"input":"\(seed ? "memory/cc/user_misc.md" : "f4")","why":"只是随口一提"}。\(now)
         preservation（交了 rewrite_now 才写）：对照那一页旧的「现在」，旧事实一件一条：还在的写 {"page":"…","old":"旧事实","status":"保留"}；有新证据改了的写 "status":"改了","new":"新说法","why":"哪条新原料"；新「现在」里没有、也没有新证据的写 "status":"疑似漏了"。
         正文优先：篇幅不够就整段省略诊断，不要为了诊断少写正文。诊断只给\(names.user)看，照实写，没把握的就写没把握。
         """

@@ -8,6 +8,7 @@ struct AskCardView: View {
     let streaming: Bool
     @Environment(ConversationViewModel.self) private var viewModel: ConversationViewModel?
     @Environment(ProviderManager.self) private var providerManager: ProviderManager?
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     /// isCCConversation 回退读全局模型。B-8（plan-paging-decouple B-0 表 1）：翻页不再重交 rootView 后，这个值要自带失效通道——声明即订阅
     @AppStorage("selectedChatModel") private var selectedChatModelSubscription = ""
     /// 多选勾选中、还没点「确定」的；nil = 跟卡上已选的走
@@ -431,10 +432,6 @@ struct AskCardView: View {
             .fieldBox(boxed)
     }
 
-    private func plainValue(_ i: Int, _ field: AskCard.Field) -> String {
-        (fieldDrafts[i] ?? initialText(field)).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.calendar = Calendar(identifier: .gregorian)
@@ -619,6 +616,7 @@ struct AskCardView: View {
     private var isCCConversation: Bool {
         guard let providerManager, let conv = viewModel?.selectedConversation else { return false }
         let model = providerManager.resolveModel(conversationModelId: conv.selectedModelId,
+                                                 profileModelId: profileManager?.currentProfile.preferredModel,
                                                  globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
         return providerManager.provider(for: model)?.type == .ccBridge
     }

@@ -520,6 +520,7 @@ enum PendingImportApplier {
         let extraKeys = ["savedProfiles", "savedCharacterCards", "globalWorldBooks", "savedPresets",
                          "savedWritingStyles", "todoItems_v1", "petState_v1",
                          "fileLibraryLocalDocumentsSlugMapV1", "globalRegexScripts_v1"]
+            + GlobalExporter.deviceFloorFiles.map(\.udKey)
         for key in extraKeys {
             // 角色卡这类搬去文件的 blob 从 BlobStore 取（快照仍是 Data，回滚时写回文件）
             let v: Any? = BlobStore.migratedKeys.contains(key) ? BlobStore.data(forKey: key) : UserDefaults.standard.object(forKey: key)
@@ -536,6 +537,20 @@ enum PendingImportApplier {
 
         let data = try PropertyListSerialization.data(fromPropertyList: snapshot, format: .binary, options: 0)
         try data.write(to: plistURL, options: .atomic)
+    }
+
+    /// 本机按层设置三份（权限档位 / 工具抽屉，atrium P3⑤a；page2 App 装卸，P3⑥）：包里没有 = 老备份，本机值不动。
+    /// 启动时 `applyIfNeeded` 在 App.init 里跑，早于 `ToolDrawerStore.shared` 第一次读盘；权限 / App 读缓存按 Data 比，自己会换。
+    /// `RightPanelToolManager` 是 App 属性、早于这里建好，靠 ProfileManager 建好时设当前层重算 + 自己监听键变化
+    static func restoreDeviceFloorFiles(from udDir: URL, into defaults: UserDefaults = .standard) throws {
+        for (udKey, filename) in GlobalExporter.deviceFloorFiles {
+            let fileURL = udDir.appendingPathComponent(filename)
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { continue }
+            let data = try Data(contentsOf: fileURL)
+            guard let obj = try? JSONSerialization.jsonObject(with: data),
+                  let blob = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { continue }
+            defaults.set(blob, forKey: udKey)
+        }
     }
 
     /// Apply staging UserDefaults 的统一逻辑：
@@ -594,6 +609,8 @@ enum PendingImportApplier {
                     }
                 }
             }
+
+            try restoreDeviceFloorFiles(from: udDir)
 
             // web_search 6 个 key
             let wsURL = udDir.appendingPathComponent("web_search.json")
@@ -711,13 +728,5 @@ enum PendingImportApplier {
             .appendingPathComponent("userdefaults-staging", isDirectory: true)
         try? fm.removeItem(at: udStaging)
         // workspace 早已清；这里不再处理
-    }
-
-    // MARK: - Cleanup External (UI 用)
-
-    /// 用户在 versionMismatch 时选择"清理放弃"
-    static func cleanupVersionMismatch() {
-        StagingPaths.cleanupAllStagingArtifacts()
-        // 主位未动；正常启动
     }
 }

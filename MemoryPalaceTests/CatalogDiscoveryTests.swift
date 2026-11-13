@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -53,7 +54,7 @@ final class CatalogDiscoveryTests: XCTestCase {
 
     private func logs(_ text: String) -> Int {
         MemoryWriteLog.flush()
-        return MemoryWriteLog.entries(profileId: pid).filter { $0.note.contains(text) }.count
+        return MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).filter { $0.note.contains(text) }.count
     }
 
     @discardableResult
@@ -112,7 +113,7 @@ final class CatalogDiscoveryTests: XCTestCase {
         XCTAssertTrue(backend.requests.isEmpty)
         XCTAssertEqual(report.proposals, 1, report.summary)
         let ds = directions()
-        XCTAssertEqual(ds.map(\.path), ["楼层/主题/毕设"], "只出现一天的（搬家 / 毕设进度 / 看电影）不提")
+        XCTAssertEqual(ds.map(\.path), ["主题/毕设"], "只出现一天的（搬家 / 毕设进度 / 看电影）不提")
         let d = try XCTUnwrap(ds.first)
         XCTAssertEqual(d.action, .newPage)
         XCTAssertEqual(d.mode, .daily)
@@ -133,14 +134,14 @@ final class CatalogDiscoveryTests: XCTestCase {
     }
 
     func testTopicThatLiterallyHitsAnExistingPageIsNotProposed() async throws {
-        try wiki.save(WikiPage(path: "楼层/项目/毕业设计", kind: .project, triggers: ["毕设"], hook: "", title: "毕业设计"))
-        try wiki.save(WikiPage(path: "楼层/人/饼干", kind: .person, triggers: [], hook: "", title: "饼干"))
+        try wiki.save(WikiPage(path: "项目/毕业设计", kind: .project, triggers: ["毕设"], hook: "", title: "毕业设计"))
+        try wiki.save(WikiPage(path: "人/饼干", kind: .person, triggers: [], hook: "", title: "饼干"))
         try a4(21, ["毕设", "饼干体检", "陶艺展"])
         try a4(22, ["毕设", "饼干体检", "陶艺展"])
 
         _ = await CatalogSession(job: job()).daily(now: at(22))
 
-        XCTAssertEqual(directions().map(\.path), ["楼层/主题/陶艺展"], "触发词 / 标题字面对上已有页的不提")
+        XCTAssertEqual(directions().map(\.path), ["主题/陶艺展"], "触发词 / 标题字面对上已有页的不提")
     }
 
     /// 一段 A2 从 21 号晚上聊到 22 号白天：两天都有消息，A4 两天各一条（后一天标接前一天），两天的话题都算
@@ -159,7 +160,7 @@ final class CatalogDiscoveryTests: XCTestCase {
 
         _ = await CatalogSession(job: job()).daily(now: at(22))
 
-        XCTAssertEqual(directions().map(\.path), ["楼层/主题/夜跑"], "按有消息的记忆日算连续，不因为接前一天就整天不算")
+        XCTAssertEqual(directions().map(\.path), ["主题/夜跑"], "按有消息的记忆日算连续，不因为接前一天就整天不算")
     }
 
     func testSameRunIsProposedOnceAndAgainOnlyAfterABreak() async throws {
@@ -170,8 +171,8 @@ final class CatalogDiscoveryTests: XCTestCase {
         _ = await CatalogSession(job: j).daily(now: at(21))
         XCTAssertEqual(directions().count, 1, "待批的方向不重复提")
 
-        let first = try directionProposal("楼层/主题/毕设")
-        try await WikiProposalReview.reject(first.id, store: store, context: ModelContext(container))
+        let first = try directionProposal("主题/毕设")
+        try await WikiProposalReview.reject(first.id, store: store, profileId: pid, context: ModelContext(container))
         try a4(22, ["毕设"])
         _ = await CatalogSession(job: j).daily(now: at(22))
         XCTAssertEqual(directions().count, 1, "驳回之后同一段连续往后延，不再提")
@@ -217,11 +218,11 @@ final class CatalogDiscoveryTests: XCTestCase {
         let j = job(caller: { _, user in
             users.append(user)
             return """
-            {"items":[{"type":"new_page","path":"楼层/主题/陶艺展","kind":"主题","title":"陶艺展","hook":"当小鹿说起陶艺展时先看这页","now":"在准备成都的陶艺展（时间未注明）。"}]}
+            {"items":[{"type":"new_page","path":"主题/陶艺展","kind":"主题","title":"陶艺展","hook":"当小鹿说起陶艺展时先看这页","now":"在准备成都的陶艺展（时间未注明）。"}]}
             """
         })
         _ = await CatalogSession(job: j).daily(now: at(22))
-        let direction = try directionProposal("楼层/主题/陶艺展")
+        let direction = try directionProposal("主题/陶艺展")
         XCTAssertTrue(users.isEmpty)
 
         try await approve(direction.id)
@@ -232,10 +233,10 @@ final class CatalogDiscoveryTests: XCTestCase {
         XCTAssertEqual(run.proposals, 1, run.summary)
         let content = try XCTUnwrap(contentProposals().first)
         XCTAssertTrue(content.items.contains { $0.change.isNewPage }, "A4-only 批了就算点名开页：没有碎片也照交新开页")
-        XCTAssertFalse(wiki.pageExists("楼层/主题/陶艺展"), "正文没批，wiki 不变")
+        XCTAssertFalse(wiki.pageExists("主题/陶艺展"), "正文没批，wiki 不变")
 
         try await approve(content.id)
-        XCTAssertTrue(wiki.pageExists("楼层/主题/陶艺展"))
+        XCTAssertTrue(wiki.pageExists("主题/陶艺展"))
     }
 
     func testOrdinaryAutomaticNewPagesStillNeedThreeFragments() async throws {
@@ -249,15 +250,15 @@ final class CatalogDiscoveryTests: XCTestCase {
     func testUnreadableTimelineDoesNotBlockFragmentsOrExpiry() async throws {
         try FileManager.default.createDirectory(at: TimelineStore.dir(root: root).appendingPathComponent("2026-10.md", isDirectory: true),
                                                 withIntermediateDirectories: true)
-        try wiki.save(WikiPage(path: "楼层/项目/毕设", kind: .project, triggers: [], hook: "", title: "毕设",
+        try wiki.save(WikiPage(path: "项目/毕设", kind: .project, triggers: [], hook: "", title: "毕设",
                                now: "交互装置，开题答辩（到 2026-10-20）。", validUntil: "2026-10-20"))
         try (12...14).forEach { try fragment("纸帆船第\($0)次", subject: "纸帆船", day: $0) }
 
         let report = await CatalogSession(job: job()).daily(now: at(22))
 
-        XCTAssertEqual(Set(directions().map(\.path)), ["楼层/主题/纸帆船", "楼层/项目/毕设"], report.summary)
+        XCTAssertEqual(Set(directions().map(\.path)), ["主题/纸帆船", "项目/毕设"], report.summary)
         MemoryWriteLog.flush()
-        XCTAssertTrue(MemoryWriteLog.entries(profileId: pid).contains { !$0.ok && $0.note.contains("没准备好") }, "记下 A4 这一路没准备好")
+        XCTAssertTrue(MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).contains { !$0.ok && $0.note.contains("没准备好") }, "记下 A4 这一路没准备好")
     }
 
     /// 主调是 nil 分三种：今天还没到时候、这天没有 A2 标题（只有没压缩的）都不算失败；过了的日子有 A2 标题却没主调才记，状态没变不再记
@@ -274,7 +275,7 @@ final class CatalogDiscoveryTests: XCTestCase {
         XCTAssertTrue(directions().isEmpty, "没写成主调的日子话题不算：20 号单独一天")
         XCTAssertEqual(logs("主调却没写成"), 1, "同一状态只记一次")
         MemoryWriteLog.flush()
-        let notes = MemoryWriteLog.entries(profileId: pid).map(\.note).filter { $0.contains("主调却没写成") }
+        let notes = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).map(\.note).filter { $0.contains("主调却没写成") }
         XCTAssertTrue(notes.allSatisfy { $0.contains("2026-10-21") && !$0.contains("2026-10-19") && !$0.contains("2026-10-22") }, "\(notes)")
 
         try a4(19, ["散步"], headline: nil, kind: .segment)
@@ -294,7 +295,7 @@ final class CatalogDiscoveryTests: XCTestCase {
         _ = await CatalogSession(job: j).daily(now: at(22))
 
         let d = try XCTUnwrap(directions().first)
-        XCTAssertEqual(d.path, "楼层/主题/潜水")
+        XCTAssertEqual(d.path, "主题/潜水")
         XCTAssertTrue(d.reason.contains("10-10") && d.reason.contains("10-11"), d.reason)
     }
 
@@ -306,9 +307,9 @@ final class CatalogDiscoveryTests: XCTestCase {
         _ = await CatalogSession(job: j).daily(now: at(20))
         _ = await CatalogSession(job: j).daily(now: at(20))
         XCTAssertEqual(directions().count, 1, "一次最多看一批日子，看不完的下次看；同一段只提一条")
-        let first = try directionProposal("楼层/主题/工作")
+        let first = try directionProposal("主题/工作")
         XCTAssertEqual(first.items.first?.change.direction?.basis, ["A4「工作」自 2026-09-10 起连续"])
-        try await WikiProposalReview.reject(first.id, store: store, context: ModelContext(container))
+        try await WikiProposalReview.reject(first.id, store: store, profileId: pid, context: ModelContext(container))
 
         for day in 21...22 { try a4(day, ["工作"]) }
         _ = await CatalogSession(job: j).daily(now: at(22))
@@ -318,17 +319,17 @@ final class CatalogDiscoveryTests: XCTestCase {
     // MARK: - valid_until 到期复核
 
     func testExpiredPageProposesReviewOnceAndUnknownDeadlinesStayQuiet() async throws {
-        try wiki.save(WikiPage(path: "楼层/项目/毕设", kind: .project, triggers: [], hook: "", title: "毕设",
+        try wiki.save(WikiPage(path: "项目/毕设", kind: .project, triggers: [], hook: "", title: "毕设",
                                now: "交互装置，开题答辩（到 2026-10-20）。", validUntil: "2026-10-20"))
-        try wiki.save(WikiPage(path: "楼层/主题/日语", kind: .topic, triggers: [], hook: "", title: "日语",
+        try wiki.save(WikiPage(path: "主题/日语", kind: .topic, triggers: [], hook: "", title: "日语",
                                now: "报了 12 月考试（到 2026-12-01）。", validUntil: "2026-12-01"))
-        try wiki.save(WikiPage(path: "楼层/人/饼干", kind: .person, triggers: [], hook: "", title: "饼干", now: "体检约在（到 2026-10-01）。"))
+        try wiki.save(WikiPage(path: "人/饼干", kind: .person, triggers: [], hook: "", title: "饼干", now: "体检约在（到 2026-10-01）。"))
         let before = wiki.versionSnapshot()
         var users: [String] = []
         let j = job(caller: { _, user in
             users.append(user)
             return """
-            {"items":[{"type":"rewrite_now","path":"楼层/项目/毕设","now":"交互装置，开题答辩过了，中期检查（到 2026-11-30）。","valid_until":"2026-11-30"}]}
+            {"items":[{"type":"rewrite_now","path":"项目/毕设","now":"交互装置，开题答辩过了，中期检查（到 2026-11-30）。","valid_until":"2026-11-30"}]}
             """
         })
 
@@ -337,12 +338,12 @@ final class CatalogDiscoveryTests: XCTestCase {
 
         XCTAssertTrue(users.isEmpty, "自动发现零模型调用")
         let ds = directions()
-        XCTAssertEqual(ds.map(\.path), ["楼层/项目/毕设"], "旧页没有期限的不猜（正文里写了也不算）；没到期的不提；待批的不重复提")
+        XCTAssertEqual(ds.map(\.path), ["项目/毕设"], "旧页没有期限的不猜（正文里写了也不算）；没到期的不提；待批的不重复提")
         XCTAssertEqual(ds[0].action, .update)
         XCTAssertTrue(ds[0].reason.contains("2026-10-20"), ds[0].reason)
         XCTAssertEqual(wiki.versionSnapshot(), before, "只提复核，不删、不改")
 
-        let direction = try directionProposal("楼层/项目/毕设")
+        let direction = try directionProposal("项目/毕设")
         try await approve(direction.id)
         _ = await CatalogSession(job: j).directions(direction.id, now: at(22))
         XCTAssertEqual(users.count, 1)
@@ -351,7 +352,7 @@ final class CatalogDiscoveryTests: XCTestCase {
 
         let content = try XCTUnwrap(contentProposals().first)
         try await approve(content.id)
-        XCTAssertEqual(wiki.read("楼层/项目/毕设")?.validUntil, "2026-11-30")
+        XCTAssertEqual(wiki.read("项目/毕设")?.validUntil, "2026-11-30")
 
         _ = await CatalogSession(job: j).daily(now: at(22))
         XCTAssertEqual(directions().count, 1, "新期限没到：不再提")
@@ -360,7 +361,7 @@ final class CatalogDiscoveryTests: XCTestCase {
     }
 
     func testValidUntilFollowsTheDeadlineWrittenInNowAndRoundTrips() throws {
-        var page = WikiPage(path: "楼层/项目/毕设", kind: .project, triggers: ["毕设"], hook: "", title: "毕设",
+        var page = WikiPage(path: "项目/毕设", kind: .project, triggers: ["毕设"], hook: "", title: "毕设",
                             now: "中期检查（到 2026-11-30）。", validUntil: "2026-11-30")
         XCTAssertEqual(WikiPage.parse(page.markdown, path: page.path), page, "序列化往返")
         page.validUntil = nil
@@ -370,12 +371,12 @@ final class CatalogDiscoveryTests: XCTestCase {
         XCTAssertNil(parsed.validUntil)
         XCTAssertTrue(parsed.markdown.contains("有效到: 下周"), "没有替换的时候，认不出的手写值原样留着")
 
-        try wiki.save(WikiPage(path: "楼层/项目/毕设", kind: .project, triggers: [], hook: "", title: "毕设", now: "开题。"))
+        try wiki.save(WikiPage(path: "项目/毕设", kind: .project, triggers: [], hook: "", title: "毕设", now: "开题。"))
         var sources = CatalogSources()
-        sources.versions["楼层/项目/毕设"] = wiki.version(of: "楼层/项目/毕设")
+        sources.versions["项目/毕设"] = wiki.version(of: "项目/毕设")
         let json = """
-        {"items":[{"type":"rewrite_now","path":"楼层/项目/毕设","now":"中期检查（到 2026-11-30）。","valid_until":"2026-12-31"},
-        {"type":"new_page","path":"楼层/主题/日语","kind":"主题","title":"日语","now":"报了考试（到 2026-12-01），听力课（到 2026-11-15）。"}]}
+        {"items":[{"type":"rewrite_now","path":"项目/毕设","now":"中期检查（到 2026-11-30）。","valid_until":"2026-12-31"},
+        {"type":"new_page","path":"主题/日语","kind":"主题","title":"日语","now":"报了考试（到 2026-12-01），听力课（到 2026-11-15）。"}]}
         """
         let got = try XCTUnwrap(CatalogItems.parse(json, sources: sources, wiki: wiki))
         guard case .rewriteNow(_, _, _, let until) = got.items[0].change else { return XCTFail() }
@@ -386,19 +387,19 @@ final class CatalogDiscoveryTests: XCTestCase {
 
         try wiki.save(new)
         try wiki.rebuildIndexes(affecting: [new.path])
-        XCTAssertTrue(wiki.layerLines("楼层/主题").contains { $0.contains("2026-11-15") }, "代码生成的索引带上期限")
+        XCTAssertTrue(wiki.layerLines("主题").contains { $0.contains("2026-11-15") }, "代码生成的索引带上期限")
     }
 
     /// 写手漏填 valid_until：新正文还写着「到 某天」，期限就还在；只改期限、正文没变也算有变化；审计台手改日期也照正文走
     func testOmittedOrHandEditedDeadlineFollowsTheText() async throws {
-        try wiki.save(WikiPage(path: "楼层/项目/毕设", kind: .project, triggers: [], hook: "", title: "毕设",
+        try wiki.save(WikiPage(path: "项目/毕设", kind: .project, triggers: [], hook: "", title: "毕设",
                                now: "中期检查（到 2026-11-30）。", validUntil: "2026-11-30"))
-        try wiki.save(WikiPage(path: "楼层/项目/作品集", kind: .project, triggers: [], hook: "", title: "作品集", now: "投递截止（到 2026-12-20）。"))
+        try wiki.save(WikiPage(path: "项目/作品集", kind: .project, triggers: [], hook: "", title: "作品集", now: "投递截止（到 2026-12-20）。"))
         var sources = CatalogSources()
         sources.versions = wiki.versionSnapshot()
         let json = """
-        {"items":[{"type":"rewrite_now","path":"楼层/项目/毕设","now":"中期检查（到 2026-11-30），导师要求加用户测试。"},
-        {"type":"rewrite_now","path":"楼层/项目/作品集","now":"投递截止（到 2026-12-20）。"}]}
+        {"items":[{"type":"rewrite_now","path":"项目/毕设","now":"中期检查（到 2026-11-30），导师要求加用户测试。"},
+        {"type":"rewrite_now","path":"项目/作品集","now":"投递截止（到 2026-12-20）。"}]}
         """
         let got = try XCTUnwrap(CatalogItems.parse(json, sources: sources, wiki: wiki))
         XCTAssertEqual(got.items.count, 2, "作品集：正文没变、期限从无到有，也算有变化")
@@ -411,33 +412,33 @@ final class CatalogDiscoveryTests: XCTestCase {
         try store.edit(p.id, itemId: item.id, change: draft.apply(to: item.change), judgment: nil)
         try await approve(p.id)
 
-        XCTAssertEqual(wiki.read("楼层/项目/毕设")?.validUntil, "2026-12-15", "审计台改了日期：期限跟着正文")
-        XCTAssertEqual(wiki.read("楼层/项目/作品集")?.validUntil, "2026-12-20")
+        XCTAssertEqual(wiki.read("项目/毕设")?.validUntil, "2026-12-15", "审计台改了日期：期限跟着正文")
+        XCTAssertEqual(wiki.read("项目/作品集")?.validUntil, "2026-12-20")
     }
 
     /// 页上原来手写了认不出的「有效到: 下周」：批了新期限以后只有新的那个生效，原写法换个键名留着
     func testInvalidHandwrittenDeadlineIsReplacedNotWinning() async throws {
-        try wiki.saveRaw("---\n类: 项目\n触发词: []\n钩子: \n有效到: 下周\n---\n# 毕设\n\n## 现在\n中期检查。\n", path: "楼层/项目/毕设")
-        let item = WikiProposal.Item(change: .rewriteNow(path: "楼层/项目/毕设", old: "中期检查。", new: "中期检查（到 2026-11-30）。", until: "2026-11-30"),
-                                     baseVersion: wiki.version(of: "楼层/项目/毕设"))
+        try wiki.saveRaw("---\n类: 项目\n触发词: []\n钩子: \n有效到: 下周\n---\n# 毕设\n\n## 现在\n中期检查。\n", path: "项目/毕设")
+        let item = WikiProposal.Item(change: .rewriteNow(path: "项目/毕设", old: "中期检查。", new: "中期检查（到 2026-11-30）。", until: "2026-11-30"),
+                                     baseVersion: wiki.version(of: "项目/毕设"))
         let p = WikiProposal(origin: .scheduled, createdAt: at(22), items: [item])
         try store.save(p)
         try await approve(p.id)
 
-        let raw = try XCTUnwrap(wiki.readRaw("楼层/项目/毕设"))
-        XCTAssertEqual(wiki.read("楼层/项目/毕设")?.validUntil, "2026-11-30")
+        let raw = try XCTUnwrap(wiki.readRaw("项目/毕设"))
+        XCTAssertEqual(wiki.read("项目/毕设")?.validUntil, "2026-11-30")
         XCTAssertEqual(raw.components(separatedBy: "\n").filter { WikiPage.metaKey($0) == WikiPage.validUntilKey }.count, 1, raw)
         XCTAssertTrue(raw.contains("下周"), "被换掉的手写原文还在，只是不参与解析")
     }
 
     /// 驳回了到期复核、页没改：提案满 30 天清掉以后，同一页同一个期限也不再提
     func testHandledExpirySurvivesProposalPurge() async throws {
-        try wiki.save(WikiPage(path: "楼层/项目/毕设", kind: .project, triggers: [], hook: "", title: "毕设",
+        try wiki.save(WikiPage(path: "项目/毕设", kind: .project, triggers: [], hook: "", title: "毕设",
                                now: "开题答辩（到 2026-10-20）。", validUntil: "2026-10-20"))
         let j = job()
         _ = await CatalogSession(job: j).daily(now: at(22))
-        let first = try directionProposal("楼层/项目/毕设")
-        try await WikiProposalReview.reject(first.id, store: store, context: ModelContext(container), now: at(22))
+        let first = try directionProposal("项目/毕设")
+        try await WikiProposalReview.reject(first.id, store: store, profileId: pid, context: ModelContext(container), now: at(22))
 
         _ = await CatalogSession(job: j).daily(now: at(30, month: 12))
 
@@ -448,12 +449,12 @@ final class CatalogDiscoveryTests: XCTestCase {
     // MARK: - 人设变化：只手动
 
     func testPersonaChangeRunsOnlyWhenSheAsks() async throws {
-        try wiki.save(WikiPage(path: "楼层/小鹿/身体", kind: .user, triggers: [], hook: "", title: "身体", now: "近视 500 度。"))
+        try wiki.save(WikiPage(path: "{{user}}/身体", kind: .user, triggers: [], hook: "", title: "身体", now: "近视 500 度。"))
         let before = wiki.versionSnapshot()
         let backend = FakeCatalogBackend { n, _ in
-            n == 1 ? .toolCalls([CatalogTestKit.call("read_wiki", "{\"path\":\"楼层/小鹿/身体\"}")])
+            n == 1 ? .toolCalls([CatalogTestKit.call("read_wiki", "{\"path\":\"{{user}}/身体\"}")])
                 : .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, """
-                {"items":[{"type":"rewrite_now","path":"楼层/小鹿/身体","now":"做了近视手术（详见人设）。"}]}
+                {"items":[{"type":"rewrite_now","path":"{{user}}/身体","now":"做了近视手术（详见人设）。"}]}
                 """)])
         }
         let j = job(backend: backend)
@@ -482,8 +483,8 @@ final class CatalogDiscoveryTests: XCTestCase {
         let j = job(sorter: .model, caller: { _, user in
             users.append(user)
             return users.count == 1
-                ? #"{"fragments":[],"timeline_proposals":[{"kind":"宠物","title":"毕设","path":"楼层/项目/毕设","days":["2026-10-21","2026-10-22"]}]}"#
-                : #"{"fragments":[],"timeline_proposals":[{"kind":"项目","title":"毕设","path":"楼层/项目/毕设","days":["2026-10-21","2026-10-22"],"reason":"连续两天在赶"}]}"#
+                ? #"{"fragments":[],"timeline_proposals":[{"kind":"宠物","title":"毕设","path":"项目/毕设","days":["2026-10-21","2026-10-22"]}]}"#
+                : #"{"fragments":[],"timeline_proposals":[{"kind":"项目","title":"毕设","path":"项目/毕设","days":["2026-10-21","2026-10-22"],"reason":"连续两天在赶"}]}"#
         })
 
         _ = await CatalogSession(job: j).daily(now: at(22))
@@ -492,7 +493,7 @@ final class CatalogDiscoveryTests: XCTestCase {
         XCTAssertTrue(users[0].contains("2026-10-21 · 话题：毕设") && users[0].contains("搬家"), "A4 时间轴那一栏是每天的话题")
         XCTAssertTrue(users[1].contains("timeline_proposals[0]"), "重写回灌原因")
         let d = try XCTUnwrap(directions().first)
-        XCTAssertEqual(d.path, "楼层/项目/毕设")
+        XCTAssertEqual(d.path, "项目/毕设")
         XCTAssertEqual(d.kind, .project)
         XCTAssertEqual(d.action, .newPage)
         XCTAssertTrue(d.clues.isEmpty)
@@ -504,24 +505,24 @@ final class CatalogDiscoveryTests: XCTestCase {
     func testModelTimelineDedupesBySourceNotPath() async throws {
         try a4(20, ["毕设"])
         try a4(21, ["毕设"])
-        var reply = #"{"fragments":[],"timeline_proposals":[{"kind":"项目","title":"毕设","path":"楼层/项目/毕设","days":["2026-10-20","2026-10-21"]}]}"#
+        var reply = #"{"fragments":[],"timeline_proposals":[{"kind":"项目","title":"毕设","path":"项目/毕设","days":["2026-10-20","2026-10-21"]}]}"#
         var calls = 0
         let j = job(sorter: .model, caller: { _, _ in
             calls += 1
             return reply
         })
         _ = await CatalogSession(job: j).daily(now: at(21))
-        let first = try directionProposal("楼层/项目/毕设")
-        try await WikiProposalReview.reject(first.id, store: store, context: ModelContext(container))
+        let first = try directionProposal("项目/毕设")
+        try await WikiProposalReview.reject(first.id, store: store, profileId: pid, context: ModelContext(container))
 
         try a4(22, ["毕设"])
-        reply = #"{"fragments":[],"timeline_proposals":[{"kind":"主题","title":"毕设","path":"楼层/主题/毕设","days":["2026-10-21","2026-10-22"]}]}"#
+        reply = #"{"fragments":[],"timeline_proposals":[{"kind":"主题","title":"毕设","path":"主题/毕设","days":["2026-10-21","2026-10-22"]}]}"#
         _ = await CatalogSession(job: j).daily(now: at(22))
         XCTAssertEqual(directions().count, 1, "同一段连续换个路径也算同一来源")
 
         try a4(25, ["毕设"])
         try a4(26, ["毕设"])
-        reply = #"{"fragments":[],"timeline_proposals":[{"kind":"项目","title":"毕设","path":"楼层/项目/毕设","days":["2026-10-25","2026-10-26"]}]}"#
+        reply = #"{"fragments":[],"timeline_proposals":[{"kind":"项目","title":"毕设","path":"项目/毕设","days":["2026-10-25","2026-10-26"]}]}"#
         _ = await CatalogSession(job: j).daily(now: at(26))
         XCTAssertEqual(directions().count, 2, "断开后新的连续段是新来源，可以再提")
         XCTAssertEqual(calls, 3)
@@ -532,14 +533,14 @@ final class CatalogDiscoveryTests: XCTestCase {
         try a4(21, ["毕设"])
         try a4(22, ["毕设"])
         try (12...14).forEach { try fragment("毕设第\($0)天", subject: "毕设", day: $0) }
-        let new = #"{"kind":"项目","title":"毕设","path":"楼层/项目/毕设"}"#
+        let new = #"{"kind":"项目","title":"毕设","path":"项目/毕设"}"#
         let fragments = (1...3).map { #"{"f":"f\#($0)","new":\#(new)}"# }.joined(separator: ",")
         var users: [String] = []
         let j = job(sorter: .model, caller: { _, user in
             users.append(user)
             let timeline = users.count == 1
-                ? #"[{"kind":"主题","title":"毕设","path":"楼层/主题/毕设","days":["2026-10-21","2026-10-22"]}]"#
-                : #"[{"kind":"项目","title":"毕设","path":"楼层/项目/毕设","days":["2026-10-21","2026-10-22"]}]"#
+                ? #"[{"kind":"主题","title":"毕设","path":"主题/毕设","days":["2026-10-21","2026-10-22"]}]"#
+                : #"[{"kind":"项目","title":"毕设","path":"项目/毕设","days":["2026-10-21","2026-10-22"]}]"#
             return #"{"fragments":[\#(fragments)],"timeline_proposals":\#(timeline)}"#
         })
 
@@ -547,7 +548,7 @@ final class CatalogDiscoveryTests: XCTestCase {
 
         XCTAssertEqual(users.count, 2)
         XCTAssertTrue(users[1].contains("不止一个目标"), "回灌：同一个主题统一成一个目标")
-        XCTAssertEqual(directions().map(\.path), ["楼层/项目/毕设"], "统一以后只剩一条方向")
+        XCTAssertEqual(directions().map(\.path), ["项目/毕设"], "统一以后只剩一条方向")
     }
 
     func testModelSorterIsNotCalledWithoutFragmentsOrTimeline() async throws {
@@ -560,14 +561,14 @@ final class CatalogDiscoveryTests: XCTestCase {
     }
 
     func testModelTimelineProposalIsCheckedAgainstTheGivenDays() {
-        let raw = #"{"fragments":[],"timeline_proposals":[{"kind":"项目","title":"毕设","path":"楼层/项目/毕设","days":["2026-10-22"]}]}"#
+        let raw = #"{"fragments":[],"timeline_proposals":[{"kind":"项目","title":"毕设","path":"项目/毕设","days":["2026-10-22"]}]}"#
         guard case .failure(let f) = CatalogModelSorter.check(raw, pool: [], pages: []) else { return XCTFail("时间轴是暂无却提了") }
         XCTAssertTrue(f.message.contains("暂无"))
         let day = CatalogTimeline.Day(date: "2026-10-22", topics: ["毕设"])
         guard case .success(let ok) = CatalogModelSorter.check(raw, pool: [], pages: [], timeline: [day]) else { return XCTFail() }
-        XCTAssertEqual(ok.grouped.timeline.map(\.path), ["楼层/项目/毕设"])
+        XCTAssertEqual(ok.grouped.timeline.map(\.path), ["项目/毕设"])
         XCTAssertEqual(ok.grouped.timeline.first?.days, ["2026-10-22"])
-        let existing = [WikiInjectionSnapshot.Page(path: "楼层/项目/毕设", title: "毕设", triggers: [], hook: "", now: "")]
+        let existing = [WikiInjectionSnapshot.Page(path: "项目/毕设", title: "毕设", triggers: [], hook: "", now: "")]
         guard case .failure = CatalogModelSorter.check(raw, pool: [], pages: existing, timeline: [day]) else { return XCTFail("已有的页不能提开页") }
         let madeUp = raw.replacingOccurrences(of: "2026-10-22", with: "2026-09-01")
         guard case .failure(let g) = CatalogModelSorter.check(madeUp, pool: [], pages: [], timeline: [day]) else { return XCTFail("编的日期") }

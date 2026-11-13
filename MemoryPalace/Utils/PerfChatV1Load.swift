@@ -645,9 +645,9 @@ enum ChatV1Load {
         func conv(_ id: String) -> Conversation? {
             try? ctx.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.id == id && $0.profileId == pid })).first
         }
-        let bubble = UserDefaults.standard.bool(forKey: "chatBubbleMode")
         let f = Core.Fixture.self
         guard let a = conv(PerfHarness.convA), let b = conv(PerfHarness.convB), let l = conv(f.L.convId), let m = conv(f.M.convId) else { return nil }
+        let bubble = b.isBubbleMode
         let pathA = PerfSeed.pathA, pathB = PerfSeed.pathB
         func bodyDigests(_ path: [String], long: [String: String] = [:]) -> [String: UInt64] {
             Dictionary(uniqueKeysWithValues: path.enumerated().map { i, id in (id, Core.fnv1a64(long[id] ?? f.body(i))) })
@@ -1021,7 +1021,7 @@ enum ChatV1Load {
             case .string: effective = d.string(forKey: key) ?? NSNull()
             case .data: effective = d.data(forKey: key).map(Core.dataPin) ?? NSNull()
             // M1：主题报 ThemeManager 解析后真正用上的 id（定义里没有这个 id 会回 default）
-            case .theme: effective = ThemeManager.shared.selectedThemeId
+            case .theme: effective = ThemeManager.shared.chatTheme.id
             }
             var row: [String: Any] = ["effective": effective,
                                       "source": argument[key] != nil ? "argument" : (persistent[key] != nil ? "persistent" : "default"),
@@ -1042,7 +1042,7 @@ enum ChatV1Load {
             out[key] = d.object(forKey: key).map { "\($0)" } ?? "default"
         }
         out["themeDefinitions"] = d.data(forKey: "themeDefinitions").map(Core.dataPin) ?? "default"
-        out["themeResolved"] = ThemeManager.shared.selectedThemeId
+        out["themeResolved"] = ThemeManager.shared.chatTheme.id
         let screen = UIScreen.main
         out["viewport"] = "\(Int(screen.bounds.width))x\(Int(screen.bounds.height))@\(screen.scale)"
         let traits = PerfHarness.paging?.view.window?.traitCollection

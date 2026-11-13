@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -99,6 +100,28 @@ final class HistoryWindowMaterializeTests: XCTestCase {
         XCTAssertNil(byId["n10"], "窗口外")
     }
 
+    /// plan-model-vision-check §1.2：模型看不了图 → 照片换文字（没描述写「[图片]」），不带原图；文件照带
+    func testImagesNotAllowedTurnsPhotosIntoText() {
+        let (vm, _) = makeVM(count: 300)
+        let byId = Dictionary(uniqueKeysWithValues: vm.windowedHistory(depth: 40, imagesAllowed: false).messages.map { ($0.id, $0) })
+        XCTAssertEqual(byId["n296"]?.content, "[图片]\n" + ChatCardEventPrompt.prefix([ChatCardEvent(text: "事件 296")]) + "问题 296")
+        XCTAssertEqual(byId["n266"]?.content, "[图片: 一张图 266]\n问题 266")
+        XCTAssertFalse(byId.values.contains { $0.images.contains { $0.imageData != nil } }, "一张原图都不发")
+        XCTAssertEqual(byId["n292"]?.images.first?.fileData, Data(repeating: 7, count: 16))
+    }
+
+    /// plan-send-notice-marker A：只有最新那条真被拦了图才记；能看图 / 最新一条没图都不记
+    func testVisionWithheldOnlyMarksLatestPhoto() {
+        let (vm, _) = makeVM(count: 297)                                          // 最后一条 n296 是带图的 user
+        _ = vm.windowedHistory(depth: 40, imagesAllowed: false)
+        XCTAssertEqual(vm.visionWithheldNode?.id, "n296")
+        _ = vm.windowedHistory(depth: 40, imagesAllowed: true)
+        XCTAssertNil(vm.visionWithheldNode)
+        let (older, _) = makeVM(count: 300)                                       // 最后一条是 assistant，旧图不算
+        _ = older.windowedHistory(depth: 40, imagesAllowed: false)
+        XCTAssertNil(older.visionWithheldNode)
+    }
+
     func testNotOverWindowEqualsFull() {
         let (vm, _) = makeVM(count: 30)
         assertSame(vm.buildWindowedAPIMessages(depth: 40), vm.buildAPIMessages(maxMessages: .max))
@@ -119,11 +142,29 @@ final class HistoryWindowMaterializeTests: XCTestCase {
         let fullCount = vm.buildAPIMessages(maxMessages: .max).count
         let covered = fullCount - 55                                               // 窗口 55：在 [depth, depth×2] 里 → 锚定
         SummaryFileStore.save(ContextSummary(summary: "摘要", coveredCount: covered, updatedAt: Date()),
-                              conversationId: convId, profileId: pid, conversationTitle: "t")
+                              conversationId: convId, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), conversationTitle: "t")
         let start = try XCTUnwrap(ConversationViewModel.anchoredWindowStart(fullCount: fullCount, covered: covered, depth: 40))
         let windowed = vm.buildWindowedAPIMessages(depth: 40)
         XCTAssertEqual(windowed.count, 55)
         assertSame(windowed, Array(vm.buildAPIMessages(maxMessages: .max).dropFirst(start)))
+    }
+
+    /// P2-r2 必修 1：关参与窗摘要不注入 → 有 coveredCount 也不能锚定（否则 [0, covered) 既无摘要又不在窗，还白占 depth…depth×2）
+    func testAnchoredWindowFallsBackToSlidingWhenWindowNotParticipating() throws {
+        let (vm, convId) = makeVM(count: 300)
+        let fullCount = vm.buildAPIMessages(maxMessages: .max).count
+        let covered = fullCount - 55
+        SummaryFileStore.save(ContextSummary(summary: "摘要", coveredCount: covered, updatedAt: Date()),
+                              conversationId: convId, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), conversationTitle: "t")
+        let conv = try XCTUnwrap(vm.selectedConversation)
+        conv.memoryEnabled = false
+        let windowed = vm.windowedHistory(depth: 40)
+        XCTAssertEqual(windowed.messages.count, 40, "关参与：退滑动窗，条数 = depth")
+        XCTAssertEqual(windowed.start, fullCount - 40)
+        assertSame(windowed.messages, Array(vm.buildAPIMessages(maxMessages: .max).suffix(40)))
+
+        conv.memoryEnabled = true
+        XCTAssertEqual(vm.windowedHistory(depth: 40).messages.count, 55, "开参与：照旧锚定（对照）")
     }
 
     func testBuildAPIMessagesDefaultSuffixUnchanged() {

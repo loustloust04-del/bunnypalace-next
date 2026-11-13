@@ -47,31 +47,12 @@ enum VocabSentenceGrader {
         }
 
         let request = buildRequest(word: word, definition: definition, sentence: sentence)
-
-        // 预算闸（做梦同款）
-        if let provider = providerManager.provider(for: model) {
-            let inputTok = HeuristicEstimator().estimate(request.systemPrompt + request.messages[0].content)
-            let estimated = BudgetCalculator.actualCost(
-                provider: provider, modelId: model.modelId,
-                usage: TokenUsage(inputTokens: inputTok, outputTokens: 256)
-            )
-            if case .blocked = providerManager.budgetGate(providerId: provider.id, estimatedCost: estimated),
-               !BudgetPreflight.mayDeferEarlyGate(provider: provider, estimated: estimated) {
-                return nil
-            }
-        }
-
         let router = ProviderRouter(usageContext: UsageContext(kind: .vocab))
-        guard let (response, usage) = try? await router.sendNonStreaming(
+        guard let r = try? await router.sideCall(
             model: model, messages: request.messages,
             systemPrompt: request.systemPrompt, providerManager: providerManager
-        ) else { return nil }
+        ), !r.hitOutputLimit else { return nil }
 
-        if let usage, let provider = providerManager.provider(for: model) {
-            let cost = BudgetCalculator.actualCost(provider: provider, modelId: model.modelId, usage: usage)
-            providerManager.commitSpend(providerId: provider.id, amount: cost, usage: usage)
-        }
-
-        return parse(response)
+        return parse(r.text)
     }
 }

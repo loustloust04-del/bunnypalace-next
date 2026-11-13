@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 // MARK: - Cache Diagnostic Log（app 内常驻探针，设置→调试 可看）
@@ -28,6 +29,21 @@ final class CacheDiagLog {
 }
 
 // MARK: - Chat Provider Protocol
+
+/// 卡住看门狗的阈值（plan-reply-error-report-1106 §2）；测试注入毫秒级 + 假时钟
+struct StallWatchdogConfig: Equatable {
+    var tick: TimeInterval = 1
+    /// 只收到 keep-alive / 别的字节、还没出增量：轻提示（从流开始算）
+    var firstByteNotice: TimeInterval = 30
+    /// 同上，硬停 → stalledFirstByte
+    var firstByteHardStop: TimeInterval = 600
+    /// 已出过增量后没有新增量：轻提示
+    var midStreamNotice: TimeInterval = 45
+    /// 同上，硬停 → stalledMidStream
+    var midStreamHardStop: TimeInterval = 180
+    /// 流式请求的显式空闲超时（§2）：默认 60 秒会被 keep-alive 一直续下去
+    static let streamingTimeout: TimeInterval = 90
+}
 
 @Observable
 class BaseChatProvider: NSObject {
@@ -75,6 +91,16 @@ class BaseChatProvider: NSObject {
     internal var onComplete: ((String, TokenUsage?) -> Void)?
     internal var onError: ((String) -> Void)?
     internal var onToolCalls: (([ToolCallBlock]) -> Void)?
+    /// 当前网络 attempt 的首个可见正文 / 有效工具调用起始；思考与用量不算。
+    internal var onEffectiveEvent: (() -> Void)?
+    internal var onRequestAttempt: (() -> Void)?
+    private var didEmitEffectiveEvent = false
+
+    internal func emitEffectiveEvent() {
+        guard !didEmitEffectiveEvent else { return }
+        didEmitEffectiveEvent = true
+        onEffectiveEvent?()
+    }
     /// 流式过程中累积的 token 用量。usage 信息常在 stream 末尾或分事件到来。
     internal var accumulatedInputTokens: Int = 0
     internal var accumulatedOutputTokens: Int = 0
@@ -95,12 +121,36 @@ class BaseChatProvider: NSObject {
     internal var gotUsage = false
     /// 本次回复停在输出上限（OpenAI finish_reason=length / Anthropic stop_reason=max_tokens）
     internal(set) var hitOutputLimit = false
+    /// 这一次回复的结局（plan-reply-error-report-1106 §1.2）；每次请求开始清零
+    internal(set) var outcome: ReplyOutcome = .normal
+    /// 上游原样的 finish_reason / stop_reason（认不出的也存）
+    internal(set) var finishReason: String?
     /// #094：这次实发 body 的顶层键 + 几个值（400 自愈只认真发了的字段）
     internal var sentShape = ParamErrorClassifier.SentShape()
     /// thinking 回传 astra #3：这次请求回传的思考块按输入计（保险闸用）
     internal var echoedThinking = BudgetPreflight.EchoedThinking()
     /// OpenAI 兼容路这一次回复的思考（plan-model-compat-p0 §4）；别家不填
     internal var reasoning = ReasoningCapture()
+
+    // MARK: - 卡住看门狗（plan-reply-error-report-1106 §2）
+
+    /// 注入时钟（测试用假时钟推进）
+    @ObservationIgnored var clock: () -> Date = { Date() }
+    /// 阈值（测试注入毫秒级）；Router 每次发送前按自己的配置覆盖
+    @ObservationIgnored var stallConfig = StallWatchdogConfig()
+    /// 轻提示往外抛（Router → VM 顶部 toast）；每个阶段最多一次
+    @ObservationIgnored var onStallNotice: ((String) -> Void)?
+    /// 最近一次收到任何字节（含 keep-alive 注释行）
+    @ObservationIgnored internal private(set) var lastByteAt: Date?
+    /// 最近一次收到正文 / 思考 / 工具增量
+    @ObservationIgnored internal private(set) var lastDeltaAt: Date?
+    /// 看门狗已经硬停：不是用户点停止，收尾照常走 onComplete
+    @ObservationIgnored internal private(set) var stoppedByWatchdog = false
+    @ObservationIgnored private var streamStartedAt: Date?
+    @ObservationIgnored private var stallWatchdogTask: Task<Void, Never>?
+    @ObservationIgnored private var firstByteNoticeSent = false
+    @ObservationIgnored private var midStreamNoticeSent = false
+    var isStallWatchdogRunning: Bool { stallWatchdogTask != nil }
 
     /// 这一次已经开始输出（正文 / 思考 / 工具调用，Q11）：出错不再自动重发
     var hasEmittedOutput: Bool { !streamingContent.isEmpty || receivedDone }
@@ -128,6 +178,100 @@ class BaseChatProvider: NSObject {
     /// 没收到 [DONE] 就结束的流：子类把压着没吐的正文排队吐出（返回 true = 排了回调，结算要排在它后面）
     func flushHeldContent() -> Bool { false }
 
+    /// 收尾判空（plan-reply-error-report-1106 §1.2.4）：正常结束但正文 trim 后为空、且这一轮没有工具调用 → emptyReply（只有思考也算空）
+    internal func settleEmptyOutcome(hasToolCalls: Bool) {
+        guard !hasToolCalls, outcome == .normal,
+              streamingContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        outcome = .emptyReply
+    }
+
+    /// 网络错误给用户看的文案：超时统一成中文（plan-reply-error-report-1106 §1.5）
+    static func networkErrorMessage(_ error: NSError) -> String {
+        error.code == NSURLErrorTimedOut ? "上游太久没回，请求超时了" : error.localizedDescription
+    }
+
+    /// 任何字节到达（feedSSE / delegate 收数据入口）：keep-alive 注释行也算
+    internal func markByteReceived() {
+        lastByteAt = clock()
+    }
+
+    /// 正文 / 思考 / 工具增量到达：中途卡住的计时清零
+    internal func markDelta() {
+        lastDeltaAt = clock()
+    }
+
+    /// 流式请求真发出去时调用：记起点，起 1 秒粒度的检查 Task
+    internal func startStallWatchdog() {
+        stopStallWatchdog()
+        streamStartedAt = clock()
+        lastByteAt = nil
+        lastDeltaAt = nil
+        firstByteNoticeSent = false
+        midStreamNoticeSent = false
+        stoppedByWatchdog = false
+        let interval = max(0.001, stallConfig.tick)
+        stallWatchdogTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard let self, !Task.isCancelled else { return }
+                if self.stallTick() { return }
+            }
+        }
+    }
+
+    internal func stopStallWatchdog() {
+        stallWatchdogTask?.cancel()
+        stallWatchdogTask = nil
+    }
+
+    /// 一次检查：返回 true = 已经硬停 / 该退出，Task 停掉
+    @discardableResult
+    internal func stallTick() -> Bool {
+        guard isStreaming, !receivedDone, !terminatedByError else { return true }
+        let now = clock()
+        if let lastDeltaAt {
+            // 已经出过增量：只看增量空闲；keep-alive 不续它
+            let idle = now.timeIntervalSince(lastDeltaAt)
+            if idle >= stallConfig.midStreamHardStop {
+                hardStopAfterStall(.stalledMidStream)
+                return true
+            }
+            if idle >= stallConfig.midStreamNotice, !midStreamNoticeSent {
+                midStreamNoticeSent = true
+                onStallNotice?("上游中途停住了")
+            }
+        } else {
+            // 还没有任何增量：从流开始算，keep-alive 只证明连上了
+            let idle = now.timeIntervalSince(streamStartedAt ?? now)
+            if idle >= stallConfig.firstByteHardStop {
+                hardStopAfterStall(.stalledFirstByte)
+                return true
+            }
+            if lastByteAt != nil, idle >= stallConfig.firstByteNotice, !firstByteNoticeSent {
+                firstByteNoticeSent = true
+                onStallNotice?("已连上，上游在排队")
+            }
+        }
+        return false
+    }
+
+    /// 硬停 = 取消连接 + 正常收尾：已有正文保留，正文为空也派 onComplete（灰胶囊落地）。
+    /// 不走 onError，也绝不碰 VM 的「用户点停止」路径。
+    private func hardStopAfterStall(_ outcome: ReplyOutcome) {
+        stoppedByWatchdog = true
+        stopStallWatchdog()
+        self.outcome = outcome
+        let task = currentTask
+        currentTask = nil
+        urlSession = nil            // 迟到的 delegate 回调按陈旧作废，不会再收尾第二次
+        sessionGeneration = nil
+        isStreaming = false
+        task?.cancel()
+        let flushed = flushHeldContent()
+        let settle: () -> Void = { [self] in _ = onComplete?(streamingContent, finalUsage) }
+        if flushed { enqueueCallback(settle) } else { settle() }
+    }
+
     func sendStreaming(
         messages: [(role: String, content: String)],
         model: String,
@@ -149,6 +293,7 @@ class BaseChatProvider: NSObject {
     }
 
     func cancel() {
+        stopStallWatchdog()
         budgetPreflightTask?.cancel()
         budgetPreflightTask = nil
         currentTask?.cancel()
@@ -168,6 +313,8 @@ class BaseChatProvider: NSObject {
         var usage: TokenUsage?
         var hitOutputLimit = false
         var reasoning = ReasoningCapture()
+        var outcome: ReplyOutcome = .normal
+        var finishReason: String? = nil
     }
 
     /// 子类按各家格式解析整包；字段对齐流式路径已支持的（文本 / 工具调用 / usage / 联网来源）
@@ -225,6 +372,7 @@ class BaseChatProvider: NSObject {
             onError?(msg)
             return
         }
+        if !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !result.toolCalls.isEmpty { emitEffectiveEvent() }
         emitPaced(result)
     }
 
@@ -245,6 +393,8 @@ class BaseChatProvider: NSObject {
             gotUsage = true
         }
         hitOutputLimit = result.hitOutputLimit
+        outcome = result.outcome
+        finishReason = result.finishReason
         reasoning = result.reasoning
         let gen = pacedGeneration
         let text = result.text
@@ -276,6 +426,7 @@ class BaseChatProvider: NSObject {
             if !result.toolCalls.isEmpty, let cb = self.onToolCalls {
                 cb(result.toolCalls)
             } else {
+                self.settleEmptyOutcome(hasToolCalls: false)
                 self.onComplete?(self.streamingContent, result.usage)
             }
         }
@@ -284,6 +435,7 @@ class BaseChatProvider: NSObject {
 
     internal func resetState(onToken: @escaping (String) -> Void, onComplete: @escaping (String, TokenUsage?) -> Void, onError: @escaping (String) -> Void) {
         cancel()
+        didEmitEffectiveEvent = false
         self.onToken = onToken
         self.onComplete = onComplete
         self.onError = onError
@@ -315,6 +467,14 @@ class BaseChatProvider: NSObject {
         self.finalEventUsageState = nil
         self.gotUsage = false
         self.hitOutputLimit = false
+        self.outcome = .normal
+        self.finishReason = nil
+        self.stoppedByWatchdog = false
+        self.lastByteAt = nil
+        self.lastDeltaAt = nil
+        self.streamStartedAt = nil
+        self.firstByteNoticeSent = false
+        self.midStreamNoticeSent = false
         self.sentShape = ParamErrorClassifier.SentShape()
         self.echoedThinking = BudgetPreflight.EchoedThinking()
         self.reasoning = ReasoningCapture()
@@ -357,7 +517,9 @@ class BaseChatProvider: NSObject {
         let task = session.dataTask(with: request)
         currentTask = task
         requestWasSent = true
+        onRequestAttempt?()
         onRequestSent?(request)
+        startStallWatchdog()
         task.resume()
     }
 
@@ -406,6 +568,41 @@ class BaseChatProvider: NSObject {
         images: [PendingChatAttachment] = []
     ) async throws -> (String, TokenUsage?) {
         fatalError("Subclass must implement")
+    }
+
+    /// 副调用这次按流式发（卡上「后台任务用流式」，router 建 provider 时按卡设；刀 4 返修）
+    var sideCallStreams = false
+
+    /// 副调用发请求、拿非流式同形的整包：流式时边收边攒（SideStreamAssembler），非 200 / 流里报错照旧抛上游原因（去 key）
+    internal func sideCallBody(_ request: URLRequest, format: SideStreamAssembler.Format,
+                               apiKey: String, extraHeaders: [String: String]) async throws -> Data {
+        let secrets = ParamErrorClassifier.secrets(apiKey: apiKey, headers: extraHeaders)
+        let fail: (Data, Int) -> NSError = { data, code in
+            NSError(domain: "ChatService", code: code, userInfo: [NSLocalizedDescriptionKey: ParamErrorClassifier.redacted(
+                Self.extractError(from: data, statusCode: code), secrets: secrets)])
+        }
+        guard sideCallStreams else {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard statusCode == 200 else { throw fail(data, statusCode) }
+            return data
+        }
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard statusCode == 200 else {
+            var data = Data()
+            for try await byte in bytes { data.append(byte) }
+            throw fail(data, statusCode)
+        }
+        var assembler = SideStreamAssembler(format: format)
+        do {
+            for try await line in bytes.lines { try assembler.feed(line) }
+            return try assembler.body()
+        } catch SideStreamAssembler.Failure.upstream(let payload) {
+            throw fail(Data(payload.utf8), 200)
+        } catch SideStreamAssembler.Failure.incomplete {
+            throw NSError(domain: "ChatService", code: -4, userInfo: [NSLocalizedDescriptionKey: "回包中途断了（流式没收到结束标记）"])
+        }
     }
 
     /// 从非流式响应体中提取错误信息
@@ -458,6 +655,7 @@ extension BaseChatProvider: URLSessionDataDelegate {
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         if isStale(session) { return }
+        markByteReceived()
         if httpStatusCode == 200, !isEventStream {
             // 没标 event-stream 但 body 长得像 SSE（缺头的中转）→ 按 SSE 走
             let head = String(decoding: data.prefix(16), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -473,6 +671,7 @@ extension BaseChatProvider: URLSessionDataDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         if isStale(session) { return }
+        stopStallWatchdog()
         let wasStreaming = isStreaming
         isStreaming = false
         urlSession = nil
@@ -480,7 +679,7 @@ extension BaseChatProvider: URLSessionDataDelegate {
         if let error = error as? NSError, error.code != NSURLErrorCancelled {
             // 流内 error 已经排了 onError（终态只报一次）：随后的连接异常不再报第二次
             if terminatedByError { return }
-            let msg = error.localizedDescription
+            let msg = Self.networkErrorMessage(error)
             urlErrorCode = error.code
             self.error = msg
             onError?(msg)
@@ -506,10 +705,18 @@ extension BaseChatProvider: URLSessionDataDelegate {
         }
 
         if wasStreaming {
+            // 正常结束，但既没见过 [DONE] / message_stop，也没见过 finish_reason / stop_reason → 流断了（§1.2.5）
+            if !terminatedByError, finishReason == nil, !stoppedByWatchdog { outcome = .streamCut }
             let flushed = !terminatedByError && flushHeldContent()
             let settle = { [self] in
                 if terminatedByError { return }
                 if streamingContent.isEmpty {
+                    // 非流断的异常结局（审核拦下 / 上游中止…）即使正文为空也要落胶囊；
+                    // 流断且正文为空保持原来的「未收到回复」（颜色是红的，不是灰胶囊）
+                    if outcome != .normal, outcome != .streamCut {
+                        onComplete?(streamingContent, finalUsage)
+                        return
+                    }
                     let msg = "未收到回复"
                     self.error = msg
                     onError?(msg)
@@ -541,6 +748,7 @@ extension BaseChatProvider: URLSessionDataDelegate {
 
     /// 喂解码器；一行超上限就断流报错
     internal func feedSSE(_ data: Data) -> [SSELineDecoder.Field] {
+        markByteReceived()
         do {
             return try sseDecoder.feed(data)
         } catch {
@@ -562,7 +770,7 @@ extension BaseChatProvider: URLSessionDataDelegate {
 
 // MARK: - 有序序列 → 线上消息（④b）
 
-/// provider adapter 共用的纯函数：定 system 前缀；非前缀 system 原位保留或降级；降级时按序合并相邻同 role。
+/// provider adapter 共用的纯函数：记忆保持 system，其余非前缀 system 按提供商能力原位保留或降级。
 enum PromptWire {
     /// 降级边界：不支持序列内 system 的接口把它转成 user 文本块，包这层标明是系统注入（语义降级，不等价于 system 权限）
     static let systemNoteOpen = "<system_note>"
@@ -579,7 +787,13 @@ enum PromptWire {
     }
 
     struct Plan {
-        let systemPrompt: String?
+        /// 合并前仍保留来源，记忆不能因与普通 system 拼接而失去权限边界。
+        let systemSegments: [PromptMessage]
+        /// 此下标起是从历史后上提的记忆；之前仍是原来的稳定 system 前缀。
+        let stableSystemSegmentCount: Int
+        var systemPrompt: String? {
+            systemSegments.isEmpty ? nil : systemSegments.map(\.content).joined(separator: "\n\n")
+        }
         let messages: [Message]
         /// 非前缀 system 段数（原位发 / 被降级）
         let inPlaceSystemCount: Int
@@ -588,15 +802,22 @@ enum PromptWire {
 
     static func plan(_ ordered: [PromptMessage], strategy: SystemStrategy) -> Plan {
         let firstNonSystem = ordered.firstIndex { $0.role != "system" } ?? ordered.count
-        var prefix: [String] = []
+        var prefix: [PromptMessage] = []
+        var memorySuffix: [PromptMessage] = []
         var rest: [PromptMessage] = []
         for (index, message) in ordered.enumerated() {
-            if message.role == "system" && (index < firstNonSystem || message.pinnedToSystemPrefix) {
-                prefix.append(message.content)
+            if message.role == "system", message.source == .memory, index >= firstNonSystem,
+               strategy == .degradeToUserNote {
+                memorySuffix.append(message)
+            } else if message.role == "system" && (index < firstNonSystem || message.pinnedToSystemPrefix
+                || (message.source.requiresSystemRole && strategy == .degradeToUserNote)) {
+                prefix.append(message)
             } else {
                 rest.append(message)
             }
         }
+        let stableSystemSegmentCount = prefix.count
+        prefix.append(contentsOf: memorySuffix)
         let inPlace = rest.filter { $0.role == "system" }.count
         let degrade = strategy == .degradeToUserNote && inPlace > 0
         var messages = rest.map { message -> Message in
@@ -618,7 +839,7 @@ enum PromptWire {
             }
             messages = merged
         }
-        return Plan(systemPrompt: prefix.isEmpty ? nil : prefix.joined(separator: "\n\n"), messages: messages,
+        return Plan(systemSegments: prefix, stableSystemSegmentCount: stableSystemSegmentCount, messages: messages,
                     inPlaceSystemCount: inPlace, degradedSystemCount: degrade ? inPlace : 0)
     }
 }
@@ -727,14 +948,14 @@ final class OpenAICompatibleProvider: BaseChatProvider {
         for (key, value) in extraHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        if samplingParams?.streaming == false { request.timeoutInterval = 600 }
+        request.timeoutInterval = samplingParams?.streaming == false ? 600 : StallWatchdogConfig.streamingTimeout   // 流式 90 秒（§2）：keep-alive 会把默认 60 秒一直续下去
         request.httpBody = Self.encodeBody(body)
 
         startRequest(request)
     }
 
     /// ④b：有序消息序列 → 请求 body。开头连续 system（+ 锚定前缀的段）并成首条 system；
-    /// 其余 system 支持交错时原位 role:system，否则降级成 <system_note> user 块并按序合并相邻同 role。
+    /// 其余 system 支持交错时原位 role:system，否则记忆提升到 system 前缀，非记忆降级成 <system_note> user 块。
     /// 没有非前缀 system 时与旧 buildRequestBody 逐字节一致（ProviderOrderingTests 夹具）。
     static func buildRequestBody(
         ordered: [PromptMessage],
@@ -848,6 +1069,10 @@ final class OpenAICompatibleProvider: BaseChatProvider {
             for result in turn.results {
                 apiMessages.append(["role": "tool", "tool_call_id": result.toolUseId, "content": result.text])
             }
+            for follow in turn.followUps {
+                if follow.hasReply { apiMessages.append(["role": "assistant", "content": follow.reply]) }
+                apiMessages.append(["role": "user", "content": follow.note])
+            }
         }
 
         var body: [String: Any] = [
@@ -951,11 +1176,15 @@ final class OpenAICompatibleProvider: BaseChatProvider {
             }
         }
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "messages": apiMessages,
-            "stream": false,
+            "stream": sideCallStreams,
         ]
+        if sideCallStreams, !ResolvedCompat.resolve(providerType: .openaiCompatible, baseURL: baseURL, modelId: model, sampling: nil)
+            .params.dropped.contains(ParamCompat.Group.streamOptions) {
+            body["stream_options"] = ["include_usage": true]
+        }
 
         guard let url = URL(string: "\(baseURL)/chat/completions") else {
             throw NSError(domain: "ChatService", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的 API 地址"])
@@ -963,6 +1192,7 @@ final class OpenAICompatibleProvider: BaseChatProvider {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = 600   // 副调用非流式和聊天非流式一样 600s；默认 60s 会把慢模型的长输出超时掉（体检 L-B1）
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         for (key, value) in extraHeaders {
@@ -976,19 +1206,13 @@ final class OpenAICompatibleProvider: BaseChatProvider {
             throw NSError(domain: "BudgetGate", code: -1, userInfo: [NSLocalizedDescriptionKey: FixJump.budgetPreflightMessage])
         }
         requestWasSent = true
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-
-        guard statusCode == 200 else {
-            throw NSError(domain: "ChatService", code: statusCode,
-                          userInfo: [NSLocalizedDescriptionKey: ParamErrorClassifier.redacted(
-                              Self.extractError(from: data, statusCode: statusCode), secrets: ParamErrorClassifier.secrets(apiKey: apiKey, headers: extraHeaders))])
-        }
+        let data = try await sideCallBody(request, format: .openAI, apiKey: apiKey, extraHeaders: extraHeaders)
 
         // 和聊天的非流式同一个解析：content 是数组 / null 也认（以前只认字符串，记忆写手直接报「无法解析响应」）
         usageBaseURL = baseURL
         usageCacheWriteIs1h = APIUsageParser.isOpenRouter(baseURL) && model.lowercased().contains("claude")
         let parsed = try parseNonStreamBody(data)
+        hitOutputLimit = parsed.hitOutputLimit
         return (parsed.text, parsed.usage)
     }
 
@@ -1013,7 +1237,9 @@ final class OpenAICompatibleProvider: BaseChatProvider {
                 calls.append(ToolCallBlock(id: id, name: name, argumentsJSON: fn["arguments"] as? String ?? "{}"))
             }
         }
-        let hit = choices.first?["finish_reason"] as? String == "length"
+        let reason = choices.first?["finish_reason"] as? String
+        let outcome = ReplyOutcome(finishReason: reason)
+        let hit = outcome == .truncatedLength
         let usage = APIUsageParser.openAI(obj, baseURL: usageBaseURL, cacheWriteIs1h: usageCacheWriteIs1h)
         var reasoning = ReasoningCapture()
         reasoning.absorbMessage(message)
@@ -1023,7 +1249,7 @@ final class OpenAICompatibleProvider: BaseChatProvider {
         }
 
         return NonStreamResult(text: text, toolCalls: calls.markingLastTruncated(hit), usage: usage, hitOutputLimit: hit,
-                               reasoning: reasoning)
+                               reasoning: reasoning, outcome: outcome, finishReason: reason)
     }
 
     override func processData(_ data: Data) {
@@ -1050,6 +1276,7 @@ final class OpenAICompatibleProvider: BaseChatProvider {
                             }
                             cb(calls.markingLastTruncated(hitOutputLimit))
                         } else {
+                            settleEmptyOutcome(hasToolCalls: false)
                             onComplete?(streamingContent, finalUsage)
                         }
                     }
@@ -1068,6 +1295,9 @@ final class OpenAICompatibleProvider: BaseChatProvider {
     }
 
     private func emitContent(_ content: String) {
+        guard !content.isEmpty else { return }
+        markDelta()
+        if !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { emitEffectiveEvent() }
         enqueueCallback { [self] in
             streamingContent += content
             onToken?(content)
@@ -1110,7 +1340,11 @@ final class OpenAICompatibleProvider: BaseChatProvider {
         }
 
         let choices = obj["choices"] as? [[String: Any]]
-        if choices?.first?["finish_reason"] as? String == "length" { hitOutputLimit = true }
+        if let reason = choices?.first?["finish_reason"] as? String {
+            finishReason = reason
+            outcome = ReplyOutcome(finishReason: reason)
+            hitOutputLimit = outcome == .truncatedLength
+        }
         guard let delta = choices?.first?["delta"] as? [String: Any] else {
             if let err = obj["error"] as? [String: Any],
                let message = err["message"] as? String {
@@ -1126,7 +1360,12 @@ final class OpenAICompatibleProvider: BaseChatProvider {
         }
 
         // 思考字段在正文之前读：同一片里先有思考（Kimi 文档：思考总在正文前）；流式中不实时显示（Q9），回复完由 router 挂段
+        let reasoningBytesBefore = reasoning.text.utf8.count
+        let reasoningDetailCountBefore = reasoning.details.count
         reasoning.absorbDelta(delta)
+        if reasoning.text.utf8.count != reasoningBytesBefore || reasoning.details.count != reasoningDetailCountBefore {
+            markDelta()   // 只有思考增量也算「还在出东西」，看门狗不误停
+        }
         if let content = delta["content"] as? String {
             if splitsLeadingThinkTag {
                 let body = thinkSplitter.feed(content, into: &reasoning, enabled: !reasoning.hasNative)
@@ -1149,6 +1388,8 @@ final class OpenAICompatibleProvider: BaseChatProvider {
                     if let args = fn["arguments"] as? String { entry.args += args }
                 }
                 toolCallAccum[idx] = entry
+                markDelta()
+                if !entry.id.isEmpty && !entry.name.isEmpty { emitEffectiveEvent() }
             }
         }
     }
@@ -1331,7 +1572,7 @@ final class AnthropicProvider: BaseChatProvider {
         for (key, value) in extraHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        if samplingParams?.streaming == false { request.timeoutInterval = 600 }
+        request.timeoutInterval = samplingParams?.streaming == false ? 600 : StallWatchdogConfig.streamingTimeout   // 流式 90 秒（§2）：keep-alive 会把默认 60 秒一直续下去
         request.httpBody = Self.encodeBody(body)
 
         startRequest(request)
@@ -1340,7 +1581,7 @@ final class AnthropicProvider: BaseChatProvider {
     /// ④b：有序消息序列 → 请求 body。Anthropic 只有顶层 system：开头连续 system（+ 锚定前缀的段）按序进顶层；
     /// 其余 system 原位转成 <system_note> user 文本块（不上移、不丢），再按序合并相邻同 role 的内容块（附件块顺序不变）。
     /// 序列以 assistant 结尾（depth=0 assistant 注入）时 Anthropic 当 prefill 续写——维持现状，不删。
-    /// 没有非前缀 system 时与旧 buildRequestBody 逐字节一致（ProviderOrderingTests 夹具）。
+    /// 没有易变记忆时 system 保持旧单块；缓存开启时另在末个非 deferred tool 挂标。
     static func buildRequestBody(
         ordered: [PromptMessage],
         model: String,
@@ -1353,13 +1594,35 @@ final class AnthropicProvider: BaseChatProvider {
         // #089 P0-b：没下发客户端工具时 API 不收工具块 → 历史退回纯文字 + 〔系统记录〕
         let toolNames = ToolReplay.clientToolNames(tools)
         let plan = PromptWire.plan(ToolReplay.wireOrdered(ordered, toolNames: toolNames), strategy: .degradeToUserNote)
-        return buildRequestBody(
-            messages: [], model: model, systemPrompt: plan.systemPrompt,
+        let cacheEnabled = samplingParams?.cacheFriendly == true && allowCacheControl
+        let stableSystemPrompt: String?
+        if cacheEnabled && plan.stableSystemSegmentCount > 0
+            && plan.stableSystemSegmentCount < plan.systemSegments.count {
+            // 分隔符属于 X：X 出现或清空都不能改变稳定块字节；空稳定文本回退旧单块挂标。
+            let stable = plan.systemSegments.prefix(plan.stableSystemSegmentCount).map(\.content).joined(separator: "\n\n")
+            stableSystemPrompt = stable.isEmpty ? nil : stable
+        } else {
+            stableSystemPrompt = nil
+        }
+        var body = buildRequestBody(
+            messages: [], model: model, systemPrompt: stableSystemPrompt ?? plan.systemPrompt,
             samplingParams: samplingParams, tools: tools, toolTurns: toolTurns,
             allowCacheControl: allowCacheControl,
             wireMessages: anthropicWire(plan.messages, toolNames: toolNames),
             compat: compat
         )
+        if stableSystemPrompt != nil {
+            var blocks = body["system"] as? [[String: Any]] ?? []
+            let volatile = plan.systemSegments.dropFirst(plan.stableSystemSegmentCount).map(\.content).joined(separator: "\n\n")
+            blocks.append(["type": "text", "text": "\n\n" + volatile])
+            body["system"] = blocks
+        }
+        if cacheEnabled, var tools = body["tools"] as? [[String: Any]],
+           let anchor = tools.lastIndex(where: { $0["defer_loading"] as? Bool != true }) {
+            tools[anchor]["cache_control"] = cacheMark(samplingParams)
+            body["tools"] = tools
+        }
+        return body
     }
 
     /// #089 P0-b：带工具回合的 assistant 展开成 assistant[正文?, tool_use…] → user[tool_result…] → … → assistant[最后的正文]。
@@ -1469,6 +1732,19 @@ final class AnthropicProvider: BaseChatProvider {
                     return block
                 }
             ])
+            // 回执后模型只回了字 + 补的提醒：assistant 正文 → user 提醒；没回字就把提醒并进上一条 user（保持一问一答交替）
+            for follow in turn.followUps {
+                let note: [String: Any] = ["type": "text", "text": follow.note]
+                if follow.hasReply {
+                    apiMessages.append(["role": "assistant", "content": [["type": "text", "text": follow.reply]]])
+                    apiMessages.append(["role": "user", "content": [note]])
+                } else if var last = apiMessages.last, last["role"] as? String == "user", let blocks = last["content"] as? [[String: Any]] {
+                    last["content"] = blocks + [note]
+                    apiMessages[apiMessages.count - 1] = last
+                } else {
+                    apiMessages.append(["role": "user", "content": [note]])
+                }
+            }
         }
 
         // 思考强度（research-reasoning-effort §2.3）：4.7+ / 5 系用 adaptive + output_config.effort，老模型用 budget_tokens
@@ -1519,7 +1795,7 @@ final class AnthropicProvider: BaseChatProvider {
 
         // ── prompt cache 显式挂标（cacheFriendly 开关，缓存读 0.1×）──
         if samplingParams?.cacheFriendly == true && allowCacheControl {
-            // BP1：整段 system。易变内容已被组装层下沉进 messages 的[动态上下文]段，system 全段逐轮稳定
+            // BP1：旧入口缓存整段 system；ordered 入口只传稳定块（记忆易变块随后追加、不挂标），另挂末个非 deferred tool；同 oh-my-pi applyHeadCaching。
             if let sys = body["system"] as? String, !sys.isEmpty {
                 body["system"] = [["type": "text", "text": sys, "cache_control": cacheMark(samplingParams)] as [String: Any]]
             }
@@ -1621,6 +1897,7 @@ final class AnthropicProvider: BaseChatProvider {
         if let sys = systemPrompt, !sys.isEmpty {
             body["system"] = sys
         }
+        if sideCallStreams { body["stream"] = true }
 
         guard let url = URL(string: "\(baseURL)/messages") else {
             throw NSError(domain: "ChatService", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的 API 地址"])
@@ -1628,6 +1905,7 @@ final class AnthropicProvider: BaseChatProvider {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = 600   // 副调用非流式和聊天非流式一样 600s；默认 60s 会把慢模型的长输出超时掉（体检 L-B1）
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         for (key, value) in extraHeaders {
@@ -1641,17 +1919,11 @@ final class AnthropicProvider: BaseChatProvider {
             throw NSError(domain: "BudgetGate", code: -1, userInfo: [NSLocalizedDescriptionKey: FixJump.budgetPreflightMessage])
         }
         requestWasSent = true
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-
-        guard statusCode == 200 else {
-            throw NSError(domain: "ChatService", code: statusCode,
-                          userInfo: [NSLocalizedDescriptionKey: ParamErrorClassifier.redacted(
-                              Self.extractError(from: data, statusCode: statusCode), secrets: ParamErrorClassifier.secrets(apiKey: apiKey, headers: extraHeaders))])
-        }
+        let data = try await sideCallBody(request, format: .anthropic, apiKey: apiKey, extraHeaders: extraHeaders)
 
         // 和聊天的非流式同一个解析：拼全部 text 块（以前只取第一块，第一块是 thinking 就报「无法解析响应」）
         let parsed = try parseNonStreamBody(data)
+        hitOutputLimit = parsed.hitOutputLimit
         return (parsed.text, parsed.usage)
     }
 
@@ -1695,9 +1967,11 @@ final class AnthropicProvider: BaseChatProvider {
         }
         let usage = (obj["usage"] as? [String: Any]).flatMap(APIUsageParser.anthropic)
         let stop = obj["stop_reason"] as? String
-        let hit = stop == "max_tokens"
+        let outcome = ReplyOutcome(anthropicStopReason: stop)
+        let hit = outcome == .truncatedLength
         if stop != "tool_use" && !hit { calls = [] }
-        return NonStreamResult(text: text, toolCalls: calls.markingLastTruncated(hit), usage: usage, hitOutputLimit: hit)
+        return NonStreamResult(text: text, toolCalls: calls.markingLastTruncated(hit), usage: usage, hitOutputLimit: hit,
+                               outcome: outcome, finishReason: stop)
     }
 
     override func processData(_ data: Data) {
@@ -1715,7 +1989,7 @@ final class AnthropicProvider: BaseChatProvider {
                 currentEventType = name.trimmingCharacters(in: .whitespaces)
             case .data(let payload):
                 handleAnthropicEvent(type: currentEventType, data: payload)
-            case .comment, .other:
+            case .comment, .blank, .other:
                 break
             }
         }
@@ -1785,9 +2059,15 @@ final class AnthropicProvider: BaseChatProvider {
             if let cb = obj["content_block"] as? [String: Any] {
                 blockAccum[obj["index"] as? Int ?? 0] = ReplyBlock(raw: cb, complete: false)
                 let type = cb["type"] as? String
+                if type == "text", let text = cb["text"] as? String, !text.isEmpty {
+                    markDelta()
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { emitEffectiveEvent() }
+                }
                 if type == "tool_use", let id = cb["id"] as? String, let name = cb["name"] as? String {
                     let idx = obj["index"] as? Int ?? 0
                     toolUseAccum[idx] = (id: id, name: name, json: "")
+                    markDelta()
+                    if !id.isEmpty && !name.isEmpty { emitEffectiveEvent() }
                 } else if type == "web_search_tool_result", let content = cb["content"] as? [[String: Any]] {
                     // Anthropic server-side web search 返回：content 数组里是 web_search_result 项
                     // 直接 in content_block_start 携带，不走 delta
@@ -1815,6 +2095,8 @@ final class AnthropicProvider: BaseChatProvider {
                 let idx = obj["index"] as? Int ?? 0
                 if let text = delta["text"] as? String {
                     appendToBlock(idx, key: "text", text)
+                    markDelta()
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { emitEffectiveEvent() }
                     enqueueCallback { [self] in
                         streamingContent += text
                         onToken?(text)
@@ -1822,8 +2104,10 @@ final class AnthropicProvider: BaseChatProvider {
                 } else if let partial = delta["partial_json"] as? String {
                     if var entry = toolUseAccum[idx] { entry.json += partial; toolUseAccum[idx] = entry }
                     blockInputJSON[idx, default: ""] += partial
+                    if !partial.isEmpty { markDelta() }
                 } else if let thinking = delta["thinking"] as? String {
                     appendToBlock(idx, key: "thinking", thinking)
+                    if !thinking.isEmpty { markDelta() }
                 } else if let signature = delta["signature"] as? String {
                     blockAccum[idx]?.raw["signature"] = signature
                 } else if let citation = delta["citation"] {
@@ -1848,7 +2132,9 @@ final class AnthropicProvider: BaseChatProvider {
             // { "type": "message_delta", "delta": { "stop_reason": ... }, "usage": { "output_tokens": N } }
             if let delta = obj["delta"] as? [String: Any], let sr = delta["stop_reason"] as? String {
                 stopReason = sr
-                hitOutputLimit = sr == "max_tokens"
+                finishReason = sr
+                outcome = ReplyOutcome(anthropicStopReason: sr)
+                hitOutputLimit = outcome == .truncatedLength
                 if sr == "refusal" { refusalCategory = Self.refusalCategoryIn(obj) }
             }
             if let u = obj["usage"] as? [String: Any] {
@@ -1868,6 +2154,7 @@ final class AnthropicProvider: BaseChatProvider {
                     }
                     cb(calls.markingLastTruncated(stopReason == "max_tokens"))
                 } else {
+                    settleEmptyOutcome(hasToolCalls: false)
                     onComplete?(streamingContent, finalUsage)
                 }
             }
@@ -1940,13 +2227,20 @@ final class ProviderRouter {
         self.usageContext = usageContext
     }
 
-    /// 上一次回复停在输出上限（VM 在 onComplete 里读，同 currentWebSources 的模式）；只认通用分支
-    @ObservationIgnored private(set) var lastReplyHitOutputLimit = false
+    /// 上一次回复的结局与上游原样的 finish_reason / stop_reason（VM 在 onComplete 里读，同 currentWebSources 的模式）；只认通用分支
+    @ObservationIgnored private(set) var lastReplyOutcome: ReplyOutcome = .normal
+    @ObservationIgnored private(set) var lastFinishReason: String?
+    /// 上一次回复停在输出上限（从结局算出来，老的读法不变）
+    var lastReplyHitOutputLimit: Bool { lastReplyOutcome == .truncatedLength }
+    /// 卡住看门狗阈值（plan-reply-error-report-1106 §2）；测试注入毫秒级
+    @ObservationIgnored var stallWatchdogConfig = StallWatchdogConfig()
     /// 上一次实发的可见输出上限（越界重试后是 8192）；没带采样参数的请求为 nil
     @ObservationIgnored private(set) var lastRequestedMaxTokens: Int?
     /// #094：这一回合 400 自愈学到了东西（「这个模型不收 temperature / top_p，已自动去掉」）；目录 / 血统本来就知道的不提示。
     /// VM 在 onComplete / onError / onToolCalls 里取（取一次就清），出聊天页小灰字
     @ObservationIgnored private(set) var lastParamAdaptation: String?
+    /// 上一次请求最后报错时的 URLSession 错误码（超时 = NSURLErrorTimedOut；没报错 / 不是连接错误 = nil）。种子据此对超时原样再发一次
+    @ObservationIgnored private(set) var lastFailureURLErrorCode: Int?
 
     /// 5xx / 429 / 连接断开的自动重试正在等（plan-model-compat-p0 §7.4）：停止按钮要能取消它
     private var pendingRetry: DispatchWorkItem?
@@ -2083,14 +2377,18 @@ final class ProviderRouter {
         onComplete: @escaping (String, TokenUsage?) -> Void,
         onError: @escaping (String) -> Void,
         onToolCalls: (([ToolCallBlock], TokenUsage?) -> Void)? = nil,
-        onRetry: ((String) -> Void)? = nil
+        onRetry: ((String) -> Void)? = nil,
+        onStallNotice: ((String) -> Void)? = nil,
+        onEffectiveEvent: (() -> Void)? = nil,
+        onRequestAttempt: (() -> Void)? = nil
     ) {
         #if (DEBUG || PERF_BENCH) && os(macOS)
         if BenchIsolation.active, Self.perfMacRequested,
            MainActor.assumeIsolated({ PerfHarnessMac.streamEnabled && model.credentialId == PerfHarnessMacStream.credentialID }) {
             MainActor.assumeIsolated {
                 lastUsageRecord = nil
-                lastReplyHitOutputLimit = false
+                lastReplyOutcome = .normal
+                lastFinishReason = nil
                 lastRequestedMaxTokens = nil
                 lastParamAdaptation = nil
                 requestSerial += 1
@@ -2120,8 +2418,10 @@ final class ProviderRouter {
         #endif
         let capped = samplingParams.map { OutputTokenCap.resolved($0, modelId: model.modelId) }
         lastUsageRecord = nil
-        lastReplyHitOutputLimit = false
+        lastReplyOutcome = .normal
+        lastFinishReason = nil
         lastRequestedMaxTokens = capped?.maxTokens
+        lastFailureURLErrorCode = nil
         if attempt == 0 && transientRetry == 0 { lastParamAdaptation = nil }
         pendingRetry?.cancel()
         pendingRetry = nil
@@ -2186,11 +2486,15 @@ final class ProviderRouter {
         let requestFailed: (String) -> Void = { [weak self] message in
             guard MainActor.assumeIsolated({ !settlement.isSettled }) else { return }
             let usage: TokenUsage?
+            let failed: BaseChatProvider?
             switch provider.type {
-            case .openaiCompatible: usage = self?.openAIProvider.finalUsage
-            case .anthropic: usage = self?.anthropicProvider.finalUsage
-            default: usage = nil
+            case .openaiCompatible: usage = self?.openAIProvider.finalUsage; failed = self?.openAIProvider
+            case .anthropic: usage = self?.anthropicProvider.finalUsage; failed = self?.anthropicProvider
+            case .chatgptOAuth: usage = nil; failed = self?.chatgptOAuthProvider
+            default: usage = nil; failed = nil
             }
+            // 请求级失败统一在这里记错误码（兼容层 / ChatGPT OAuth 都走这一个出口）
+            self?.lastFailureURLErrorCode = failed?.urlErrorCode
             _ = record(usage, .error)
             onError(message)
         }
@@ -2205,9 +2509,11 @@ final class ProviderRouter {
         if provider.type == .localMLX {
             BreadcrumbLog.shared.add("🌱", "请求 本机/\(model.modelId) · \(messages.count)条 · sys \(systemPrompt?.count ?? 0)字")
             let effort = samplingParams?.reasoningEffort ?? ReasoningEffort.auto
+            onRequestAttempt?()
             localProvider.send(modelId: model.modelId, messages: messages, systemPrompt: systemPrompt,
                                hasImages: !imageMap.isEmpty, thinking: effort != ReasoningEffort.auto && effort != "none",
-                               onToken: onToken, onComplete: onComplete, onError: onError)
+                               onToken: onToken, onComplete: onComplete, onError: onError,
+                               onEffectiveEvent: onEffectiveEvent)
             return
         }
 
@@ -2226,6 +2532,8 @@ final class ProviderRouter {
                     let access = try await Self.ensureFreshAccessToken(token, credentialId: provider.id, providerManager: providerManager)
                     let oauthProvider = self.chatgptOAuthProvider
                     oauthProvider.onRequestSent = self.sentRequestRecorder(model: model, round: toolTurns.count, secrets: [access])
+                    oauthProvider.onEffectiveEvent = onEffectiveEvent
+                    oauthProvider.onRequestAttempt = onRequestAttempt
                     self.chatgptOAuthProvider.sendStreaming(
                         messages: messages,
                         model: model.modelId,
@@ -2347,7 +2655,8 @@ final class ProviderRouter {
                     samplingParams: capped, imageMap: imageMap, additionalHeaders: additionalHeaders,
                     tools: tools, toolTurns: toolTurns.map { $0.droppingThinking() }, ordered: ordered, attempt: 1,
                     transientRetry: transientRetry,
-                    onToken: onToken, onComplete: onComplete, onError: onError, onToolCalls: onToolCalls, onRetry: onRetry
+                    onToken: onToken, onComplete: onComplete, onError: onError, onToolCalls: onToolCalls, onRetry: onRetry, onStallNotice: onStallNotice,
+                    onEffectiveEvent: onEffectiveEvent, onRequestAttempt: onRequestAttempt
                 )
                 self.thinkingStrippedSerial = self.requestSerial   // 上面同步开了重发那一次（serial 已 +1）
                 return
@@ -2365,7 +2674,8 @@ final class ProviderRouter {
                     samplingParams: capped, imageMap: imageMap, additionalHeaders: additionalHeaders,
                     tools: tools, toolTurns: toolTurns, ordered: ordered, attempt: attempt,
                     transientRetry: transientRetry,
-                    onToken: onToken, onComplete: onComplete, onError: onError, onToolCalls: onToolCalls, onRetry: onRetry
+                    onToken: onToken, onComplete: onComplete, onError: onError, onToolCalls: onToolCalls, onRetry: onRetry, onStallNotice: onStallNotice,
+                    onEffectiveEvent: onEffectiveEvent, onRequestAttempt: onRequestAttempt
                 )
                 if droppedThinking { self.thinkingStrippedSerial = self.requestSerial }
                 return
@@ -2385,7 +2695,8 @@ final class ProviderRouter {
                     samplingParams: retry, imageMap: imageMap, additionalHeaders: additionalHeaders,
                     tools: tools, toolTurns: toolTurns, ordered: ordered, attempt: 1,
                     transientRetry: transientRetry,
-                    onToken: onToken, onComplete: onComplete, onError: onError, onToolCalls: onToolCalls, onRetry: onRetry
+                    onToken: onToken, onComplete: onComplete, onError: onError, onToolCalls: onToolCalls, onRetry: onRetry, onStallNotice: onStallNotice,
+                    onEffectiveEvent: onEffectiveEvent, onRequestAttempt: onRequestAttempt
                 )
                 return
             }
@@ -2413,7 +2724,8 @@ final class ProviderRouter {
                     samplingParams: retry, imageMap: imageMap, additionalHeaders: additionalHeaders,
                     tools: tools, toolTurns: toolTurns, ordered: ordered, attempt: 1,
                     transientRetry: transientRetry,
-                    onToken: onToken, onComplete: onComplete, onError: onError, onToolCalls: onToolCalls, onRetry: onRetry
+                    onToken: onToken, onComplete: onComplete, onError: onError, onToolCalls: onToolCalls, onRetry: onRetry, onStallNotice: onStallNotice,
+                    onEffectiveEvent: onEffectiveEvent, onRequestAttempt: onRequestAttempt
                 )
                 return
             }
@@ -2442,7 +2754,8 @@ final class ProviderRouter {
                         samplingParams: capped, imageMap: imageMap, additionalHeaders: additionalHeaders,
                         tools: tools, toolTurns: toolTurns, ordered: ordered, attempt: attempt,
                         transientRetry: transientRetry + 1,
-                        onToken: onToken, onComplete: onComplete, onError: onError, onToolCalls: onToolCalls, onRetry: onRetry
+                        onToken: onToken, onComplete: onComplete, onError: onError, onToolCalls: onToolCalls, onRetry: onRetry, onStallNotice: onStallNotice,
+                        onEffectiveEvent: onEffectiveEvent, onRequestAttempt: onRequestAttempt
                     )
                     if droppedThinking { self.thinkingStrippedSerial = self.requestSerial }
                 }
@@ -2459,6 +2772,10 @@ final class ProviderRouter {
         }
         MainActor.assumeIsolated { settlement.freezeKey(apiKey, host: URL(string: provider.baseURL)?.host ?? "") }
         chatProvider.onRequestSent = sentRequestRecorder(model: model, round: toolTurns.count, secrets: [apiKey])
+        chatProvider.onEffectiveEvent = onEffectiveEvent
+        chatProvider.onRequestAttempt = onRequestAttempt
+        chatProvider.stallConfig = stallWatchdogConfig
+        chatProvider.onStallNotice = onStallNotice
         pendingUsageOnCancel = { [weak chatProvider] in
             _ = record(chatProvider?.finalUsage, .error)
         }
@@ -2479,7 +2796,8 @@ final class ProviderRouter {
             ordered: ordered,
             onToken: onToken,
             onComplete: { [weak self, weak chatProvider] text, usage in
-                self?.lastReplyHitOutputLimit = chatProvider?.hitOutputLimit ?? false
+                self?.lastReplyOutcome = chatProvider?.outcome ?? .normal
+                self?.lastFinishReason = chatProvider?.finishReason
                 finished(text, usage)
             },
             onError: adaptiveFailed,
@@ -2507,6 +2825,20 @@ final class ProviderRouter {
         providerManager: ProviderManager,
         images: [PendingChatAttachment] = []
     ) async throws -> (String, TokenUsage?) {
+        let r = try await sideCall(model: model, messages: messages, systemPrompt: systemPrompt,
+                                   providerManager: providerManager, images: images)
+        return (r.text, r.usage)
+    }
+
+    /// 后台副调用（体检 L1）：记账、预算终闸都在这里和 provider 层做完，调用方不用再早闸 / commitSpend；
+    /// 带回截断标志（L-B2），被截断的结果由调用方决定当不当真
+    func sideCall(
+        model: ProviderModel,
+        messages: [(role: String, content: String)],
+        systemPrompt: String?,
+        providerManager: ProviderManager,
+        images: [PendingChatAttachment] = []
+    ) async throws -> SideCallResult {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure {
             // 严格测量角色：非流式（摘要 / 转写 / 记忆 / 标题等）一律拒绝 + 记录 + 停轮（§3.1）
@@ -2548,8 +2880,10 @@ final class ProviderRouter {
         switch provider.type {
         case .openaiCompatible:
             chatProvider = OpenAICompatibleProvider() // 独立实例，避免干扰流式
+            chatProvider.sideCallStreams = provider.sideCallStreaming != false
         case .anthropic:
             chatProvider = AnthropicProvider()
+            chatProvider.sideCallStreams = provider.sideCallStreaming != false
         case .ccBridge:
             chatProvider = CCBridgeProvider() // 独立实例（内部用 shared WS singleton）
         case .chatgptOAuth:
@@ -2599,7 +2933,7 @@ final class ProviderRouter {
             usage.ledgerCostRecorded = true
             usage.ledgerSpendRecorded = true
             usage.ledgerRecord = row
-            return (result.0, usage)
+            return SideCallResult(text: result.0, usage: usage, hitOutputLimit: chatProvider.hitOutputLimit)
         } catch {
             var row = UsageRecord(provider: provider, modelId: model.modelId, usage: nil,
                                   started: started, ended: Date(), status: .error, context: usageContext,
@@ -2651,7 +2985,8 @@ final class ProviderRouter {
         default:
             if !explained, let plain { text = plain + "。原文：" + text }
         }
-        if status > 0, !text.contains("HTTP \(status)）") {
+        // 状态码 200 时不再拼「（… HTTP 200）」：那不是上游给的失败码，只会让人误以为接口回错了
+        if status > 0, status != 200, !text.contains("HTTP \(status)）") {
             text += FixJump.statusTail(host: host, modelId: modelId, status: status)
         }
         if learnedNow != ParamCompat.Learned() { text += "\n（\(FixJump.learnedPrefix)\(learnedNow.summary)，下次自动照办）" }
@@ -2826,4 +3161,12 @@ final class CCBridgeProvider: BaseChatProvider {
         // CC 在 tmux 里处理，无法从外部中断；本地只清流式状态
         isStreaming = false
     }
+}
+
+extension CacheDiagLog: MemoryLog {}
+
+struct SideCallResult {
+    let text: String
+    let usage: TokenUsage?
+    let hitOutputLimit: Bool
 }

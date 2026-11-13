@@ -59,6 +59,7 @@ final class CCBridgeReplyDedupOrderTests: XCTestCase {
             XCTAssertEqual(callReply?.requestId, "user-1")
             XCTAssertEqual(callReply?.streaming, true)
             delivered.fulfill()
+            return true
         }
         client.handleIncoming(frame(id, requestId: "user-1", streaming: true))
         wait(for: [delivered], timeout: 2)
@@ -69,7 +70,7 @@ final class CCBridgeReplyDedupOrderTests: XCTestCase {
         let client = CCBridgeWebSocketClient(dedupDefaults: defaults)
         let id = "t-replay-\(UUID().uuidString.prefix(8))"
         var count = 0
-        client.onProactiveMessage = { _, _, _, _, _, _, _, _, _ in count += 1 }
+        client.onProactiveMessage = { _, _, _, _, _, _, _, _, _ in count += 1; return true }
         client.handleIncoming(frame(id))
         XCTAssertTrue(waitUntil { self.seen(id) })
         client.handleIncoming(frame(id))

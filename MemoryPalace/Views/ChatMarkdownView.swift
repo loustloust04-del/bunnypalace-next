@@ -63,6 +63,11 @@ struct ChatMarkdownView: View {
     /// 点到 extraHighlights 里的词（小芽马克笔概念词 → 弹释义 sheet）；nil = 点了不管
     var onExtraHighlightTap: ((String) -> Void)? = nil
 
+    #if DEBUG
+    /// 段尾丢字探针 B：气泡模式第几个泡（BubbleModeRow 注入）
+    @Environment(\.chatProbeBubbleIndex) private var probeBubbleIndex
+    #endif
+
     #if os(macOS)
     // ms0911 R8 B3 / R8b N2：设置「外观 › 排版」两根滑杆 mac 自己读（key/默认值与 CardFlowView 同名键一致），
     // 滑杆只在 mac 传 config、只在 mac 进 cacheDims；iOS 的 fork 渲染器本来就不吃滑杆（写死块距 30 / 行距 5），
@@ -87,6 +92,8 @@ struct ChatMarkdownView: View {
 
     @State private var flashing = true
     @Environment(\.chatSearchTerms) private var searchTerms
+    /// 被非聊天页（编程会话 / 助手面板）复用时整套读全局色，见 ThemeScope
+    @Environment(\.themeScope) private var themeScope
     @Environment(\.chatMergesTextRuns) private var focusMerges
     /// 只有聚焦态（浮层预览）且定稿才合并；流式中（animated）不合并
     private var mergesTextRuns: Bool { focusMerges && !animated }
@@ -188,6 +195,7 @@ struct ChatMarkdownView: View {
         // 合并在 parse 时生效（Document+ TextRunMerger），缓存的是合并后的块，必须进 key；
         // 只在合并时追加，列表侧（不合并）key 与原来逐字相同，不多一次重算
         let base = "\(fontName)|\(scale)|\(animated)|q\(onQuote != nil ? 1 : 0)n\(nodeId != nil ? 1 : 0)|\(hl)|t\(themeDim)|r\(role.rawValue)"
+            + (themeScope == .global ? "|g" : "")
             + (mergesTextRuns ? "|m" : "")
         #if os(macOS)
         // 排版滑杆仍只 mac 进 key（R8b N1：iOS 调滑杆不换缓存键，fork 渲染器不吃）
@@ -195,6 +203,15 @@ struct ChatMarkdownView: View {
         #else
         return base + (lineSpacingScaleOverride.map { "|ls\($0)" } ?? "")
         #endif
+    }
+
+    /// 聊天正文（user / assistant）取聊天页配色；非聊天调用方（.global）照旧全局。
+    private var chatPalette: ThemePalette? {
+        role == .global || themeScope == .global ? nil : Theme.chat
+    }
+
+    private var blockQuoteColor: Color? {
+        themeScope == .chat ? Theme.chatBlockQuoteColor(for: role) : nil
     }
 
     /// 渲染 config。Swift 5.10 不支持实参位 `#if`，提为计算属性：#else 分支 = 原调用表达式逐字，
@@ -207,14 +224,18 @@ struct ChatMarkdownView: View {
                              textHighlights: renderHighlights,
                              lineSpacingScale: effectiveLineSpacingScale,
                              paragraphSpacingScale: effectiveParagraphSpacingScale,
-                             textColor: role.color,
+                             textColor: role.color(in: themeScope),
+                             palette: chatPalette,
+                             blockQuoteColor: blockQuoteColor,
                              mergesTextRuns: mergesTextRuns)
         #else
         return .memoryPalace(fontName: fontName, scale: scale, animated: animated,
                              contextMenu: contextMenu,
                              textHighlights: renderHighlights,
                              lineSpacingScale: lineSpacingScaleOverride,
-                             textColor: role.color,
+                             textColor: role.color(in: themeScope),
+                             palette: chatPalette,
+                             blockQuoteColor: blockQuoteColor,
                              mergesTextRuns: mergesTextRuns)
         #endif
     }
@@ -249,10 +270,14 @@ struct ChatMarkdownView: View {
             syncOnMiss: !animated && nodeId.map { MarkdownRenderCache.shared.isFreshlyStreamed($0) } == true,
             preparedDocument: preparedDocument
         )
+        #if DEBUG
+        .environment(\.markdownProbeTag, ParagraphTailBreadcrumb.tag(nodeId: nodeId, bubble: probeBubbleIndex))
+        #endif
         #if PERSONAL_APPS
-        // ticker:// 拦在最内层；不认识的 URL 必须 .systemAction 往外传（citation 反查在外层）
+        // ticker:// 拦在最内层；其余按「链接打开方式」开（花园浏览器 / 系统）。
+        // 11-08 模拟器实测：这里回 .systemAction 会直接交给系统，不会再走到外层 MessageSegmentsView 的 handler
         .environment(\.openURL, OpenURLAction { url in
-            guard url.scheme == "ticker" else { return .systemAction }
+            guard url.scheme == "ticker" else { return gardenOpenURLResult(url) }
             let sym = String(url.path.dropFirst())
             guard !sym.isEmpty else { return .handled }
             tickerOpen = TickerOpen(symbol: sym)

@@ -53,18 +53,11 @@ enum SchemaCoverageCheck {
         return names.sorted()
     }
 
-    // MARK: - Document 字段清单（CodingKeys 反射 — 用 try? JSONEncoder + Decoder helper）
+    // MARK: - Document 字段清单
 
-    /// 通过 encode 一个 zero-valued document → 解析 JSON keys 来拿 Document 字段名清单。
-    /// 比手维护一份字段表更可靠（Document 真改了字段，自动反映）。
+    /// 反射存储字段而不是 JSON keys：Codable 会省略 nil，旧包兼容的可选列也必须纳入覆盖。
     static func documentFieldNames<D: Codable>(sample: D) -> [String] {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        guard let data = try? encoder.encode(sample),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return []
-        }
-        return obj.keys.sorted()
+        Mirror(reflecting: sample).children.compactMap(\.label).sorted()
     }
 
     // MARK: - 字段覆盖比对（G-A.1.8 必经）
@@ -126,6 +119,7 @@ enum SchemaCoverageCheck {
             ("WorldBook",                   WorldBook(name: "", profileId: "")),
             ("StickerAsset",                StickerAsset(name: "", imagePath: "", thumbnailPath: "", profileId: "")),
             ("PlacedSticker",               PlacedSticker(conversationId: "", positionX: 0, positionY: 0, profileId: "")),
+            ("ChatMeme",                    ChatMeme(name: "", fileName: "", mimeType: "", profileId: "")),
             ("BookEntry",                   BookEntry(id: "", profileId: "", name: "")),
             ("AudiobookItem",               AudiobookItem(profileId: "", title: "", fileName: "", fileSizeBytes: 0, totalDuration: 0)),
             ("AudiobookBookmark",           AudiobookBookmark(profileId: "", bookId: UUID(), timestamp: 0, bookTitleSnapshot: "")),
@@ -150,6 +144,7 @@ enum SchemaCoverageCheck {
         try compareWorldBook()
         try compareStickerAsset()
         try comparePlacedSticker()
+        try compareChatMeme()
         try compareBookEntry()
         try compareAudiobookItem()
         try compareAudiobookBookmark()
@@ -168,7 +163,9 @@ enum SchemaCoverageCheck {
             ccBridgeSessionName: nil, selectedModelId: "", currentStyleId: "", permGrantsRaw: nil, mcpServerIds: [],
             draftText: "", draftAttachmentsData: nil, draftQuotePreview: "", draftQuoteReplyTo: "",
             nodes: [], branchSelectionData: Data(), personaId: "", archiveKind: "", sourceMetadata: Data(),
-            cardVariablesData: Data()
+            cardVariablesData: Data(), recallStateData: Data(), memoryWindowChoicesData: Data(),
+            previousWindowId: "", previousWindowSnapshotData: Data(), lastRealChatAt: Date(), displayMode: "",
+            displayModeUpdatedAt: Date(), ccHubId: "", ccHubIdentity: ""
         )
         let docFields = documentFieldNames(sample: doc)
         // nodes 是嵌套数组，不是 Conversation @Model 字段
@@ -188,7 +185,8 @@ enum SchemaCoverageCheck {
             usagePromptTokens: nil, usageCompletionTokens: nil, usageCacheReadTokens: nil,
             usageCacheWriteTokens: nil, usageCostUSD: nil, usageSavedUSD: nil,
             imageDescsData: nil, bookRef: nil, webSourcesData: nil, thinkingSummary: nil, toolSummariesData: nil, isSyntheticRoot: false,
-            sourceMetadata: Data(), sourceVisibility: "", cardVariablesData: Data(), cardEditedAt: Date(), cardEventsData: Data()
+            sourceMetadata: Data(), sourceVisibility: "", cardVariablesData: Data(), cardEditedAt: Date(), cardEventsData: Data(),
+            recallHitsData: Data(), recallReceiptData: Data()
         )
         try compareFields(modelName: "MessageNode",
                           modelFields: modelFieldNames(model),
@@ -304,6 +302,14 @@ enum SchemaCoverageCheck {
         )
         try compareFields(modelName: "StickerAsset",
                           modelFields: modelFieldNames(model),
+                          docFields: documentFieldNames(sample: doc))
+    }
+
+    private static func compareChatMeme() throws {
+        let doc = FullChatMemeDocument(schemaVersion: 4, id: UUID(), name: "", detail: "", fileName: "", mimeType: "",
+                                       isFavorite: false, lastSentAt: nil, createdAt: Date(), profileId: "")
+        try compareFields(modelName: "ChatMeme",
+                          modelFields: modelFieldNames(ChatMeme(name: "", fileName: "", mimeType: "", profileId: "")),
                           docFields: documentFieldNames(sample: doc))
     }
 

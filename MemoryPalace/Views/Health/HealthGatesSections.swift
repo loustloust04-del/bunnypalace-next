@@ -24,13 +24,13 @@ struct HealthGatesSections: View {
         )
     }
 
-    /// 三档行（plan-权限管理 T7）：label 保留宏展开，右侧换档位下拉，写入走 PermissionCenter。
+    /// 三档行（plan-权限管理 T7）：label 保留宏展开；右侧只显示这个人生效的档位，点进去改这个人的（atrium P3⑤a）
     @ViewBuilder private func permRow(_ label: String, domain: PermissionDomain) -> some View {
         HStack {
             Text(label.expandingMacros(profile: profileManager?.currentProfile))
                 .font(m.body)
             Spacer(minLength: 8)
-            PermissionLevelPicker(domain: domain)
+            PermissionLevelReadout(domain: domain)
         }
     }
 

@@ -39,6 +39,14 @@ struct ChatToolStep: Identifiable, Equatable {
         case "card_guide": return "读取卡片说明"
         case "search_web": return "搜索网页"
         case "browse_url": return "阅读网页"
+        case "chrome_read": return "用 Chrome 读网页"
+        case "site_query": return "用 Chrome 查站点"
+        case "browser_open": return "在浏览器里打开网页"
+        case "browser_look": return "看浏览器里这一页"
+        case "browser_click": return "在浏览器里点了一下"
+        case "browser_type": return "在浏览器里填字"
+        case "browser_scroll": return "在浏览器里翻页"
+        case "browser_back": return "浏览器后退"
         case "run_command": return "运行命令"
         default: return integration.flatMap { $0.isEmpty ? nil : $0 } ?? name
         }
@@ -70,7 +78,8 @@ struct ChatToolStep: Identifiable, Equatable {
         case "fs_write", "fs_append": return "square.and.pencil"
         case "fs_list": return "folder"
         case "run_command": return "terminal"
-        case "browse_url": return "globe"
+        case "browse_url", "chrome_read", "site_query": return "globe"
+        case "browser_open", "browser_look", "browser_click", "browser_type", "browser_scroll", "browser_back": return "cursorarrow.rays"
         default: return "wrench.and.screwdriver"
         }
     }

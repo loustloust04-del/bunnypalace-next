@@ -361,7 +361,8 @@ struct ConfigPage: View {
         do {
             let result = try unlocked.map { try ConfigImporter.importAll($0) } ?? ConfigImporter.importAll(data)
             let keysNote = unlocked != nil ? " · 写回 \(result.restoredKeys) 个 API key" : ""
-            statusMessage = "✅ 导入成功\(keysNote) · 请关闭设置并完全退出 app 重开，确保所有界面看到新设置。"
+            let namesNote = result.ignoredNameMirrors ? "\n称呼以楼层为准，不随设置导入" : ""
+            statusMessage = "✅ 导入成功\(keysNote) · 请关闭设置并完全退出 app 重开，确保所有界面看到新设置。\(namesNote)"
             statusIsError = false
         } catch {
             statusMessage = "❌ 导入失败：\(error.localizedDescription)"

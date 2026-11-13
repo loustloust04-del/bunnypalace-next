@@ -23,6 +23,8 @@ struct DataSettingsTab: View {
     @AppStorage("exportMode") private var exportMode = "lightweight"
     @AppStorage("userName") private var userName = "你"
     @AppStorage("assistantName") private var assistantName = "助手"
+    /// 新包首启没做成库快照时的提示（PreUpgradeSnapshot，不挡启动）
+    @AppStorage(PreUpgradeSnapshot.noticeKey) private var preUpgradeNotice = ""
 
     @State private var isExportingAll = false
     @State private var exportProgress: Double = 0
@@ -628,6 +630,18 @@ struct DataSettingsTab: View {
         // 搜索锚点：命中叶子条目时滚到那一行
         ScrollViewReader { anchorProxy in
         SettingsSectionList(.list) {
+            if !preUpgradeNotice.isEmpty {
+                Section {
+                    Text(preUpgradeNotice)
+                        .font(m.secondary)
+                        .foregroundColor(.orange)
+                    Button("知道了") { preUpgradeNotice = "" }
+                        .font(m.secondary)
+                        .buttonStyle(.plain)
+                }
+                .listRowBackground(Theme.mainBg)
+                .listRowSeparator(.hidden)
+            }
             Section("导入") {
                 Button(action: { showImporter = true }) {
                     HStack(spacing: 6) {

@@ -15,7 +15,7 @@ struct GlobalImportSheet: View {
     @State private var phase: Phase = .pickFile
     @State private var pickedURL: URL?
     @State private var manifest: GlobalExportManifest?
-    @State private var progress = GlobalBackupProgress()
+    @StateObject private var progress = GlobalBackupProgress()
     @State private var errorMessage: String?
 
     @State private var isPresentingFileImporter: Bool = false
@@ -32,27 +32,20 @@ struct GlobalImportSheet: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider().opacity(0.15)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    switch phase {
-                    case .pickFile:
-                        pickFileContent
-                    case .peeking:
-                        peekingContent
-                    case .preview:
-                        previewContent
-                    case .staging:
-                        stagingContent
-                    case .finished:
-                        finishedContent
-                    case .failed:
-                        failedContent
-                    }
-                }
-                .padding(24)
+        BackupSheetFrame(title: "从备份恢复", closeDisabled: phase == .staging || phase == .peeking) {
+            switch phase {
+            case .pickFile:
+                pickFileContent
+            case .peeking:
+                peekingContent
+            case .preview:
+                previewContent
+            case .staging:
+                stagingContent
+            case .finished:
+                finishedContent
+            case .failed:
+                failedContent
             }
         }
         #if os(macOS)
@@ -90,28 +83,6 @@ struct GlobalImportSheet: View {
         } message: {
             Text("此操作不可撤销。导入过程中当前数据不会被改动，只在重启 app 时完成切换。")
         }
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        HStack {
-            Text("从备份恢复")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundColor(Theme.textPrimary)
-            Spacer()
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18))
-                    .foregroundColor(Theme.textMuted)
-            }
-            .buttonStyle(.plain)
-            .disabled(phase == .staging || phase == .peeking)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
     }
 
     // MARK: - Pick File
@@ -206,22 +177,14 @@ struct GlobalImportSheet: View {
                         manifest = nil
                         phase = .pickFile
                     } label: {
-                        Text("换文件")
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent))
-                            .foregroundColor(Theme.textPrimary)
+                        Text("换文件").backupButtonFace(Theme.accent, Theme.textPrimary)
                     }
                     .buttonStyle(.plain)
 
                     Button {
                         showConfirm1 = true
                     } label: {
-                        Text("开始导入")
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange))
-                            .foregroundColor(.white)
+                        Text("开始导入").backupButtonFace(Color.orange, .white)
                     }
                     .buttonStyle(.plain)
                 }
@@ -245,36 +208,19 @@ struct GlobalImportSheet: View {
     // MARK: - Staging
 
     private var stagingContent: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                ProgressView()
-                Text("正在构建导入数据...")
-                    .font(.system(size: 14))
-                    .foregroundColor(Theme.textPrimary)
-            }
-            ProgressView(value: progress.overallFraction)
-                .progressViewStyle(.linear)
-                .tint(Theme.branchIndicator)
-            Text("当前：\(displaySectionName(progress.currentSection))")
-                .font(.caption)
-                .foregroundColor(Theme.textMuted)
-            Text("当前数据未被改动。此阶段完成后会要求重启 app 完成切换。")
-                .font(.caption)
-                .foregroundColor(Theme.textMuted)
-        }
+        BackupProgressBlock(
+            title: "正在构建导入数据...",
+            fraction: progress.overallFraction,
+            section: displaySectionName(progress.currentSection),
+            note: "当前数据未被改动。此阶段完成后会要求重启 app 完成切换。"
+        )
     }
 
     // MARK: - Finished
 
     private var finishedContent: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(Theme.branchIndicator)
-                Text("导入数据已就绪")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
-            }
+            BackupStatusTitle(systemImage: "checkmark.circle.fill", color: Theme.branchIndicator, title: "导入数据已就绪")
 
             Text("staging 已写好，主位数据未动。需要重启 app 才能完成切换。")
                 .font(.system(size: 13))
@@ -316,11 +262,7 @@ struct GlobalImportSheet: View {
                 Button {
                     dismiss()
                 } label: {
-                    Text("我知道了")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.branchIndicator))
-                        .foregroundColor(.white)
+                    Text("我知道了").backupButtonFace(Theme.branchIndicator, .white)
                 }
                 .buttonStyle(.plain)
             }
@@ -331,52 +273,11 @@ struct GlobalImportSheet: View {
     // MARK: - Failed
 
     private var failedContent: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.orange)
-                Text("导入失败")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
-            }
-            if let err = errorMessage {
-                Text(err)
-                    .font(.caption)
-                    .foregroundColor(Theme.textMuted)
-                    .textSelection(.enabled)
-            }
-            Text("当前数据未被改动。可以稍后重试或换一个文件。")
-                .font(.caption)
-                .foregroundColor(Theme.textMuted)
-
-            Spacer(minLength: 10)
-
-            HStack(spacing: 10) {
-                Button {
-                    pickedURL = nil
-                    manifest = nil
-                    errorMessage = nil
-                    phase = .pickFile
-                } label: {
-                    Text("重选文件")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent))
-                        .foregroundColor(Theme.textPrimary)
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    dismiss()
-                } label: {
-                    Text("关闭")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent.opacity(0.5)))
-                        .foregroundColor(Theme.textPrimary)
-                }
-                .buttonStyle(.plain)
-            }
+        BackupFailedBlock(title: "导入失败", error: errorMessage, note: "当前数据未被改动。可以稍后重试或换一个文件。", retryTitle: "重选文件") {
+            pickedURL = nil
+            manifest = nil
+            errorMessage = nil
+            phase = .pickFile
         }
     }
 

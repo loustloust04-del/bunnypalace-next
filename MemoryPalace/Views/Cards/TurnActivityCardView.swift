@@ -9,9 +9,12 @@ struct TurnActivityCardView: View {
     let onStop: () -> Void
 
     private var finished: [TurnActivity.Step] { activity.steps.filter { $0.ok != nil } }
+    @Environment(\.themeScope) private var themeScope
+    /// 名单卡：深色聊天卡底下标签字读 token（固定棕灰只有 4.3:1）
+    private var labelColor: Color { Theme.chatCardStyle(themed: true, scope: themeScope)?.label ?? CodeBlockStyle.label }
 
     var body: some View {
-        ChatCardShell(kindLabel: "进度") {
+        ChatCardShell(kindLabel: "进度", themed: true) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .center, spacing: 8) {
                     statusIcon
@@ -46,16 +49,16 @@ struct TurnActivityCardView: View {
     @ViewBuilder
     private var statusIcon: some View {
         switch blocked {
-        case .approval: Image(systemName: "lock.shield").foregroundStyle(Theme.branchIndicator)
-        case .question: Image(systemName: "questionmark.circle").foregroundStyle(Theme.branchIndicator)
+        case .approval: Image(systemName: "lock.shield").foregroundStyle(Theme.chat.branchIndicator)
+        case .question: Image(systemName: "questionmark.circle").foregroundStyle(Theme.chat.branchIndicator)
         case nil:
             if let running = activity.running {
                 Image(systemName: running.icon ?? "wrench.and.screwdriver")
-                    .foregroundStyle(Theme.branchIndicator)
+                    .foregroundStyle(Theme.chat.branchIndicator)
                     .symbolEffect(.pulse, options: .repeating)
             } else {
                 Image(systemName: "ellipsis")
-                    .foregroundStyle(CodeBlockStyle.label)
+                    .foregroundStyle(labelColor)
             }
         }
     }
@@ -66,11 +69,11 @@ struct TurnActivityCardView: View {
             Text(step.label).font(.caption)
             Image(systemName: step.ok == true ? "checkmark" : "xmark")
                 .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(step.ok == true ? Theme.branchIndicator : Color.red.opacity(0.75))
+                .foregroundStyle(step.ok == true ? Theme.chat.branchIndicator : Color.red.opacity(0.75))
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
-        .background(Capsule().fill(CodeBlockStyle.label.opacity(0.08)))
+        .background(Capsule().fill(labelColor.opacity(0.08)))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(step.label)，\(step.ok == true ? "完成" : "失败")")
     }

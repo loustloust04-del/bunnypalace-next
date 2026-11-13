@@ -32,7 +32,7 @@ struct MacWorkspaceSettingsPage: View {
                         ForEach(availableTools) { tool in
                             Button(tool.name) {
                                 preferences.addTool(tool.id, seed: seed)
-                                tools?.setEnabled(tool.id, true)
+                                tools?.setEnabled(tool.id, true, target: .defaults)
                             }
                         }
                         if !items.contains(where: { $0.toolID == MacWorkspacePreferences.homeID }) {
@@ -155,7 +155,7 @@ struct MacWorkspaceSettingsPage: View {
             AppIconView(name: icon(item), size: 15, tint: Theme.textSecondary, toolID: item.toolID).frame(width: 22)
             Text(name(item))
             if let id = item.toolID, let tool = tools?.tool(byId: id), !tool.isEnabled {
-                Button("启用") { tools?.setEnabled(id, true) }.controlSize(.small)
+                Button("启用") { tools?.setEnabled(id, true, target: .defaults) }.controlSize(.small)
             }
             Spacer()
             Button {

@@ -38,7 +38,7 @@ final class CCSessionModelEntry {
     }
 }
 
-/// session_name → 模型。索引本身不是 Observable：读的时候没有就建一个空的（只动这张不被观察的表，不让任何视图重算），
+/// (hub, session_name) → 模型（plan-multi-hub B2.8：两台同名 mp-cc 各是各的；主 hub 的键还是 session 名本身，同原来）。索引本身不是 Observable：读的时候没有就建一个空的（只动这张不被观察的表，不让任何视图重算），
 /// 帧来了写进对应那一项。有界（审查 R1-9）：最多 maxEntries 项、ttl 没碰过的清掉，先清最久没碰过的；
 /// 胶囊每次重算都会读一下当前会话那项，正在看的不会被清。只在 main 上用
 @MainActor
@@ -52,17 +52,32 @@ final class CCSessionModelStore {
 
     var count: Int { entries.count }
 
-    func entry(for sessionName: String, now: Date = Date()) -> CCSessionModelEntry {
-        touchedAt[sessionName] = now
-        if let e = entries[sessionName] { return e }
-        prune(now: now, keep: sessionName)
+    nonisolated static func key(hubId: String, sessionName: String) -> String {
+        hubId == CCBridgeWebSocketClient.primaryHubId ? sessionName : "\(hubId)\u{1F}\(sessionName)"
+    }
+
+    func entry(for sessionName: String, hubId: String = CCBridgeWebSocketClient.primaryHubId, now: Date = Date()) -> CCSessionModelEntry {
+        let key = Self.key(hubId: hubId, sessionName: sessionName)
+        touchedAt[key] = now
+        if let e = entries[key] { return e }
+        prune(now: now, keep: key)
         let e = CCSessionModelEntry()
-        entries[sessionName] = e
+        entries[key] = e
         return e
     }
 
-    func apply(_ m: CCSessionModel, now: Date = Date()) {
-        entry(for: m.sessionName, now: now).update(m.model)
+    func apply(_ m: CCSessionModel, hubId: String = CCBridgeWebSocketClient.primaryHubId, now: Date = Date()) {
+        entry(for: m.sessionName, hubId: hubId, now: now).update(m.model)
+    }
+
+    /// 删 hub：那台的会话模型一起清
+    func removeHub(_ hubId: String) {
+        guard hubId != CCBridgeWebSocketClient.primaryHubId else { return }
+        let prefix = Self.key(hubId: hubId, sessionName: "")
+        for key in entries.keys where key.hasPrefix(prefix) {
+            entries[key] = nil
+            touchedAt[key] = nil
+        }
     }
 
     private func prune(now: Date, keep: String) {

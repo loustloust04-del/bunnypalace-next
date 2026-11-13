@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -77,7 +78,7 @@ final class CatalogAgentTests: XCTestCase {
     private let bread = CatalogFragment(id: UUID(), content: "喜欢面包", category: "preference", day: "2026-10-13")
 
     private func job(snapshot: [CatalogFragment]? = nil, maxRounds: Int = 10) -> CatalogAgent.Job {
-        CatalogAgent.Job(topic: "电影", aliases: ["片子"], path: "楼层/事/电影", fragmentIds: [movie.id, bread.id], profileId: pid,
+        CatalogAgent.Job(topic: "电影", aliases: ["片子"], path: "事/电影", fragmentIds: [movie.id, bread.id], profileId: pid,
                          memoryRoot: root, names: CatalogTestKit.names, floorPrompt: "", snapshot: snapshot ?? [movie, bread],
                          modelName: "假模型", maxRounds: maxRounds, embedder: CatalogFakeEmbedder.unavailable())
     }
@@ -91,7 +92,7 @@ final class CatalogAgentTests: XCTestCase {
     }
 
     private let submit = """
-    {"items":[{"type":"new_page","path":"楼层/事/电影","kind":"事","title":"电影","hook":"她提到电影、看片的时候先看这页","now":"在追科幻片（自 2026-10 起）。",
+    {"items":[{"type":"new_page","path":"事/电影","kind":"事","title":"电影","hook":"她提到电影、看片的时候先看这页","now":"在追科幻片（自 2026-10 起）。",
       "records":[{"text":"2026-10-12 一起看了《星际穿越》","fragments":["f1"],"aline":[{"layer":"A4","window":"0001aaaa"}]},{"text":"没出处的一行"}]}]}
     """
 
@@ -100,6 +101,15 @@ final class CatalogAgentTests: XCTestCase {
     }
 
     // MARK: -
+
+    func testManualOpeningUsesOnlySharedDomainPrincipleWithoutSeedSchema() {
+        var j = job(snapshot: [])
+        j.floorPrompt = "虚构底图：云桥城有夜航。"
+        let content = CatalogAgent.opening(j, rootIndex: "", labels: [:])
+        XCTAssertTrue(content.contains(CatalogPrompts.factDomainPrinciple))
+        XCTAssertFalse(content.contains("fact_domain"))
+        XCTAssertTrue(content.contains(j.floorPrompt))
+    }
 
     func testMultiRoundSearchThenSubmit() async throws {
         try CatalogTestKit.timeline(root: root, conv: "0001aaaa-conv", title: "看片", topics: ["一起看了电影《星际穿越》"], day: 12)
@@ -134,7 +144,7 @@ final class CatalogAgentTests: XCTestCase {
         XCTAssertTrue(backend.requests[2].toolTurns[1].results[1].text.contains("# C 档案"), "list_wiki 不给 path = 根索引")
 
         MemoryWriteLog.flush()
-        let notes = MemoryWriteLog.entries(profileId: pid).map(\.note)
+        let notes = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).map(\.note)
         XCTAssertTrue(notes.contains { $0.hasPrefix("整理「电影」第 1 轮：search_aline「电影」「片子」 ") }, "日志带搜索词：\(notes)")
         XCTAssertTrue(notes.contains { $0.hasPrefix("整理「电影」第 2 轮：search_fragments「电影」 ") && $0.contains("、list_wiki 根 ") }, "\(notes)")
     }
@@ -154,7 +164,7 @@ final class CatalogAgentTests: XCTestCase {
         let modelBody = "模型正文开头\n```\n" + String(repeating: "逐轮正文", count: 6000) + "\n```\n模型正文末尾"
         let finishedBody = "finished 的真正全文\n" + String(repeating: "最终提醒正文", count: 4000) + "\n真正全文末尾"
         let accepted = """
-        {"items":[{"type":"new_page","path":"楼层/事/电影","kind":"事","title":"电影","records":[{"text":"一起看电影的完整记录","fragments":["f1"]}]}],"covered":["f2"],"reason":"面包已有页完整记录"}
+        {"items":[{"type":"new_page","path":"事/电影","kind":"事","title":"电影","records":[{"text":"一起看电影的完整记录","fragments":["f1"]}]}],"covered":["f2"],"reason":"面包已有页完整记录"}
         """
         let backend = FakeCatalogBackend { [allDropped] n, _ in
             switch n {
@@ -215,6 +225,9 @@ final class CatalogAgentTests: XCTestCase {
             for turn in request.toolTurns {
                 for call in turn.calls { XCTAssertTrue(text.contains(call.argumentsJSON)) }
                 for result in turn.results { XCTAssertTrue(text.contains(result.text), "完整记录实际回灌的回执及补充提醒") }
+                for follow in turn.followUps {
+                    XCTAssertTrue(text.contains(follow.reply) && text.contains(follow.note), "完整记录回执后只回的字和补的提醒")
+                }
             }
         }
         let clipped = try XCTUnwrap(backend.requests[1].toolTurns.first?.results.first?.text)
@@ -223,11 +236,13 @@ final class CatalogAgentTests: XCTestCase {
         XCTAssertTrue(text.contains(CatalogRunRecord.code(clipped)))
         XCTAssertTrue(backend.requests[2].toolTurns.last?.results.first?.text.contains("格式不对") == true)
         XCTAssertTrue(backend.requests[3].toolTurns.last?.results.first?.text.contains("输出太长被截断") == true)
-        XCTAssertTrue(backend.requests[4].toolTurns.last?.results.last?.text.contains("你还没交") == true)
+        XCTAssertEqual(backend.requests[4].toolTurns.last?.followUps.map(\.reply), [finishedBody], "只回字那一轮的全文留在历史里")
+        XCTAssertTrue(backend.requests[4].toolTurns.last?.followUps.last?.note.contains("你还没交") == true)
+        XCTAssertFalse(backend.requests[4].toolTurns.last?.results.last?.text.contains("你还没交") == true, "提醒不拼在回执上")
         XCTAssertTrue(backend.requests[5].toolTurns.last?.results.first?.text.contains("全部被扔掉") == true)
         XCTAssertTrue(backend.requests[5].toolTurns.last?.results.last?.text.contains("轮数到顶") == true)
         MemoryWriteLog.flush()
-        let entries = MemoryWriteLog.entries(profileId: pid).filter { $0.run?.path == CatalogRunRecord.folderName + "/" + file.lastPathComponent }
+        let entries = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).filter { $0.run?.path == CatalogRunRecord.folderName + "/" + file.lastPathComponent }
         XCTAssertEqual(entries.count, 6)
         let links = try entries.map { try XCTUnwrap($0.run) }
         XCTAssertEqual(Set(links.map(\.path)).count, 1)
@@ -259,7 +274,7 @@ final class CatalogAgentTests: XCTestCase {
         let text = try String(contentsOf: record.url, encoding: .utf8)
         XCTAssertTrue(text.contains("父级开场"))
         MemoryWriteLog.flush()
-        let entries = MemoryWriteLog.entries(profileId: pid).filter { $0.run?.path == record.relativePath }
+        let entries = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).filter { $0.run?.path == record.relativePath }
         XCTAssertEqual(entries.count, 2)
         XCTAssertEqual(Set(entries.compactMap { $0.run?.anchor }).count, 2)
         for entry in entries {
@@ -331,6 +346,165 @@ final class CatalogAgentTests: XCTestCase {
         XCTAssertTrue(backend.requests[1].history.last?.content.contains("你还没交") == true)
     }
 
+    /// 已有工具回合时只回了字：那段话按 assistant 留进历史、提醒另起一条 user，回执原样不拼提醒；四条线格式都一问一答交替、tool_use 配对不破
+    func testPlainReplyAfterToolTurnKeptAsAssistantAndReminderIsOwnUserMessage() async throws {
+        let backend = FakeCatalogBackend { [submit] n, _ in
+            switch n {
+            case 1: return self.search()
+            case 2: return .finished("我先想想再交")
+            default: return .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, submit)])
+            }
+        }
+
+        let out = await agent(backend).run(job())
+
+        XCTAssertEqual(out.stop, .submitted)
+        XCTAssertEqual(backend.requests.count, 3)
+        let before = backend.requests[1], after = backend.requests[2]
+        XCTAssertEqual(after.history.map(\.role), before.history.map(\.role), "有工具回合时回的字不进 history，接在回合后面")
+        XCTAssertEqual(after.toolTurns.count, 1)
+        XCTAssertEqual(after.toolTurns[0].results.map(\.text), before.toolTurns[0].results.map(\.text), "回执原样，不往上拼提醒")
+        XCTAssertEqual(after.toolTurns[0].followUps.count, 1)
+        let follow = try XCTUnwrap(after.toolTurns[0].followUps.first)
+        XCTAssertEqual(follow.reply, "我先想想再交")
+        XCTAssertTrue(follow.note.contains("你还没交"))
+        let callId = after.toolTurns[0].calls[0].id
+
+        let anthropic = AnthropicProvider.buildRequestBody(messages: after.history, model: "claude-haiku-4-5", systemPrompt: after.system,
+                                                           samplingParams: nil, tools: after.tools, toolTurns: after.toolTurns)
+        let messages = try XCTUnwrap(anthropic["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["user", "assistant", "user", "assistant", "user"])
+        let blocks = messages.map { $0["content"] as? [[String: Any]] ?? [] }
+        XCTAssertEqual(blocks[1].compactMap { $0["type"] as? String == "tool_use" ? $0["id"] as? String : nil }, [callId])
+        XCTAssertEqual(blocks[2].compactMap { $0["tool_use_id"] as? String }, [callId], "tool_use 后面紧跟它的 tool_result")
+        XCTAssertEqual(blocks[3].map { $0["text"] as? String }, ["我先想想再交"])
+        XCTAssertEqual(blocks[4].map { $0["text"] as? String }, [follow.note])
+
+        let openai = OpenAICompatibleProvider.buildRequestBody(messages: after.history, model: "m", systemPrompt: after.system,
+                                                              samplingParams: nil, tools: after.tools, toolTurns: after.toolTurns)
+        let wire = try XCTUnwrap(openai["messages"] as? [[String: Any]])
+        XCTAssertEqual(wire.compactMap { $0["role"] as? String }, ["system", "user", "assistant", "tool", "assistant", "user"])
+        XCTAssertEqual(wire[3]["tool_call_id"] as? String, callId)
+        XCTAssertEqual(wire[4]["content"] as? String, "我先想想再交")
+        XCTAssertEqual(wire[5]["content"] as? String, follow.note)
+
+        let codex = ChatGPTOAuthProvider.buildRequestBody(messages: after.history, model: "m", systemPrompt: after.system,
+                                                          samplingParams: nil, tools: after.tools, toolTurns: after.toolTurns)
+        let input = try XCTUnwrap(codex["input"] as? [[String: Any]])
+        XCTAssertEqual(input.map { ($0["type"] as? String) ?? ($0["role"] as? String) ?? "" },
+                       ["user", "function_call", "function_call_output", "assistant", "user"])
+
+        XCTAssertEqual(LocalLLMService.chat(for: after).map { "\($0.role)" }, ["system", "user", "assistant", "tool", "assistant", "user"])
+    }
+
+    /// 没回字（空）的提醒：Anthropic 并进上一条 user（tool_result 后面跟一个 text 块），仍然交替；工具回合刚收完的收尾提醒照旧接在新回合最后一条结果后面、只接一次
+    func testRemindShapes() throws {
+        let call = ToolCallBlock(id: "c1", name: "read", argumentsJSON: "{}")
+        var history: [(role: String, content: String)] = [(role: "user", content: "开场")]
+        var turns = [ToolTurn(calls: [call], results: [ToolResultBlock(toolUseId: "c1", text: "原料", isError: false)])]
+        CatalogAgent.remind("提醒一", history: &history, turns: &turns, reply: "")
+        CatalogAgent.remind("提醒二", history: &history, turns: &turns, reply: "想想")
+        XCTAssertEqual(turns[0].results[0].text, "原料")
+        XCTAssertEqual(turns[0].followUps, [ToolFollowUp(reply: "", note: "提醒一"), ToolFollowUp(reply: "想想", note: "提醒二")])
+        XCTAssertEqual(history.count, 1)
+        let body = AnthropicProvider.buildRequestBody(messages: history, model: "claude-haiku-4-5", systemPrompt: nil, samplingParams: nil, toolTurns: turns)
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["user", "assistant", "user", "assistant", "user"])
+        XCTAssertEqual((messages[2]["content"] as? [[String: Any]])?.compactMap { $0["type"] as? String }, ["tool_result", "text"])
+        let openai = try XCTUnwrap(OpenAICompatibleProvider.buildRequestBody(messages: history, model: "m", systemPrompt: nil, samplingParams: nil,
+                                                                             toolTurns: turns)["messages"] as? [[String: Any]])
+        XCTAssertEqual(openai.compactMap { $0["role"] as? String }, ["user", "assistant", "tool", "user", "assistant", "user"])
+
+        var fresh = [ToolTurn(calls: [call], results: [ToolResultBlock(toolUseId: "c1", text: "原料", isError: false)])]
+        CatalogAgent.remind("收尾", history: &history, turns: &fresh, reply: nil)
+        XCTAssertEqual(fresh[0].results[0].text, "原料\n\n收尾")
+        XCTAssertTrue(fresh[0].followUps.isEmpty)
+        CatalogAgent.remind("再收尾", history: &history, turns: &fresh, reply: nil)
+        XCTAssertEqual(fresh[0].results[0].text, "原料\n\n收尾", "同一回合连调两次 nil 不叠第二条")
+        XCTAssertTrue(fresh[0].followUps.isEmpty)
+        XCTAssertEqual(history.count, 1)
+        CatalogAgent.remind("又说了话", history: &history, turns: &fresh, reply: "嗯")
+        XCTAssertEqual(fresh[0].results[0].text, "原料\n\n收尾", "同一条回执上不叠第二条提醒")
+        XCTAssertEqual(fresh[0].followUps, [ToolFollowUp(reply: "嗯", note: "又说了话")])
+
+        var none: [ToolTurn] = []
+        var opening: [(role: String, content: String)] = [(role: "user", content: "开场")]
+        CatalogAgent.remind("交", history: &opening, turns: &none, reply: "好的")
+        XCTAssertEqual(opening.map(\.role), ["user", "assistant", "user"], "还没有工具回合：照旧进 history")
+    }
+
+    /// astra P3：签名 thinking / redacted → 两条工具回执 → 有字 / 空字 followUps → 下一工具回合，开缓存：第二次请求里第一次的消息逐字节是前缀
+    /// （只有挪走的 cache_control 归一化），签名块、调用 id、回执正文原样
+    func testCachePrefixStableAcrossSignedThinkingFollowUpsAndNextToolRound() throws {
+        func use(_ id: String, _ path: String) -> [String: Any] { ["type": "tool_use", "id": id, "name": "read", "input": ["path": path]] }
+        var first = ToolTurn(calls: [ToolCallBlock(id: "c1", name: "read", argumentsJSON: #"{"path":"a"}"#),
+                                     ToolCallBlock(id: "c2", name: "read", argumentsJSON: #"{"path":"b"}"#)],
+                             results: [ToolResultBlock(toolUseId: "c1", text: "原料 a", isError: false),
+                                       ToolResultBlock(toolUseId: "c2", text: "原料 b", isError: true)],
+                             assistantContent: [["type": "thinking", "thinking": "先读两份再说", "signature": "sig_first_round"],
+                                                ["type": "redacted_thinking", "data": "red_payload_1"],
+                                                ["type": "text", "text": "我读两份"], use("c1", "a"), use("c2", "b")], thinkingTokens: 30)
+        first.text = "我读两份"
+        first.followUps = [ToolFollowUp(reply: "我想想", note: "提醒一"), ToolFollowUp(reply: "", note: "提醒二")]
+        let second = ToolTurn(calls: [ToolCallBlock(id: "c3", name: "read", argumentsJSON: #"{"path":"c"}"#)],
+                              results: [ToolResultBlock(toolUseId: "c3", text: "原料 c", isError: false)],
+                              assistantContent: [["type": "thinking", "thinking": "再读一份", "signature": "sig_second_round"], use("c3", "c")], thinkingTokens: 8)
+        var sampling = SamplingParams()
+        sampling.cacheFriendly = true
+        sampling.reasoningEffort = "medium"
+        let history = [(role: "user", content: "开场")]
+        func body(_ turns: [ToolTurn]) throws -> (body: [String: Any], messages: [[String: Any]]) {
+            let b = AnthropicProvider.buildRequestBody(messages: history, model: "claude-sonnet-4-5", systemPrompt: "系统", samplingParams: sampling,
+                                                        tools: CatalogAgentTools.definitions(submitOnly: false), toolTurns: turns)
+            return (b, try XCTUnwrap(b["messages"] as? [[String: Any]]))
+        }
+        func text(_ value: Any) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed]), as: UTF8.self)
+        }
+        func stripped(_ m: [String: Any]) throws -> String {
+            var msg = m
+            msg["content"] = (m["content"] as? [[String: Any]])?.map { var b = $0; b.removeValue(forKey: "cache_control"); return b }
+            return try text(msg)
+        }
+
+        let one = try body([first]), two = try body([first, second])
+
+        XCTAssertNotNil(one.body["thinking"], "开了思考")
+        for key in ["system", "tools", "thinking", "model"] {
+            XCTAssertEqual(try one.body[key].map(text), try two.body[key].map(text), "顶层 \(key) 两次不同")
+        }
+        XCTAssertEqual(one.messages.compactMap { $0["role"] as? String }, ["user", "assistant", "user", "assistant", "user"])
+        XCTAssertEqual(two.messages.count, one.messages.count + 2)
+        let marked = try XCTUnwrap(one.messages.lastIndex { $0["role"] as? String == "assistant" })
+        XCTAssertEqual(marked, 3, "第一次的缓存标在有字那条 assistant 上")
+        for i in 0..<one.messages.count {
+            if i == marked {
+                XCTAssertNotNil((one.messages[i]["content"] as? [[String: Any]])?.last?["cache_control"])
+                XCTAssertNil((two.messages[i]["content"] as? [[String: Any]])?.last?["cache_control"], "第二次挪到新一轮")
+                XCTAssertEqual(try stripped(one.messages[i]), try stripped(two.messages[i]), "断点那条只差挪走的 cache_control")
+            } else {
+                XCTAssertEqual(try text(one.messages[i]), try text(two.messages[i]), "第 \(i) 条消息两次不同")
+            }
+        }
+        let blocks = try XCTUnwrap(two.messages[1]["content"] as? [[String: Any]])
+        XCTAssertEqual(blocks.map { $0["type"] as? String }, ["thinking", "redacted_thinking", "text", "tool_use", "tool_use"])
+        XCTAssertEqual(blocks[0]["signature"] as? String, "sig_first_round")
+        XCTAssertEqual(blocks[1]["data"] as? String, "red_payload_1")
+        XCTAssertEqual(blocks.compactMap { $0["id"] as? String }, ["c1", "c2"])
+        let results = try XCTUnwrap(two.messages[2]["content"] as? [[String: Any]])
+        XCTAssertEqual(results.map { $0["tool_use_id"] as? String }, ["c1", "c2"])
+        XCTAssertEqual(results.map { $0["content"] as? String }, ["原料 a", "原料 b"])
+        XCTAssertEqual(results[1]["is_error"] as? Bool, true)
+        XCTAssertEqual((two.messages[3]["content"] as? [[String: Any]])?.map { $0["text"] as? String }, ["我想想"])
+        XCTAssertEqual((two.messages[4]["content"] as? [[String: Any]])?.map { $0["text"] as? String }, ["提醒一", "提醒二"], "空字的提醒并进这条 user")
+        let next = try XCTUnwrap(two.messages[5]["content"] as? [[String: Any]])
+        XCTAssertEqual(next.first?["signature"] as? String, "sig_second_round")
+        XCTAssertEqual(next.last?["id"] as? String, "c3")
+        XCTAssertNotNil(next.last?["cache_control"], "标挪到新一轮最后一个非思考块上，思考块不挂")
+        XCTAssertNil(next.first?["cache_control"])
+        XCTAssertEqual((two.messages[6]["content"] as? [[String: Any]])?.map { $0["tool_use_id"] as? String }, ["c3"])
+    }
+
     func testBadSubmitFormatGetsAnotherRound() async throws {
         let backend = FakeCatalogBackend { [submit] n, _ in
             .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, n == 1 ? "{\"pages\":[]}" : submit)])
@@ -369,7 +543,7 @@ final class CatalogAgentTests: XCTestCase {
         XCTAssertTrue(out.items.isEmpty)
         XCTAssertEqual(backend.requests.count, 2)
         MemoryWriteLog.flush()
-        let note = try XCTUnwrap(MemoryWriteLog.entries(profileId: pid).first { $0.note.contains("交了 0 条：已有页已完整记录") }?.note)
+        let note = try XCTUnwrap(MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).first { $0.note.contains("交了 0 条：已有页已完整记录") }?.note)
         let files = try draftFiles()
         XCTAssertTrue(files.contains { note.contains($0.lastPathComponent) })
     }
@@ -404,11 +578,13 @@ final class CatalogAgentTests: XCTestCase {
         XCTAssertEqual(out.rounds, 2)
         let result = try XCTUnwrap(backend.requests[1].toolTurns.first?.results.first)
         XCTAssertTrue(result.isError)
-        for reason in expected.dropReasons { XCTAssertTrue(result.text.contains(reason), result.text) }
+        for reason in expected.dropReasons {
+            XCTAssertTrue(result.text.contains(WikiStore.shown(reason, user: CatalogTestKit.names.user)), result.text)
+        }
     }
 
     private let listy = """
-    {"items":[{"type":"new_page","path":"楼层/事/电影","kind":"事","title":"电影","hook":"当她提到电影时先看这页","now":"- 在追科幻片（自 2026-10 起）",
+    {"items":[{"type":"new_page","path":"事/电影","kind":"事","title":"电影","hook":"当她提到电影时先看这页","now":"- 在追科幻片（自 2026-10 起）",
       "records":[{"text":"2026-10-12 一起看了《星际穿越》","fragments":["f1"]}]}]}
     """
 
@@ -423,7 +599,7 @@ final class CatalogAgentTests: XCTestCase {
             XCTAssertEqual(out.rounds, 2, "只给一次重写")
             let result = try XCTUnwrap(backend.requests[1].toolTurns.first?.results.first)
             XCTAssertTrue(result.isError)
-            XCTAssertTrue(result.text.contains("items[0] 楼层/事/电影：") && result.text.contains("「- 在追科幻片（自 2026-10 起）」"), result.text)
+            XCTAssertTrue(result.text.contains("items[0] 事/电影：") && result.text.contains("「- 在追科幻片（自 2026-10 起）」"), result.text)
             let item = try XCTUnwrap(out.items.first)
             XCTAssertEqual(item.checks?.isEmpty == false, flagged)
             XCTAssertEqual(out.revision, flagged ? "重写一次后仍有没过的" : "重写一次后通过")
@@ -455,7 +631,7 @@ final class CatalogAgentTests: XCTestCase {
 
     /// 收不进页的内容和没过检查共用同一次修订：凑不出第三次提交
     func testUnappliedAndHardChecksShareOneRevision() async throws {
-        let unknown = "{\"items\":[{\"type\":\"rewrite_records\",\"path\":\"楼层/事/电影\"}]}"
+        let unknown = "{\"items\":[{\"type\":\"rewrite_records\",\"path\":\"事/电影\"}]}"
         let backend = FakeCatalogBackend { [listy] n, _ in .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, n == 1 ? unknown : listy)]) }
         let out = await agent(backend).run(job())
         XCTAssertEqual(out.stop, .submitted)
@@ -467,13 +643,13 @@ final class CatalogAgentTests: XCTestCase {
 
     /// 两次都只交了收不进页的内容：修订用完就交，不再要第三次
     func testUnappliedOnlyTwiceIsDeliveredWithoutAThirdRequest() async throws {
-        let unknown = "{\"items\":[{\"type\":\"rewrite_records\",\"path\":\"楼层/事/电影\"}]}"
+        let unknown = "{\"items\":[{\"type\":\"rewrite_records\",\"path\":\"事/电影\"}]}"
         let backend = FakeCatalogBackend { n, _ in n == 1 ? self.search() : .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, unknown)]) }
         let out = await agent(backend).run(job())
         XCTAssertEqual(out.stop, .submitted)
         XCTAssertEqual(backend.requests.count, 3, "搜一次、交一次、修订一次")
         XCTAssertEqual(out.items, [])
-        XCTAssertEqual(out.unapplied.map(\.page), ["楼层/事/电影"])
+        XCTAssertEqual(out.unapplied.map(\.page), ["事/电影"])
         XCTAssertEqual(out.revision, "重写一次后仍有没过的")
     }
 
@@ -493,7 +669,7 @@ final class CatalogAgentTests: XCTestCase {
 
     func testUnconsumedFieldReasonIsFedBackThenRepairAccepted() async throws {
         let bad = """
-        {"items":[{"type":"new_page","path":"楼层/事/电影","title":"电影","judgment":"共存"}]}
+        {"items":[{"type":"new_page","path":"事/电影","title":"电影","judgment":"共存"}]}
         """
         let backend = FakeCatalogBackend { [submit, bad] n, _ in
             .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, n == 1 ? bad : submit)])
@@ -535,7 +711,7 @@ final class CatalogAgentTests: XCTestCase {
         XCTAssertEqual(backend.requests.count, 3)
         XCTAssertEqual(try draftFiles().count, 3)
         MemoryWriteLog.flush()
-        XCTAssertTrue(MemoryWriteLog.entries(profileId: pid).contains { $0.note.contains("最后一轮输出被截断") })
+        XCTAssertTrue(MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).contains { $0.note.contains("最后一轮输出被截断") })
     }
 
     func testRejectedSubmitsAtRoundLimitNeverRequestAgain() async {
@@ -732,7 +908,7 @@ final class CatalogAgentTests: XCTestCase {
         XCTAssertTrue(rejected.contains("items：0\ndropped：\(parsed.dropped)"))
         for reason in parsed.dropReasons { XCTAssertTrue(rejected.contains(reason), rejected) }
         MemoryWriteLog.flush()
-        let note = try XCTUnwrap(MemoryWriteLog.entries(profileId: pid).first { $0.note.contains("第 1 轮：") }?.note)
+        let note = try XCTUnwrap(MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).first { $0.note.contains("第 1 轮：") }?.note)
         for file in files { XCTAssertTrue(note.contains(file.lastPathComponent), note) }
     }
 
@@ -792,11 +968,11 @@ final class CatalogAgentTests: XCTestCase {
         XCTAssertTrue(text.contains("- search_fragments「电影」 · 参数 {\"terms\":[\"电影\"]} · 回 "), text)
         XCTAssertFalse(text.contains("一起看了电影"), "只记工具名、参数、字数，不存全文")
         MemoryWriteLog.flush()
-        XCTAssertTrue(MemoryWriteLog.entries(profileId: pid).contains { $0.note.hasPrefix("整理「电影」被预算拦下，第 2 轮") })
+        XCTAssertTrue(MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).contains { $0.note.hasPrefix("整理「电影」被预算拦下，第 2 轮") })
         let runFile = try XCTUnwrap(try runFiles().first)
         let runText = try String(contentsOf: runFile, encoding: .utf8)
         XCTAssertTrue(runText.contains("一起看了电影"), "被拦记录仍保留上一轮工具返回全文")
-        let blockedEntry = try XCTUnwrap(MemoryWriteLog.entries(profileId: pid).first { $0.note.hasPrefix("整理「电影」被预算拦下，第 2 轮") })
+        let blockedEntry = try XCTUnwrap(MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).first { $0.note.hasPrefix("整理「电影」被预算拦下，第 2 轮") })
         XCTAssertEqual(blockedEntry.run?.path, CatalogRunRecord.folderName + "/" + runFile.lastPathComponent)
         let anchor = try XCTUnwrap(blockedEntry.run?.anchor)
         XCTAssertTrue(runText.contains("<a id=\"\(anchor)\"></a>\n\n## Agent「电影」第 2 轮 · 系统提示与请求\n"))
@@ -805,18 +981,18 @@ final class CatalogAgentTests: XCTestCase {
     /// astra 10-16 #1：read_wiki 读到的版本当基线；没读过的页用开工时那一版
     func testBaseVersionIsWhatTheAgentSaw() async throws {
         let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
-        let read = try wiki.save(WikiPage(path: "楼层/人/小慧", kind: .person, triggers: ["小慧"], hook: "h", title: "小慧"))
-        let unread = try wiki.save(WikiPage(path: "楼层/人/阿杰", kind: .person, triggers: ["阿杰"], hook: "h", title: "阿杰"))
+        let read = try wiki.save(WikiPage(path: "人/小慧", kind: .person, triggers: ["小慧"], hook: "h", title: "小慧"))
+        let unread = try wiki.save(WikiPage(path: "人/阿杰", kind: .person, triggers: ["阿杰"], hook: "h", title: "阿杰"))
         let backend = FakeCatalogBackend { n, _ in
-            if n == 1 { return .toolCalls([CatalogTestKit.call("read_wiki", "{\"path\":\"楼层/人/小慧\"}")]) }
-            for path in ["楼层/人/小慧", "楼层/人/阿杰"] {
+            if n == 1 { return .toolCalls([CatalogTestKit.call("read_wiki", "{\"path\":\"人/小慧\"}")]) }
+            for path in ["人/小慧", "人/阿杰"] {
                 var page = wiki.read(path)!
                 page.now = "她手改了"
                 _ = try? wiki.saveRaw(page.markdown, path: path)
             }
             return .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, """
-            {"items":[{"type":"append","path":"楼层/人/小慧","records":[{"text":"2026-10-12 一起看电影","fragments":["f1"]}]},
-                      {"type":"retag","path":"楼层/人/阿杰","hook":"新钩子"}]}
+            {"items":[{"type":"append","path":"人/小慧","records":[{"text":"2026-10-12 一起看电影","fragments":["f1"]}]},
+                      {"type":"retag","path":"人/阿杰","hook":"新钩子"}]}
             """)])
         }
 
@@ -879,9 +1055,9 @@ final class CatalogAgentTests: XCTestCase {
     func testToolsReadOnlyErrors() async throws {
         let tools = CatalogAgentTools(wiki: WikiStore(root: root.appendingPathComponent("wiki")), memoryRoot: root, fragments: [movie],
                                       embedder: CatalogFakeEmbedder.unavailable())
-        let noPage = await tools.execute(name: "read_wiki", argumentsJSON: "{\"path\":\"楼层/人/谁\"}", now: Date())
+        let noPage = await tools.execute(name: "read_wiki", argumentsJSON: "{\"path\":\"人/谁\"}", now: Date())
         XCTAssertTrue(noPage.isError)
-        let noLayer = await tools.execute(name: "list_wiki", argumentsJSON: "{\"path\":\"楼层/没有\"}", now: Date())
+        let noLayer = await tools.execute(name: "list_wiki", argumentsJSON: "{\"path\":\"主题/没有\"}", now: Date())
         XCTAssertTrue(noLayer.isError)
         let noWindow = await tools.execute(name: "read_aline", argumentsJSON: "{\"window\":\"ffffffff\"}", now: Date())
         XCTAssertTrue(noWindow.isError)
@@ -996,7 +1172,7 @@ final class CatalogAgentTests: XCTestCase {
         XCTAssertEqual(p.items.first?.fragmentIds, [m.id])
         XCTAssertEqual(p.request, .init(profileId: pid, text: "整理一个主题：电影"), "她说的这句话就是方向授权，记下来")
         XCTAssertNil(p.items.first { $0.change.direction != nil }, "不再出一个方向等她重复批")
-        XCTAssertFalse(WikiStore(root: root.appendingPathComponent("wiki")).pageExists("楼层/事/电影"), "正文没批不落页")
+        XCTAssertFalse(WikiStore(root: root.appendingPathComponent("wiki")).pageExists("事/电影"), "正文没批不落页")
     }
 
     /// 第 9 段：现在整理里第一个主题的修订被预算闸拦下——交第一稿，照样往上报「被拦」，后面的主题不再跑
@@ -1014,7 +1190,7 @@ final class CatalogAgentTests: XCTestCase {
         try ctx.save()
         let backend = FakeCatalogBackend { _, _ in
             .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, """
-            {"items":[{"type":"new_page","path":"楼层/主题/测试页","kind":"主题","title":"测试页","now":"- 列表行（自 2026-10 起）",
+            {"items":[{"type":"new_page","path":"主题/测试页","kind":"主题","title":"测试页","now":"- 列表行（自 2026-10 起）",
               "records":[{"text":"2026-10-10 去看剧","fragments":["f1"]}]}]}
             """)])
         }
@@ -1056,9 +1232,9 @@ final class CatalogAgentTests: XCTestCase {
             return nil
         }
         let backend = FakeCatalogBackend { _, request in
-            XCTAssertTrue(request.history[0].content.contains("新主题 · 类：主题 · 建议路径：楼层/主题/剧场"))
+            XCTAssertTrue(request.history[0].content.contains("新主题 · 类：主题 · 建议路径：主题/剧场"))
             return .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, """
-            {"items":[{"type":"new_page","path":"楼层/主题/剧场","kind":"事","title":"剧场","records":[{"text":"2026-10-10 周五去看剧","fragments":["f1"]}]}],
+            {"items":[{"type":"new_page","path":"主题/剧场","kind":"事","title":"剧场","records":[{"text":"2026-10-10 周五去看剧","fragments":["f1"]}]}],
              "covered":["f2"],"single":["f3","f4"]}
             """)])
         }
@@ -1080,5 +1256,121 @@ final class CatalogAgentTests: XCTestCase {
         XCTAssertEqual(rows.first { $0.id == ids[2] }?.isSingleEnough, true, "分到这个主题的单条就够直接打标")
         XCTAssertNil(rows.first { $0.id == ids[3] }?.organizedAt, "没分到这个主题的不能被它判单条")
         XCTAssertNil(rows.first { $0.id == ids[1] }?.organizedAt, "covered 等正文批了才标")
+    }
+
+    /// 工具循环发出去的那份：提示词、历史、工具回执、工具定义里的 {{user}} 换成名字；模型自己的调用原样
+    func testAgentRequestShownWithCurrentName() {
+        let raw = #"{"path":"星砚/品味"}"#
+        let call = CatalogTestKit.call("read_wiki", raw, id: "c1")
+        let turn = ToolTurn(calls: [call], results: [ToolResultBlock(toolUseId: "c1", text: "- [[{{user}}/作息]] · 补充", isError: false)])
+        let request = AssistantBackendRequest(system: "本人的页挂在 {{user}}/ 下", history: [(role: "user", content: "【这一页】{{user}}/品味")],
+                                              tools: [["name": "submit_proposal", "enum": ["{{user}}/品味"]]], toolTurns: [turn])
+        let shown = CatalogAgent.shown(request, user: "星砚")
+        XCTAssertEqual(shown.system, "本人的页挂在 星砚/ 下")
+        XCTAssertEqual(shown.history.map(\.content), ["【这一页】星砚/品味"])
+        XCTAssertEqual(shown.toolTurns.first?.results.first?.text, "- [[星砚/作息]] · 补充")
+        XCTAssertEqual(shown.toolTurns.first?.calls.first?.argumentsJSON, raw, "回放的是模型原样写的调用（它写的就是名字）")
+        XCTAssertEqual(shown.tools.first?["enum"] as? [String], ["星砚/品味"])
+    }
+
+    /// 本人那组：模型照它看到的名字 read_wiki / 交条目 → 执行在 {{user}}/… 上；回合里存、回放的是模型原样的调用，
+    /// 回执显示名字；每一轮发出去的前缀（system / 开场 / 前面的回合）逐字不变
+    func testUserBranchToolCallsExecuteOnStoredPathAndReplayRaw() async throws {
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        let base = try wiki.save(WikiPage(path: "{{user}}/身体", kind: .user, triggers: ["过敏"], hook: "h", title: "身体", now: "花生过敏。",
+                                          links: [.init(target: "{{user}}/作息", relation: .supplement, why: "")]))
+        let read = CatalogTestKit.call("read_wiki", #"{"path":"粟粟/身体"}"#, id: "r1")
+        let list = CatalogTestKit.call("list_wiki", #"{ "path" : "粟粟" }"#, id: "l1")
+        let backend = FakeCatalogBackend { n, _ in
+            switch n {
+            case 1: return .toolCalls([read])
+            case 2: return .toolCalls([list])
+            default:
+                return .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit,
+                    #"{"items":[{"type":"append","path":"粟粟/身体","records":[{"text":"2026-10-12 随身带药","fragments":["f1"]}]}]}"#)])
+            }
+        }
+
+        let out = await agent(backend).run(job())
+
+        XCTAssertEqual(out.items.compactMap(\.change.targetPath), ["{{user}}/身体"], "条目落回落盘路径")
+        XCTAssertEqual(out.items.first?.baseVersion, base, "读到的就是 {{user}}/身体 那一页")
+        XCTAssertEqual(backend.requests.count, 3)
+        let second = backend.requests[1], third = backend.requests[2]
+        XCTAssertEqual(second.toolTurns.first?.calls.first?.argumentsJSON, read.argumentsJSON, "回放模型原样的调用")
+        let readResult = try XCTUnwrap(second.toolTurns.first?.results.first)
+        XCTAssertFalse(readResult.isError, readResult.text)
+        XCTAssertTrue(readResult.text.contains("[[粟粟/作息]]") && !readResult.text.contains("{{user}}"), readResult.text)
+        let listResult = try XCTUnwrap(third.toolTurns.last?.results.first)
+        XCTAssertFalse(listResult.isError, "空格写法的 path 也认成本人那组：\(listResult.text)")
+        XCTAssertTrue(listResult.text.contains("粟粟/身体"), listResult.text)
+        for r in backend.requests {
+            XCTAssertFalse(([r.system] + r.history.map(\.content) + r.toolTurns.flatMap(\.results).map(\.text)).joined().contains("{{user}}"))
+        }
+        XCTAssertEqual(second.system, third.system)
+        XCTAssertEqual(second.history.map(\.content), third.history.map(\.content))
+        XCTAssertEqual(second.toolTurns.first?.calls.map(\.argumentsJSON), third.toolTurns.first?.calls.map(\.argumentsJSON), "前缀里的回合两轮逐字一样")
+        XCTAssertEqual(second.toolTurns.first?.results.map(\.text), third.toolTurns.first?.results.map(\.text))
+    }
+
+    /// 签名思考：回放原样调用时 tool_use 的 input 对得上原内容块，思考块保留；拿还原过路径的参数回放就会被当成改过、思考被删（所以不能那样做）
+    func testRawCallReplayKeepsSignedThinking() {
+        let call = CatalogTestKit.call("read_wiki", #"{"path":"粟粟/身体"}"#, id: "r1")
+        let content: [[String: Any]] = [["type": "tool_use", "id": "r1", "name": "read_wiki", "input": ["path": "粟粟/身体"]],
+                                        ["type": "thinking", "thinking": "读完再想", "signature": "sig"]]
+        var raw = ToolTurn(calls: [call], results: [ToolResultBlock(toolUseId: "r1", text: "x", isError: false)])
+        raw.assistantContent = content
+        XCTAssertTrue(AnthropicProvider.toolTurnAssistantContent(raw).contains { $0["type"] as? String == "thinking" })
+        var executed = ToolTurn(calls: [CatalogTestKit.call("read_wiki", #"{"path":"{{user}}/身体"}"#, id: "r1")], results: raw.results)
+        executed.assistantContent = content
+        XCTAssertFalse(AnthropicProvider.toolTurnAssistantContent(executed).contains { $0["type"] as? String == "thinking" })
+    }
+
+    /// covered_page 写名字：还原成 {{user}} 后挂到读过的本人页，不挂到首条条目的页
+    func testCoveredPageByNameAttachesToUserPage() async throws {
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        let mine = try wiki.save(WikiPage(path: "{{user}}/身体", kind: .user, title: "身体", now: "花生过敏。"))
+        try wiki.save(WikiPage(path: "人/小慧", kind: .person, title: "小慧", now: "室友。"))
+        let backend = FakeCatalogBackend { n, _ in
+            switch n {
+            case 1: return .toolCalls([CatalogTestKit.call("read_wiki", #"{"path":"粟粟/身体"}"#), CatalogTestKit.call("read_wiki", #"{"path":"人/小慧"}"#)])
+            default:
+                return .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit,
+                    #"{"items":[{"type":"append","path":"人/小慧","records":[{"text":"2026-10-12 一起看电影","fragments":["f1"]}]}],"covered":["f2"],"covered_page":"粟粟/身体"}"#)])
+            }
+        }
+        let out = await agent(backend).run(job())
+        XCTAssertEqual(out.items.first { $0.change.targetPath == "人/小慧" }?.covered ?? [], [], "不挂到首条条目的页")
+        let confirm = try XCTUnwrap(out.items.first { $0.change.targetPath == "{{user}}/身体" })
+        XCTAssertEqual(confirm.covered, [bread.id])
+        XCTAssertEqual(confirm.baseVersion, mine)
+    }
+
+    /// covered_page 点名了没读过的页：打回一次；改不对也不改挂到别的页
+    func testUnresolvableCoveredPageIsRejectedNotMisattached() async throws {
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        try wiki.save(WikiPage(path: "人/小慧", kind: .person, title: "小慧", now: "室友。"))
+        let submit = #"{"items":[{"type":"append","path":"人/小慧","records":[{"text":"2026-10-12 一起看电影","fragments":["f1"]}]}],"covered":["f2"],"covered_page":"粟粟/没读过"}"#
+        let backend = FakeCatalogBackend { n, _ in
+            n == 1 ? .toolCalls([CatalogTestKit.call("read_wiki", #"{"path":"人/小慧"}"#)]) : .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, submit)])
+        }
+        let out = await agent(backend).run(job())
+        let rejected = try XCTUnwrap(backend.requests.dropFirst(2).first?.toolTurns.last?.results.first)
+        XCTAssertTrue(rejected.isError, rejected.text)
+        XCTAssertTrue(rejected.text.contains("covered_page「粟粟/没读过」"), "打回说清楚，回执里显示名字：\(rejected.text)")
+        XCTAssertEqual(out.items.compactMap(\.change.targetPath), ["人/小慧"])
+        XCTAssertEqual(out.items.first?.covered ?? [], [], "给了覆盖目标却解析不了：不静默改挂")
+        XCTAssertFalse(out.items.contains { if case .confirmCovered = $0.change { return true } else { return false } })
+    }
+
+    /// 诊断尾部被截断：先按原规则救回正文，再还原路径，再校验（诊断截断不连累正文）
+    func testTruncatedDiagnosticsStillRestoresBodyPaths() throws {
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        var sources = CatalogSources()
+        sources.addFragments([movie])
+        let json = #"{"items":[{"type":"new_page","path":"粟粟/电影","kind":"用户","title":"电影","records":[{"text":"2026-10-12 一起看了电影","fragments":["f1"]}]}],"coverage":[{"input":"f1","at":"粟粟/电"#
+        let parsed = try XCTUnwrap(CatalogItems.parse(json, sources: sources, wiki: wiki, truncated: true, user: CatalogTestKit.names.user))
+        XCTAssertEqual(parsed.items.compactMap(\.change.targetPath), ["{{user}}/电影"])
+        XCTAssertNil(CatalogItems.parse(json, sources: sources, wiki: wiki, truncated: true)?.items.first, "不给名字就不还原（名字路径不合法，被扔）")
     }
 }

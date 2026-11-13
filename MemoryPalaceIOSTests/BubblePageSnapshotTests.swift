@@ -48,7 +48,7 @@ final class BubblePageSnapshotTests: XCTestCase {
         // 实图仍应固定为气泡无头像无昵称、文章署名常显。
         let settings: [String: Any] = [
             "selectedFont": "", "fontScale": 17.0 / 13.5, "inputFontBase": 13.5,
-            "chatBubbleMode": true, "showAvatar": true, "hideRoleName": true,
+            "showAvatar": true, "hideRoleName": true,
             "hideTimestamp": false, "userName": "You", "assistantName": "Jane Doe",
             BubblePopTuning.enabledKey: false
         ]
@@ -87,7 +87,6 @@ final class BubblePageSnapshotTests: XCTestCase {
             theme.themeMode = oldMode
             theme.selectTheme(id: oldTheme)
         }
-        theme.selectTheme(id: AppThemeDefinition.defaultTheme.id)
 
         let firstTime = try XCTUnwrap(Calendar.current.date(from: DateComponents(year: 2025, month: 1, day: 15, hour: 12)))
         let nodeIDs = Self.messages.indices.map { "bubble-preview-node-\($0)" }
@@ -128,8 +127,12 @@ final class BubblePageSnapshotTests: XCTestCase {
             ("article-light", .light, false), ("article-dark", .dark, false)
         ]
         for (name, scheme, bubbleMode) in variants {
-            defaults.set(bubbleMode, forKey: "chatBubbleMode")
+            // 模式是对话自己的：每轮改这条对话的 displayMode（同一个库，ContentView 每轮新建）
+            conversation.mode = bubbleMode ? .bubble : .article
+            try context.save()
             defaults.set(!bubbleMode, forKey: "hideRoleName")
+            // 主题只有一套：气泡对拍用 iMessage 主题，文章对拍用宫殿默认（同 T7 时的观感）
+            theme.selectTheme(id: bubbleMode ? AppThemeDefinition.iMessageTheme.id : AppThemeDefinition.defaultTheme.id)
             // 同一真实管理器 API + UIKit trait + SwiftUI 环境一同切换；不复制任何主题色。
             theme.themeMode = scheme == .light ? .light : .dark
             theme.syncSystemColorScheme(scheme)
@@ -158,12 +161,15 @@ final class BubblePageSnapshotTests: XCTestCase {
                 return !input.isFirstResponder && self.keyboardGuide(around: input) != nil
             }
             let vm = try XCTUnwrap(PerfHarness.viewModel)
+            XCTAssertEqual(vm.isBubbleMode, bubbleMode)
+            XCTAssertEqual(theme.isBubbleModeActive, bubbleMode, "聊天页配色跟着对话自己的模式")
             XCTAssertEqual(vm.currentPath.map(\.content), Self.messages.map(\.text))
             XCTAssertEqual(vm.currentPath.map(\.role), Self.messages.map(\.role))
             XCTAssertEqual(theme.activeScheme, scheme)
             XCTAssertEqual(window.traitCollection.userInterfaceStyle, scheme == .light ? .light : .dark)
 
-            let requiredTexts = Self.messages.map(\.text) + ["Jane Doe", ChatTimeDivider.label(firstTime)]
+            let requiredTexts = Self.messages.map(\.text) + ["Jane Doe",
+                bubbleMode ? "Jan 15 12:00 PM" : ChatTimeDivider.label(firstTime)]
                 + (bubbleMode ? [] : ["You"])
             var captured = false
             defer {
@@ -195,11 +201,21 @@ final class BubblePageSnapshotTests: XCTestCase {
                 try await captureFadeAndSecondDivider(window: window, output: output, context: context,
                                                       original: conversation, viewModel: vm, time: firstTime)
             }
+            if bubbleMode {
+                try await assertTurnStatus(window: window, output: output, variant: name, container: container,
+                                           original: conversation, viewModel: vm, profiles: profiles,
+                                           presets: presets, providers: providers)
+            }
+            // 10-29 反馈截图（只在指定目录时跑；跑完挂起等外面用 mobai 点「+」/ 表情键盘 / 头像 zoom）
+            if bubbleMode, name == "light", let dir = env["MP_FEEDBACK_SHOTS_DIR"], dir.hasPrefix("/") {
+                try await captureFeedback1029(window: window, output: URL(fileURLWithPath: dir, isDirectory: true),
+                                              container: container, original: conversation, viewModel: vm,
+                                              profile: profile, providers: providers)
+            }
         }
         XCTAssertNotEqual(previews[0], previews[1], "浅深主题不应输出同一张图")
-        defaults.set(true, forKey: "chatBubbleMode")
         let router = SettingsSearchRouter.shared
-        router.request(anchor: "leaf-appear-bubblemode")
+        router.request(anchor: "leaf-appear-timestamp")
         testScene.content = AnyView(NavigationStack {
             AppearancePage()
                 .environment(theme)
@@ -207,22 +223,307 @@ final class BubblePageSnapshotTests: XCTestCase {
                 .preferredColorScheme(.dark)
         })
         defer { router.request(anchor: nil); router.clearFlash() }
-        try await waitUntil("等待设置页沿生产搜索锚点滚到聊天样式") {
-            router.flashingAnchor == "leaf-appear-bubblemode"
+        try await waitUntil("等待设置页沿生产搜索锚点滚到气泡对话") {
+            router.flashingAnchor == "leaf-appear-timestamp"
         }
         // 生产锚点滚动动画为0.3s；等它结束后移除仅用于导航的闪光。
         try await Task.sleep(for: .milliseconds(350))
         router.clearFlash()
         let appearance = try capture(window: window, to: output.appendingPathComponent("appearance-chat-style-dark.png"))
         let appearanceText = try recognizedText(in: appearance.pixels, size: window.bounds.size)
-        for text in ["文章", "气泡", "显示时间戳"] {
-            XCTAssertTrue(appearanceText.contains { $0.key.contains(Self.textKey(text)) }, "聊天样式实图缺少\(text)")
+        // 全局「显示方式」已删：外观页是「气泡对话」「文章对话」两块
+        for text in ["气泡对话", "显示时间戳", "气泡圆角", "文章对话"] {
+            XCTAssertTrue(appearanceText.contains { $0.key.contains(Self.textKey(text)) }, "外观实图缺少\(text)")
         }
+        XCTAssertFalse(appearanceText.contains { $0.key.contains(Self.textKey("显示方式")) }, "全局显示方式开关还在")
         for text in ["显示头像", "显示昵称"] {
             XCTAssertFalse(appearanceText.contains { $0.key.contains(Self.textKey(text)) }, "退役开关仍出现在真实设置页")
         }
         try await assertPopControls(window: window, output: output, container: container,
                                     profileId: profile.id, conversationID: conversation.id)
+        try await assertThemePages(window: window, output: output, theme: theme)
+    }
+
+    /// 共存第一步：主题库不再有「主题应用到」分段；颜色页有「气泡模式」一节，五行默认「跟随上面」
+    private func assertThemePages(window: UIWindow, output: URL, theme: ThemeManager) async throws {
+        let testScene = MemoryPalaceIOSTestScene.shared
+        theme.themeMode = .light
+        theme.syncSystemColorScheme(.light)
+        window.overrideUserInterfaceStyle = .light
+        testScene.content = AnyView(NavigationStack { ThemeLibraryPage().environment(theme) }
+            .environment(\.colorScheme, .light))
+        try await Task.sleep(for: .milliseconds(600))
+        window.layoutIfNeeded()
+        let library = try capture(window: window, to: output.appendingPathComponent("theme-library-light.png"))
+        let libraryText = try recognizedText(in: library.pixels, size: window.bounds.size)
+        XCTAssertTrue(libraryText.contains { $0.key.contains("iMessage") }, "主题库里应列出 iMessage")
+        for gone in ["主题应用到", "文章模式", "气泡模式"] {
+            XCTAssertFalse(libraryText.contains { $0.key.contains(Self.textKey(gone)) }, "主题库还有分段：\(gone)")
+        }
+
+        // custom 是唯一不内置的种子主题，进页不弹「复制一份」
+        testScene.content = AnyView(NavigationStack { ThemeColorsPage(themeId: AppThemeDefinition.customTheme.id).environment(theme) }
+            .environment(\.colorScheme, .light))
+        try await Task.sleep(for: .milliseconds(600))
+        window.layoutIfNeeded()
+        let scroll = try XCTUnwrap(Self.scrollViews(in: window).max { $0.contentSize.height < $1.contentSize.height },
+                                   "颜色页找不到滚动视图")
+        var found: [TextEvidence] = []
+        var shot: Snapshot?
+        var offset: CGFloat = 0
+        while offset <= scroll.contentSize.height {
+            scroll.setContentOffset(CGPoint(x: 0, y: min(offset, max(0, scroll.contentSize.height - scroll.bounds.height
+                                                                        + scroll.adjustedContentInset.bottom))), animated: false)
+            try await Task.sleep(for: .milliseconds(300))
+            window.layoutIfNeeded()
+            let candidate = try capture(window: window, to: output.appendingPathComponent("theme-colors-bubble-section-light.png"))
+            let text = try recognizedText(in: candidate.pixels, size: window.bounds.size)
+            if text.filter({ $0.key.contains(Self.textKey("跟随上面")) }).count >= 5,
+               text.contains(where: { $0.key == Self.textKey("气泡模式") }) {
+                found = text
+                shot = candidate
+                break
+            }
+            offset += 80
+        }
+        XCTAssertNotNil(shot, "颜色页没找到「气泡模式」一节（五行都显示跟随上面）")
+        for row in ["你的气泡底", "你的气泡渐变", "你的文字"] {
+            XCTAssertTrue(found.contains { $0.key.contains(Self.textKey(row)) }, "气泡模式一节缺少「\(row)」")
+        }
+        // Vision 常把「AI」认成「Al」：AI 两行只核汉字部分且不带「你的」
+        for row in ["气泡底", "文字"] {
+            XCTAssertTrue(found.contains { $0.key.hasSuffix(row) && $0.key.count > row.count && !$0.key.contains("你的") },
+                          "气泡模式一节缺少「AI \(row)」")
+        }
+    }
+
+    private static func scrollViews(in view: UIView) -> [UIScrollView] {
+        let own = (view as? UIScrollView).map { [$0] } ?? []
+        return own + view.subviews.flatMap { scrollViews(in: $0) }
+    }
+
+    private func assertTurnStatus(window: UIWindow, output: URL, variant: String, container: ModelContainer,
+                                  original: Conversation, viewModel: ConversationViewModel, profiles: ProfileManager,
+                                  presets: PresetManager, providers: ProviderManager) async throws {
+        let defaults = UserDefaults.standard
+        let permissionKeys = [PermissionDomain.toolsMaster.storageKey, PermissionDomain.fileLibrary.storageKey]
+        let savedPermissions = permissionKeys.map { defaults.object(forKey: $0) as? Int }
+        defaults.set(PermissionLevel.bypass.rawValue, forKey: permissionKeys[0])
+        defaults.set(PermissionLevel.notAllowed.rawValue, forKey: permissionKeys[1])
+        let thinking = defaults.string(forKey: DisclosureKind.thinking.key)
+        defaults.set(DisclosureMode.inline.rawValue, forKey: DisclosureKind.thinking.key)
+        let tts = defaults.object(forKey: "ttsEnabled") as? Bool
+        defaults.set(false, forKey: "ttsEnabled")
+        let budgetEnabled = GlobalBudgetStore.shared.enabled
+        GlobalBudgetStore.shared.setEnabled(false)
+        defer {
+            for (key, value) in zip(permissionKeys, savedPermissions) {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+            if let thinking { defaults.set(thinking, forKey: DisclosureKind.thinking.key) }
+            else { defaults.removeObject(forKey: DisclosureKind.thinking.key) }
+            if let tts { defaults.set(tts, forKey: "ttsEnabled") } else { defaults.removeObject(forKey: "ttsEnabled") }
+            GlobalBudgetStore.shared.setEnabled(budgetEnabled)
+        }
+        let first = try TurnStatusStreamFixture.reply("拉磨中")
+        let next = try TurnStatusStreamFixture.reply("新一轮开炉")
+        let continuation = DispatchSemaphore(value: 0)
+        defer { continuation.signal() }
+        let server = try ScriptedHTTPServer { index, _ in
+            if index == 0 { return (200, "text/event-stream", first) }
+            if index == 1 {
+                _ = continuation.wait(timeout: .now() + 120)
+                return (200, "text/event-stream", TurnStatusStreamFixture.finalReply)
+            }
+            return (200, "text/event-stream", next)
+        }
+        try server.start()
+        defer { server.stop() }
+        let credentialId = "bubble-status-\(UUID().uuidString)"
+        let model = ProviderModel(credentialId: credentialId, modelId: "gpt-4o", name: "本地合成回包")
+        providers.addCredential(APICredential(id: credentialId, name: "本地合成回包", emoji: "",
+                                              type: .openaiCompatible, baseURL: server.baseURL, models: [model]))
+        providers.setApiKey("test-key", for: credentialId)
+        defer { providers.removeCredential(id: credentialId) }
+        let savedProfile = profiles.currentProfile
+        var profile = savedProfile
+        profile.assistantName = "Muse"
+        profiles.updateProfile(profile)
+        defer { profiles.updateProfile(savedProfile) }
+        let context = container.mainContext
+        let cid = "bubble-status-\(variant)"
+        let nodeID = "\(cid)-initial"
+        let conversation = Conversation(id: cid, title: "饼干小计划", createTime: Date(), updateTime: Date(),
+                                        currentNodeId: nodeID, provider: "api", profileId: profile.id)
+        conversation.selectedModelId = model.id
+        conversation.memoryEnabled = false
+        conversation.nodeCount = 1
+        conversation.mode = original.mode
+        context.insert(conversation)
+        context.insert(MessageNode(id: nodeID, role: "assistant", content: "下午一起做饼干吧，我来挑口味。",
+                                   contentType: "text", createTime: Date(), parentId: nil, childrenIds: [],
+                                   conversationId: cid, profileId: profile.id))
+        try context.save()
+        viewModel.loadConversation(conversation, context: context)
+        try await waitUntil("等待状态样本真实加载") { !viewModel.isLoading && viewModel.selectedConversation?.id == cid }
+        defer { viewModel.cancelAssistantTurn(context: context); viewModel.loadConversation(original, context: context) }
+        XCTAssertTrue(viewModel.sendMessage("好呀，帮我选一种不太甜的。", model: model, profile: profile, preset: .balanced,
+                                            providerManager: providers, context: context))
+        try await waitUntil("等待真实SSE、临时状态和问问题工具") { viewModel.pendingUserQuestion != nil }
+        XCTAssertEqual(viewModel.turnStatus(for: cid), "拉磨中")
+        XCTAssertNil(PermissionPromptCenter.shared.pendingRequest)
+        _ = try await stableInput(window: window, reason: "等待状态胶囊稳定") { PerfHarness.markdownPending == 0 }
+        let header = try capture(window: window, to: output.appendingPathComponent("turn-status-\(variant).png"))
+        let headerText = try recognizedText(in: header.pixels, size: window.bounds.size)
+        XCTAssertTrue(headerText.contains { $0.frame.maxY < 180 && $0.text.contains("拉磨中") }, "顶栏必须显示模型本轮写出的短句")
+        XCTAssertTrue(headerText.contains { $0.frame.maxY < 180 && $0.text.contains("问问题") }, "顶栏必须显示具体工具")
+        try JSONEncoder().encode(headerText).write(to: output.appendingPathComponent("turn-status-\(variant)-text.json"), options: .atomic)
+
+        // 先沿生产关闭入口收起问问题卡；续轮网络挂起，避免两个 sheet 抢同一个 presenter。
+        viewModel.dismissActiveAskCard()
+        try await waitUntil("等待问问题卡收起并进入续轮") {
+            window.rootViewController?.presentedViewController == nil && server.requestBodies.count == 2
+        }
+
+        let details = BubbleTurnDetails(conversationId: cid, profileId: profile.id, turnID: viewModel.currentTurnID,
+                                        content: .init(node: viewModel.currentTurnNode(for: cid)), bridgePhase: nil)
+        let sheet = UIHostingController(rootView: BubbleTurnSheet(viewModel: viewModel, details: details)
+            .modelContainer(container).environment(profiles).environment(presets).environment(providers).environment(ThemeManager.shared))
+        sheet.modalPresentationStyle = .pageSheet
+        sheet.sheetPresentationController?.detents = [.large()]
+        sheet.sheetPresentationController?.prefersGrabberVisible = true
+        let presenter = try XCTUnwrap(window.rootViewController)
+        presenter.present(sheet, animated: false)
+        defer { sheet.dismiss(animated: false) }
+        try await waitUntil("等待真实本轮过程page sheet") {
+            sheet.view.window === window && !sheet.isBeingPresented && PerfHarness.markdownPending == 0
+        }
+        let process = try capture(window: window, to: output.appendingPathComponent("turn-sheet-\(variant).png"))
+        let processText = try recognizedText(in: process.pixels, size: window.bounds.size)
+        for text in ["本轮过程", "先确认口味", "本轮状态"] {
+            XCTAssertTrue(processText.contains { $0.key.contains(Self.textKey(text)) }, "本轮过程实图缺少\(text)")
+        }
+        viewModel.cancelAssistantTurn(context: context)
+        continuation.signal()
+        XCTAssertNil(viewModel.turnStatus(for: cid))
+        XCTAssertTrue(viewModel.sendMessage("再挑一次。", model: model, profile: profile, preset: .balanced,
+                                            providerManager: providers, context: context))
+        try await waitUntil("等待下一轮，验证旧sheet不串轮") { viewModel.pendingUserQuestion != nil }
+        XCTAssertEqual(viewModel.turnStatus(for: cid), "新一轮开炉")
+        try await waitUntil("等待已结束轮次的sheet稳定") {
+            sheet.view.window === window && PerfHarness.markdownPending == 0
+        }
+        let retained = try capture(window: window, to: output.appendingPathComponent("turn-sheet-retained-\(variant).png"))
+        let retainedText = try recognizedText(in: retained.pixels, size: window.bounds.size)
+        XCTAssertTrue(retainedText.contains { $0.key.contains("先确认口味") }, "旧轮次结束后仍能查看其过程")
+        XCTAssertFalse(retainedText.contains { $0.text.contains("新一轮开炉") }, "旧sheet不能显示新一轮状态")
+        viewModel.cancelAssistantTurn(context: context)
+        sheet.dismiss(animated: false)
+        viewModel.loadConversation(original, context: context)
+        try await waitUntil("恢复整屏对拍原始会话") {
+            !viewModel.isLoading && viewModel.currentPath.map(\.content) == Self.messages.map(\.text)
+        }
+    }
+
+    private func captureFeedback1029(window: UIWindow, output: URL, container: ModelContainer, original: Conversation,
+                                     viewModel: ConversationViewModel, profile: Profile, providers: ProviderManager) async throws {
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        // 上一段（本轮过程 sheet + 问问题卡）可能还叠着没收干净：从最上层一层层收掉
+        while let top = Self.topPresented(window.rootViewController) {
+            top.dismiss(animated: false)
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        let defaults = UserDefaults.standard
+        let thinking = defaults.string(forKey: DisclosureKind.thinking.key)
+        defaults.set(DisclosureMode.inline.rawValue, forKey: DisclosureKind.thinking.key)
+        let budgetEnabled = GlobalBudgetStore.shared.enabled
+        GlobalBudgetStore.shared.setEnabled(false)
+        defer {
+            if let thinking { defaults.set(thinking, forKey: DisclosureKind.thinking.key) }
+            else { defaults.removeObject(forKey: DisclosureKind.thinking.key) }
+            GlobalBudgetStore.shared.setEnabled(budgetEnabled)
+        }
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let reply = Data("data: {\"choices\":[{\"delta\":{\"content\":\"七点吧，天黑前回来。\"}}]}\n\ndata: [DONE]\n\n".utf8)
+        let server = try ScriptedHTTPServer { _, _ in
+            _ = release.wait(timeout: .now() + 120)
+            return (200, "text/event-stream", reply)
+        }
+        try server.start()
+        defer { server.stop() }
+        let credentialId = "fb1029-\(UUID().uuidString)"
+        let model = ProviderModel(credentialId: credentialId, modelId: "gpt-4o", name: "本地合成回包")
+        providers.addCredential(APICredential(id: credentialId, name: "本地合成回包", emoji: "", type: .openaiCompatible,
+                                              baseURL: server.baseURL, models: [model], toolsSupported: false))
+        providers.setApiKey("test-key", for: credentialId)
+        defer { providers.removeCredential(id: credentialId) }
+
+        let context = container.mainContext
+        let cid = "fb1029-conv"
+        let base = Date().addingTimeInterval(-600)
+        let rows: [(String, String, String?)] = [("user", "晚上出去走走？", nil),
+                                                 ("assistant", "去河边吧，近一点，也能躲一躲雨。", "想一条不赶时间的路线"),
+                                                 ("user", "好呀，我先去换鞋", nil)]
+        let ids = rows.indices.map { "\(cid)-\($0)" }
+        let conversation = Conversation(id: cid, title: "散步", createTime: base, updateTime: base,
+                                        currentNodeId: ids.last!, provider: "api", profileId: profile.id)
+        conversation.selectedModelId = model.id
+        conversation.memoryEnabled = false
+        conversation.nodeCount = rows.count
+        conversation.mode = .bubble
+        context.insert(conversation)
+        var nodes: [MessageNode] = []
+        for (i, row) in rows.enumerated() {
+            let node = MessageNode(id: ids[i], role: row.0, content: row.1, contentType: "text",
+                                   createTime: base.addingTimeInterval(Double(i) * 30), parentId: i == 0 ? nil : ids[i - 1],
+                                   childrenIds: i + 1 == ids.count ? [] : [ids[i + 1]], conversationId: cid, profileId: profile.id)
+            node.ccThinking = row.2
+            context.insert(node)
+            nodes.append(node)
+        }
+        try context.save()
+        // AI 贴在她第二条上（灰胶囊），她给 AI 那条点了 ❤️（白胶囊）
+        let store = ChatReactionStore.shared
+        store.addAIReaction("👍", on: ids[2])
+        let suite = UserDefaults(suiteName: "fb1029-outbox-\(UUID().uuidString)")!
+        store.toggle("❤️", on: ChatReactionTarget(node: nodes[1], blockIndex: 0, blockText: rows[1].1),
+                     outbox: ChatCardEventOutbox(defaults: suite), trigger: nil)
+
+        viewModel.loadConversation(conversation, context: context)
+        try await waitUntil("等待 10-29 样本加载") { !viewModel.isLoading && viewModel.selectedConversation?.id == cid }
+        defer { viewModel.cancelAssistantTurn(context: context); viewModel.loadConversation(original, context: context) }
+        _ = try await stableInput(window: window, reason: "等待样本稳定") { PerfHarness.markdownPending == 0 }
+        _ = try capture(window: window, to: output.appendingPathComponent("1-thinking-bubble-6-ai-reaction.png"))
+
+        XCTAssertTrue(viewModel.sendMessage("那我们几点出发？", model: model, profile: profile, preset: .balanced,
+                                            providerManager: providers, context: context))
+        try await waitUntil("等待进入等待态") { viewModel.assistantTurnInFlight && server.requestBodies.count == 1 }
+        try await Task.sleep(for: .milliseconds(1500))
+        let waiting = try capture(window: window, to: output.appendingPathComponent("2-waiting.png"))
+        let texts = try recognizedText(in: waiting.pixels, size: window.bounds.size)
+        try JSONEncoder().encode(texts).write(to: output.appendingPathComponent("2-waiting-text.json"), options: .atomic)
+        XCTAssertFalse(texts.contains { $0.text.contains("正在思考") }, "顶栏换成轮换文案，不再写死「正在思考…」")
+        release.signal()
+        try await waitUntil("等待回复落地") { !viewModel.assistantTurnInFlight }
+
+        // 挂起：外面用 mobai 真点「+」菜单 / 长按出表情条点「+」/ 点头像看 zoom，写 .release 收工
+        let hold = output.appendingPathComponent(".holding")
+        let done = output.appendingPathComponent(".release")
+        try? FileManager.default.removeItem(at: done)
+        try Data().write(to: hold)
+        let deadline = Date().addingTimeInterval(1200)
+        while !FileManager.default.fileExists(atPath: done.path), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        try? FileManager.default.removeItem(at: hold)
+        try? FileManager.default.removeItem(at: done)
+    }
+
+    private static func topPresented(_ root: UIViewController?) -> UIViewController? {
+        var top = root?.presentedViewController
+        while let next = top?.presentedViewController { top = next }
+        return top
     }
 
     private func stableInput(window: UIWindow, reason: String, when ready: () -> Bool) async throws -> CGRect {
@@ -314,6 +615,7 @@ final class BubblePageSnapshotTests: XCTestCase {
         let conversation = Conversation(id: id, title: "渐隐与时间分隔对拍", createTime: time, updateTime: time,
                                         currentNodeId: try XCTUnwrap(ids.last), provider: "api", profileId: original.profileId)
         conversation.memoryEnabled = false
+        conversation.mode = original.mode
         context.insert(conversation)
         let probeText = "M" + String(repeating: "\u{00a0}", count: 40) + "M"
         for index in ids.indices {
@@ -330,7 +632,7 @@ final class BubblePageSnapshotTests: XCTestCase {
         }
         let shot = try capture(window: window, to: output.appendingPathComponent("fade-and-divider-dark.png"))
         let text = try recognizedText(in: shot.pixels, size: window.bounds.size)
-        let label = Self.textKey(ChatTimeDivider.label(time.addingTimeInterval(14 * 60 + 14400)))
+        let label = Self.textKey("Jan 15 4:14 PM")
         XCTAssertTrue(text.contains { $0.key == label && $0.frame.minY > 180 && $0.frame.maxY < 700 },
                       "第二条时间分隔必须真实出现在两组消息之间")
         try JSONEncoder().encode(text).write(to: output.appendingPathComponent("fade-and-divider-dark-text.json"), options: .atomic)

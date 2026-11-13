@@ -2,7 +2,7 @@ import Foundation
 
 /// 按字节缓冲，只在完整行上做 UTF-8 解码；行尾认 \n、\r\n、单独 \r（\r 在分片末尾时等下一片再判）
 struct SSELineDecoder {
-    enum Field: Equatable { case event(String), data(String), comment, other }
+    enum Field: Equatable { case event(String), data(String), comment, blank, other }
 
     struct LineTooLong: Error {}
 
@@ -71,6 +71,7 @@ struct SSELineDecoder {
 
     /// 规范：`field:value`，冒号后**最多去一个**空格；以 `:` 开头 = 注释；没冒号 = 整行是字段名、值为空
     static func parse(line: String) -> Field {
+        if line.isEmpty { return .blank }
         if line.hasPrefix(":") { return .comment }
         let name: Substring
         var value: Substring = ""
@@ -90,5 +91,48 @@ struct SSELineDecoder {
 
     private static func decode(_ bytes: Data) -> String {
         String(decoding: bytes, as: UTF8.self)
+    }
+}
+
+/// 字段 → 事件：空行派发，同一事件多条 data 用 \n 拼，没有 data 的事件不派发；
+/// 流结束时没空行收尾的最后一个事件也吐出来（比规范宽，MCP / MiniMax 都有不补空行的服务端）
+struct SSEEventAssembler {
+    struct Event: Equatable {
+        var name: String
+        var data: String
+    }
+
+    private var name = ""
+    private var data: [String] = []
+
+    mutating func add(_ fields: [SSELineDecoder.Field]) -> [Event] {
+        var out: [Event] = []
+        for field in fields {
+            switch field {
+            case .event(let value): name = value
+            case .data(let value): data.append(value)
+            case .blank: if let e = dispatch() { out.append(e) }
+            case .comment, .other: break
+            }
+        }
+        return out
+    }
+
+    mutating func finish() -> [Event] {
+        dispatch().map { [$0] } ?? []
+    }
+
+    private mutating func dispatch() -> Event? {
+        defer { name = ""; data = [] }
+        guard !data.isEmpty else { return nil }
+        return Event(name: name, data: data.joined(separator: "\n"))
+    }
+
+    /// 一次拿到整段回包时用
+    static func events(in body: Data) throws -> [Event] {
+        var decoder = SSELineDecoder()
+        var assembler = SSEEventAssembler()
+        let events = assembler.add(try decoder.feed(body)) + assembler.add(decoder.finish())
+        return events + assembler.finish()
     }
 }

@@ -18,7 +18,7 @@ final class WebSearchSettings: ObservableObject {
     private let selectedIdKey = "webSearchSelectedId"
     private let blockedDomainsKey = "webSearchBlockedDomains_v1"
 
-    /// "导入推荐" 默认黑名单（支付/银行/邮箱常见 9 个敏感域）
+    /// "导入推荐" 默认黑名单（支付/银行/邮箱 9 个；plan-opencli-in-app 补邮箱 / 苹果账号 / 密码管理 / AI 网站 8 个：Chrome 登录态能读到它们）
     static let recommendedBlocklist: [String] = [
         "alipay.com",
         "weixin.qq.com",
@@ -29,6 +29,14 @@ final class WebSearchSettings: ObservableObject {
         "bankofchina.com",
         "mail.qq.com",
         "mail.163.com",
+        "mail.google.com",
+        "outlook.live.com",
+        "icloud.com",
+        "appleid.apple.com",
+        "1password.com",
+        "claude.ai",
+        "chatgpt.com",
+        "console.anthropic.com",
     ]
 
     private init() {

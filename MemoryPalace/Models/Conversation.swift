@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 
@@ -59,6 +60,12 @@ final class Conversation {
     /// spawn 出来的 mp-cc-N 不带 --continue，无跨重启历史 continuity。
     var ccBridgeSessionName: String? = nil
 
+    /// 多 hub（plan-multi-hub B1）：这条 CC 对话连哪台电脑。nil = 老对话 = 主 hub；新建的写明确值（主 hub 也写 "primary"，但那台 hub_id 还不知道时留 nil）。
+    /// 跨设备同步来、本机认不出那台 = `CCHubRegistry.unboundHubId`（待绑定，拒发）
+    var ccHubId: String? = nil
+    /// 绑定时那台 hub 自报的 hub_id（hello）：跨设备同步 / 恢复按它认机器
+    var ccHubIdentity: String? = nil
+
     /// 该对话当前选中的模型 combinedId（providerId+modelId）。
     /// "" = 没单独选过，回退全局 selectedChatModel。手动切/发送时写入。
     var selectedModelId: String = ""
@@ -86,6 +93,17 @@ final class Conversation {
     /// nil = 旧对话还没生成 / 没有分叉。currentNodeId 是它派生出的路径末端缓存。
     var branchSelectionData: Data? = nil
 
+    /// 逐轮召回的物化缓存；消息回执才是分支恢复的事实来源。nil = 旧库，从空状态开始。
+    var recallStateData: Data? = nil
+
+    /// 读侧段④：本窗六项（Z3–Z8）选择，开新窗时冻结。nil = 老窗，按楼层开窗口那几勾走（`MemoryWindowChoices.legacy`）
+    var memoryWindowChoicesData: Data? = nil
+    /// 读侧段④：开窗时选中的上个窗口 id 和那时冻结的最后几条（`PreviousWindowSnapshot`）。源窗删了 / 关了参与就清正文，不复活
+    var previousWindowId: String? = nil
+    @Attribute(.externalStorage) var previousWindowSnapshotData: Data? = nil
+    /// 读侧段④：普通 API 窗口真实 user 轮首个提供商响应生效的时间（选「上个窗口」用；打开、改标题、工具续轮不推进）。nil = 老窗
+    var lastRealChatAt: Date? = nil
+
     /// 卡库 ⑧c：本对话用的身份（UserPersonaStore id）。nil = 没指定，回退楼层 / Profile 身份文本
     var personaId: String? = nil
     /// 卡库 ⑧c：归档类型。nil = 普通对话；"groupReadOnly" = 酒馆群聊只读归档（不续聊、不进记忆）
@@ -94,6 +112,13 @@ final class Conversation {
     @Attribute(.externalStorage) var sourceMetadata: Data? = nil
     /// 卡库第二批 B4：卡里网页的 chat 变量（JSON 对象）。nil = 还没写过，读时从 sourceMetadata 的 header.chat_metadata.variables 惰性取
     @Attribute(.externalStorage) var cardVariablesData: Data? = nil
+
+    /// 显示方式（气泡 / 文章共存第二步）："article" 文章 / "bubble" 气泡，读写走 `mode`。
+    /// 默认文章：老库轻量迁移后全是文章，导入的归档也是文章，不看任何全局开关
+    var displayMode: String = "article"
+    /// 上次在对话菜单里换模式的时间（nil = 没换过）。换模式不推进 updateTime（列表按它排），
+    /// 跨设备同步按这个时间单独比新旧，免得被对端内容更新、模式更旧的文档盖回去
+    var displayModeUpdatedAt: Date? = nil
 
     init(id: String, title: String, createTime: Date, updateTime: Date, currentNodeId: String, provider: String = "chatgpt", profileId: String = "") {
         self.id = id
@@ -106,11 +131,33 @@ final class Conversation {
     }
 }
 
+/// 对话的显示方式：文章（默认）/ 气泡。每个对话自己记，对话菜单里能换
+enum ConversationDisplayMode: String, CaseIterable {
+    case article
+    case bubble
+}
+
 extension Conversation {
     static let groupReadOnlyArchive = "groupReadOnly"
 
+    /// 认不出的值按文章算
+    var mode: ConversationDisplayMode {
+        get { ConversationDisplayMode(rawValue: displayMode) ?? .article }
+        set { displayMode = newValue.rawValue }
+    }
+
+    var isBubbleMode: Bool { mode == .bubble }
+
+    /// 同步导出用的「这条对话最后一次变化」：内容（updateTime）和模式（displayModeUpdatedAt）取较新的
+    var syncStamp: Date { max(updateTime, displayModeUpdatedAt ?? .distantPast) }
+
     /// 只读归档（群聊首批）：不续聊、不重生成
     var isReadOnlyArchive: Bool { archiveKind == Self.groupReadOnlyArchive }
+
+    var recallState: RecallConversationState {
+        get { recallStateData.flatMap { try? JSONDecoder().decode(RecallConversationState.self, from: $0) } ?? .init() }
+        set { recallStateData = try? JSONEncoder().encode(newValue) }
+    }
 
     /// 不在显示路径上的追加（后台 / 别的对话）：新节点接在 parentId 下，父有多个孩子时把它记成选中，
     /// 否则选择表还指着旧孩子，重开会回到旧分支
@@ -185,6 +232,11 @@ final class MessageNode {
 
     /// 思考过程的一句话总结（小模型生成，plan-thinking-branch）；nil = 还没有。可选列轻量迁移
     var thinkingSummary: String? = nil
+    /// 这一轮助手回复的结局（ReplyOutcome.rawValue，plan-reply-error-report-1106）。nil = 正常 / 老数据。
+    /// 提示文字不进 content，只存这里给气泡下面的灰胶囊读。
+    var replyOutcome: String? = nil
+    /// 上游原样的 finish_reason / stop_reason（认不出的也存），nil = 正常 / 老数据 / 没拿到。可选列轻量迁移
+    var finishReason: String? = nil
     /// 主对话工具组摘要：[内容指纹: 一句话]，可选列兼容旧库。
     var toolSummariesData: Data? = nil
 
@@ -212,6 +264,9 @@ final class MessageNode {
     /// nil = 老消息 / 无命中 / 卡片诞生前的数据，不渲染卡片。
     var recallHitsData: Data? = nil
 
+    /// 版本化的逐轮决策、发送尝试和读取事实；不参与消息正文、显示或记忆提取。
+    var recallReceiptData: Data? = nil
+
     /// 卡库 ⑧c：导入来源 / metadata（JSON：候选 raw、swipe_info、源 swipe 原文、variables 等），只存不执行
     @Attribute(.externalStorage) var sourceMetadata: Data? = nil
     /// 卡库 ⑧c：源可见性（SillyTavernMessageVisibility rawValue）。nil = 普通；hidden / uiSystem 不进显示、记忆、API
@@ -224,6 +279,13 @@ final class MessageNode {
     /// 网页卡事件 / 表情回应捎带（research-chat-cards §13）：发送时从待捎带箱取走的 [ChatCardEvent] JSON。
     /// nil = 没捎带。拼上下文时放在这条用户消息正文前面
     var cardEventsData: Data? = nil
+
+    /// 发送时发生了什么、要一直挂在消息下面的一句（plan-send-notice-marker A）：比如模型看不了图、照片只发了描述。
+    /// 不写进正文，跟消息内容撞不上；nil = 没有
+    var sendNotice: String? = nil
+
+    /// 报错标记换格式之前的消息：也认老的「⚠️ 」（plan-send-notice-marker B）
+    var usesLegacyErrorMarker: Bool { ChatSystemMessage.usesLegacyMarker(createTime) }
 
     /// 源里隐藏的消息（酒馆 /hide、界面提示）：和合成根一样不进显示 / 记忆 / API
     var isSourceHidden: Bool { sourceVisibility == "hidden" || sourceVisibility == "uiSystem" }
@@ -271,6 +333,11 @@ final class MessageNode {
 
     func setRecallHits(_ hits: [InjectionHit]) {
         recallHitsData = hits.isEmpty ? nil : (try? JSONEncoder().encode(hits))
+    }
+
+    var recallReceipt: RecallTurnReceipt? {
+        get { recallReceiptData.flatMap { try? JSONDecoder().decode(RecallTurnReceipt.self, from: $0) } }
+        set { recallReceiptData = newValue.flatMap { try? JSONEncoder().encode($0) } }
     }
 
     func setImageDesc(_ desc: String, for name: String) {

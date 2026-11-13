@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// 整理提案一个目录项的原料：一份一行（名称 + 层）+ 全文，只读（粟粟 10-23：「提案我也不能点进去，然后看每个原料是啥」）。
@@ -5,7 +6,7 @@ import Foundation
 /// 标「这份原料在提案之后改过」。现在的样子只取这一项列着的那几份，规则同种子原料那套白名单
 /// （CC：cc 文件夹里的普通 .md、不跟链接、`readNoFollow`、`CatalogSeed.read`；Prompt 取楼层底图；wiki 页逐级不跟链接、索引走 `SafeWiki`；问卷取任务里的答案）。
 /// private_ 开头的文件在最前面就滤掉：不列、不取回执、不读盘；wiki 文字里指向私人页的 `[[…]]` 行也剥掉。文件 IO，调用方放后台
-enum WikiProposalSources {
+extension WikiProposalSources {
     struct Source: Equatable, Sendable {
         var path: String
         var name: String
@@ -15,6 +16,17 @@ enum WikiProposalSources {
         var text: String?
         /// 读到的和提案生成时不一样 / 清空了 / 现在不在了 / 现在读不了 / 没读到
         var note: String?
+        /// 回扫候选（不是正式原料）：命中的名字
+        var candidate: [String]? = nil
+        var sourceContext: SeedSourceContext? = nil
+        var factDomain: SeedFactDomain? = nil
+        var domainNote: String? = nil
+
+        var sourceLabel: String {
+            if layer == "CC" { return "CC 记忆" }
+            guard let sourceContext else { return "未记录" }
+            return ([sourceContext.slotName] + sourceContext.headingPath).joined(separator: " › ")
+        }
     }
 
     /// 一份原料现在的样子（astra 10-23 P2：不在 / 读失败 / 空要分开）
@@ -22,6 +34,10 @@ enum WikiProposalSources {
         case present(text: String, version: String)
         case empty
         case missing
+        /// 槽位仍在，但编辑后重切已没有原段。
+        case resegmented
+        case contextChanged
+        case legacySegmentation
         case unreadable(String)
     }
 
@@ -29,45 +45,21 @@ enum WikiProposalSources {
     static let emptiedNote = "这份原料在提案之后改过（现在是空的）"
     static let goneNote = "这份原料现在已经不在了"
     static let missingNote = "没读到这份原料"
+    static let resegmentedNote = "这份原料在提案之后重切或标题上下文已变化，保留旧快照"
+    static let contextChangedNote = "这份原料的槽位在提案之后改过名，正文按旧快照显示"
+    static let legacySegmentationNote = "旧分段，当前无法按同号核对"
     static func unreadableNote(_ why: String) -> String { "这份原料现在读不了（\(why)）" }
 
     static let ccPrefix = "memory/\(CCMemorySync.subdir)/"
 
-    /// 路径里任何一段以 private_ 开头（大小写不论）的一律不碰
-    static func isPrivate(_ path: String) -> Bool {
-        path.split(separator: "/").contains { CCMemorySync.isExcluded(name: String($0)) }
-    }
-
-    /// 文字里带 `[[私人页]]` 的那几行剥掉（历史 INDEX 回执 / 页里的连线）
-    static func strippingPrivateLinks(_ text: String) -> String {
-        guard text.range(of: "private_", options: .caseInsensitive) != nil else { return text }
-        let lines = text.components(separatedBy: "\n")
-        return lines.filter { !linksPrivate($0) }.joined(separator: "\n")
-    }
-
-    private static func linksPrivate(_ line: String) -> Bool {
-        var rest = line[...]
-        while let open = rest.range(of: "[[") {
-            guard let close = rest[open.upperBound...].range(of: "]]") else { return false }
-            if isPrivate(String(rest[open.upperBound..<close.lowerBound])) { return true }
-            rest = rest[close.upperBound...]
-        }
-        return false
-    }
-
     // MARK: - 回执
 
-    /// 一次扫完任务的 read 回执：路径 → 实际读到的全文（同 `CatalogSeedTask.readText`：同一路径取第一次成功的那一份）
-    static func receipts(_ task: CatalogSeedTask) -> [String: String] {
+    /// 一次读完任务的原料快照：路径 → 这次实际读到的全文（同 `CatalogSeedTask.readText`：只认快照，摘要对不上的不算）
+    static func receipts(_ task: CatalogSeedTask, wiki: WikiStore) -> [String: String] {
+        guard let snapshot = task.snapshot(wiki: wiki) else { return [:] }
         var out: [String: String] = [:]
-        for turn in task.turns {
-            for call in turn.calls where call.name == CatalogSeedTools.read {
-                guard let path = CatalogJSON.decode(CatalogSeedTools.Args.self, call.argumentsJSON)?.path?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      out[path] == nil,
-                      let result = turn.results.first(where: { $0.toolUseId == call.id && !$0.isError }),
-                      let cut = result.text.firstIndex(of: "\n") else { continue }
-                out[path] = String(result.text[result.text.index(after: cut)...])
-            }
+        for (path, version) in task.read where !version.isEmpty {
+            if let text = snapshot.text(path) { out[path] = text }
         }
         return out
     }
@@ -84,6 +76,7 @@ enum WikiProposalSources {
                         memoryRoot: URL, wiki: WikiStore, check: () throws -> Void) rethrows -> [String: Current] {
         var out: [String: Current] = [:]
         var safe: SafeWiki?
+        var promptSegments: [String: [CatalogSeedMaterials.Item]] = [:]
         for path in paths where !isPrivate(path) {
             try check()
             switch layers[path] ?? guessLayer(path) {
@@ -105,10 +98,41 @@ enum WikiProposalSources {
                     return .present(text: text, version: WikiStore.version(of: Data(text.utf8)))
                 } ?? .missing
             default:
+                let material = task?.materials.first { $0.path == path }
+                guard let context = material?.sourceContext else {
+                    out[path] = .legacySegmentation
+                    continue
+                }
                 guard let floorBase else { continue }
-                guard let s = floorBase.sections.first(where: { $0.path == path }) else { out[path] = .missing; continue }
-                out[path] = s.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? .empty : .present(text: s.text, version: WikiStore.version(of: Data(s.text.utf8)))
+                guard let s = floorBase.sections.first(where: { $0.path == context.slotPath }) else {
+                    out[path] = .missing
+                    continue
+                }
+                if s.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    out[path] = .empty
+                } else if s.name != context.slotName {
+                    out[path] = .contextChanged
+                } else {
+                    if promptSegments[s.path] == nil {
+                        promptSegments[s.path] = CatalogSeedMaterials.personaItems(path: s.path, name: s.name, text: s.text, isEnabled: s.isEnabled)
+                    }
+                    let segments = promptSegments[s.path] ?? []
+                    let frozenPaths = task?.materials.filter { $0.sourceContext == context }.map(\.path) ?? []
+                    let currentPaths = segments.filter { $0.sourceContext == context }.map(\.path)
+                    // 同槽别节改动引起 #NN 重编号也算重切，fail-closed 留旧快照。
+                    guard frozenPaths == currentPaths,
+                          let segment = segments.first(where: { $0.path == path }),
+                          segment.sourceContext == context else {
+                        out[path] = .resegmented
+                        continue
+                    }
+                    if segment.version != material?.version,
+                       segments.contains(where: { $0.path != path && $0.version == material?.version && $0.sourceContext == context }) {
+                        out[path] = .resegmented
+                    } else {
+                        out[path] = .present(text: segment.text, version: segment.version)
+                    }
+                }
             }
         }
         return out
@@ -184,7 +208,7 @@ enum WikiProposalSources {
     // MARK: - 拼一项的原料
 
     /// 种子目录项的原料（顺序照目录项列的，重复的只列一次）。`receipts` 由 `receipts(_:)` 取，`current` 由 `current(...)` 取
-    static func seed(paths: [String], task: CatalogSeedTask?, receipts: [String: String], current: [String: Current]) -> [Source] {
+    static func seed(paths: [String], task: CatalogSeedTask?, receipts: [String: String], current: [String: Current], wiki: WikiStore) -> [Source] {
         var seen = Set<String>()
         var out: [Source] = []
         for raw in paths {
@@ -194,6 +218,13 @@ enum WikiProposalSources {
             let layer = material?.layer ?? guessLayer(path)
             let name = material?.name ?? (path as NSString).lastPathComponent
             let readVersion = task?.read[path].flatMap { $0.isEmpty ? nil : $0 } ?? material?.version
+            let card = readVersion.flatMap { SeedNoteStore(wiki: wiki).load(path: path, version: $0) }
+                .flatMap { $0.path == path && $0.version == readVersion ? $0 : nil }
+            let issue = card.flatMap { $0.contextIssue(for: material?.sourceContext) }
+            let domain = issue == nil ? card?.factDomain : .unspecified
+            let domainNote = issue.map { "\($0.note)，本轮按待判" }
+                ?? (task == nil ? "任务快照不在" : layer == "wiki" ? "无要点卡"
+                    : card?.factDomain == nil ? "旧格式未记录" : "模型判断")
             var text = receipts[path]
             var note: String?
             switch current[path] {
@@ -201,6 +232,12 @@ enum WikiProposalSources {
                 if text == nil { text = now } else if let readVersion, readVersion != version { note = changedNote }
             case .empty?:
                 note = emptiedNote
+            case .resegmented?:
+                note = resegmentedNote
+            case .contextChanged?:
+                note = contextChangedNote
+            case .legacySegmentation?:
+                note = legacySegmentationNote
             case .missing?:
                 note = text == nil ? missingNote : goneNote
             case .unreadable(let why)?:
@@ -210,7 +247,8 @@ enum WikiProposalSources {
             }
             if text == nil, note == nil { note = missingNote }
             if layer == "wiki" { text = text.map(strippingPrivateLinks) }
-            out.append(Source(path: path, name: name, layer: layer, text: text, note: note))
+            out.append(Source(path: path, name: name, layer: layer, text: text, note: note,
+                              sourceContext: material?.sourceContext, factDomain: domain, domainNote: domainNote))
         }
         return out
     }
@@ -229,19 +267,21 @@ enum WikiProposalSources {
         return "Prompt"
     }
 
-    /// 卡片列表头上的一行：「原料 12 份 · CC 7 · wiki 4 · Prompt 1」
+    /// 卡片列表头上的一行：「原料 12 份 · CC 7 · wiki 4 · Prompt 1」；有回扫候选另算「· 回扫候选 3 份」（不算进原料）
     static func tally(_ sources: [Source]) -> String {
         var order: [String] = []
         var counts: [String: Int] = [:]
-        for s in sources {
+        let formal = sources.filter { $0.candidate == nil }
+        for s in formal {
             if counts[s.layer] == nil { order.append(s.layer) }
             counts[s.layer, default: 0] += 1
         }
-        return (["原料 \(sources.count) 份"] + order.map { "\($0) \(counts[$0] ?? 0)" }).joined(separator: " · ")
+        let candidates = sources.count - formal.count
+        return (["原料 \(formal.count) 份"] + order.map { "\($0) \(counts[$0] ?? 0)" } + (candidates > 0 ? ["回扫候选 \(candidates) 份"] : [])).joined(separator: " · ")
     }
 }
 
-/// 种子任务的解析结果 + 回执索引：同一份 task.json 没改过就复用（目录 65 项挨个点进去，不每次重新解码整份任务）
+/// 种子任务的解析结果 + 快照正文索引：同一份 task.json 没改过就复用（目录 65 项挨个点进去，不每次重新解码整份任务、重读快照）
 final class SeedTaskCache: @unchecked Sendable {
     static let shared = SeedTaskCache()
 
@@ -263,7 +303,7 @@ final class SeedTaskCache: @unchecked Sendable {
             return (hit.task, hit.receipts)
         }
         guard let task = store.load(id) else { return nil }
-        let receipts = WikiProposalSources.receipts(task)
+        let receipts = WikiProposalSources.receipts(task, wiki: store.wiki)
         if let stamp { lock.withLock { entry = Entry(file: file, stamp: stamp, task: task, receipts: receipts) } }
         return (task, receipts)
     }

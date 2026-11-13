@@ -186,6 +186,10 @@ final class LocalLLMService {
             for result in turn.results {
                 messages.append(.tool((result.isError ? "[error] " : "") + result.text))
             }
+            for follow in turn.followUps {
+                if follow.hasReply { messages.append(.assistant(follow.reply)) }
+                messages.append(.user(follow.note))
+            }
         }
         if let nudge = request.nudge, nudge.afterTurns >= request.toolTurns.count {
             messages += [.assistant(nudge.reply), .user(AssistantNudge.note)]
@@ -293,17 +297,38 @@ final class LocalChatProvider {
         return (system, history)
     }
 
+    /// Accounting view of the exact system prefix used by trimmed; ellipsis/image notices have no memory source.
+    static func retainedSystemSegments(_ segments: [TaggedSegment]) -> [TaggedSegment] {
+        var remaining = systemBudget
+        var first = true
+        return segments.filter { $0.role == "system" }.map { segment in
+            if !first { remaining = max(0, remaining - "\n\n".count) }
+            first = false
+            let content = String(segment.content.prefix(remaining))
+            remaining -= content.count
+            return TaggedSegment(source: segment.source, role: segment.role, template: segment.template,
+                                 content: content, nodeId: segment.nodeId)
+        }
+    }
+
     func send(modelId: String, messages: [(role: String, content: String)], systemPrompt: String?, hasImages: Bool,
               thinking: Bool = false,
               onToken: @escaping (String) -> Void,
               onComplete: @escaping (String, TokenUsage?) -> Void,
-              onError: @escaping (String) -> Void) {
+              onError: @escaping (String) -> Void,
+              onEffectiveEvent: (() -> Void)? = nil) {
         let (system, history) = Self.trimmed(system: systemPrompt ?? "", messages: messages, hasImages: hasImages)
         var request = AssistantBackendRequest(system: system, history: history, tools: [], toolTurns: [],
                                               maxTokens: thinking ? 4096 : 2048)   // 想的部分也吃上限
         request.enableThinking = thinking
         // 开思考时模型吐 <think>…</think>：换成 [thinking]…[/thinking]，收进思考气泡
         let converter = ThinkTagConverter()
+        var didEmitEffective = false
+        let reportEffective: () -> Void = {
+            guard !didEmitEffective else { return }
+            didEmitEffective = true
+            onEffectiveEvent?()
+        }
         Task { @MainActor in
             self.job?.cancel()
             self.isStreaming = true
@@ -313,16 +338,18 @@ final class LocalChatProvider {
                 guard let self else { return }
                 switch event {
                 case .token(let raw):
-                    let token = thinking ? converter.feed(raw) : raw
+                    let token = thinking ? converter.feed(raw, onVisibleContent: reportEffective) : raw
                     guard !token.isEmpty else { return }
+                    if !thinking && !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { reportEffective() }
                     self.streamingContent += token
                     onToken(token)
                 case .finished(let text):
                     self.isStreaming = false
                     if thinking {
                         let whole = ThinkTagConverter()
-                        onComplete(whole.feed(text) + whole.flush(), nil)
+                        onComplete(whole.feed(text, onVisibleContent: reportEffective) + whole.flush(onVisibleContent: reportEffective), nil)
                     } else {
+                        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { reportEffective() }
                         onComplete(text, nil)
                     }
                 case .toolCalls:

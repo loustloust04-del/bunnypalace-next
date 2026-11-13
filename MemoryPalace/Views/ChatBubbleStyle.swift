@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftStreamingMarkdown   // P3 menu 探针起给 assistant 静态分支用 fork；splitBlocks 的围栏配对也用它（两端都链接 fork）
 
@@ -71,13 +72,13 @@ struct AvatarBox: View {
                 .frame(width: size, height: size)
                 .clipShape(Circle())
                 .overlay(
-                    Circle().strokeBorder(Theme.textMuted.opacity(0.25), lineWidth: 1)
+                    Circle().strokeBorder(Theme.chat.textMuted.opacity(0.25), lineWidth: 1)
                 )
         } else {
             Circle()
-                .fill(Theme.textMuted.opacity(0.18))
+                .fill(Theme.chat.textMuted.opacity(0.18))
                 .overlay(
-                    Circle().strokeBorder(Theme.textMuted.opacity(0.25), lineWidth: 1)
+                    Circle().strokeBorder(Theme.chat.textMuted.opacity(0.25), lineWidth: 1)
                 )
                 .frame(width: size, height: size)
         }
@@ -138,7 +139,7 @@ struct TypingDotsView: View {
             BouncingDotsView()
         } else {
             HStack(spacing: 8) {
-                Theme.textSecondary
+                Theme.chat.textSecondary
                     .mask { ThinkingOrb(state: OrbState.stored(styleRaw), size: .px20, displaySize: 34) }
                     .frame(width: 34, height: 34)
                 RotatingShimmerLabel()
@@ -156,7 +157,7 @@ struct BouncingDotsView: View {
         HStack(spacing: 4) {
             ForEach(0..<3, id: \.self) { i in
                 Circle()
-                    .fill(Theme.textMuted.opacity(0.5))
+                    .fill(Theme.chat.textMuted.opacity(0.5))
                     .frame(width: 5, height: 5)
                     .offset(y: bouncing ? -3 : 1)
                     .animation(
@@ -170,17 +171,53 @@ struct BouncingDotsView: View {
     }
 }
 
+/// 气泡模式等待（10-29）：iMessage 式三颗灰点依次明暗，不带思考球和文案（文案挪到顶栏状态行）。
+/// 纯 TimelineView 驱动没有 @State，不碰泡的 transition（同 TypingDotsView 的教训）
+struct BubbleTypingDots: View {
+    private static let size: CGFloat = 8
+    private static let period = 1.2
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 5) {
+                ForEach(0..<3, id: \.self) { i in
+                    Circle()
+                        .fill(Theme.chat.textMuted)
+                        .frame(width: Self.size, height: Self.size)
+                        .opacity(Self.opacity(t: t, index: i))
+                }
+            }
+        }
+        .padding(.vertical, 6)
+        .accessibilityElement()
+        .accessibilityLabel("正在输入")
+    }
+
+    /// 每颗错开 0.2 拍：亮到 0.9 再落回 0.35
+    static func opacity(t: TimeInterval, index: Int) -> Double {
+        let phase = (t / period - Double(index) * 0.2).truncatingRemainder(dividingBy: 1)
+        let wave = max(0, sin((phase < 0 ? phase + 1 : phase) * 2 * .pi))
+        return 0.35 + 0.55 * wave
+    }
+}
+
 /// CC 等待泡（收口即发，plan-跨对话排队）：消息发给 CC、回复未落地时挂在列表底部的弹跳点行。
 /// 纯 UI 合成行不是 MessageNode；样式对齐气泡模式 assistant 泡（固定 iMessage 外观值）。
+/// 气泡模式只跳三个点（文案在顶栏）；文章模式照旧思考球 + 文案
 struct CCWaitingBubbleRow: View {
+    var bubbleMode = false
+
     var body: some View {
         HStack(spacing: 0) {
-            TypingDotsView()
+            Group {
+                if bubbleMode { BubbleTypingDots() } else { TypingDotsView() }
+            }
                 .padding(.horizontal, BubbleModeRow.fixedPaddingH)
                 .padding(.vertical, BubbleModeRow.fixedPaddingV)
                 .background(
                     BubbleTailShape(isUser: false, radius: 20, hasTail: true)
-                        .fill(Theme.assistantBubble)
+                        .fill(Theme.chat.assistantBubble)
                 )
             Spacer(minLength: 62)
         }
@@ -222,6 +259,10 @@ struct BubbleModeRow: View {
     var isHighlighted: Bool = false
     var branchInfo: BranchInfo? = nil
     var onSwitchBranch: (String, Int) -> Void = { _, _ in }
+    /// Read 回执：粟粟最后一条消息且 AI 正在回 → 泡下方右对齐小字 Read
+    var showRead: Bool = false
+    /// A4：reply_to 引用的那句话（截断预览）；画在泡上方、和泡同侧对齐
+    var quotedPreview: String? = nil
     @State private var showBranchPicker = false
     /// 输入框正在编辑这条：所有分泡一起变透明 + 圆角虚线（plan-edit-in-composer §6）
     var isBeingEdited: Bool = false
@@ -246,18 +287,33 @@ struct BubbleModeRow: View {
     static let fixedPaddingV: Double = 10
     static let fixedLineSpacing: Double = 0
     static let fixedParagraphSpacing: Double = 1.65
+    /// 回复引用条的字：正文色压淡到 0.8（像 iMessage 的淡引用），对比度测试见 BubbleThemeTests
+    static let replyQuoteTextOpacity: Double = 0.8
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             if isUser {
                 Spacer(minLength: 62)
-                VStack(alignment: .trailing, spacing: 4) { header; attachmentStrip; bubbleStack.chatReactionBadge(target: ChatReactionTarget(node: node), isUser: true); branchPager }
+                VStack(alignment: .trailing, spacing: 4) {
+                    header
+                    attachmentStrip
+                    replyQuote
+                    bubbleStack
+                    if showRead {
+                        Text("Read")
+                            .font(.system(size: 11))
+                            .foregroundColor(Theme.chat.textMuted)
+                            .accessibilityLabel("已读")
+                    }
+                    branchPager
+                }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     header
                     attachmentStrip
-                    bubbleStack.chatReactionBadge(target: ChatReactionTarget(node: node), isUser: false)
-                    RecallCardView(node: node).padding(.horizontal, Self.fixedPaddingH)
+                    replyQuote
+                    bubbleStack
+                    MessageRecallCardView(node: node).padding(.horizontal, Self.fixedPaddingH)
                     branchPager
                     usageFooter
                 }
@@ -272,6 +328,33 @@ struct BubbleModeRow: View {
                      ChatSpacingOverride(lineSpacing: Self.fixedLineSpacing,
                                          paragraphSpacing: Self.fixedParagraphSpacing))
         #endif
+    }
+
+    /// iMessage 回复引用：泡上方一个描边小泡，竖线 + 被引用的那句话。字压在聊天底色上（不压彩色泡），
+    /// iMessage 主题和宫殿默认主题浅深都 ≥ 4.5:1。
+    @ViewBuilder
+    private var replyQuote: some View {
+        if let quotedPreview {
+            Text(quotedPreview)
+                .font(.system(size: CGFloat(13 * fontScale / 1.2)))
+                .foregroundColor(Theme.chat.textPrimary.opacity(Self.replyQuoteTextOpacity))
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .padding(.leading, 8.5)
+                .overlay(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(Theme.chat.textMuted)
+                        .frame(width: 2.5)
+                }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(Theme.chat.textMuted.opacity(0.45), lineWidth: 1)
+            )
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("bubble-reply-quote")
+        }
     }
 
     @ViewBuilder
@@ -297,7 +380,7 @@ struct BubbleModeRow: View {
             }()
             Text("↑\(Self.fmtTok(pt)) ↓\(Self.fmtTok(ct))" + hit + cost)
                 .font(.system(size: 10))
-                .foregroundColor(Theme.textMuted.opacity(0.5))
+                .foregroundColor(Theme.chat.textMuted.opacity(0.5))
                 .padding(.horizontal, 2)
         }
     }
@@ -308,7 +391,7 @@ struct BubbleModeRow: View {
 
     @ViewBuilder
     private var header: some View {
-        if isUser, node.styleIdSnapshot != nil || node.cardEventsData != nil {
+        if isUser, node.styleIdSnapshot != nil || (node.cardEventsData != nil && !node.visibleCardEvents.isEmpty) {
             HStack(spacing: 4) {
                 StyleChip(styleId: node.styleIdSnapshot)
                 CardEventsChip(node: node)
@@ -362,7 +445,12 @@ struct BubbleModeRow: View {
                     }
                 }
             }
-            if !isUser, node.contentType == "heartvoice" || node.content.hasPrefix("💭 心声\n\n") {
+            if let memeId = MemeToken.match(node.content) {
+                // 表情包：无气泡无底（plan-bubble-sticker-send §1.4）；长按菜单「复制本段」复制名字
+                quotable(MemeToken.promptText(name: MemeStore.fetch(memeId, in: modelContext)?.name, detail: nil)) { _ in
+                    MemeMessageView(memeId: memeId)
+                }
+            } else if !isUser, node.contentType == "heartvoice" || node.content.hasPrefix("💭 心声\n\n") {
                 HeartvoiceCardView(text: node.contentType == "heartvoice" ? node.content : String(node.content.dropFirst("💭 心声\n\n".count)),
                                    time: node.createTime)
             } else if isComplex {
@@ -379,7 +467,7 @@ struct BubbleModeRow: View {
                                 fontScale: fontScale,
                                 lineSpacingScale: lineSpacingScale,
                                 paragraphSpacingScale: paragraphSpacingScale,
-                                regexScripts: regexScripts,
+                                regexScripts: regexScripts, userName: userName, charName: assistantName,
                                 isUser: isUser,
                                 profileId: node.profileId,
                                 simplifyMarkdown: true,
@@ -401,15 +489,24 @@ struct BubbleModeRow: View {
                 if let thinking = parsed.thinking ?? (showCCThinking ? node.ccThinking : nil)
                     ?? (isLiveStreaming || DisclosureMode(rawValue: thinkingModeRaw) == .hidden
                         ? nil : ChatDisplaySnapshot.segments(of: node)?.attachedThinkingText), !thinking.isEmpty {
-                    ThinkingBubble(text: thinking, nodeId: node.id, profileId: node.profileId)
+                    ThinkingBubble(text: thinking, nodeId: node.id, profileId: node.profileId,
+                                   cornerRadius: bubbleCornerRadius)
                 }
                 ForEach(shownBlocks.indices, id: \.self) { i in
-                    quotable(shownBlocks[i]) { forceTail in
+                    let blockTarget = ChatReactionTarget(node: node, blockIndex: i, blockText: shownBlocks[i])
+                    quotable(shownBlocks[i], reactionTarget: blockTarget) { forceTail in
                         // partial 态（流式/reveal）中尾巴归 dots 泡；定格后回到末块
                         singleBubble(hasTail: forceTail || (isLastInRun && i == shownBlocks.count - 1 && !showPartialDots && !userVoicesBelow)) {
                             blockText(shownBlocks[i])
+                                #if DEBUG
+                                .environment(\.chatProbeBubbleIndex, i)
+                                #endif
                         }
                     }
+                    // 回应锚到长按的这一个泡：徽标挂在单泡上角（iMessage 式，你的泡左上、AI 的泡右上）
+                    .chatReactionBadge(target: blockTarget, isUser: isUser)
+                    // 长按菜单的回应目标也跟这一个泡走
+                    .environment(\.reactionTarget, blockTarget)
                     // 群弹真凶修（探针定案）：块级弹入只在 partial 态（流式弹泡/CC reveal 进行中）
                     // 或 popPending（发消息，v7 弹泡下沉行内）挂——静态渲染一律 .identity 直出。
                     .transition(showPartialDots || popPending
@@ -440,6 +537,7 @@ struct BubbleModeRow: View {
                     }
                 }
             }
+            if let notice = node.sendNotice { SendNoticeLine(text: notice) }
         }
         .animation(popEnabled ? BubblePopTuning.popAnimation : nil, value: shownBlocks.count)
         .animation(popEnabled ? BubblePopTuning.popAnimation : nil, value: showPartialDots)
@@ -460,7 +558,7 @@ struct BubbleModeRow: View {
         }
         .overlay(
             RoundedRectangle(cornerRadius: bubbleCornerRadius)
-                .fill(Theme.branchIndicator.opacity(0.2 * flashOpacity))
+                .fill(Theme.chat.branchIndicator.opacity(0.2 * flashOpacity))
                 .allowsHitTesting(false)
         )
         .onChange(of: isHighlighted, initial: true) { _, highlighted in
@@ -497,7 +595,7 @@ struct BubbleModeRow: View {
     }
 
     /// 流式 typing 指示（弹泡模式尾泡 + blockText 空块 fallback 共用）
-    private var typingDots: some View { TypingDotsView() }
+    private var typingDots: some View { BubbleTypingDots() }
 
     /// 有 thinking / tool / attachment 段 = 复杂，整块不拆（思考链气泡是第 3 步）。
     /// audioRef 不算数（对齐 hasRenderableSegments）：语音走独立语音气泡，
@@ -528,29 +626,24 @@ struct BubbleModeRow: View {
         // B6 A2' 弹泡模式：数据源换 streamingText，只出已完成段落（尾段生长中不渲染，
         // 思考标签未闭合时整段留在尾块 → 思考阶段自然只显示 dots）
         if isLiveStreaming, let live = streamingText {
-            let cleaned = ContentCleaner.clean(live, cacheKey: "\(node.id)_\(live.count)")
-            let extracted = ContentCleaner.extractThinking(from: cleaned)
-            let blocks = Self.streamingBlocks(extracted.content)
-                .filter { !BubbleMarkdownSimplifier.isRenderEmpty($0) }
+            let display = MessageDisplayText.streaming(live, scripts: regexScripts, userName: userName, charName: assistantName)
+            let blocks = Self.streamingVisibleBlocks(display.body)
             #if (DEBUG || PERF_BENCH) && os(iOS)
             // 渲染输入进度（perf P0 §5.2 streamInput）：交给气泡的已完成块总长（末块不渲染）
             if PerfHarness.strictMeasure { PerfRenderLedger.noteStreamInput(nodeId: node.id, chars: blocks.reduce(0) { $0 + $1.count }, mode: "bubble") }
             #endif
-            return (extracted.thinking, blocks)
+            return (display.thinking, blocks)
         }
-        // 卡开场的 {{char}}/{{user}} 只在显示副本展开（③b）
-        let displayContent = isUser ? node.content : ChatSystemMessage.split(node.content).body
-        let cleaned = EffectiveCharacterContext(charName: assistantName, userName: userName)
-            .expand(ContentCleaner.clean(displayContent, cacheKey: "\(node.id)_\(displayContent.count)"))
-        if cleaned.isEmpty && isStreaming { return (nil, [""]) }
-        let extracted = isUser ? nil : ContentCleaner.extractThinking(from: cleaned)
         // 她带语音的消息：content 里 [语音 m:ss] 那行只给 AI 看，气泡显示读 .text 段（打的字原文），同文章模式（sol P2-4）；
         // 没语音段的普通消息照用 content，手打的 [语音 0:07] 行原样
         let typed = isUser ? ChatDisplaySnapshot.segments(of: node)?.userTypedTextIfVoice : nil
-        let body = extracted?.content ?? typed.map {
-            EffectiveCharacterContext(charName: assistantName, userName: userName)
-                .expand(ContentCleaner.clean($0, cacheKey: "\(node.id)_typed_\($0.count)"))
-        } ?? cleaned
+        // 显示正则整条跑完再拆块：跨段落的规则（状态栏之类）才匹配得上
+        let display = MessageDisplayText.make(typed ?? node.content, role: node.role, scripts: regexScripts,
+                                              userName: userName, charName: assistantName,
+                                              cacheKey: typed == nil ? node.id : "\(node.id)_typed",
+                                              legacyErrorMarker: node.usesLegacyErrorMarker)
+        let body = display.body
+        if body.isEmpty && display.thinking == nil && isStreaming { return (nil, [""]) }
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         // 卡库 ⑦：先把明确 HTML 包成 ```html 再拆块（文档里的空行不再把它拆碎）
         var blocks = trimmed.isEmpty ? [] : Self.splitBlocks(MessageHTMLSegments.markdownPromotingHTML(body))
@@ -562,7 +655,7 @@ struct BubbleModeRow: View {
         // 渲染账本 consumed（perf P0 §5.2）：静态拆块消费的 node.content 快照摘要
         if PerfHarness.strictMeasure { PerfRenderLedger.noteConsumed(nodeId: node.id, content: node.content, mode: "bubble") }
         #endif
-        return (extracted?.thinking, blocks)
+        return (display.thinking, blocks)
     }
 
     @ViewBuilder
@@ -570,9 +663,6 @@ struct BubbleModeRow: View {
         if block.isEmpty && isStreaming {
             typingDots
         } else if isUser {
-            // ⑤a：用户块也跑显示规则（placement 1），只改显示副本
-            let block = RegexPipeline.run(regexScripts, text: block, phase: .display, placement: RegexPipeline.userPlacement,
-                                          userName: userName, charName: assistantName)
             // 用户块整块是卡片（分气泡已把卡片单独成块）→ 画卡，不露 JSON（research-chat-cards §6）
             if let card = ChatCardRegistry.standaloneCardBlock(block),
                let view = ChatCardRegistry.view(language: card.language, code: card.code, nodeId: node.id, streaming: false) {
@@ -583,28 +673,25 @@ struct BubbleModeRow: View {
             } else {
                 Text(InConvFind.highlighted(block, terms: searchTerms))
                     .font(FontManager.font(size: 13.5))
-                    .foregroundColor(Theme.userText)
+                    .foregroundColor(Theme.chat.userText)
                     .textSelection(.enabled)
                     .lineSpacing(0)
             }
         } else {
-            let regexed = RegexPipeline.run(regexScripts, text: block, phase: .display,
-                                            placement: RegexPipeline.placement(forRole: node.role),
-                                            userName: userName, charName: assistantName)
             // 气泡模式抹平文档感 Markdown（标题/嵌套列表/分隔线）；正则脚本先吃原文，简化只发生在渲染前
-            let display = BubbleMarkdownSimplifier.simplify(regexed)
+            let display = BubbleMarkdownSimplifier.simplify(block)
             // B6 A2'：单渲染器收敛——弹泡模式下块一旦出现内容已定格，流式/静态都走 fork 静态渲染
             // （原 isStreaming 的 MarkdownUI 分支随 Phase 5 数据断链已近死代码，删）
             // R2-4b：统一走 ChatMarkdownView（划词收生词）
             ChatMarkdownView(
                 text: MessageHTMLSegments.markdownPromotingHTML(display),   // 卡库 ⑦：显示正则产出的 HTML 同样交给网页卡
                 fontName: selectedFont,
-                scale: fontScale > 0 ? fontScale : 1.0,
+                scale: fontScale > 0 ? fontScale : 1.2,
                 nodeId: node.id,
                 profileId: node.profileId,
                 onQuote: onQuoteText,
                 // M1 三格：这里是 blockText 的 else 分支（非 user），恒为 AI 正文；
-                // 同函数的 user 分支是上面那个纯 Text，走 Theme.userText
+                // 同函数的 user 分支是上面那个纯 Text，走 Theme.chat.userText
                 role: .assistant,
                 lineSpacingScaleOverride: Self.fixedLineSpacing
             )
@@ -617,9 +704,11 @@ struct BubbleModeRow: View {
     /// iOS：wrapper 登记 marker 命中区 + 活副本，长按走 Telegram 式浮层
     /// （见 docs/plan-contextmenu-telegram-style.md）；macOS 从同 spec 渲染 .contextMenu。
     /// content 的 Bool 参数 = 预览强制带尾巴（列表渲染传 false 走原逻辑）。
-    /// actions 有值 = 换成这份条目（AI 语音泡：换一版），仍只在 blockMenuSpecs 非 nil（挂菜单的场合）时挂
+    /// actions 有值 = 换成这份条目（AI 语音泡：换一版），仍只在 blockMenuSpecs 非 nil（挂菜单的场合）时挂。
+    /// reactionTarget 有值：mac 菜单最前面加「回应」子菜单（iOS 的表情条在浮层里，走 environment）
     @ViewBuilder
     private func quotable<Content: View>(_ text: String, voicePath: String? = nil, actions: [MenuActionSpec]? = nil,
+                                         reactionTarget: ChatReactionTarget? = nil,
                                          @ViewBuilder _ content: @escaping (Bool) -> Content) -> some View {
         if let blockMenuSpecs {
             #if os(iOS)
@@ -632,7 +721,19 @@ struct BubbleModeRow: View {
                 previewContent: { AnyView(content(true)) }
             )
             #else
-            content(false).contextMenu { MenuActionSpec.menuItems(from: actions ?? blockMenuSpecs(text, voicePath)) }
+            content(false).contextMenu {
+                if let reactionTarget {
+                    Menu("回应") {
+                        ForEach(MacReactionMenu.items(target: reactionTarget), id: \.emoji) { item in
+                            Button { MacReactionMenu.pick(item.emoji, target: reactionTarget) } label: {
+                                if item.selected { Label(item.emoji, systemImage: "checkmark") } else { Text(item.emoji) }
+                            }
+                        }
+                    }
+                    Divider()
+                }
+                MenuActionSpec.menuItems(from: actions ?? blockMenuSpecs(text, voicePath))
+            }
             #endif
         } else {
             content(false)
@@ -647,14 +748,14 @@ struct BubbleModeRow: View {
                 if isBeingEdited {
                     // 泡形带尾巴不是 InsettableShape：往里收半个线宽再描，虚线不出原外框
                     BubbleTailShape(isUser: isUser, radius: bubbleCornerRadius, hasTail: hasTail)
-                        .stroke(Theme.branchIndicator, style: EditingBubbleDash.style)
+                        .stroke(Theme.chat.branchIndicator, style: EditingBubbleDash.style)
                         .padding(EditingBubbleDash.lineWidth / 2)
                 } else {
                     // 你的气泡可以是锚在聊天区的两色渐变（plan-bubble-gradient）；列表是反转的（CardFlowView.flippedUpsideDown）
                     UserBubbleFill(
                         shape: BubbleTailShape(isUser: isUser, radius: bubbleCornerRadius, hasTail: hasTail),
-                        base: isUser ? Theme.userBubble : Theme.assistantBubble,
-                        gradient: isUser ? Theme.userBubbleGradient : nil,
+                        base: isUser ? Theme.chat.userBubble : Theme.chat.assistantBubble,
+                        gradient: isUser ? Theme.chat.userBubbleGradient : nil,
                         anchor: .scrollView(flipped: true)
                     )
                 }
@@ -665,6 +766,14 @@ struct BubbleModeRow: View {
     /// 未闭合代码围栏整体留在尾块不会被切半；文本以空行收尾时尾块其实已闭合，保守晚弹一拍。
     static func streamingBlocks(_ text: String) -> [String] {
         Array(splitBlocks(text).dropLast())
+    }
+
+    /// 流式中交给气泡的段落（10-29 返工 B5）：先按原始的流定哪些段落写完了，再把 ```react 块藏掉——
+    /// 先删块再分段会把「晚安」当成还没写完的尾段一起藏了
+    static func streamingVisibleBlocks(_ text: String) -> [String] {
+        streamingBlocks(text)
+            .map(ChatReactionIntent.streamingVisible)
+            .filter { !$0.isEmpty && !BubbleMarkdownSimplifier.isRenderEmpty($0) }
     }
 
     /// CC 入场弹泡节奏（粟粟拍的时长感）：弹某泡**之前**停「打这段字的时间」——
@@ -710,14 +819,32 @@ struct ThinkingBubble: View {
     let text: String
     var nodeId: String? = nil
     var profileId: String = ""
+    /// 同普通气泡的圆角（外观设置「泡圆角」，默认 20），连续曲率
+    var cornerRadius: Double = 20
 
     var body: some View {
         // 展开/弹 sheet 分流统一在 ThinkingDisclosure（「思考过程弹出显示」开关）
         ThinkingDisclosure(label: "思考", text: text, nodeId: nodeId, profileId: profileId)
             .padding(.horizontal, BubbleModeRow.fixedPaddingH)
             .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Theme.textMuted.opacity(0.1))
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Theme.chat.textMuted.opacity(0.1))
             )
+            // iMessage 式圈圈尾巴（10-29 B2）：从左下角往左下外侧斜排，一颗比一颗小；同底色，不浮动、不动画
+            .overlay(alignment: .bottomLeading) {
+                ZStack(alignment: .topLeading) {
+                    dot(8, x: 16, y: 1)
+                    dot(5, x: 9, y: 8)
+                    dot(3, x: 3.5, y: 13.5)
+                }
+                .frame(width: 0, height: 0, alignment: .topLeading)
+                .foregroundStyle(Theme.chat.textMuted.opacity(0.1))
+            }
+            .padding(.bottom, 16)
+    }
+
+    /// 圆心落在泡左下角往右 x、往下 y
+    private func dot(_ size: CGFloat, x: CGFloat, y: CGFloat) -> some View {
+        Circle().frame(width: size, height: size).offset(x: x - size / 2, y: y - size / 2)
     }
 }

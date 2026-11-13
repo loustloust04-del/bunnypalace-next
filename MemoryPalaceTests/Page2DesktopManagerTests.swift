@@ -9,18 +9,21 @@ final class Page2DesktopManagerTests: XCTestCase {
     var defaults: UserDefaults!
     var tm: RightPanelToolManager!
     var mgr: Page2DesktopManager!
+    /// 默认那份（atrium P3⑥0：manager 的 tools 是生效值、只读；改默认走 setDefaultTools）
+    var base: [RightPanelTool] = []
 
     override func setUp() {
         super.setUp()
         defaults = UserDefaults(suiteName: Self.suiteName)!
         defaults.removePersistentDomain(forName: Self.suiteName)
-        tm = RightPanelToolManager()
-        tm.tools = [
+        tm = RightPanelToolManager(defaults: defaults)
+        base = [
             RightPanelTool(id: "a", name: "A", icon: "a.circle", order: 0),
             RightPanelTool(id: "b", name: "B", icon: "b.circle", order: 1),
             RightPanelTool(id: "c", name: "C", icon: "c.circle", order: 2),
             RightPanelTool(id: "d", name: "D", icon: "d.circle", isEnabled: false, order: 3),
         ]
+        tm.setDefaultTools(base)
         mgr = Page2DesktopManager(defaults: defaults)
     }
 
@@ -36,7 +39,7 @@ final class Page2DesktopManagerTests: XCTestCase {
         XCTAssertNil(mgr.desktopAppIds)
         XCTAssertNil(mgr.dockToolIds)
         // 未播种期间全局 reorder 仍然双侧联动（现状行为）
-        tm.tools[0].order = 9
+        base[0].order = 9; tm.setDefaultTools(base)
         XCTAssertEqual(mgr.desktopTools(tm).map(\.id), ["b", "c", "a"])
         XCTAssertEqual(mgr.dockTools(tm).map(\.id), ["b", "c", "a"])
     }
@@ -46,7 +49,7 @@ final class Page2DesktopManagerTests: XCTestCase {
         mgr.removeFromDesktop("b", tm: tm)
         XCTAssertEqual(mgr.desktopAppIds, ["a", "c"])
         // 全局 order 再变，桌面不跟了
-        tm.tools[0].order = 9
+        base[0].order = 9; tm.setDefaultTools(base)
         XCTAssertEqual(mgr.desktopTools(tm).map(\.id), ["a", "c"])
         // dock 没编辑过，仍跟随
         XCTAssertEqual(mgr.dockTools(tm).map(\.id), ["b", "c", "a"])
@@ -65,39 +68,30 @@ final class Page2DesktopManagerTests: XCTestCase {
         XCTAssertEqual(mgr.desktopTools(tm).map(\.id), ["b", "c", "a"])
     }
 
-    func testDockAddRemoveMove() {
-        mgr.removeFromDock("c", tm: tm)
-        XCTAssertEqual(mgr.dockTools(tm).map(\.id), ["a", "b"])
-        mgr.addToDock("c", tm: tm)
-        mgr.moveDock("c", before: "a", tm: tm)
-        XCTAssertEqual(mgr.dockTools(tm).map(\.id), ["c", "a", "b"])
-    }
-
     // 两列表互不相干：mac 逻辑本体
     func testDesktopAndDockIndependent() {
-        mgr.removeFromDock("a", tm: tm)
-        XCTAssertEqual(mgr.desktopTools(tm).map(\.id), ["a", "b", "c"], "dock 删了桌面还在")
-        mgr.removeFromDesktop("b", tm: tm)
-        XCTAssertEqual(mgr.dockTools(tm).map(\.id), ["b", "c"], "桌面删了 dock 还在")
+        defaults.set(["b", "c"], forKey: "page2DockTools_v1")
+        let m = Page2DesktopManager(defaults: defaults)
+        XCTAssertEqual(m.desktopTools(tm).map(\.id), ["a", "b", "c"], "dock 少了桌面还在")
+        m.removeFromDesktop("b", tm: tm)
+        XCTAssertEqual(m.dockTools(tm).map(\.id), ["b", "c"], "桌面删了 dock 还在")
     }
 
     // 设置页禁用 → 隐身不除名；重开 → 原位回来
     func testDisabledToolHiddenNotRemoved() {
         mgr.moveDesktopApp("c", before: "a", tm: tm) // 播种 ["c","a","b"]
-        tm.tools[1].isEnabled = false // 禁 b
+        base[1].isEnabled = false; tm.setDefaultTools(base) // 禁 b
         XCTAssertEqual(mgr.desktopTools(tm).map(\.id), ["c", "a"])
         XCTAssertEqual(mgr.desktopAppIds, ["c", "a", "b"], "id 保留")
-        tm.tools[1].isEnabled = true
+        base[1].isEnabled = true; tm.setDefaultTools(base)
         XCTAssertEqual(mgr.desktopTools(tm).map(\.id), ["c", "a", "b"])
     }
 
     // 持久化：新实例同 suite 回读
     func testPersistenceRoundtrip() {
         mgr.removeFromDesktop("a", tm: tm)
-        mgr.addToDock("d", tm: tm)
         let reloaded = Page2DesktopManager(defaults: defaults)
         XCTAssertEqual(reloaded.desktopAppIds, ["b", "c"])
-        XCTAssertEqual(reloaded.dockToolIds, ["a", "b", "c", "d"])
     }
 
     // 存档里的未知 id（工具下架）渲染时静默吞掉
@@ -107,13 +101,12 @@ final class Page2DesktopManagerTests: XCTestCase {
         XCTAssertEqual(m.desktopTools(tm).map(\.id), ["a", "c"])
     }
 
-    // 钉禁用工具进 dock：id 记下，渲染过滤，启用后出现
-    func testIsInDockAndPinDisabled() {
-        XCTAssertTrue(mgr.isInDock("a", tm: tm))
-        XCTAssertFalse(mgr.isInDock("d", tm: tm))
-        mgr.addToDock("d", tm: tm)
-        XCTAssertEqual(mgr.dockTools(tm).map(\.id), ["a", "b", "c"], "禁用中不显示")
-        tm.tools[3].isEnabled = true
-        XCTAssertEqual(mgr.dockTools(tm).map(\.id), ["a", "b", "c", "d"])
+    // dock 存档里的禁用工具：id 记着，渲染过滤，启用后出现
+    func testDockDisabledToolHidden() {
+        defaults.set(["a", "b", "c", "d"], forKey: "page2DockTools_v1")
+        let m = Page2DesktopManager(defaults: defaults)
+        XCTAssertEqual(m.dockTools(tm).map(\.id), ["a", "b", "c"], "禁用中不显示")
+        base[3].isEnabled = true; tm.setDefaultTools(base)
+        XCTAssertEqual(m.dockTools(tm).map(\.id), ["a", "b", "c", "d"])
     }
 }

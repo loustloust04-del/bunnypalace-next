@@ -307,18 +307,21 @@ struct XiaoyaTipBulb: View {
     let action: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @Environment(\.page2AppActive) private var appActive
+    /// 前后台听 UIKit 通知，不读环境 scenePhase：page2 子应用宿主拷的是环境快照，后台往返后停在 inactive，
+    /// 灯泡一直不浮不呼吸（同 8ef0b21e6 终端 3D / 4214a8b33 桌面长按）
+    @State private var foreground = UIApplication.shared.applicationState == .active
     #else
     private let appActive = true
+    private let foreground = true
     #endif
     @State private var origin = Date.now
 
     static let size: CGFloat = 62
 
     private var lit: Bool { unseen > 0 }
-    private var moving: Bool { !reduceMotion && appActive && scenePhase == .active }
+    private var moving: Bool { !reduceMotion && appActive && foreground }
 
     var body: some View {
         Button(action: action) {
@@ -345,6 +348,10 @@ struct XiaoyaTipBulb: View {
         .buttonStyle(.plain)
         .accessibilityLabel("小芽的提示")
         .accessibilityValue(lit ? "\(unseen) 条没看" : "")
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in foreground = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in foreground = false }
+        #endif
     }
 
     /// 呼吸：2.6 s 一个来回，0 = 最暗最小，1 = 最亮最大

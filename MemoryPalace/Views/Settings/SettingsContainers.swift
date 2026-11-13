@@ -98,6 +98,8 @@ extension EnvironmentValues {
     /// 只有 `MacSettingsPage` 置 true：它注册了 `navigationDestination(for: SettingsRoute.self)`，值驱动 link 才有落点。
     /// 别的 mac 宿主（右栏面板等自带 NavigationStack 的地方）没注册，`SettingsNavRow` 退回 destination 式 link。
     @Entry var settingsRouteHost = false
+    /// 同一宿主给的代码推入（往 path 末尾追加一层，同值驱动 link）；行里不能整块包 link 时用它
+    @Entry var settingsRoutePush: ((SettingsRoute) -> Void)? = nil
     /// 页面注入后，页里的行用它登记「真离开时」的收尾
     @Entry var settingsPageExit: SettingsPageExit? = nil
 }

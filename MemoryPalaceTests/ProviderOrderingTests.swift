@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -73,28 +74,161 @@ final class ProviderOrderingTests: XCTestCase {
 
     private func roles(_ body: [String: Any]) -> [String] { messages(body).compactMap { $0["role"] as? String } }
 
-    // MARK: - 主闸：没有非前缀 system 时，请求体与改前逐字节一致
+    // MARK: - Recall Z/X 权限边界（真实 adapter JSON，不录制金样）
 
-    func testNoInjectionBodiesAreByteIdenticalToPreChangeFixtures() {
-        let all = ProviderOrderingScenarios.all()
-        XCTAssertEqual(Set(all.map(\.name)), Set(Self.preChangeFixtures.keys), "每个夹具都要比")
-        for s in all {
-            let json = ProviderOrderingScenarios.canonicalJSON(body(s, ordered(s)))
-            XCTAssertEqual(json, Self.preChangeFixtures[s.name], "\(s.name) 请求体与改前不一致")
+    func testRecallMemoryRemainsSystemAcrossCacheRolesPositionsAndProviders() throws {
+        let profile = Profile(id: "recall-wire", name: "岚舟", emoji: "", description: "",
+                              userName: "星砚", assistantName: "岚舟")
+        let hit = InjectionHit(memoryId: UUID(), snippet: "林栖碎片", category: "fact",
+                               score: nil, retrieverId: "fullFallback", catalog: false)
+        let layers = RecallMemoryLayers(stable: "Z：星砚住在云桥城", volatile: "X：林栖约了周末见面",
+                                        hits: [hit], pages: [])
+        let history: [(role: String, content: String)] = [("user", "云桥城"), ("assistant", "岚舟答复"), ("user", "聊聊林栖")]
+        for cache in [false, true] {
+            for role in ["user", "assistant", "system"] {
+                // relative 前/后历史，以及 absolute depth 0/1。
+                for placement in 0..<4 {
+                    var preset = Preset(name: "Recall wire")
+                    preset.sampling.cacheFriendly = cache
+                    func marker(_ id: String, _ index: Int) -> PromptSlot {
+                        PromptSlot(id: id, name: id, role: role, content: "", isSystemPrompt: false,
+                                   isMarker: true, injectionDepth: placement >= 2 ? placement - 2 : 0,
+                                   injectionPosition: placement >= 2 ? .absolute : .relative, sequenceIndex: index)
+                    }
+                    let memoryIndex = placement == 0 ? 0 : 2
+                    preset.prompts = [
+                        marker(PromptSlot.memoryInjectionId, memoryIndex),
+                        marker(PromptSlot.contextSummaryId, memoryIndex + 1),
+                        marker(PromptSlot.timelineId, memoryIndex + 2),
+                        marker(PromptSlot.userProfileId, memoryIndex + 3),
+                        PromptSlot(id: PromptSlot.chatHistoryId, name: "历史", role: "user", content: "",
+                                   isSystemPrompt: false, isMarker: true, sequenceIndex: placement == 0 ? 4 : 0)
+                    ]
+                    let assembled = PromptAssembler.assembleTagged(
+                        preset: preset, profile: profile, memories: [], chatHistory: history,
+                        contextSummary: "A2：星砚的真实窗口摘要", userProfile: "画像：星砚的偏好",
+                        timelineSummary: "A4：云桥城的旧日事件", selfMemory: "不应重新组装的 B4",
+                        recallLayers: layers)
+                    XCTAssertEqual(assembled.memoryHits, [hit])
+                    XCTAssertTrue(assembled.segments.filter { $0.source.requiresSystemRole }.allSatisfy { $0.role == "system" })
+                    let ordered = PromptAssembler.orderedMessages(from: assembled.segments)
+                    for provider in 0..<3 {
+                        let body: [String: Any]
+                        if provider == 2 {
+                            body = AnthropicProvider.buildRequestBody(ordered: ordered, model: "claude-sonnet-4-5",
+                                                                      samplingParams: preset.sampling, allowCacheControl: true)
+                        } else {
+                            var compat = ResolvedCompat.permissive
+                            compat.interleavedSystem = provider == 0
+                            body = OpenAICompatibleProvider.buildRequestBody(ordered: ordered, model: "recall-wire",
+                                                                            samplingParams: preset.sampling, compat: compat)
+                        }
+                        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: body)) as? [String: Any])
+                        let system = (wire["system"] as? String)
+                            ?? (wire["system"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
+                        let msgs = messages(wire)
+                        let systemText = ([system] + msgs.filter { $0["role"] as? String == "system" }.map(text)).joined(separator: "\n")
+                        let nonSystem = msgs.filter { $0["role"] as? String != "system" }.map(text).joined(separator: "\n")
+                        for payload in [layers.stable, layers.volatile, "A2：星砚的真实窗口摘要", "画像：星砚的偏好", "A4：云桥城的旧日事件"] {
+                            XCTAssertEqual(systemText.components(separatedBy: payload).count - 1, 1,
+                                           "cache=\(cache), role=\(role), placement=\(placement), provider=\(provider)")
+                            XCTAssertFalse(nonSystem.contains(payload))
+                        }
+                        XCTAssertFalse((systemText + nonSystem).contains("不应重新组装的 B4"))
+                    }
+                }
+            }
         }
     }
 
-    func testLegacyShapeMatchesOldAssembleWithoutInjection() {
-        for s in ProviderOrderingScenarios.all() {
-            let old = PromptAssembler.assemble(
-                preset: s.preset, profile: s.profile, memories: [],
-                chatHistory: s.history.map { (role: $0.role, content: $0.content) },
-                fileLibrary: s.fileLibrary, styleContent: s.styleContent,
-                folderInstructions: s.folderInstructions, volatileNote: s.volatileNote)
-            let legacy = PromptMessage.legacyShape(ordered(s))
-            XCTAssertEqual(legacy.systemPrompt, old.systemPrompt, s.name)
-            XCTAssertEqual(legacy.messages.map(\.role), old.messages.map(\.role), s.name)
-            XCTAssertEqual(legacy.messages.map(\.content), old.messages.map(\.content), s.name)
+    func testRecallSystemPromotionPreservesSourcesAndNonMemoryStrategies() throws {
+        let ordered = [
+            PromptMessage(role: "system", content: "岚舟身份", source: .slot(id: "main", name: "main"), nodeId: nil, pinnedToSystemPrefix: false),
+            PromptMessage(role: "user", content: "星砚原话", source: .chatHistory, nodeId: "u1", pinnedToSystemPrefix: false),
+            PromptMessage(role: "system", content: "林栖记忆", source: .memory, nodeId: nil, pinnedToSystemPrefix: false),
+            PromptMessage(role: "system", content: "云桥城世界书", source: .worldBook(entryName: "云桥城"), nodeId: nil, pinnedToSystemPrefix: false)
+        ]
+        let plan = PromptWire.plan(ordered, strategy: .degradeToUserNote)
+        XCTAssertEqual(plan.systemSegments.map(\.source), [.slot(id: "main", name: "main"), .memory])
+        XCTAssertEqual(plan.degradedSystemCount, 1, "非记忆世界书仍按旧策略降级")
+        XCTAssertEqual(plan.messages.last?.chunks.last?.text, "<system_note>\n云桥城世界书\n</system_note>")
+        XCTAssertFalse(plan.messages.flatMap(\.chunks).contains { $0.text.contains("林栖记忆") })
+
+        var preset = Preset.balanced
+        preset.sampling.cacheFriendly = true
+        let profile = Profile(id: "recall-nonmemory", name: "岚舟", emoji: "", description: "",
+                              userName: "星砚", assistantName: "岚舟")
+        var entry = WorldBookEntry()
+        entry.keys = ["云桥城"]
+        entry.content = "世界书：云桥城天气"
+        let assembled = PromptAssembler.assembleTagged(
+            preset: preset, profile: profile, memories: [],
+            chatHistory: [("user", "云桥城")], globalEntries: [entry], styleContent: "岚舟简短作答",
+            statusNote: "星砚当前状态",
+            recallLayers: RecallMemoryLayers(stable: "", volatile: "林栖本轮记忆", hits: [], pages: []))
+        let dynamic = try XCTUnwrap(assembled.segments.first { $0.source == .volatileContext })
+        XCTAssertEqual(dynamic.role, "user")
+        XCTAssertTrue(dynamic.content.contains(entry.content))
+        XCTAssertTrue(dynamic.content.contains("星砚当前状态"))
+        XCTAssertFalse(dynamic.content.contains("林栖本轮记忆"))
+        let realUser = try XCTUnwrap(PromptAssembler.orderedMessages(from: assembled.segments).last { !$0.isInjected && $0.role == "user" })
+        XCTAssertTrue(realUser.content.hasSuffix("<style>岚舟简短作答</style>"))
+    }
+
+    func testEmptyPreparedRecallLayersDoNotFallBackToMemorySelection() {
+        let profile = Profile(id: "recall-empty", name: "岚舟", emoji: "", description: "",
+                              userName: "星砚", assistantName: "岚舟")
+        for cache in [false, true] {
+            var preset = Preset.balanced
+            preset.sampling.cacheFriendly = cache
+            let segments = PromptAssembler.assembleTagged(
+                preset: preset, profile: profile, memories: [], chatHistory: [("user", "星砚原话")],
+                selfMemory: "岚舟不应自动补回的记忆",
+                recallLayers: RecallMemoryLayers(stable: "", volatile: "", hits: [], pages: [])).segments
+            XCTAssertFalse(segments.contains { $0.source == .memory })
+        }
+    }
+
+    func testDefaultRecallLayersKeepWikiAndSelfMemorySystemWithoutPreparedInput() throws {
+        let profile = Profile(id: "recall-default-wire", name: "岚舟", emoji: "", description: "",
+                              userName: "星砚", assistantName: "岚舟")
+        let wiki = WikiInjectionSnapshot(indexLines: ["- [[人/林栖]] 林栖"],
+                                         pages: [.init(path: "人/林栖", title: "林栖", triggers: [], hook: "云桥城的朋友", now: "周末见面")])
+        for cache in [false, true] {
+            var preset = Preset.balanced
+            preset.sampling.cacheFriendly = cache
+            for idx in preset.prompts.indices where preset.prompts[idx].id == PromptSlot.memoryInjectionId {
+                preset.prompts[idx].role = "assistant"
+                preset.prompts[idx].injectionPosition = .absolute
+                preset.prompts[idx].injectionDepth = 0
+            }
+            let result = PromptAssembler.assembleTagged(preset: preset, profile: profile, memories: [],
+                                                         chatHistory: [("user", "林栖")], selfMemory: "岚舟自己的记忆", wiki: wiki)
+            let memory = result.segments.filter { $0.source == .memory }
+            XCTAssertFalse(memory.isEmpty)
+            XCTAssertTrue(memory.allSatisfy { $0.role == "system" })
+            let ordered = PromptAssembler.orderedMessages(from: result.segments)
+            let body = AnthropicProvider.buildRequestBody(ordered: ordered, model: "claude-sonnet-4-5",
+                                                          samplingParams: preset.sampling, allowCacheControl: true)
+            let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: body)) as? [String: Any])
+            let system = (wire["system"] as? String)
+                ?? (wire["system"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
+            for expected in ["岚舟自己的记忆", "[[人/林栖]]", "云桥城的朋友", "周末见面"] {
+                XCTAssertTrue(system.contains(expected))
+                XCTAssertFalse(messages(wire).map(text).joined().contains(expected))
+            }
+        }
+    }
+
+    // MARK: - 主闸：唯一允许的请求体差异是 Anthropic 末工具缓存断点，其余逐字节一致
+
+    func testNoInjectionBodiesMatchPreChangeFixturesExceptLastToolCacheMark() {
+        let all = ProviderOrderingScenarios.all()
+        XCTAssertEqual(Set(all.map(\.name)), Set(Self.preChangeFixtures.keys), "每个夹具都要比")
+        for s in all {
+            let request = ProviderOrderingScenarios.strippingOrderedToolCacheMark(body(s, ordered(s)), scenario: s)
+            let json = ProviderOrderingScenarios.canonicalJSON(request)
+            XCTAssertEqual(json, Self.preChangeFixtures[s.name], "\(s.name) 请求体除明确新增的工具断点外与改前不一致")
         }
     }
 
@@ -278,6 +412,249 @@ final class ProviderOrderingTests: XCTestCase {
         XCTAssertTrue(text(msgs.last ?? [:]).contains("<system_note>\n尾部系统注入\n</system_note>"))
     }
 
+    private func cacheWireOrdered(
+        stablePrefixes: [String] = ["身份：岚舟", "Z：星砚住在云桥城"],
+        memorySuffixes: [String]
+    ) -> [PromptMessage] {
+        let prefix = stablePrefixes.enumerated().map { index, content in
+            PromptMessage(role: "system", content: content,
+                          source: index == 0 ? .slot(id: "main", name: "main") : .memory,
+                          nodeId: nil, pinnedToSystemPrefix: false)
+        }
+        let history = [
+            PromptMessage(role: "user", content: "星砚原话", source: .chatHistory, nodeId: "u1", pinnedToSystemPrefix: false),
+            PromptMessage(role: "assistant", content: "岚舟答复", source: .chatHistory, nodeId: "a1", pinnedToSystemPrefix: false),
+            PromptMessage(role: "user", content: "再聊林栖", source: .chatHistory, nodeId: "u2", pinnedToSystemPrefix: false)
+        ]
+        return prefix + history + memorySuffixes.map {
+            PromptMessage(role: "system", content: $0, source: .memory, nodeId: nil, pinnedToSystemPrefix: false)
+        }
+    }
+
+    private func cacheWireTool(_ name: String, deferred: Bool? = nil) -> [String: Any] {
+        var tool: [String: Any] = [
+            "name": name, "description": "虚构工具 \(name)",
+            "input_schema": ["type": "object", "properties": [:]] as [String: Any]
+        ]
+        if let deferred { tool["defer_loading"] = deferred }
+        return tool
+    }
+
+    func testAnthropicOrderedCacheSeparatesVolatileMemoryAndKeepsStableBytes() throws {
+        let suffixes = ["X：林栖约了周末见面\n原文尾行  ", "X：林栖改约下周\n新原文尾行  "]
+        let params = ProviderOrderingScenarios.preset(cacheFriendly: true).sampling
+        var systems: [[[String: Any]]] = []
+        for suffix in suffixes {
+            let request = AnthropicProvider.buildRequestBody(
+                ordered: cacheWireOrdered(memorySuffixes: [suffix]), model: "claude-sonnet-4-5",
+                samplingParams: params)
+            let system = try XCTUnwrap(request["system"] as? [[String: Any]])
+            XCTAssertEqual(system.count, 2)
+            guard system.count == 2 else { return }
+            XCTAssertEqual(system.compactMap { $0["type"] as? String }, ["text", "text"])
+            XCTAssertEqual(system[0]["text"] as? String, "身份：岚舟\n\nZ：星砚住在云桥城")
+            XCTAssertEqual(system[1]["text"] as? String, "\n\n" + suffix, "分隔符只加在 X 开头，原文不裁剪")
+            XCTAssertEqual(system.filter { $0["cache_control"] != nil }.count, 1)
+            let mark = try XCTUnwrap(system[0]["cache_control"] as? [String: Any])
+            XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(mark), #"{"ttl":"1h","type":"ephemeral"}"#)
+            XCTAssertNil(system[1]["cache_control"])
+            let expected = suffix == suffixes[0]
+                ? "身份：岚舟\n\nZ：星砚住在云桥城\n\nX：林栖约了周末见面\n原文尾行  "
+                : "身份：岚舟\n\nZ：星砚住在云桥城\n\nX：林栖改约下周\n新原文尾行  "
+            XCTAssertEqual(Array(system.compactMap { $0["text"] as? String }.joined().utf8), Array(expected.utf8),
+                           "两块直接拼接必须等于改前 systemPrompt 的独立字面期望")
+            XCTAssertFalse(messages(request).map(text).joined().contains(suffix))
+            let assistant = try XCTUnwrap(messages(request).first { $0["role"] as? String == "assistant" })
+            let assistantBlocks = try XCTUnwrap(assistant["content"] as? [[String: Any]])
+            XCTAssertEqual(assistantBlocks.count, 1)
+            XCTAssertEqual(assistantBlocks.first?["text"] as? String, "岚舟答复")
+            XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(try XCTUnwrap(assistantBlocks.last?["cache_control"] as? [String: Any])),
+                           ProviderOrderingScenarios.canonicalJSON(mark), "BP4 保持原来的最后 assistant 断点")
+            systems.append(system)
+        }
+        XCTAssertEqual(Array(ProviderOrderingScenarios.canonicalJSON(systems[0][0]).utf8),
+                       Array(ProviderOrderingScenarios.canonicalJSON(systems[1][0]).utf8),
+                       "换 X 不能改变稳定块 canonical bytes")
+        XCTAssertNotEqual(ProviderOrderingScenarios.canonicalJSON(systems[0][1]),
+                          ProviderOrderingScenarios.canonicalJSON(systems[1][1]))
+    }
+
+    func testAnthropicOrderedCacheStableBytesSurviveMemoryAppearanceAndClearing() throws {
+        let params = ProviderOrderingScenarios.preset(cacheFriendly: true).sampling
+        let stableText = "身份：岚舟\n\nZ：星砚住在云桥城"
+        let rounds: [[String]] = [[], ["X：林栖周末见面  "], []]
+        var stableBytes: [[UInt8]] = []
+        for suffixes in rounds {
+            let request = AnthropicProvider.buildRequestBody(
+                ordered: cacheWireOrdered(memorySuffixes: suffixes), model: "claude-sonnet-4-5",
+                samplingParams: params)
+            let system = try XCTUnwrap(request["system"] as? [[String: Any]])
+            XCTAssertEqual(system.count, suffixes.isEmpty ? 1 : 2)
+            let stable = try XCTUnwrap(system.first)
+            XCTAssertEqual(stable["text"] as? String, stableText)
+            let mark = try XCTUnwrap(stable["cache_control"] as? [String: Any])
+            XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(mark), #"{"ttl":"1h","type":"ephemeral"}"#)
+            XCTAssertTrue(system.dropFirst().allSatisfy { $0["cache_control"] == nil })
+            let expectedText = suffixes.isEmpty ? stableText : stableText + "\n\nX：林栖周末见面  "
+            XCTAssertEqual(Array(system.compactMap { $0["text"] as? String }.joined().utf8),
+                           Array(expectedText.utf8))
+            stableBytes.append(Array(ProviderOrderingScenarios.canonicalJSON(stable).utf8))
+        }
+        XCTAssertEqual(stableBytes[0], stableBytes[1], "X 出现不能改变稳定块 canonical bytes")
+        XCTAssertEqual(stableBytes[1], stableBytes[2], "X 清空不能改变稳定块 canonical bytes")
+    }
+
+    func testAnthropicOrderedCacheJoinsMultiplePrefixesAndMemorySuffixesWithoutLosingBytes() throws {
+        let request = AnthropicProvider.buildRequestBody(
+            ordered: cacheWireOrdered(stablePrefixes: ["身份：岚舟\n", "Z：星砚住在云桥城", "规则：不复述"],
+                                      memorySuffixes: ["X：林栖周末见面\n", "X：展览在云桥城  "]),
+            model: "claude-sonnet-4-5", samplingParams: ProviderOrderingScenarios.preset(cacheFriendly: true).sampling)
+        let system = try XCTUnwrap(request["system"] as? [[String: Any]])
+        XCTAssertEqual(system.count, 2)
+        XCTAssertEqual(system.first?["text"] as? String, "身份：岚舟\n\n\nZ：星砚住在云桥城\n\n规则：不复述")
+        XCTAssertEqual(system.last?["text"] as? String, "\n\nX：林栖周末见面\n\n\nX：展览在云桥城  ")
+        XCTAssertNotNil(system.first?["cache_control"])
+        XCTAssertNil(system.last?["cache_control"])
+        XCTAssertEqual(Array(system.compactMap { $0["text"] as? String }.joined().utf8),
+                       Array("身份：岚舟\n\n\nZ：星砚住在云桥城\n\n规则：不复述\n\nX：林栖周末见面\n\n\nX：展览在云桥城  ".utf8))
+    }
+
+    func testAnthropicOrderedCacheWithoutStablePrefixFallsBackToSingleMarkedBlock() throws {
+        let request = AnthropicProvider.buildRequestBody(
+            ordered: cacheWireOrdered(stablePrefixes: [], memorySuffixes: ["X：林栖周末见面", "X：云桥城展览  "]),
+            model: "claude-sonnet-4-5", samplingParams: ProviderOrderingScenarios.preset(cacheFriendly: true).sampling,
+            tools: [cacheWireTool("lookup")])
+        let system = try XCTUnwrap(request["system"] as? [[String: Any]])
+        XCTAssertEqual(system.count, 1, "全易变时沿用单块，不伪造空的稳定缓存块")
+        XCTAssertEqual(system.first?["text"] as? String, "X：林栖周末见面\n\nX：云桥城展览  ")
+        let mark = try XCTUnwrap(system.first?["cache_control"] as? [String: Any])
+        XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(mark), #"{"ttl":"1h","type":"ephemeral"}"#)
+        let tools = try XCTUnwrap(request["tools"] as? [[String: Any]])
+        XCTAssertNotNil(tools.last?["cache_control"], "没有稳定 system 不影响 tools 断点")
+    }
+
+    func testAnthropicOrderedCacheWithEmptyStableTextFallsBackToSingleMarkedBlock() throws {
+        let request = AnthropicProvider.buildRequestBody(
+            ordered: cacheWireOrdered(stablePrefixes: [""], memorySuffixes: ["X：林栖周末见面  "]),
+            model: "claude-sonnet-4-5", samplingParams: ProviderOrderingScenarios.preset(cacheFriendly: true).sampling)
+        let system = try XCTUnwrap(request["system"] as? [[String: Any]])
+        XCTAssertEqual(system.count, 1)
+        XCTAssertEqual(system.first?["text"] as? String, "\n\nX：林栖周末见面  ", "回退不能丢失原 systemPrompt 的分隔符")
+        let mark = try XCTUnwrap(system.first?["cache_control"] as? [String: Any])
+        XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(mark), #"{"ttl":"1h","type":"ephemeral"}"#)
+    }
+
+    func testAnthropicOrderedCacheWithEmptyVolatileTextPreservesSeparator() throws {
+        let request = AnthropicProvider.buildRequestBody(
+            ordered: cacheWireOrdered(memorySuffixes: [""]), model: "claude-sonnet-4-5",
+            samplingParams: ProviderOrderingScenarios.preset(cacheFriendly: true).sampling)
+        let system = try XCTUnwrap(request["system"] as? [[String: Any]])
+        XCTAssertEqual(system.count, 2)
+        XCTAssertEqual(system.last?["text"] as? String, "\n\n", "空 X 仍保留合法非空的分隔符块")
+        XCTAssertNotNil(system.first?["cache_control"])
+        XCTAssertNil(system.last?["cache_control"])
+        XCTAssertEqual(Array(system.compactMap { $0["text"] as? String }.joined().utf8),
+                       Array("身份：岚舟\n\nZ：星砚住在云桥城\n\n".utf8))
+    }
+
+    func testAnthropicOrderedCacheWithoutMemoryOrToolsIsByteIdenticalToLegacyBuilder() throws {
+        let ordered = cacheWireOrdered(memorySuffixes: [])
+        let legacy = PromptMessage.legacyShape(ordered)
+        XCTAssertEqual(legacy.systemPrompt, "身份：岚舟\n\nZ：星砚住在云桥城")
+        for cacheFriendly in [false, true] {
+            let params = ProviderOrderingScenarios.preset(cacheFriendly: cacheFriendly).sampling
+            let request = AnthropicProvider.buildRequestBody(ordered: ordered, model: "claude-sonnet-4-5", samplingParams: params)
+            let oldRequest = AnthropicProvider.buildRequestBody(
+                messages: legacy.messages, model: "claude-sonnet-4-5", systemPrompt: legacy.systemPrompt,
+                samplingParams: params, imageMap: legacy.imageMap)
+            XCTAssertEqual(Array(ProviderOrderingScenarios.canonicalJSON(request).utf8),
+                           Array(ProviderOrderingScenarios.canonicalJSON(oldRequest).utf8))
+            XCTAssertNil(request["tools"])
+            if cacheFriendly {
+                let system = try XCTUnwrap(request["system"] as? [[String: Any]])
+                XCTAssertEqual(system.count, 1)
+                XCTAssertEqual(system.first?["text"] as? String, "身份：岚舟\n\nZ：星砚住在云桥城",
+                               "无 X 时不得添加末尾分隔符")
+            }
+        }
+    }
+
+    func testAnthropicOrderedToolsMarkOnlyLastNonDeferredToolWithSharedTTL() throws {
+        let cases: [(tools: [[String: Any]], markedIndex: Int?)] = [
+            ([cacheWireTool("first"), cacheWireTool("last")], 1),
+            (ProviderOrderingScenarios.tool + [
+                cacheWireTool("deferred_middle", deferred: true),
+                cacheWireTool("last_active", deferred: false),
+                cacheWireTool("deferred_tail", deferred: true)
+            ], 2),
+            ([cacheWireTool("deferred_first", deferred: true), cacheWireTool("deferred_last", deferred: true)], nil)
+        ]
+        for longTTL in [false, true] {
+            var params = ProviderOrderingScenarios.preset(cacheFriendly: true).sampling
+            params.cacheLongTTL = longTTL
+            let expectedMark = longTTL ? #"{"ttl":"1h","type":"ephemeral"}"# : #"{"type":"ephemeral"}"#
+            for testCase in cases {
+                let request = AnthropicProvider.buildRequestBody(
+                    ordered: cacheWireOrdered(memorySuffixes: ["X：林栖周末见面"]),
+                    model: "claude-sonnet-4-5", samplingParams: params, tools: testCase.tools)
+                var tools = try XCTUnwrap(request["tools"] as? [[String: Any]])
+                XCTAssertEqual(tools.count, testCase.tools.count)
+                XCTAssertEqual(tools.indices.filter { tools[$0]["cache_control"] != nil },
+                               testCase.markedIndex.map { [$0] } ?? [])
+                if let index = testCase.markedIndex {
+                    let mark = try XCTUnwrap(tools[index].removeValue(forKey: "cache_control") as? [String: Any])
+                    XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(mark), expectedMark)
+                }
+                XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(["tools": tools]),
+                               ProviderOrderingScenarios.canonicalJSON(["tools": ToolSchemaRenderer.anthropic(testCase.tools)]),
+                               "除新断点外，工具 schema、defer_loading 和顺序保持原样")
+                let system = try XCTUnwrap(request["system"] as? [[String: Any]])
+                let systemMark = try XCTUnwrap(system.first?["cache_control"] as? [String: Any])
+                XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(systemMark), expectedMark)
+                let assistant = try XCTUnwrap(messages(request).first { $0["role"] as? String == "assistant" })
+                let assistantMark = try XCTUnwrap((assistant["content"] as? [[String: Any]])?.last?["cache_control"] as? [String: Any])
+                XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(assistantMark), expectedMark)
+            }
+        }
+    }
+
+    func testAnthropicOrderedCacheDisabledKeepsSystemStringAndNoMarksAnywhere() {
+        let tools = [cacheWireTool("first"), cacheWireTool("last"), cacheWireTool("deferred", deferred: true)]
+        for (cacheFriendly, allowCacheControl) in [(false, true), (true, false), (false, false)] {
+            let request = AnthropicProvider.buildRequestBody(
+                ordered: cacheWireOrdered(memorySuffixes: ["X：林栖周末见面", "X：云桥城展览  "]),
+                model: "claude-sonnet-4-5", samplingParams: ProviderOrderingScenarios.preset(cacheFriendly: cacheFriendly).sampling,
+                tools: tools, toolTurns: [ProviderOrderingScenarios.toolTurn], allowCacheControl: allowCacheControl)
+            XCTAssertEqual(request["system"] as? String, "身份：岚舟\n\nZ：星砚住在云桥城\n\nX：林栖周末见面\n\nX：云桥城展览  ")
+            XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(["tools": request["tools"] ?? []]),
+                           ProviderOrderingScenarios.canonicalJSON(["tools": tools]))
+            XCTAssertFalse(ProviderOrderingScenarios.canonicalJSON(request).contains(#""cache_control""#),
+                           "cacheFriendly=\(cacheFriendly), allowCacheControl=\(allowCacheControl)：system/tools/messages 都不得挂标")
+        }
+    }
+
+    func testAnthropicLegacyBuilderNeverAddsOrderedToolCacheMarksOrSplitsSystem() throws {
+        let tools = ProviderOrderingScenarios.tool + [cacheWireTool("last"), cacheWireTool("deferred", deferred: true)]
+        for cacheFriendly in [false, true] {
+            let request = AnthropicProvider.buildRequestBody(
+                messages: [("user", "星砚原话"), ("assistant", "岚舟答复"), ("user", "再聊林栖")],
+                model: "claude-sonnet-4-5", systemPrompt: "身份：岚舟\n\nX：林栖周末见面",
+                samplingParams: ProviderOrderingScenarios.preset(cacheFriendly: cacheFriendly).sampling, tools: tools)
+            let wireTools = try XCTUnwrap(request["tools"] as? [[String: Any]])
+            XCTAssertTrue(wireTools.allSatisfy { $0["cache_control"] == nil })
+            XCTAssertEqual(ProviderOrderingScenarios.canonicalJSON(["tools": wireTools]),
+                           ProviderOrderingScenarios.canonicalJSON(["tools": ToolSchemaRenderer.anthropic(tools)]))
+            if cacheFriendly {
+                let system = try XCTUnwrap(request["system"] as? [[String: Any]])
+                XCTAssertEqual(system.count, 1, "非 ordered 入口仍缓存完整 system，不套用新边界")
+                XCTAssertEqual(system.first?["text"] as? String, "身份：岚舟\n\nX：林栖周末见面")
+                XCTAssertNotNil(system.first?["cache_control"])
+            } else {
+                XCTAssertEqual(request["system"] as? String, "身份：岚舟\n\nX：林栖周末见面")
+            }
+        }
+    }
+
     /// thinking 回传 §6：当轮回传夹具（思考 + 正文 + 进度更新思考 + tool_use，审批卡改过 input）——
     /// 只有这一条 assistant 变成原样块（只换 input、BP4 挂在 tool_use），其余和老夹具逐字节相同
     func testAnthropicToolTurnEchoesThisTurnsBlocksVerbatim() throws {
@@ -374,6 +751,23 @@ struct ProviderOrderingScenario {
 }
 
 enum ProviderOrderingScenarios {
+    /// 旧夹具唯一豁免：先验证原生 Anthropic 末工具断点的形状，再移除它以比较其余字节。
+    static func strippingOrderedToolCacheMark(
+        _ body: [String: Any], scenario: ProviderOrderingScenario,
+        file: StaticString = #filePath, line: UInt = #line
+    ) -> [String: Any] {
+        guard scenario.name == "anthropic-cache-tools" else { return body }
+        guard var tools = body["tools"] as? [[String: Any]], tools.count == 1,
+              let mark = tools[0].removeValue(forKey: "cache_control") as? [String: Any] else {
+            XCTFail("anthropic-cache-tools 必须有唯一的末工具缓存断点", file: file, line: line)
+            return body
+        }
+        XCTAssertEqual(canonicalJSON(mark), #"{"ttl":"1h","type":"ephemeral"}"#, file: file, line: line)
+        var stripped = body
+        stripped["tools"] = tools
+        return stripped
+    }
+
     /// 夹具口径：采样层全发（.permissive），只取 host 判断那几项（OR 挂标 / 路由、序列内 system）
     static func wireCompat(baseURL: String, model: String, sampling: SamplingParams?) -> ResolvedCompat {
         let resolved = ResolvedCompat.resolve(providerType: .openaiCompatible, baseURL: baseURL, modelId: model,

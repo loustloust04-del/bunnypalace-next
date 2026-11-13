@@ -117,6 +117,7 @@ final class CallController {
             return block(.profileMissing)
         }
         let model = host.providerManager.resolveModel(conversationModelId: conversation.selectedModelId,
+                                                      profileModelId: profile.preferredModel,
                                                       globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
         start(host: host, conversation: conversation, profile: profile, model: model, nativeCallID: call.call_id)
         return true

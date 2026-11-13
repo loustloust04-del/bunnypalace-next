@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -80,7 +81,7 @@ final class CatalogFaithfulnessTests: XCTestCase {
         sources.addFile("memory/cc/user_cat.md", cite: .init(layer: "CC", filePath: "memory/cc/user_cat.md"))
 
         let parsed = try XCTUnwrap(CatalogItems.parse("""
-        {"items":[{"type":"new_page","path":"楼层/人/豆包","kind":"人","title":"豆包","records":[
+        {"items":[{"type":"new_page","path":"人/豆包","kind":"人","title":"豆包","records":[
           {"text":"2026-10-12 改吃处方粮","fragments":["f1"]},
           {"text":"2026-10-12 没出处"},
           {"text":"2026-10-12 伪造编号","fragments":["f99"]},
@@ -110,7 +111,7 @@ final class CatalogFaithfulnessTests: XCTestCase {
             "Prompt 人设", "CC memory/cc/user_cat.md", "A4 2026-10-12", "A2《看病》第 2 段",
         ])
         XCTAssertEqual(parsed.dropReasons.map { String($0.prefix { $0 != "：" }) },
-                       [1, 2, 3, 5, 6, 8, 11, 13].map { "items[0] 楼层/人/豆包.records[\($0)]" })
+                       [1, 2, 3, 5, 6, 8, 11, 13].map { "items[0] 人/豆包.records[\($0)]" })
         XCTAssertEqual(parsed.items[0].fragmentIds, [given.id], "伪造编号、截掉的尾部碎片都挂不上")
     }
 
@@ -142,7 +143,7 @@ final class CatalogFaithfulnessTests: XCTestCase {
     private let f1 = CatalogFragment(id: UUID(), content: "豆包改吃处方粮", category: "fact", day: "2026-10-12")
     private let f2 = CatalogFragment(id: UUID(), content: "豆包体重 6kg", category: "fact", day: "2026-10-13")
     private let f3 = CatalogFragment(id: UUID(), content: "豆包怕吸尘器", category: "fact", day: "2026-10-14")
-    private let path = "楼层/人/豆包"
+    private let path = "人/豆包"
     private var rewrite: String {
         """
         {"items":[
@@ -227,11 +228,11 @@ final class CatalogFaithfulnessTests: XCTestCase {
     func testUnattachedCoveredDoesNotCountAsCovered() throws {
         var sources = CatalogSources()
         sources.addFragments([f1])
-        var parsed = try XCTUnwrap(CatalogItems.parse("{\"items\":[],\"covered\":[\"f1\"]}\n{\"coverage\":[{\"input\":\"f1\",\"at\":\"楼层/人/没有的页\"}]}",
+        var parsed = try XCTUnwrap(CatalogItems.parse("{\"items\":[],\"covered\":[\"f1\"]}\n{\"coverage\":[{\"input\":\"f1\",\"at\":\"人/没有的页\"}]}",
                                                       sources: sources, wiki: wiki))
-        parsed.covered = CatalogItems.attachCovered(&parsed.items, covered: parsed.covered, path: "楼层/人/没有的页", version: nil)
+        parsed.covered = CatalogItems.attachCovered(&parsed.items, covered: parsed.covered, path: "人/没有的页", version: nil)
         XCTAssertEqual(parsed.covered, [f1.id], "页不在，挂不上")
-        XCTAssertTrue(CatalogDiagnostics.coverage(parsed, sources: sources).contains("- f1：写手说在「楼层/人/没有的页」，交审条目上没挂它"))
+        XCTAssertTrue(CatalogDiagnostics.coverage(parsed, sources: sources).contains("- f1：写手说在「人/没有的页」，交审条目上没挂它"))
     }
 
     // MARK: - 三条路：提案上的 run 链接打开同一份记录，交审诊断就在那一节
@@ -262,7 +263,7 @@ final class CatalogFaithfulnessTests: XCTestCase {
             let labels = ["甲一", "甲二", "甲三"].compactMap { Self.label(of: $0, in: user) }
             let records = labels.map { "{\"text\":\"2026-10-10 \($0) 那件事\",\"fragments\":[\"\($0)\"]}" }.joined(separator: ",")
             return """
-            {"items":[{"type":"new_page","path":"楼层/主题/甲","kind":"主题","title":"甲","now":"在做甲（自 2026-10 起）。",
+            {"items":[{"type":"new_page","path":"主题/甲","kind":"主题","title":"甲","now":"在做甲（自 2026-10 起）。",
               "records":[\(records),{"text":"2026-10-11 编的","fragments":["f99"]}]}]}
             {"coverage":[{"input":"\(labels[0])","at":"记录"},{"input":"\(labels[1])","why":"重复"}]}
             """
@@ -292,13 +293,13 @@ final class CatalogFaithfulnessTests: XCTestCase {
     func testManualSameRoundSearchThenSubmitAndDynamicInputs() async throws {
         let container = try container()
         try memories("电影", ["看电影一", "看电影二", "看电影三"], in: container)
-        try wiki.save(WikiPage(path: "楼层/事/电影", kind: .event, title: "电影", now: "在追片（自 2026-10 起）。"))
+        try wiki.save(WikiPage(path: "事/电影", kind: .event, title: "电影", now: "在追片（自 2026-10 起）。"))
         var labels: [String] = []
         let backend = FakeCatalogBackend { n, request in
             @MainActor func submit(_ coverage: String) -> ToolCallBlock {
                 let l = labels.isEmpty ? ["f1", "f2", "f3"] : labels
                 return CatalogTestKit.call(CatalogAgentTools.submit, """
-                {"items":[{"type":"append","path":"楼层/事/电影","records":[{"text":"2026-10-10 看电影","fragments":["\(l[0])"]}]}],\(coverage)}
+                {"items":[{"type":"append","path":"事/电影","records":[{"text":"2026-10-10 看电影","fragments":["\(l[0])"]}]}],\(coverage)}
                 """)
             }
             if n == 1 {
@@ -331,7 +332,7 @@ final class CatalogFaithfulnessTests: XCTestCase {
         let container = try container()
         try memories("电影", ["看电影一"], in: container)
         let args = """
-        {"items":[{"type":"new_page","path":"楼层/事/电影","kind":"事","title":"电影","now":"在追片（自 2026-10 起）。",
+        {"items":[{"type":"new_page","path":"事/电影","kind":"事","title":"电影","now":"在追片（自 2026-10 起）。",
           "records":[{"text":"2026-10-10 看电影","fragments":["f1"]}]}],"coverage":[{"input":"f1","a
         """
         let backend = FakeCatalogBackend { n, _ in
@@ -393,16 +394,16 @@ final class CatalogFaithfulnessTests: XCTestCase {
 
     // MARK: - wiki 体检
 
-    /// 断链、孤页、目录漂移各一例：每天自动整理后跑，零模型调用、零写页；漂移按代码重建索引，结果进记忆日志和 C3 页读的那份
+    /// 断链、目录漂移各一例（孤页不再算）：每天自动整理后跑，零模型调用、零写页；漂移按代码重建索引，结果进记忆日志和 C3 页读的那份
     func testHealthCheckFindsBrokenOrphanAndDriftWithoutModelOrPageWrites() async throws {
         let w = wiki
-        try w.save(WikiPage(path: "楼层/人/甲", kind: .person, title: "甲",
-                            links: [.init(target: "楼层/人/不存在", relation: .supplement, why: "x"), .init(target: "楼层/有人连", relation: .citation, why: "y")]))
-        try w.save(WikiPage(path: "楼层/散页", title: "散页"))
-        try w.save(WikiPage(path: "楼层/有人连", title: "有人连"))
-        try w.save(WikiPage(path: "楼层/人/乙", kind: .person, title: "乙"))
+        try w.save(WikiPage(path: "人/甲", kind: .person, title: "甲",
+                            links: [.init(target: "人/不存在", relation: .supplement, why: "x"), .init(target: "主题/有人连", relation: .citation, why: "y")]))
+        try w.save(WikiPage(path: "主题/散页", title: "散页"))
+        try w.save(WikiPage(path: "主题/有人连", title: "有人连"))
+        try w.save(WikiPage(path: "人/乙", kind: .person, title: "乙"))
         try w.rebuildAllIndexes()
-        try w.save(WikiPage(path: "楼层/人/新页", kind: .person, title: "新页"))
+        try w.save(WikiPage(path: "人/新页", kind: .person, title: "新页"))
         let versions = w.versionSnapshot()
         let container = try container()
         var calls = 0
@@ -416,18 +417,19 @@ final class CatalogFaithfulnessTests: XCTestCase {
         XCTAssertEqual(w.versionSnapshot(), versions, "一页都没改")
         XCTAssertTrue(WikiProposalStore(wiki: w).list().isEmpty)
         let health = try XCTUnwrap(WikiHealth.load(w))
-        XCTAssertEqual(health.brokenLinks, [.init(from: "楼层/人/甲", to: "楼层/人/不存在")])
-        XCTAssertEqual(health.orphans, ["楼层/散页"], "两支下直接放、没人连的才算；在分组里的、有人连的不算")
-        XCTAssertTrue(health.drift.contains("楼层/人：「楼层/人/新页」没列进索引"), "\(health.drift)")
-        XCTAssertTrue(health.drift.contains("楼层：「楼层/人/」那一行和页对不上"), "\(health.drift)")
+        XCTAssertEqual(health.brokenLinks, [.init(from: "人/甲", to: "人/不存在")])
+        XCTAssertEqual(health.orphans, [], "根下 9 组本身就是分组：孤页不再算")
+        XCTAssertFalse(health.summary.contains("孤页") || health.details.contains("孤页"), "孤页不再显示")
+        XCTAssertTrue(health.drift.contains("人：「人/新页」没列进索引"), "\(health.drift)")
+        XCTAssertTrue(health.drift.contains("根索引：「人/新页」没列进索引"), "\(health.drift)")
         XCTAssertNil(health.rebuildError)
         XCTAssertTrue(WikiHealth.drift(w, hasPages: true).isEmpty, "漂移照代码重建了索引")
         MemoryWriteLog.flush()
-        let entry = try XCTUnwrap(MemoryWriteLog.entries(profileId: pid).last { $0.note.hasPrefix("wiki 体检") })
+        let entry = try XCTUnwrap(MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).last { $0.note.hasPrefix("wiki 体检") })
         XCTAssertEqual(entry.note, "wiki 体检：" + health.summary)
-        XCTAssertTrue(health.summary.hasPrefix("断链 1 · 孤页 1 · 目录漂移 "))
+        XCTAssertTrue(health.summary.hasPrefix("断链 1 · 目录漂移 "))
         let (_, logged) = try section(entry.run)
-        XCTAssertTrue(logged.contains("- 楼层/人/甲 → 楼层/人/不存在"), "日志点开到体检那一节")
+        XCTAssertTrue(logged.contains("- 人/甲 → 人/不存在"), "日志点开到体检那一节")
 
         _ = await CatalogSession(job: job).daily(now: Date())
         XCTAssertEqual(try XCTUnwrap(WikiHealth.load(w)).drift, [], "重建之后下一次没有漂移")
@@ -436,13 +438,13 @@ final class CatalogFaithfulnessTests: XCTestCase {
     /// 体检拿审批锁：批提案写页、重建索引的中间不插进来
     func testHealthCheckWaitsForTheApprovalLock() async throws {
         let w = wiki
-        try w.save(WikiPage(path: "楼层/人/甲", kind: .person, title: "甲"))
+        try w.save(WikiPage(path: "人/甲", kind: .person, title: "甲"))
         try w.rebuildAllIndexes()
         let container = try container()
         let job = CatalogTestKit.job(pid: pid, root: root, container: container)
         var daily: Task<CatalogRunReport, Never>?
         try await WikiProposalReview.exclusive(WikiProposalStore(wiki: w)) {
-            try w.save(WikiPage(path: "楼层/人/乙", kind: .person, title: "乙"))
+            try w.save(WikiPage(path: "人/乙", kind: .person, title: "乙"))
             daily = Task { await CatalogSession(job: job).daily(now: Date()) }
             try await Task.sleep(nanoseconds: 1_500_000_000)
             XCTAssertNil(WikiHealth.load(w), "锁还在，体检等着")
@@ -457,7 +459,7 @@ final class CatalogFaithfulnessTests: XCTestCase {
         let job = CatalogTestKit.job(pid: pid, root: root, container: container)
         _ = await CatalogSession(job: job).daily(now: Date())
         let health = try XCTUnwrap(WikiHealth.load(wiki))
-        XCTAssertEqual(health.summary, "断链 0 · 孤页 0 · 目录漂移 0")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: wiki.folderURL("楼层").path), "空 wiki 不因体检建出分组")
+        XCTAssertEqual(health.summary, "断链 0 · 目录漂移 0")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: wiki.folderURL("人").path), "空 wiki 不因体检建出分组")
     }
 }

@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 
@@ -510,6 +511,7 @@ func deleteConversationArtifacts(
         }
     )
     if let conversation = try context.fetch(conversationDescriptor).first {
+        PreviousWindowPicker.invalidateCopies(of: [conversationId], context: context)
         context.delete(conversation)
     }
 }

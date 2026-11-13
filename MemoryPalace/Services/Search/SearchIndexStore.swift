@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// 进索引的一条消息：body 是「看得见的文字」（ContentCleaner.visibleText），FTS 里存的是它切词后的形态

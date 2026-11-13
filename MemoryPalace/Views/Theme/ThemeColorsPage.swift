@@ -11,13 +11,19 @@ import SwiftUI
 /// 取色 = 取色 sheet：色相 / 饱和度 / 明度三根条 + 原样嵌入的系统取色器（D2 加不换，见 `ColorPickSheet`）。
 /// `creating` = 主题列表「+」新建：同一页顶上多一段「名称」、颜色下面接 `ChatBackgroundSections`（一页设完名字、字色、背景），
 /// 没有撤销——外面的「取消」把这套新主题整个丢掉。
+/// `target: .person`（atrium P3④a）：编辑 TA 的聊天主题；这套还有别人在用先问「复制一份给 TA / 一起改」，内置主题复制完给 TA。
 struct ThemeColorsPage: View {
     @Environment(ThemeManager.self) private var themeManager: ThemeManager?
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.settingsMetrics) private var m
     @Environment(\.dismiss) private var dismiss
     /// nil = 编辑当前主题（外观页入口）；给定 = 编辑那一套（主题列表长按），不切换当前主题
     let fixedThemeId: String?
     let creating: Bool
+    private let themeTarget: ThemeTarget
+    /// 人页入口：这套还有谁在用（非 nil = 弹共用提示）
+    @State private var sharers: [String]?
+    @State private var saveError: String?
     @State private var draftName = ""
     @State private var editingScheme: ColorScheme = .light
     @State private var didAppear = false
@@ -30,9 +36,10 @@ struct ThemeColorsPage: View {
     @State private var pickingSlot: ColorPickingSlot?
     #endif
 
-    init(themeId: String? = nil, creating: Bool = false) {
+    init(themeId: String? = nil, creating: Bool = false, target: ThemeTarget = .interface) {
         self.fixedThemeId = themeId
         self.creating = creating
+        self.themeTarget = target
     }
 
     private struct ColorSnapshot {
@@ -42,7 +49,9 @@ struct ThemeColorsPage: View {
     }
 
     private var manager: ThemeManager { themeManager ?? ThemeManager.shared }
-    private var themeId: String { copiedThemeId ?? fixedThemeId ?? manager.selectedThemeId }
+    private var themeId: String { copiedThemeId ?? fixedThemeId ?? themeTarget.themeId(manager, profileManager) }
+    /// 页底铺图：按目标走的入口铺正在改的那套，列表长按入口照旧铺界面主题
+    private var pageBackgroundThemeId: String { fixedThemeId == nil ? themeId : manager.selectedThemeId }
     private var theme: AppThemeDefinition { manager.themeDefinition(id: themeId) ?? manager.selectedTheme }
     private var tokens: ThemeTokenSet { theme.tokens(for: editingScheme) }
     private var pure: Bool { manager.usePureBackground }
@@ -93,6 +102,27 @@ struct ThemeColorsPage: View {
             Section("聊天 · AI 消息") {
                 tokenRow("assistantBubble", "气泡底", tokens.assistantBubble.alpha == 0 ? "透明" : nil, \.assistantBubble, covered: pure)
                 overrideRow("assistantText", "文字", \.assistantText)
+            }
+            .listRowBackground(Theme.mainBg)
+            .listRowSeparator(.hidden)
+
+            Section {
+                overrideRow("bubbleModeUserBubble", "你的气泡底", \.bubbleModeUserBubble,
+                            fallback: { $0.userBubble }, offText: "跟随上面", covered: pure)
+                // 没设时跟 applyingBubbleModeColors 对齐：泡底换了 = 单色「不渐变」，否则跟随上面的渐变
+                overrideRow("bubbleModeUserBubbleGradient", "你的气泡渐变", \.bubbleModeUserBubbleGradient,
+                            fallback: { $0.bubbleModeUserBubble ?? $0.userBubbleGradient ?? $0.userBubble },
+                            offText: tokens.bubbleModeUserBubble == nil ? "跟随上面" : "不渐变", covered: pure)
+                overrideRow("bubbleModeUserText", "你的文字", \.bubbleModeUserText,
+                            fallback: { $0.userText ?? $0.textPrimary }, offText: "跟随上面")
+                overrideRow("bubbleModeAssistantBubble", "AI 气泡底", \.bubbleModeAssistantBubble,
+                            fallback: { $0.assistantBubble }, offText: "跟随上面", covered: pure)
+                overrideRow("bubbleModeAssistantText", "AI 文字", \.bubbleModeAssistantText,
+                            fallback: { $0.assistantText ?? $0.textPrimary }, offText: "跟随上面")
+            } header: {
+                Text("气泡模式")
+            } footer: {
+                Text("气泡模式下用这几种颜色，不设就跟随上面。")
             }
             .listRowBackground(Theme.mainBg)
             .listRowSeparator(.hidden)
@@ -174,9 +204,9 @@ struct ThemeColorsPage: View {
         .background {
             ThemeBackgroundView(
                 fill: Theme.sidebarBg,
-                imageURL: manager.currentBackgroundImageURL,
+                imageURL: manager.backgroundImageURL(for: pageBackgroundThemeId),
                 scheme: manager.activeScheme,
-                backgroundStyle: manager.currentBackgroundStyle
+                backgroundStyle: manager.backgroundStyle(for: pageBackgroundThemeId)
             )
             .ignoresSafeArea()
         }
@@ -202,9 +232,17 @@ struct ThemeColorsPage: View {
             Button("复制一份") { copyAndContinue() }
             Button("算了", role: .cancel) { dismiss() }
         } message: {
-            Text(fixedThemeId == nil
+            Text(themeTarget.profileId != nil && fixedThemeId == nil
+                 ? "复制一份「\(theme.name)」给 TA 再改？"
+                 : fixedThemeId == nil
                  ? "复制一份「\(theme.name)」再改？复制完自动切过去。"
                  : "复制一份「\(theme.name)」再改？当前主题不变。")
+        }
+        .sharedChatThemePrompt(sharers: $sharers, themeName: theme.name, onCopy: copyAndContinue, onCancel: { dismiss() })
+        .alert("保存失败", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+            Button("好", role: .cancel) { saveError = nil }
+        } message: {
+            Text(saveError ?? "")
         }
         .onAppear {
             guard !didAppear else { return }
@@ -212,10 +250,15 @@ struct ThemeColorsPage: View {
             editingScheme = manager.activeScheme
             if creating { draftName = theme.name }
             takeSnapshot()
-            if theme.isBuiltIn { showBuiltInPrompt = true }
+            if theme.isBuiltIn {
+                showBuiltInPrompt = true
+            } else if fixedThemeId == nil {
+                let others = themeTarget.sharers(of: themeId, manager, profileManager)
+                if !others.isEmpty { sharers = others }
+            }
         }
-        .onChange(of: manager.selectedThemeId) { _, _ in
-            // 只有「编辑当前主题」入口跟着选中走；列表入口的靶子是固定的
+        .onChange(of: themeId) { _, _ in
+            // 按目标走的入口（界面 = 选中的、人 = TA 的聊天主题）跟着它变重拍快照；列表入口的靶子是固定的
             if fixedThemeId == nil { takeSnapshot() }
         }
     }
@@ -283,18 +326,18 @@ struct ThemeColorsPage: View {
     }
 
     /// 「nil = 跟随 / 关，设过才出 ↺」的覆盖行：聊天正文字色两行（M1 三格，nil = 跟随主文字、色块画主文字色）
-    /// 和「气泡渐变」（nil = 关、色块画气泡底）共用；`fallback` 就是 nil 时色块画哪格。
+    /// 和「气泡渐变」（nil = 关、色块画气泡底）、「气泡模式」一节（nil = 跟随上面）共用；`fallback` 就是 nil 时色块画什么。
     private func overrideRow(
         _ key: String,
         _ title: String,
         _ keyPath: WritableKeyPath<ThemeTokenSet, ThemeColorValue?>,
         subtitle: String? = nil,
-        fallback: KeyPath<ThemeTokenSet, ThemeColorValue> = \.textPrimary,
+        fallback: @escaping (ThemeTokenSet) -> ThemeColorValue = { $0.textPrimary },
         offText: String = "跟随主文字",
         covered: Bool = false
     ) -> some View {
         let override = tokens[keyPath: keyPath]
-        let shown = override ?? tokens[keyPath: fallback]
+        let shown = override ?? fallback(tokens)
         return ThemeColorRow(
             title: title,
             subtitle: subtitle,
@@ -304,7 +347,7 @@ struct ThemeColorsPage: View {
             onReset: override == nil ? nil : { writeOverride(keyPath, nil) },
             apply: { writeOverride(keyPath, $0) },
             onOpenPicker: {
-                openPicker(key: key, title: title, initial: shown, read: { tokens[keyPath: keyPath] ?? tokens[keyPath: fallback] }) { writeOverride(keyPath, $0) }
+                openPicker(key: key, title: title, initial: shown, read: { tokens[keyPath: keyPath] ?? fallback(tokens) }) { writeOverride(keyPath, $0) }
             }
         )
     }
@@ -346,11 +389,16 @@ struct ThemeColorsPage: View {
         manager.replaceTokenSet(snapshot.dark, for: .dark, themeId: themeId)
     }
 
-    /// 内置主题不能改 → 复制一份接着改。外观页入口（编辑的就是当前）复制完切过去；列表入口不切，靶子换成新的那份。
+    /// 内置主题不能改 / 人页共用提示选「复制一份给 TA」→ 复制一份接着改。外观页入口（编辑的就是当前）复制完切过去；
+    /// 人页入口复制完给 TA；列表入口不切，靶子换成新的那份。
     private func copyAndContinue() {
-        let selectAfter = fixedThemeId == nil
+        let isPerson = themeTarget.profileId != nil && fixedThemeId == nil
+        let selectAfter = fixedThemeId == nil && !isPerson
         if let newId = manager.saveThemeCopy(from: themeId, name: "", select: selectAfter), !selectAfter {
             copiedThemeId = newId
+            if isPerson {
+                do { try themeTarget.apply(newId, manager, profileManager) } catch { saveError = error.localizedDescription }
+            }
         }
         takeSnapshot()
     }

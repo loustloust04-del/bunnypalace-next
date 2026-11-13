@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 
 /// 头像通用视图（顶栏胶囊/资料卡/通讯录共用）：
@@ -52,6 +53,19 @@ struct AIProfileSheet: View {
     }
 
     var body: some View {
+        #if os(iOS)
+        // iOS 的 AI 资料卡长成人页（plan-atrium P2）；「你」的卡和 Mac 照旧
+        if owner == .assistant {
+            PersonPageView()
+        } else {
+            legacyCard
+        }
+        #else
+        legacyCard
+        #endif
+    }
+
+    private var legacyCard: some View {
         NavigationStack {
             List {
                 // 头部：大头像 + 名字 + 楼层 + 状态（透明行，不进卡片）
@@ -165,14 +179,6 @@ struct AIProfileSheet: View {
 
     private func reload() {
         card = ProfileCardStore.load(profileId: profileId, owner: owner)
-        voices = owner == .assistant ? HeartvoiceFileStore.recentVoices(profileId: profileId, limit: 5) : []
-    }
-
-    /// 今天 → HH:mm；更早 → M/d HH:mm
-    static func voiceTimeLabel(_ date: Date) -> String {
-        if Calendar.current.isDateInToday(date) {
-            return date.formatted(date: .omitted, time: .shortened)
-        }
-        return date.formatted(.dateTime.month(.defaultDigits).day()) + " " + date.formatted(date: .omitted, time: .shortened)
+        voices = owner == .assistant ? HeartvoiceFileStore.recentVoices(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), limit: 5) : []
     }
 }

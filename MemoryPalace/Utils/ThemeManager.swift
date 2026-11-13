@@ -13,6 +13,10 @@ final class ThemeManager {
     private enum Keys {
         static let themeMode = "themeMode"
         static let selectedThemeId = "selectedThemeId"
+        /// T7 气泡专用主题的残留键（共存第一步收回成一套主题），启动时删掉
+        static let legacyBubbleThemeId = "bubbleThemeId"
+        /// 全局「显示方式」开关的残留键（共存第二步改成每个对话自己记），启动时删掉
+        static let legacyChatBubbleMode = "chatBubbleMode"
         static let usePureBackground = "usePureBackground"
         static let themeDefinitions = "themeDefinitions"
     }
@@ -35,6 +39,23 @@ final class ThemeManager {
 
             guard selectedThemeId != oldValue else { return }
             defaults.set(selectedThemeId, forKey: Keys.selectedThemeId)
+            touch()
+        }
+    }
+
+    /// 当前楼层的聊天主题（P3④，运行时字段不落盘，由楼层镜像写）。nil = 跟随界面主题（`selectedThemeId`）。
+    var chatThemeId: String? {
+        didSet {
+            guard chatThemeId != oldValue else { return }
+            touch()
+        }
+    }
+
+    /// 当前对话是否在气泡模式。由 `ConversationViewModel.syncBubbleModeToTheme()` 同步（选中对话变了、模式换了），
+    /// 只影响聊天页（currentChatTokenSet 用主题里的气泡模式色覆盖），全局配色不看它。
+    var isBubbleModeActive: Bool = false {
+        didSet {
+            guard isBubbleModeActive != oldValue else { return }
             touch()
         }
     }
@@ -77,10 +98,13 @@ final class ThemeManager {
         self.themeMode = AppThemeMode(rawValue: defaults.string(forKey: Keys.themeMode) ?? "") ?? .system
         self.usePureBackground = defaults.bool(forKey: Keys.usePureBackground)
         self.themeDefinitions = storedDefinitions
-        self.selectedThemeId = Self.normalizedThemeId(
+        let selectedId = Self.normalizedThemeId(
             defaults.string(forKey: Keys.selectedThemeId) ?? AppThemeDefinition.defaultTheme.id,
             within: storedDefinitions
         )
+        self.selectedThemeId = selectedId
+        defaults.removeObject(forKey: Keys.legacyBubbleThemeId)
+        defaults.removeObject(forKey: Keys.legacyChatBubbleMode)
         self.systemColorScheme = Self.detectSystemColorScheme()
     }
 
@@ -96,12 +120,29 @@ final class ThemeManager {
         themeDefinition(id: selectedThemeId) ?? .defaultTheme
     }
 
+    /// 聊天区用的主题：`chatThemeId` 指向已删 / 不存在的主题时回落界面主题（不是 default）。
+    var chatTheme: AppThemeDefinition {
+        chatTheme(for: chatThemeId)
+    }
+
+    /// 某一层存的聊天主题 id 实际落到哪一套（nil / 悬空 → 界面主题）；人页 / 在用名单按楼层算时用
+    func chatTheme(for id: String?) -> AppThemeDefinition {
+        id.flatMap(themeDefinition(id:)) ?? selectedTheme
+    }
+
     var customTheme: AppThemeDefinition {
         themeDefinition(id: AppThemeDefinition.customTheme.id) ?? .customTheme
     }
 
+    /// 全局配色（侧栏 / 列表 / 设置 / page0 / page2）：永远是 selectedThemeId，不随气泡模式变。
     var currentTokenSet: ThemeTokenSet {
         resolvedTokenSet(for: selectedTheme, scheme: activeScheme)
+    }
+
+    /// 聊天页配色：聊天主题（`chatTheme`）；气泡模式下用这套主题的 bubbleMode* 色覆盖同名普通色（nil 不覆盖），文章模式同全局。
+    /// 视图经 `Theme.chat` 取，不直接读这里。
+    var currentChatTokenSet: ThemeTokenSet {
+        resolvedTokenSet(for: chatTheme, scheme: activeScheme, bubbleMode: isBubbleModeActive)
     }
 
     var currentBackgroundImageURL: URL? {
@@ -110,6 +151,15 @@ final class ThemeManager {
 
     var currentBackgroundStyle: ThemeBackgroundStyle {
         backgroundStyle(for: selectedTheme.id)
+    }
+
+    /// 聊天背景（iOS 聊天壁纸、iPad 宽屏 / Mac 整窗背景）：跟聊天主题走。
+    var chatBackgroundImageURL: URL? {
+        backgroundImageURL(for: chatTheme.id)
+    }
+
+    var chatBackgroundStyle: ThemeBackgroundStyle {
+        backgroundStyle(for: chatTheme.id)
     }
 
     func resolvedTokenSet(for scheme: ColorScheme) -> ThemeTokenSet {
@@ -148,6 +198,11 @@ final class ThemeManager {
         selectedThemeId = id
     }
 
+    /// 楼层镜像用：值相同不 touch（didSet 里判）。
+    func applyChatTheme(_ id: String?) {
+        chatThemeId = id
+    }
+
     func updateThemeName(_ name: String, for id: String) {
         updateThemeDefinition(id: id) { theme in
             guard theme.isEditable else { return }
@@ -175,10 +230,6 @@ final class ThemeManager {
             for: scheme,
             themeId: themeId
         )
-    }
-
-    func resetCustomTheme() {
-        replaceThemeDefinition(.customTheme)
     }
 
     func copyLightIntoDarkDraft(themeId: String) {
@@ -229,6 +280,9 @@ final class ThemeManager {
         themeDefinitions.removeAll(where: { $0.id == id })
         if selectedThemeId == id {
             selectedThemeId = AppThemeDefinition.customTheme.id
+        }
+        if chatThemeId == id {
+            chatThemeId = nil
         }
     }
 
@@ -336,8 +390,12 @@ final class ThemeManager {
         }
     }
 
-    private func resolvedTokenSet(for theme: AppThemeDefinition, scheme: ColorScheme) -> ThemeTokenSet {
+    private func resolvedTokenSet(for theme: AppThemeDefinition, scheme: ColorScheme, bubbleMode: Bool = false) -> ThemeTokenSet {
         var base = theme.tokens(for: scheme)
+        // 气泡模式色先盖到普通色上，后面的纯净背景 / 壁纸半透明照常作用在盖好的结果上
+        if bubbleMode {
+            base = base.applyingBubbleModeColors()
+        }
         if usePureBackground {
             base = base.applyingPureBackground(for: scheme)
         }
@@ -422,6 +480,8 @@ final class ThemeManager {
         }
 
         lookup[AppThemeDefinition.defaultTheme.id] = .defaultTheme
+        // T7：iMessage 内置主题常驻（删了也能找回来）
+        lookup[AppThemeDefinition.iMessageTheme.id] = .iMessageTheme
 
         if let customTheme = lookup[AppThemeDefinition.customTheme.id] {
             lookup[AppThemeDefinition.customTheme.id] = AppThemeDefinition(

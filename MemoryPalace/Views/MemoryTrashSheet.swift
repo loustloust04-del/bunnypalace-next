@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -216,7 +217,7 @@ private struct MemoryTrashList: View {
         for m in assistant where !m.isActive && ids.contains(.assistant(m.slug)) {
             var revived = m
             revived.superseded = nil
-            try? SelfMemoryStore.save(revived, profileId: profileId)
+            try? SelfMemoryStore.save(revived, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked)
         }
         endSelection()
         reload()
@@ -235,7 +236,7 @@ private struct MemoryTrashList: View {
             NotificationCenter.default.post(name: .memoryDidChange, object: nil)
         }
         for m in assistant where !m.isActive && ids.contains(.assistant(m.slug)) {
-            try? SelfMemoryStore.delete(slug: m.slug, profileId: profileId)
+            try? SelfMemoryStore.delete(slug: m.slug, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked)
         }
         endSelection()
         reload()
@@ -245,7 +246,7 @@ private struct MemoryTrashList: View {
         archive = SwiftDataMemoryStore().listAll(profileId: profileId, context: modelContext).filter { $0.supersededAt != nil }
         let pid = profileId
         Task {
-            let list = await Task.detached { SelfMemoryStore.list(profileId: pid) }.value
+            let list = await Task.detached { SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked) }.value
             assistant = list
             loaded = true
             let inTrash = Set(archive.map { MemoryRowID.archive($0.id) } + list.filter { !$0.isActive }.map { MemoryRowID.assistant($0.slug) })

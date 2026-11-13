@@ -201,6 +201,13 @@ struct Page2AppShellView: View {
     @Environment(\.launchPageSignal) private var launchSignal
     @AppStorage(Page2Switcher.key) private var switcher = "strip"
     private var stripMode: Bool { switcher != "arc" }
+    private var usesFullCanvasHome: Bool {
+        #if PERSONAL_APPS
+        return SkinState.shared.active && selectedToolId == "home"
+        #else
+        return false
+        #endif
+    }
 
     private var liveIDs: [String] {
         var ids = shell.stack.openApps
@@ -230,7 +237,7 @@ struct Page2AppShellView: View {
                     .overlay {
                         // 桌面也常驻弧线（有后台应用才画，桌面拉弧线进后台）
                         Page2CornerBar(radius: Page2DisplayCorner.radius)
-                            .opacity(!stripMode && selectedToolId == "home" && !shell.stack.openApps.isEmpty
+                            .opacity(!usesFullCanvasHome && !stripMode && selectedToolId == "home" && !shell.stack.openApps.isEmpty
                                      ? (shell.cornerTouching ? 1 : 0.5) * (1 - min((shell.motion?.cardProgress ?? 0) / 0.85, 1)) : 0)
                             .animation(.easeOut(duration: 0.18), value: shell.cornerTouching)
                     }
@@ -306,7 +313,7 @@ struct Page2AppShellView: View {
         }
         .onChange(of: Page2SceneState.shared.isActive) { _, active in if !active { shell.cancelMotion() } }
         // 竖条手势只在第二页、竖条模式下开（翻页1mac 审）；离开第二页（tab / 音乐胶囊 / 楼层重建翻走）就地收掉、解锁翻页
-        .onChange(of: stripMode && Page2SceneState.shared.isActive && scenePhase == .active, initial: true) { _, enabled in
+        .onChange(of: stripMode && Page2SceneState.shared.isActive && scenePhase == .active && !usesFullCanvasHome, initial: true) { _, enabled in
             Page2StripPan.shared.install(enabled: enabled)
             if !enabled { shell.setStrip(open: false, animated: false) }
         }

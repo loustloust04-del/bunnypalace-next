@@ -12,29 +12,31 @@ struct VoiceMessageSettingsIOSSections: View {
     var body: some View {
         Section {
             FloorVoiceRows()
-            Toggle("AI 主动发语音", isOn: Binding(
-                get: { PermissionCenter.level(.voiceProactive) == .bypass },
-                set: { PermissionCenter.setLevel($0 ? .bypass : .notAllowed, for: .voiceProactive) }
-            ))
-                .tint(Theme.branchIndicator)
-                // 楼层语音设置改了（服务/声音/模型/嗓子说明/素材/主动开关）→ 立刻同步 cc-rp CLAUDE.md 标记块（按内容去重）。
-                // 挂在单行 Toggle 上：挂 Section 会摊到每一行
-                .onChange(of: profileManager?.currentProfile) { _, p in syncCCVoiceInstructions(p) }
-                .onChange(of: proactiveEnabled) { _, _ in syncCCVoiceInstructions(profileManager?.currentProfile) }
+            // atrium P3⑤a：只显示这个人生效的档位，点进去改这个人的（改默认在「我 › 权限」）
+            HStack {
+                Text("AI 主动发语音")
+                Spacer(minLength: 8)
+                PermissionLevelReadout(domain: .voiceProactive)
+            }
+                // 楼层语音设置改了（服务/声音/模型/嗓子说明/素材/默认主动开关）→ 立刻同步 cc-rp CLAUDE.md 标记块（按内容去重）。
+                // 挂在单行上：挂 Section 会摊到每一行。层上的主动开关改在人页，那边写完自己同步
+                .onChange(of: profileManager?.currentProfile) { _, p in Self.syncCCVoiceInstructions(p) }
+                .onChange(of: proactiveEnabled) { _, _ in Self.syncCCVoiceInstructions(profileManager?.currentProfile) }
         } header: {
             Text("声音")
         } footer: {
             Text("本楼层的语音服务和声音同时用于发语音条和语音通话。开启「AI 主动发语音」后 \(assistantName) 会在想让你听见语气的时刻主动发语音条。")
         }
+        #if os(macOS)
+        // atrium P3③：值按楼层存；iOS 在人页 › 声音，Mac 没人页留在这里
         Section {
             DisclosureGroup("声音效果") {
                 VoiceEffectControls()
             }
-            #if os(macOS)
             // J2b：mac 折叠三角跟次要文字色，不用系统强调色
             .tint(ShellStyle.secondaryText)
-            #endif
         }
+        #endif
         VoiceProsodySettingsSection()
         VoiceEffectsSettingsSection()
         SpeakerIdentitySettingsSection()
@@ -43,7 +45,7 @@ struct VoiceMessageSettingsIOSSections: View {
         #endif
     }
 
-    private func syncCCVoiceInstructions(_ profile: Profile?) {
+    static func syncCCVoiceInstructions(_ profile: Profile?) {
         guard let profile else { return }
         CCBridgeWebSocketClient.shared.syncVoiceInstructions(VoicePromptInjector.ccInstructionsBlock(profile: profile))
     }
@@ -78,13 +80,14 @@ struct VoiceProsodySettingsSection: View {
     }
 }
 
-/// 声音效果控件 + 恢复默认（双端共用）。显示哪些跟本楼层语音服务的语音条模型走（`capabilities.tunables`）；
-/// 楼层没选服务时全显示。
+/// 声音效果控件 + 恢复默认（iOS 人页 › 声音 / Mac 设置 › 语音）。显示哪些跟本楼层语音服务的语音条模型走（`capabilities.tunables`）；
+/// 楼层没选服务时全显示。值存本楼层（atrium P3③）：滑杆松手 / 选档 / 离开页时写 Profile，拖动中不逐帧落盘
 struct VoiceEffectControls: View {
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
-    @AppStorage(VoiceTuning.stabilityKey) private var stability = VoiceTuning.defaultStability
-    @AppStorage(VoiceTuning.styleKey) private var style = VoiceTuning.defaultStyle
-    @AppStorage(VoiceTuning.speedKey) private var speed = VoiceTuning.defaultSpeed
+    @State private var stability = VoiceTuning.defaultStability
+    @State private var style = VoiceTuning.defaultStyle
+    @State private var speed = VoiceTuning.defaultSpeed
+    @State private var loadedProfileId: String?
 
     /// (显示哪些参数, 表演感是不是三档)。三档只有 v3 / 没选服务的老楼层；v4 系是连续滑杆（V0 探针）
     private var config: (shown: Set<VoiceTunable>, discreteStability: Bool) {
@@ -101,22 +104,18 @@ struct VoiceEffectControls: View {
         VStack(alignment: .leading, spacing: 10) {
             if shown.contains(.stability) {
                 if cfg.discreteStability {
-                    Picker("表演感", selection: $stability) {
+                    Picker("表演感", selection: Binding(get: { stability }, set: { stability = $0; save() })) {
                         Text("奔放").tag(0.0)
                         Text("自然").tag(0.5)
                         Text("沉稳").tag(1.0)
                     }
                     .pickerStyle(.segmented)
-                    .onAppear {
-                        // 历史脏值 / v4 滑杆留下的非三档值钳回最近档，防 segmented 无选中
-                        if ![0.0, 0.5, 1.0].contains(stability) { stability = ElevenLabsSynthesizer.v3Stability(stability) }
-                    }
                 } else {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("表演感：\(stability, specifier: "%.2f")")
                             .font(.system(size: Theme.SettingsFont.secondary))
                             .foregroundColor(Theme.textMuted)
-                        Slider(value: $stability, in: 0...1, step: 0.05)
+                        Slider(value: $stability, in: 0...1, step: 0.05, onEditingChanged: { if !$0 { save() } })
                     }
                 }
                 Text("越低（奔放）标签响应越强、越随机；越高（沉稳）越平稳。")
@@ -129,7 +128,7 @@ struct VoiceEffectControls: View {
                     Text("风格强度：\(style, specifier: "%.2f")")
                         .font(.system(size: Theme.SettingsFont.secondary))
                         .foregroundColor(Theme.textMuted)
-                    Slider(value: $style, in: 0...1, step: 0.01)
+                    Slider(value: $style, in: 0...1, step: 0.01, onEditingChanged: { if !$0 { save() } })
                 }
             }
             if shown.contains(.speed) {
@@ -137,7 +136,7 @@ struct VoiceEffectControls: View {
                     Text("语速：\(speed, specifier: "%.2f")")
                         .font(.system(size: Theme.SettingsFont.secondary))
                         .foregroundColor(Theme.textMuted)
-                    Slider(value: $speed, in: 0.7...1.5, step: 0.01)
+                    Slider(value: $speed, in: 0.7...1.5, step: 0.01, onEditingChanged: { if !$0 { save() } })
                 }
             }
             if shown.isDisjoint(with: [.stability, .style, .speed]) {
@@ -147,12 +146,43 @@ struct VoiceEffectControls: View {
             }
 
             Button("恢复默认") {
-                VoiceTuning.resetToDefaults()
+                guard let pm = profileManager else { return }
+                var p = pm.currentProfile
+                VoiceTuning.resetToDefaults(&p)
+                pm.updateProfile(p)
+                load()
             }
             .font(.system(size: Theme.SettingsFont.secondary))
             .buttonStyle(.plain)
             .foregroundColor(Theme.branchIndicator)
         }
+        .onAppear { load() }
+        .onChange(of: profileManager?.currentProfile.id) { _, _ in load() }
+        // 同页上换了服务 / 语音条模型、表演感从滑杆变三档：重读一遍顺带钳档
+        .onChange(of: cfg.discreteStability) { _, _ in load() }
+        .onDisappear { save() }
+    }
+
+    private func load() {
+        guard let p = profileManager?.currentProfile else { return }
+        loadedProfileId = p.id
+        stability = p.voiceStability
+        style = p.voiceStyle
+        speed = p.voiceSpeed
+        // 历史脏值 / v4 滑杆留下的非三档值钳回最近档，防 segmented 无选中
+        if config.discreteStability, ![0.0, 0.5, 1.0].contains(stability) {
+            stability = ElevenLabsSynthesizer.v3Stability(stability)
+            save()
+        }
+    }
+
+    private func save() {
+        guard let pm = profileManager, pm.currentProfile.id == loadedProfileId else { return }
+        var p = pm.currentProfile
+        let next = VoiceTuning.Settings(stability: stability, similarityBoost: VoiceTuning.similarityBoost, style: style, speed: speed)
+        guard VoiceTuning.current(for: p) != next else { return }
+        VoiceTuning.set(next, on: &p)
+        pm.updateProfile(p)
     }
 }
 

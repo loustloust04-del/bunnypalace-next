@@ -128,7 +128,6 @@ struct SettingsJumpTabConsumer: ViewModifier {
         #if os(iOS)
         if case .persona = target { forceFullPersona = true }
         guard selectedTab != tab else { return }   // 页面已经在了：它自己 onChange 取
-        SettingsSearchEntry.expandFoldGroup(for: tab)
         let wasDeeper = selectedTab != nil
         if wasDeeper { selectedTab = nil }
         DispatchQueue.main.asyncAfter(deadline: .now() + (wasDeeper ? 0.45 : delay)) { selectedTab = tab }

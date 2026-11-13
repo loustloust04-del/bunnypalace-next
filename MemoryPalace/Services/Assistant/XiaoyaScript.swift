@@ -59,6 +59,8 @@ struct XiaoyaScriptProgress: Codable, Equatable {
     var surveyThen: XiaoyaScriptNode?
     var surveyProfileId: String?
     var surveyName: String?
+    /// 已答但称呼尚未保存的答案；survey 只存已接受的答案，恢复提交种子时不再改称呼
+    var pendingSurvey: XiaoyaSurveyAnswer?
     var survey: XiaoyaSurveyAnswer?
     var surveyTaskId: String?
     var surveyResult: CatalogSurvey.Outcome?
@@ -72,7 +74,7 @@ struct XiaoyaScriptProgress: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case scriptId, step, emitted, awaitingMessageId, identity, taProfileId, taName, taMeta, userName, taFaceName
         case keySaved, keySkipped, keyProvider, keyModel, hasMac, fromNewbie, pendingImport, pendingName, pendingTaId, startedAt, finishedAt
-        case surveyThen, surveyProfileId, surveyName, survey, surveyTaskId, surveyResult
+        case surveyThen, surveyProfileId, surveyName, pendingSurvey, survey, surveyTaskId, surveyResult
     }
 
     init(from decoder: Decoder) throws {
@@ -101,6 +103,7 @@ struct XiaoyaScriptProgress: Codable, Equatable {
         surveyThen = (try? c.decodeIfPresent(String.self, forKey: .surveyThen)).flatMap { $0.flatMap(XiaoyaScriptNode.init(rawValue:)) }
         surveyProfileId = try c.decodeIfPresent(String.self, forKey: .surveyProfileId)
         surveyName = try c.decodeIfPresent(String.self, forKey: .surveyName)
+        pendingSurvey = try? c.decodeIfPresent(XiaoyaSurveyAnswer.self, forKey: .pendingSurvey)
         survey = try? c.decodeIfPresent(XiaoyaSurveyAnswer.self, forKey: .survey)
         surveyTaskId = try c.decodeIfPresent(String.self, forKey: .surveyTaskId)
         surveyResult = (try? c.decodeIfPresent(CatalogSurvey.Outcome.self, forKey: .surveyResult)) ?? nil
@@ -170,10 +173,12 @@ struct XiaoyaScriptWorld {
     var survey: XiaoyaSurveyWorld? = nil
 }
 
-/// 三问落地：目标楼层没在引导里建 Ta 时取当前楼层；交答案 = 写称呼 + 把答案落进那层（同一个任务 id 只建一次），不等模型
+/// 三问落地：首次接受答案先保存称呼，再提交种子任务；恢复已接受的答案只续同一个任务，不重写称呼
 @MainActor
 struct XiaoyaSurveyWorld {
     var currentProfileId: () -> String?
+    /// 首次接受答案时保存称呼；失败不接受答案，沿用剧本的失败提示 / 重出卡交互
+    var applyUserName: (String, String) throws -> Void
     /// (答案, 目标楼层 id, 任务 id)
     var submit: (XiaoyaSurveyAnswer, String, String) async -> CatalogSurvey.Outcome
 }
@@ -685,7 +690,7 @@ final class XiaoyaScriptRunner {
             }
         case (.survey, .survey(let answer)):
             me(XiaoyaCardAnswer.survey(answer).summary)
-            p.survey = answer
+            p.pendingSurvey = answer
             next = .surveyDone
         case (.tech, .picked(let id)) where pairSupported:
             me(id == "yes" ? "有，连上" : "没有")
@@ -857,6 +862,22 @@ final class XiaoyaScriptRunner {
             }
         case .submitSurvey:
             guard p.surveyResult == nil else { return .next }
+            if let pending = p.pendingSurvey {
+                guard let target = p.surveyProfileId, let survey = world.survey else { return .stall }
+                do {
+                    try survey.applyUserName(pending.name, target)
+                    p.survey = pending
+                    p.pendingSurvey = nil
+                    progress = p
+                } catch {
+                    await say(XiaoyaScriptLines.floorFailed(error.localizedDescription), token: token)
+                    guard token == playToken else { return .stall }
+                    p.pendingSurvey = nil
+                    p.surveyName = pending.name
+                    progress = p
+                    return .rewind(.survey, 2)   // 保存失败：重出三问卡，不把答案标成已接受
+                }
+            }
             guard let answer = p.survey, !answer.answers.isEmpty, let target = p.surveyProfileId, let survey = world.survey else {
                 p.surveyResult = .empty
                 progress = p
@@ -1112,8 +1133,8 @@ extension XiaoyaScriptWorld {
             },
             survey: XiaoyaSurveyWorld(
                 currentProfileId: { profiles.currentProfile.id },
+                applyUserName: { try factory.applyUserName($0, profileId: $1) },
                 submit: { answer, profileId, taskId in
-                    factory.applyUserName(answer.name, profileId: profileId)
                     return await CatalogRunner.shared.survey(answer.answers, taskId: taskId, profileId: profileId)
                 }))
     }

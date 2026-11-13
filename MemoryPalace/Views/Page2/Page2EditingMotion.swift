@@ -13,7 +13,13 @@ struct Page2EditingMotion: ViewModifier {
     private var active: Bool { enabled && desktopActive && scenePhase == .active && !reduceMotion }
 
     func body(content: Content) -> some View {
+        #if DEBUG
+        let _ = Page2DesktopProbe.shared.motion(enabled: enabled, desktopActive: desktopActive, scenePhase: scenePhase, reduceMotion: reduceMotion)
+        #endif
         TimelineView(.animation(paused: !active)) { context in
+            #if DEBUG
+            let _ = active ? Page2DesktopProbe.shared.tick() : ()
+            #endif
             let time = context.date.timeIntervalSinceReferenceDate
             let phase = Double(seed) * 2.399963229728653
             GlassEffectContainer(spacing: 0) { content }

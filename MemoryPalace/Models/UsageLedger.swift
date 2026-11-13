@@ -31,9 +31,6 @@ enum UsageKind: String, Codable, CaseIterable, Sendable {
         case .memoryTrial: "试写"
         }
     }
-
-    /// 主模型（粟粟直接在聊）vs 副模型（后台代劳）
-    var isMainModel: Bool { self == .chat || self == .assistant }
 }
 
 /// 发请求的一方告诉 router：这次调用算谁的

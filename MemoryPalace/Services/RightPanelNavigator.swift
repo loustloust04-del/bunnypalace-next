@@ -7,6 +7,8 @@ final class RightPanelNavigator {
     struct Target: Equatable {
         let tool: String     // "memory" / "worldBook" / "cardLibrary"
         let id: String       // 面板内滚动目标 id（要和 row 的 `.id(...)` 对齐）
+        /// 终端窗口在哪台 hub 上（plan-multi-hub B3.4）。nil = 不是 hub 上的东西；终端窗口目标不带它就不认
+        var hubId: String? = nil
     }
 
     var pendingTarget: Target? = nil

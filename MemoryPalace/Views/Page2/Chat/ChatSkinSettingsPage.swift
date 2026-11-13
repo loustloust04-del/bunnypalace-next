@@ -25,7 +25,7 @@ struct ChatSkinSettingsPage: View {
             Section {
                 Toggle("在桌面显示", isOn: Binding(
                     get: { enabled },
-                    set: { toolManager?.setEnabled("cssChat", $0) }
+                    set: { toolManager?.setEnabled("cssChat", $0, target: .defaults) }
                 ))
                 .tint(Theme.branchIndicator)
             } footer: {

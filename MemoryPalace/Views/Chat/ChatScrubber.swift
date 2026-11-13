@@ -159,7 +159,7 @@ struct ChatScrubber: View {
             let thumbY = model.dragThumbY ?? idleThumbY(track)
             ZStack(alignment: .topTrailing) {
                 Capsule()
-                    .fill(Theme.textMuted.opacity(grabbed ? 0.55 : 0.32))
+                    .fill(Theme.chat.textMuted.opacity(grabbed ? 0.55 : 0.32))
                     .frame(width: grabbed ? 9 : 4, height: Self.thumbLength)
                     .position(x: geo.size.width - (grabbed ? 7.5 : 6), y: thumbY)
                     .allowsHitTesting(false)
@@ -440,11 +440,11 @@ struct ChatScrubber: View {
         VStack(alignment: .trailing, spacing: 2) {
             Text([hint.day, "第 \(hint.turn) 轮"].compactMap { $0 }.joined(separator: " · "))
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(Theme.textPrimary)
+                .foregroundColor(Theme.chat.textPrimary)
             if !hint.userLine.isEmpty {
                 Text(hint.userLine)
                     .font(.system(size: 11.5))
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(Theme.chat.textMuted)
                     .lineLimit(1)
             }
         }

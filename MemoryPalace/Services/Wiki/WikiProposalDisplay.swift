@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 
@@ -55,6 +56,10 @@ extension WikiProposal.Direction {
 }
 
 enum WikiProposalDisplay {
+
+    static func pageMarkdown(_ page: WikiPage) -> String {
+        "事实域：\(WikiPage.factDomainLabel(page.factDomain))\n\n" + page.markdown
+    }
 
     /// 批了、还没执行的方向条目。正文 / 改页这些不是方向，不算——
     /// 之前写成 `direction?.ranAt == nil`，非方向条目 nil == nil 也算进去，批正文会空跑一次执行、把「上次」盖成「没有要执行的方向」
@@ -136,26 +141,23 @@ enum WikiProposalDisplay {
         return MessageTarget(profileId: profileId, conversationId: conversationId, nodeId: nodeId)
     }
 
-    private static func isVisible(_ node: MessageNode, in conversation: Conversation, target: MessageTarget) -> Bool {
+    private static func isVisible(_ node: ConversationMessage, in conversation: ConversationWindow, target: MessageTarget) -> Bool {
         !conversation.isTrashed && conversation.id == target.conversationId && conversation.profileId == target.profileId
-            && node.id == target.nodeId && node.conversationId == conversation.id && node.profileId == target.profileId
+            && node.id == target.nodeId && node.conversationId == conversation.id
             && !node.isTrashed && node.hasDisplayableContent && (node.role == "user" || node.role == "assistant")
     }
 
     /// 在读取 context 内校验，后台加载只把可定位的值目标带回 UI。
     static func liveMessageTargets(for cites: [WikiProposal.Cite], currentProfileId: String,
-                                   context: ModelContext) -> Set<MessageTarget> {
+                                   source: any ConversationSource) -> Set<MessageTarget> {
         let targets = Set(cites.compactMap { messageTarget(for: $0, currentProfileId: currentProfileId) })
         guard !targets.isEmpty else { return [] }
-        let pid = currentProfileId
-        let conversationIds = Array(Set(targets.map(\.conversationId)))
+        let conversationIds = Set(targets.map(\.conversationId))
         let nodeIds = targets.map(\.nodeId)
-        let conversations = (try? context.fetch(FetchDescriptor<Conversation>(
-            predicate: #Predicate { $0.profileId == pid && conversationIds.contains($0.id) }
-        ))) ?? []
-        let nodes = (try? context.fetch(FetchDescriptor<MessageNode>(
-            predicate: #Predicate { $0.profileId == pid && nodeIds.contains($0.id) }
-        ))) ?? []
+        let conversations = conversationIds.compactMap {
+            try? source.window(profileId: currentProfileId, idOrPrefix: $0)
+        }
+        let nodes = (try? source.messages(profileId: currentProfileId, ids: nodeIds)) ?? []
         let byConversation = Dictionary(conversations.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let byNode = Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return Set(targets.filter { target in
@@ -178,7 +180,7 @@ enum WikiProposalDisplay {
               let node = try? context.fetch(FetchDescriptor<MessageNode>(
                 predicate: #Predicate { $0.id == nid && $0.profileId == pid && $0.conversationId == cid }
               )).first,
-              isVisible(node, in: conversation, target: target) else { return false }
+              isVisible(ConversationMessage(node), in: SwiftDataConversationSource.window(conversation), target: target) else { return false }
         viewModel.navigateToSearchResult(nodeId: target.nodeId, conversation: conversation, context: context)
         return true
     }
@@ -239,6 +241,8 @@ enum WikiProposalDisplay {
 
     enum ItemStatus: Equatable {
         case actionable, stale, approved, rejected
+        case withdrawable, legacyApproved, unsettled([String])
+        case interruptedApproval([String])
 
         var canAct: Bool { self == .actionable }
 
@@ -247,18 +251,71 @@ enum WikiProposalDisplay {
             case .actionable: return nil
             case .stale: return "页在这之后被改过，重新整理"
             case .approved: return "已批"
+            case .withdrawable: return "已批 · 可撤回"
+            case .legacyApproved: return "已批（当时未记录精确撤回凭据）"
+            case .unsettled(let targets): return "已批 · 未收口（未恢复：\(targets.joined(separator: "、"))）"
+            case .interruptedApproval(let targets): return "批准未完成（未核清：\(targets.joined(separator: "、"))）"
             case .rejected: return "已驳回"
             }
         }
     }
 
-    static func status(_ item: WikiProposal.Item) -> ItemStatus {
+    static func status(_ item: WikiProposal.Item, directionBlock: String? = nil) -> ItemStatus {
         switch item.state {
-        case .pending: return .actionable
+        case .pending:
+            if let receipt = item.approval {
+                return .interruptedApproval(receipt.progress.unresolved.isEmpty ? receipt.pages.map(\.path) : receipt.progress.unresolved)
+            }
+            return .actionable
         case .stale: return .stale
-        case .approved: return .approved
+        case .approved:
+            if let receipt = item.approval {
+                if receipt.phase != .committed {
+                    return .unsettled(receipt.progress.unresolved.isEmpty ? receipt.paths : receipt.progress.unresolved)
+                }
+                if item.change.direction == nil { return .withdrawable }
+            }
+            switch item.change {
+            case .direction(let direction):
+                if directionBlock != nil || direction.contentProposalId != nil
+                    || (direction.mode != .seed && direction.ranAt != nil) { return .approved }
+                return .withdrawable
+            case .regroup: return .legacyApproved
+            default: return .legacyApproved
+            }
         case .rejected: return .rejected
         }
+    }
+
+    static func progressLines(_ receipt: WikiProposal.ApprovalReceipt) -> [String] {
+        var targets = receipt.pages.map { "页：" + $0.path }
+        targets += (receipt.relinked ?? []).map { "重连页：" + $0.path }
+        targets += (receipt.moves ?? []).filter(\.isFolder).map { "目录：" + $0.from + " → " + $0.to }
+        targets += (receipt.groupImages ?? []).map { "分组：" + $0.path }
+        targets += receipt.fragmentMarks.map { "碎片：\($0.fragmentId)" }
+        targets += (receipt.moves ?? []).flatMap { $0.history.map { "历史：" + $0.to } }
+        func summarize(_ lines: [String], prefix: String) -> [String] {
+            let categories = ["页", "目录", "分组", "碎片", "历史"]
+            var buckets = Array(repeating: [String](), count: categories.count + 1)
+            for line in lines {
+                let name = line.hasPrefix("需人工：") ? String(line.dropFirst(4)) : line
+                let index = name.hasPrefix("重连页：") || name.hasPrefix("挪页：") ? 0
+                    : name.hasPrefix("碎片 ") || name == "标记" ? 3
+                    : categories.firstIndex { name.hasPrefix($0 + "：") } ?? categories.count
+                buckets[index].append(line)
+            }
+            return buckets.enumerated().flatMap { index, rows -> [String] in
+                guard !rows.isEmpty else { return [] }
+                let category = index < categories.count ? categories[index] : "步骤"
+                return ["\(prefix) · \(category) \(rows.count)"]
+                    + rows.prefix(3).map { prefix + " · " + $0 }
+                    + (rows.count > 3 ? ["\(prefix) · …"] : [])
+            }
+        }
+        return summarize(targets, prefix: "核账目标") + summarize(receipt.progress.completed, prefix: "已完成")
+            + summarize(receipt.progress.compensated, prefix: "已恢复")
+            + summarize(receipt.progress.unresolved, prefix: "未恢复")
+            + (receipt.progress.failedStep.map { ["失败步骤 · " + $0] } ?? [])
     }
 
     // MARK: - 它搜了什么
@@ -276,9 +333,35 @@ enum WikiProposalDisplay {
 // MARK: - 「改」的草稿：就地改文字（现在、记录行、钩子、触发词、为什么、分组名 / 钩子）
 
 struct WikiProposalDraft {
+    struct RecordRow {
+        let index: Int?
+        var body: String
+        let labels: [String]
+        let fingerprint: String?
+        var converted = false
+        var deleted = false
+        private let sourceSuffix: String
+
+        init(index: Int? = nil, line: String = "") {
+            self.index = index
+            let parts = CatalogSources.split(line)
+            body = parts.body
+            labels = parts.labels ?? []
+            fingerprint = index == nil ? nil : CatalogSources.fingerprint(line)
+            sourceSuffix = String(line.dropFirst(parts.body.count))
+        }
+
+        var line: String? {
+            let text = String(body.map { $0.isNewline ? " " : $0 }).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !deleted, !text.isEmpty else { return nil }
+            if converted { return text + "（出处：用户编辑）" }
+            return text + sourceSuffix
+        }
+    }
+
     var now = ""
     /// 一行一条
-    var records = ""
+    var records: [RecordRow] = []
     var hook = ""
     /// 逗号 / 顿号隔开
     var triggers = ""
@@ -290,6 +373,13 @@ struct WikiProposalDraft {
     var title = ""
     var kind: WikiPage.Kind?
     var sources = ""
+
+    var conversions: [CatalogSources.Conversion] {
+        records.compactMap { row in
+            guard row.converted, let index = row.index, let fingerprint = row.fingerprint, let line = row.line else { return nil }
+            return .init(index: index, fingerprint: fingerprint, newLine: line)
+        }
+    }
 
     init(_ change: WikiProposal.Change) {
         switch change {
@@ -303,11 +393,12 @@ struct WikiProposalDraft {
             break
         case .newPage(let page):
             now = page.now
-            records = page.records.joined(separator: "\n")
+            title = page.title
+            records = page.records.enumerated().map { RecordRow(index: $0.offset, line: $0.element) }
             hook = page.hook
             triggers = page.triggers.joined(separator: "、")
         case .appendRecords(_, let lines):
-            records = lines.joined(separator: "\n")
+            records = lines.enumerated().map { RecordRow(index: $0.offset, line: $0.element) }
         case .rewriteNow(_, _, let new, _):
             now = new
         case .link(_, let link):
@@ -342,14 +433,20 @@ struct WikiProposalDraft {
         case .confirmCovered:
             return change
         case .newPage(var page):
+            let title = Self.trimmed(title)
+            if !title.isEmpty {
+                page.title = title
+            } else if Self.trimmed(page.title).isEmpty {
+                page.title = String(page.path.split(separator: "/").last ?? "")
+            }
             page.now = Self.trimmed(now)
             page.validUntil = WikiPage.until(page.validUntil, in: page.now)
-            page.records = Self.lines(records)
+            page.records = records.compactMap(\.line)
             page.hook = Self.trimmed(hook)
             page.triggers = WikiPage.list(triggers)
             return .newPage(page: page)
         case .appendRecords(let path, _):
-            return .appendRecords(path: path, lines: Self.lines(records))
+            return .appendRecords(path: path, lines: records.compactMap(\.line))
         case .rewriteNow(let path, let old, _, let until):
             return .rewriteNow(path: path, old: old, new: Self.trimmed(now), until: WikiPage.until(until, in: Self.trimmed(now)))
         case .link(let from, var link):

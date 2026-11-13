@@ -36,6 +36,63 @@ final class ThemeTokenSetCodableTests: XCTestCase {
         XCTAssertEqual(tokens.textPrimary.hexString, "#3D3633")
     }
 
+    /// 共存第一步：老 JSON 和老的导出主题文件没有 5 格气泡模式色，解出来全是 nil（跟随普通色）；设过的往返不丢
+    func testLegacyJSONDecodesWithNilBubbleModeColors() throws {
+        let tokens = try JSONDecoder().decode(ThemeTokenSet.self, from: Data(legacyJSON.utf8))
+
+        XCTAssertNil(tokens.bubbleModeUserBubble)
+        XCTAssertNil(tokens.bubbleModeUserBubbleGradient)
+        XCTAssertNil(tokens.bubbleModeAssistantBubble)
+        XCTAssertNil(tokens.bubbleModeUserText)
+        XCTAssertNil(tokens.bubbleModeAssistantText)
+        XCTAssertEqual(tokens.applyingBubbleModeColors(), tokens, "全 nil 时气泡模式和普通色一模一样")
+
+        let definitionJSON = """
+        {"id": "theme-old", "name": "老主题", "isBuiltIn": false, "light": \(legacyJSON), "dark": \(legacyJSON)}
+        """
+        let definition = try JSONDecoder().decode(AppThemeDefinition.self, from: Data(definitionJSON.utf8))
+        XCTAssertNil(definition.light.bubbleModeUserBubble, "导出的老主题文件照常能读")
+        XCTAssertNil(definition.dark.bubbleModeAssistantText)
+
+        var edited = tokens
+        edited.bubbleModeUserBubble = ThemeColorValue(hex: 0x007AFF)
+        edited.bubbleModeAssistantText = ThemeColorValue(hex: 0x112233)
+        let restored = try JSONDecoder().decode(ThemeTokenSet.self, from: try JSONEncoder().encode(edited))
+        XCTAssertEqual(restored.bubbleModeUserBubble?.hexString, "#007AFF")
+        XCTAssertEqual(restored.bubbleModeAssistantText?.hexString, "#112233")
+        XCTAssertNil(restored.bubbleModeUserText)
+    }
+
+    /// 共存返工：深色草稿里 5 格气泡模式色 nil 保持 nil（跟随），设了值的跟着派生（提亮 / 压暗，不原样抄）
+    func testDarkDraftDerivesBubbleModeColors() throws {
+        let legacy = try JSONDecoder().decode(ThemeTokenSet.self, from: Data(legacyJSON.utf8))
+        let followDark = legacy.generatingDarkDraftFromLight()
+        XCTAssertNil(followDark.bubbleModeUserBubble)
+        XCTAssertNil(followDark.bubbleModeUserBubbleGradient)
+        XCTAssertNil(followDark.bubbleModeAssistantBubble)
+        XCTAssertNil(followDark.bubbleModeUserText)
+        XCTAssertNil(followDark.bubbleModeAssistantText)
+
+        var light = legacy
+        light.bubbleModeUserBubble = ThemeColorValue(hex: 0x4A90D9)
+        light.bubbleModeUserBubbleGradient = ThemeColorValue(hex: 0x7FB3E6)
+        light.bubbleModeAssistantBubble = ThemeColorValue(hex: 0xE9E9EB)
+        light.bubbleModeUserText = ThemeColorValue(hex: 0x332211)
+        light.bubbleModeAssistantText = ThemeColorValue(hex: 0x223344)
+        let dark = light.generatingDarkDraftFromLight()
+        let pairs: [(ThemeColorValue?, ThemeColorValue?)] = [
+            (light.bubbleModeUserBubble, dark.bubbleModeUserBubble),
+            (light.bubbleModeUserBubbleGradient, dark.bubbleModeUserBubbleGradient),
+            (light.bubbleModeAssistantBubble, dark.bubbleModeAssistantBubble),
+            (light.bubbleModeUserText, dark.bubbleModeUserText),
+            (light.bubbleModeAssistantText, dark.bubbleModeAssistantText)
+        ]
+        for (i, (l, d)) in pairs.enumerated() {
+            XCTAssertNotNil(d, "第 \(i) 格：设过就不能丢回跟随")
+            XCTAssertNotEqual(d?.hexString, l?.hexString, "第 \(i) 格：深色草稿要派生，不原样抄")
+        }
+    }
+
     /// 设过覆盖之后编解码保住值
     func testOverridesSurviveRoundTrip() throws {
         var tokens = try JSONDecoder().decode(ThemeTokenSet.self, from: Data(legacyJSON.utf8))

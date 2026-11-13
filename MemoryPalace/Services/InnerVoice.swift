@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 // MARK: - 心声（v2c）：AI 自发的本能独白
@@ -61,38 +62,20 @@ enum InnerVoice {
     ) async -> String? {
         CacheDiagLog.shared.log("💭 心声: 触发\(reason.isEmpty ? "" : "（\(reason.prefix(40))）")")
 
-        if let provider = providerManager.provider(for: model) {
-            var acc = systemPrompt ?? ""
-            for m in messages { acc += m.content }
-            let est = BudgetCalculator.actualCost(
-                provider: provider, modelId: model.modelId,
-                usage: TokenUsage(inputTokens: HeuristicEstimator().estimate(acc), outputTokens: 1024)
-            )
-            if case .blocked = providerManager.budgetGate(providerId: provider.id, estimatedCost: est),
-               !BudgetPreflight.mayDeferEarlyGate(provider: provider, estimated: est) {
-                CacheDiagLog.shared.log("💭 心声: 跳过（预算闸）")
-                return nil
-            }
-        }
-
         let router = ProviderRouter(usageContext: UsageContext(kind: .innerVoice, conversationId: convId, profileId: profileId))
         do {
-            let (text, usage) = try await router.sendNonStreaming(
+            let (text, _) = try await router.sendNonStreaming(
                 model: model,
                 messages: messages + [(role: "user", content: voiceInstruction)],
                 systemPrompt: systemPrompt,
                 providerManager: providerManager
             )
-            if let usage, let provider = providerManager.provider(for: model) {
-                let cost = BudgetCalculator.actualCost(provider: provider, modelId: model.modelId, usage: usage)
-                await MainActor.run { providerManager.commitSpend(providerId: provider.id, amount: cost, usage: usage) }
-            }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
                 CacheDiagLog.shared.log("💭 心声: ⚠️ 返回空")
                 return nil
             }
-            HeartvoiceFileStore.save(text: trimmed, reason: reason, convId: convId, profileId: profileId)
+            HeartvoiceFileStore.save(text: trimmed, reason: reason, convId: convId, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
             CacheDiagLog.shared.log("💭 心声: ✅ \(trimmed.count) 字")
             return trimmed
         } catch {
@@ -102,61 +85,3 @@ enum InnerVoice {
     }
 }
 
-// MARK: - 心声文件店：memory/heartvoice/{yyyy-MM-dd-HHmm}.md
-
-enum HeartvoiceFileStore {
-    private static func dir(profileId: String) -> URL {
-        let d = FileLibraryStore.memoryRoot(profileId: profileId)
-            .appendingPathComponent("heartvoice", isDirectory: true)
-        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
-        return d
-    }
-
-    private static let nameFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd-HHmm"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f
-    }()
-
-    static func save(text: String, reason: String, convId: String, profileId: String) {
-        let content = FrontmatterCodec.render(meta: [
-            ("time", FrontmatterCodec.dateFormatter.string(from: Date())),
-            ("convId", convId),
-            ("reason", reason.replacingOccurrences(of: "\n", with: " ")),
-        ], body: text)
-        let url = dir(profileId: profileId).appendingPathComponent("\(nameFormatter.string(from: Date())).md")
-        do { try Data(content.utf8).write(to: url, options: .atomic) }
-        catch { CacheDiagLog.shared.log("💭 心声: ❌ 写盘失败 — \(error.localizedDescription)") }
-    }
-
-    /// 最近 N 条心声（资料卡碎碎念用）：按文件名倒序取 N 再解析（文件名即时间戳，不全量读），新→旧
-    static func recentVoices(profileId: String, limit: Int) -> [(time: Date, text: String)] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir(profileId: profileId).path)) ?? []
-        var out: [(Date, String)] = []
-        for n in names.filter({ $0.hasSuffix(".md") }).sorted(by: >) {
-            guard out.count < limit else { break }
-            let url = dir(profileId: profileId).appendingPathComponent(n)
-            guard let raw = try? String(contentsOf: url, encoding: .utf8),
-                  let (_, body) = FrontmatterCodec.parse(raw), !body.isEmpty,
-                  let t = nameFormatter.date(from: String(n.dropLast(3))) else { continue }
-            out.append((t, body))
-        }
-        return out
-    }
-
-    /// 某天的全部心声（日记收割用）：(HH:mm, 正文)，按时间序
-    static func voices(on day: String, profileId: String) -> [(time: String, text: String)] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir(profileId: profileId).path)) ?? []
-        var out: [(String, String)] = []
-        for n in names.sorted() where n.hasPrefix(day) && n.hasSuffix(".md") {
-            let url = dir(profileId: profileId).appendingPathComponent(n)
-            guard let raw = try? String(contentsOf: url, encoding: .utf8),
-                  let (_, body) = FrontmatterCodec.parse(raw), !body.isEmpty else { continue }
-            let hhmm = String(n.dropLast(3).suffix(4))
-            let t = hhmm.count == 4 ? "\(hhmm.prefix(2)):\(hhmm.suffix(2))" : "??:??"
-            out.append((t, body))
-        }
-        return out
-    }
-}

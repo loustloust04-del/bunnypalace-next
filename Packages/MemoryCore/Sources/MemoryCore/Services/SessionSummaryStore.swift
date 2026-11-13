@@ -1,0 +1,449 @@
+import Foundation
+
+/// 第三刀：窗口摘要的一段。压缩段 = 超窗时压出去的那截；收尾段 = 关窗时把没压到的尾巴补上；
+/// 老段 = 改造前那份累计摘要，原样当第 0 段接上（plan-memory-fix-3 ①②）。
+public struct SessionSegment: Equatable {
+    public enum Kind: String { case rolling, closeout, legacy, window }
+
+    public var kind: Kind
+    public var title: String
+    public var start: Date
+    public var end: Date
+    /// 覆盖的消息下标 [from, to)，按主线 user / assistant 计；to = 写完后的位置
+    public var from: Int
+    public var to: Int
+    /// 覆盖的最后一条消息 id——水位线的可靠锚（切过分支下标会漂，id 不会）；老段没有
+    public var lastNodeId: String?
+    public var story: String
+    public var quotes: String
+    public var pending: String
+    public var keywords: [String] = []
+    /// v5 D1：A2 的尾段（kind = .closeout，老版本读到当收尾段不注入）：每次收尾整段重写，被正式压缩后换成正式段。
+    /// 文件里多一个 `tail=1`，老文件没有 = false
+    public var isTail = false
+    /// 磁盘格式：0 = 未标记的旧段，1 = 待续由本子承接，2 = 独立关键词（A3 用【走向】）。
+    /// 读旧文件保留原版本；三代迁移只把 format 0 的带待续段视作老式段。
+    public var format = 0
+
+    public static let currentFormat = 2
+
+    public init(kind: Kind, title: String, start: Date, end: Date, from: Int, to: Int, lastNodeId: String? = nil,
+                story: String, quotes: String, pending: String, keywords: [String] = [], isTail: Bool = false, format: Int = 0) {
+        self.kind = kind
+        self.title = title
+        self.start = start
+        self.end = end
+        self.from = from
+        self.to = to
+        self.lastNodeId = lastNodeId
+        self.story = story
+        self.quotes = quotes
+        self.pending = pending
+        self.keywords = keywords
+        self.isTail = isTail
+        self.format = format
+    }
+}
+
+/// 一个对话一份：上下文摘要在 memory/sessions/（只剩压缩段和改造前的第 0 段，老收尾段在重新生成前还留着），
+/// 窗口总结在 memory/windows/（v4-1，每次收尾整份重写），文件格式相同：{convId前8}-{标题slug}.md
+public struct SessionSummary: Equatable {
+    public var conversationId: String
+    public var title: String
+    /// 历史窗口锚定用：压缩到第几条（含义同旧 ContextSummary.coveredCount，只跟压缩段走，收尾段不推它）
+    public var compressedCount: Int
+    public var segments: [SessionSegment]
+    public var updatedAt: Date
+    /// 窗口总结写到哪条消息（只有 windows/ 的文件有）：收尾队列用它判断这个窗口有没有新消息
+    public var closedThrough: String? = nil
+
+    /// 总结到哪了（压缩段 + 收尾段 + 老段，取最后一段）
+    public var summarizedTo: Int { segments.last?.to ?? 0 }
+
+    public init(conversationId: String, title: String, compressedCount: Int, segments: [SessionSegment], updatedAt: Date,
+                closedThrough: String? = nil) {
+        self.conversationId = conversationId
+        self.title = title
+        self.compressedCount = compressedCount
+        self.segments = segments
+        self.updatedAt = updatedAt
+        self.closedThrough = closedThrough
+    }
+}
+
+public enum SessionSummaryStore {}
+
+public extension SessionSummaryStore {
+    static let folder = "sessions"
+
+    // MARK: - 路径（命名照 SummaryFileStore：前 8 位是锚，标题是可读糖，改名跟随）
+
+
+    static func dir(root: URL) -> URL {
+        root.appendingPathComponent(folder, isDirectory: true)
+    }
+
+    private static func slugify(_ title: String) -> String {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        var out = ""
+        for ch in t {
+            if "/\\:*?\"<>|#".contains(ch) || ch.isNewline || ch.isWhitespace { out.append("-") } else { out.append(ch) }
+        }
+        out = out.trimmingCharacters(in: CharacterSet(charactersIn: "-. "))
+        if out.count > 24 { out = String(out.prefix(24)) }
+        return out.isEmpty ? "untitled" : out
+    }
+
+    private static func existingFile(conversationId: String, in d: URL) -> URL? {
+        let prefix = String(conversationId.prefix(8)) + "-"
+        MainThreadIO.note(.enumerate, "SessionSummaryStore.existingFile")
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: d.path)) ?? []
+        return names.first { $0.hasPrefix(prefix) && $0.hasSuffix(".md") }.map { d.appendingPathComponent($0) }
+    }
+
+    /// 这个楼层所有窗口的那份文件（窗口总结格列表用），一次枚举 + 逐个读；后台调
+    static func all(memoryRoot: URL) -> [SessionSummary] {
+        all(in: dir(root: memoryRoot))
+    }
+
+    static func all(in d: URL, cancel: CatalogCancel? = nil) -> [SessionSummary] {
+        guard cancel?.isCancelled != true else { return [] }
+        MainThreadIO.note(.enumerate, "SessionSummaryStore.all")
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: d.path)) ?? []
+        var summaries: [SessionSummary] = []
+        for name in names where name.hasSuffix(".md") {
+            guard cancel?.isCancelled != true else { return [] }
+            MainThreadIO.note(.read, "SessionSummaryStore.all")
+            guard let raw = try? String(contentsOf: d.appendingPathComponent(name), encoding: .utf8) else { continue }
+            guard cancel?.isCancelled != true else { return [] }
+            if let summary = parse(raw) { summaries.append(summary) }
+        }
+        return summaries
+    }
+
+    // MARK: - 存取
+
+    static func load(conversationId: String, memoryRoot: URL) -> SessionSummary? {
+        load(conversationId: conversationId, in: dir(root: memoryRoot))
+    }
+
+    static func load(conversationId: String, in d: URL) -> SessionSummary? {
+        guard let url = existingFile(conversationId: conversationId, in: d) else { return nil }
+        MainThreadIO.note(.read, "SessionSummaryStore.load")
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        return parse(raw)
+    }
+
+    /// 严格读（三代搬迁 astra #9）：nil = 真没有；文件在但读不了 / 格式对不上就抛，不当「没有」
+    static func loadStrict(conversationId: String, in d: URL) throws -> SessionSummary? {
+        guard let url = try MemoryReadError.existingFile(prefix: String(conversationId.prefix(8)) + "-", in: d) else { return nil }
+        return try parseStrict(MemoryReadError.read(url), path: url.path)
+    }
+
+    /// 段头机读注释的行数要和读出来的段数一样；只有头、一段都没有 = nil（没东西可丢）
+    static func parseStrict(_ raw: String, path: String) throws -> SessionSummary? {
+        let segLines = raw.components(separatedBy: "\n").filter { $0.hasPrefix("<!-- seg ") }.count
+        guard let s = parse(raw) else {
+            if segLines == 0, raw.contains("conversationId:") { return nil }
+            throw MemoryReadError.corrupt(path)
+        }
+        if s.segments.count == segLines { return s }
+        // 窄口修复（10-16）：唯一的毛病是段标题断成了几行（老写手把带换行的标题写进了「## 」行）→ 并回一行再读；别的形状照旧判坏
+        if let fixed = repairSpilledTitles(raw), let r = parse(fixed), r.segments.count == segLines { return r }
+        throw MemoryReadError.corrupt(path)
+    }
+
+    /// 断开的标题最多夹几行、并起来最多几个字：只认兜底标题（≤15 字）断开的那种，夹得多 / 长的不是这个病
+    static let spilledTitleMaxLines = 6
+    static let spilledTitleMaxChars = 40
+
+    /// 段头必须是 render 写出来的真时间头（10-16 astra #1）：「## MM-dd HH:mm–HH:mm · 」，跨日终点带日期；标题整个掉到下一行的「 ·」结尾也认
+    private static let segmentHeadingPattern = #"^## \d{2}-\d{2} \d{2}:\d{2}–(\d{2}-\d{2} )?\d{2}:\d{2} ·( |$)"#
+
+    /// 夹行是正文不是标题：带【…】层标记、代码围栏、「## 」、HTML 注释的一律不修（正文里的格式示例长这样）
+    private static func looksLikeBody(_ line: String) -> Bool {
+        line.range(of: "【[^】]*】", options: .regularExpression) != nil || line.hasPrefix("```") || line.hasPrefix("~~~") || line.hasPrefix("## ") || line.contains("<!--")
+    }
+
+    /// 纯函数：每个上面不是「## 」行的「<!-- seg 」行，往上找最近的「## 」行；它得是真时间头，中间夹的全是普通文字（不是正文标记）、
+    /// 不超过 spilledTitleMaxLines 行、并起来不超过 spilledTitleMaxChars 字 → 并进那行标题。有一处不是这个形状就返回 nil（不修）
+    static func repairSpilledTitles(_ raw: String) -> String? {
+        var lines = raw.components(separatedBy: "\n")
+        var changed = false
+        var i = 0
+        while i < lines.count {
+            defer { i += 1 }
+            guard lines[i].hasPrefix("<!-- seg "), i == 0 || !lines[i - 1].hasPrefix("## ") else { continue }
+            var h = i - 1
+            while h >= 0, !lines[h].hasPrefix("## "), !lines[h].hasPrefix("<!-- seg ") { h -= 1 }
+            // 段头的样子是「## 时间 · 标题」：正文里自己带的「## 」小标题、格式示例不算
+            guard h >= 0, lines[h].range(of: segmentHeadingPattern, options: .regularExpression) != nil, i - h - 1 <= spilledTitleMaxLines else { return nil }
+            let spill = lines[(h + 1)..<i].map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            guard !spill.contains(where: looksLikeBody), spill.joined().count <= spilledTitleMaxChars else { return nil }
+            lines[h] = ([lines[h].trimmingCharacters(in: .whitespaces)] + spill).joined(separator: " ")
+            lines.removeSubrange((h + 1)..<i)
+            i = h + 1
+            changed = true
+        }
+        return changed ? lines.joined(separator: "\n") : nil
+    }
+
+    static func save(_ s: SessionSummary, memoryRoot: URL) throws {
+        try save(s, in: dir(root: memoryRoot))
+    }
+
+    static func save(_ s: SessionSummary, in d: URL) throws {
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        let desired = d.appendingPathComponent("\(s.conversationId.prefix(8))-\(slugify(s.title)).md")
+        if let existing = existingFile(conversationId: s.conversationId, in: d),
+           existing.lastPathComponent != desired.lastPathComponent {
+            try? FileManager.default.moveItem(at: existing, to: desired)
+        }
+        let target = existingFile(conversationId: s.conversationId, in: d) ?? desired
+        try Data(render(s).utf8).write(to: target, options: .atomic)
+    }
+
+    /// 这个窗口那份文件在哪（没有 = nil）
+    static func fileURL(conversationId: String, in d: URL) -> URL? {
+        existingFile(conversationId: conversationId, in: d)
+    }
+
+    static func clear(conversationId: String, memoryRoot: URL) {
+        guard let url = existingFile(conversationId: conversationId, in: dir(root: memoryRoot)) else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    /// 已有窗口摘要就读它；没有但有改造前的累计摘要 → 把它当第 0 段（老文件不动）；都没有 → 空的
+    static func loadOrSeed(conversationId: String, memoryRoot: URL, title: String) -> SessionSummary {
+        if let s = load(conversationId: conversationId, memoryRoot: memoryRoot) { return s }
+        if var s = legacySeed(conversationId: conversationId, memoryRoot: memoryRoot) {
+            s.title = title
+            return s
+        }
+        return SessionSummary(conversationId: conversationId, title: title, compressedCount: 0, segments: [], updatedAt: Date())
+    }
+
+    /// 改造前的累计摘要当第 0 段（没有 = nil）；重新生成时 sessions/ 里还没有这个窗口的文件也走它
+    static func legacySeed(conversationId: String, memoryRoot: URL) -> SessionSummary? {
+        SummaryFileStore.load(conversationId: conversationId, memoryRoot: memoryRoot).flatMap { legacySeed(from: $0, conversationId: conversationId) }
+    }
+
+    static func legacySeed(from legacy: ContextSummary, conversationId: String) -> SessionSummary? {
+        guard legacy.coveredCount > 0 else { return nil }
+        return SessionSummary(conversationId: conversationId, title: "", compressedCount: legacy.coveredCount,
+                              segments: [SessionSegment(kind: .legacy, title: "改造前的累计摘要", start: legacy.updatedAt, end: legacy.updatedAt,
+                                                        from: 0, to: legacy.coveredCount, lastNodeId: nil,
+                                                        story: legacy.summary, quotes: "", pending: "")],
+                              updatedAt: Date())
+    }
+
+    // MARK: - 水位线
+
+    /// 下一段从路径的第几条开始：先按最后一段的 lastNodeId 在路径里找（找到 = 它后面那条），
+    /// 找不到（老段 / 切过分支）退回最后一段的 to，夹在路径长度内
+    static func resumeIndex(_ s: SessionSummary, pathIds: [String]) -> Int {
+        guard let last = s.segments.last else { return 0 }
+        if let id = last.lastNodeId, let i = pathIds.firstIndex(of: id) { return i + 1 }
+        return min(last.to, pathIds.count)
+    }
+
+    // MARK: - 注入 / recall 文本
+
+    static func timeRange(_ seg: SessionSegment) -> String {
+        let day = DateFormatter(); day.dateFormat = "MM-dd HH:mm"
+        let hm = DateFormatter(); hm.dateFormat = "HH:mm"
+        let sameDay = Calendar.current.isDate(seg.start, inSameDayAs: seg.end)
+        return "\(day.string(from: seg.start))–\(sameDay ? hm.string(from: seg.end) : day.string(from: seg.end))"
+    }
+
+    /// 给模型看的一段（注入 / recall / A3 重压输入）：经过 + 原话。段里的【待续】不拼——待续只有待续本子一份（`PendingStore`），
+    /// 段里那份只给 A4 搬进本子（c2c3-v2 第 7 段）
+    static func segmentText(_ seg: SessionSegment) -> String {
+        guard seg.kind != .legacy else { return seg.story }
+        var parts = ["【经过】\(seg.story)"]
+        if !seg.quotes.isEmpty { parts.append("【原话】\(seg.quotes)") }
+        return parts.joined(separator: "\n")
+    }
+
+    /// 磁盘 v2 带关键词；注入仍沿用 segmentText，不把待续混进去。
+    private static func fileText(_ seg: SessionSegment) -> String {
+        guard seg.kind != .legacy else { return seg.story }
+        if seg.format < 2 {
+            return segmentText(seg) + (seg.pending.isEmpty ? "" : "\n【待续】\(seg.pending)")
+        }
+        var parts = ["\(seg.kind == .window ? "【走向】" : "【经过】")\(seg.story)"]
+        if !seg.quotes.isEmpty { parts.append("【原话】\(seg.quotes)") }
+        if !seg.keywords.isEmpty { parts.append("【关键词】" + seg.keywords.joined(separator: "，")) }
+        if seg.kind != .window, !seg.pending.isEmpty { parts.append("【待续】\(seg.pending)") }
+        return parts.joined(separator: "\n")
+    }
+
+    /// 纯函数（v4-1 §六）：当前窗口注哪几段上下文摘要。收尾段一律不注（它属于窗口总结）；一段的最后一条消息还在历史窗口里
+    /// （`lastNodeId` 在窗口的节点 id 里；老段没有 id 就看下标：它盖到的最后一条 ≥ 窗口起点）→ 不注（宁缺不重，Q9）
+    static func injectableSegments(_ segments: [SessionSegment], windowIds: Set<String>, windowStart: Int) -> [SessionSegment] {
+        segments.filter { seg in
+            guard seg.kind != .closeout, seg.kind != .window else { return false }
+            if let id = seg.lastNodeId { return !windowIds.contains(id) }
+            return seg.to <= windowStart
+        }
+    }
+
+    /// 窗口内注入：最近 fullCount 段全文，更早的每段一行「时间 · 标题」
+    static func injectionText(_ s: SessionSummary, fullCount: Int) -> String? {
+        guard !s.segments.isEmpty else { return nil }
+        let keep = max(1, fullCount)
+        let older = s.segments.dropLast(keep)
+        let recent = s.segments.suffix(keep)
+        var out: [String] = []
+        if !older.isEmpty {
+            out.append("更早（只列标题，细节用 recall 翻 conversation_id=\(s.conversationId.prefix(8))）：\n"
+                       + older.map { "- \(timeRange($0)) · \($0.title)" }.joined(separator: "\n"))
+        }
+        for seg in recent {
+            out.append("〔\(timeRange(seg)) · \(seg.title)〕\n\(segmentText(seg))")
+        }
+        return out.joined(separator: "\n\n")
+    }
+
+    /// recall 只给 conversation_id 时：段标题全列 + 最近两段全文（没做完的事只在待续本子里，这里不列）
+    static func recallText(_ s: SessionSummary) -> String {
+        var out = "《\(s.title)》conv \(s.conversationId.prefix(8)) · 共 \(s.segments.count) 段"
+        if s.segments.count > 2 {
+            out += "\n" + s.segments.dropLast(2).map { "- \(timeRange($0)) · \($0.title)" }.joined(separator: "\n")
+        }
+        for seg in s.segments.suffix(2) {
+            out += "\n\n〔\(timeRange(seg)) · \(seg.title)〕\n\(segmentText(seg))"
+        }
+        return out
+    }
+
+    // MARK: - 文件格式（frontmatter + 每段一个 ## 标题 + 一行机读注释）
+
+    private static let iso = FrontmatterCodec.dateFormatter
+
+    static func render(_ s: SessionSummary) -> String {
+        let body = s.segments.map { seg -> String in
+            var meta = "kind=\(seg.kind.rawValue) from=\(seg.from) to=\(seg.to) start=\(iso.string(from: seg.start)) end=\(iso.string(from: seg.end))"
+            if let id = seg.lastNodeId { meta += " last=\(id)" }
+            if seg.isTail { meta += " tail=1" }
+            if seg.format > 0 { meta += " w=\(seg.format)" }
+            // 标题必须一行：换行进了标题行，段头和机读注释就隔开了（10-16 色色那份严格读判坏）
+            return "## \(timeRange(seg)) · \(oneLine(seg.title))\n<!-- seg \(meta) -->\n\(fileText(seg))"
+        }.joined(separator: "\n\n")
+        var meta: [(key: String, value: String)] = [
+            ("conversationId", s.conversationId),
+            ("title", oneLine(s.title)),
+            ("compressedCount", String(s.compressedCount)),
+            ("updatedAt", iso.string(from: s.updatedAt)),
+        ]
+        if let c = s.closedThrough { meta.append((key: "closedThrough", value: c)) }
+        return FrontmatterCodec.render(meta: meta, body: body)
+    }
+
+    static func parse(_ raw: String) -> SessionSummary? {
+        guard let (meta, body) = FrontmatterCodec.parse(raw), let convId = meta["conversationId"] else { return nil }
+        var segments: [SessionSegment] = []
+        let lines = body.components(separatedBy: "\n")
+        var i = 0
+        while i < lines.count {
+            guard lines[i].hasPrefix("## "), i + 1 < lines.count, lines[i + 1].hasPrefix("<!-- seg ") else { i += 1; continue }
+            let heading = String(lines[i].dropFirst(3))
+            let title = heading.components(separatedBy: " · ").dropFirst().joined(separator: " · ")
+            let fields = Dictionary(lines[i + 1].dropFirst(9).replacingOccurrences(of: " -->", with: "")
+                .split(separator: " ").compactMap { pair -> (String, String)? in
+                    let kv = pair.split(separator: "=", maxSplits: 1)
+                    return kv.count == 2 ? (String(kv[0]), String(kv[1])) : nil
+                }, uniquingKeysWith: { a, _ in a })
+            var j = i + 2
+            var text: [String] = []
+            while j < lines.count, !(lines[j].hasPrefix("## ") && j + 1 < lines.count && lines[j + 1].hasPrefix("<!-- seg ")) {
+                text.append(lines[j]); j += 1
+            }
+            let kind = fields["kind"].flatMap(SessionSegment.Kind.init(rawValue:)) ?? .rolling
+            let joined = text.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            let layers = kind == .legacy ? (story: joined, quotes: "", pending: "", keywords: [String]()) : splitLayers(joined)
+            segments.append(SessionSegment(
+                kind: kind, title: title,
+                start: fields["start"].flatMap(iso.date(from:)) ?? .distantPast,
+                end: fields["end"].flatMap(iso.date(from:)) ?? .distantPast,
+                from: fields["from"].flatMap { Int($0) } ?? 0,
+                to: fields["to"].flatMap { Int($0) } ?? 0,
+                lastNodeId: fields["last"],
+                story: layers.story, quotes: layers.quotes, pending: layers.pending, keywords: layers.keywords,
+                isTail: fields["tail"] == "1", format: fields["w"].flatMap { Int($0) } ?? 0))
+            i = j
+        }
+        return SessionSummary(
+            conversationId: convId, title: meta["title"] ?? "",
+            compressedCount: meta["compressedCount"].flatMap { Int($0) } ?? 0,
+            segments: segments,
+            updatedAt: meta["updatedAt"].flatMap(iso.date(from:)) ?? .distantPast,
+            closedThrough: meta["closedThrough"])
+    }
+
+    private static let lineLayerMark = try! NSRegularExpression(
+        pattern: #"(?m)^\s*(【(?:经过|走向|原话|关键词|待续)】)"#)
+
+    static func lineLayerMarks(_ text: String) -> [(mark: String, range: Range<String.Index>)] {
+        lineLayerMark.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
+            guard let range = Range(match.range(at: 1), in: text) else { return nil }
+            return (String(text[range]), range)
+        }
+    }
+
+    /// 新旧五种块名只认行首；全无行首标记的旧怪文件沿用首次字面匹配。
+    static func splitLayers(_ text: String) -> (story: String, quotes: String, pending: String, keywords: [String]) {
+        var found = lineLayerMarks(text)
+        if found.isEmpty {
+            found = ["【经过】", "【走向】", "【原话】", "【关键词】", "【待续】"]
+                .compactMap { mark in text.range(of: mark).map { (mark, $0) } }
+            found.sort { $0.range.lowerBound < $1.range.lowerBound }
+        }
+        guard !found.isEmpty else { return (text, "", "", []) }
+        var out: [String: String] = [:]
+        for (k, f) in found.enumerated() {
+            let end = k + 1 < found.count ? found[k + 1].range.lowerBound : text.endIndex
+            out[f.mark] = String(text[f.range.upperBound..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return (out["【经过】"] ?? out["【走向】"] ?? "", out["【原话】"] ?? "", out["【待续】"] ?? "",
+                parseKeywords(out["【关键词】"] ?? ""))
+    }
+
+    static func parseKeywords(_ text: String) -> [String] {
+        var seen: Set<String> = []
+        return text.components(separatedBy: CharacterSet(charactersIn: ",，、"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != "无" && $0 != "（无）" && seen.insert($0).inserted }
+    }
+
+    /// 压成一行：各种换行（含 \r\n）都换成空格，连着的空行不留多余空格
+    static func oneLine(_ s: String) -> String {
+        s.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+}
+
+/// 严格读的错（三代搬迁 astra #9）：「不存在」不算错；文件在但读不了、读得出但格式对不上，都要原样留着、报路径
+public enum MemoryReadError: LocalizedError, Equatable {
+    case unreadable(String)
+    case corrupt(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unreadable(let path): return "读不了 \(path)"
+        case .corrupt(let path): return "格式对不上 \(path)"
+        }
+    }
+
+    public static func read(_ url: URL) throws -> String {
+        do { return try String(contentsOf: url, encoding: .utf8) } catch { throw unreadable(url.path) }
+    }
+
+    /// 文件夹里按前缀找那份文件；文件夹不在 = nil，列不出来就抛
+    public static func existingFile(prefix: String, in d: URL) throws -> URL? {
+        guard FileManager.default.fileExists(atPath: d.path) else { return nil }
+        let names: [String]
+        do { names = try FileManager.default.contentsOfDirectory(atPath: d.path) } catch { throw unreadable(d.path) }
+        return names.first { $0.hasPrefix(prefix) && $0.hasSuffix(".md") }.map { d.appendingPathComponent($0) }
+    }
+}

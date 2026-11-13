@@ -27,7 +27,7 @@ struct GlobalExportSheet: View {
 
     @State private var includeMemoryTree: Bool = true
     @State private var phase: Phase = .preview
-    @State private var progress = GlobalBackupProgress()
+    @StateObject private var progress = GlobalBackupProgress()
     @State private var resultURL: URL?
     @State private var errorMessage: String?
 
@@ -43,24 +43,16 @@ struct GlobalExportSheet: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider().opacity(0.15)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    switch phase {
-                    case .preview:
-                        previewContent
-                    case .exporting:
-                        exportingContent
-                    case .finished:
-                        finishedContent
-                    case .failed:
-                        failedContent
-                    }
-                }
-                .padding(24)
+        BackupSheetFrame(title: "全量备份", closeDisabled: phase == .exporting) {
+            switch phase {
+            case .preview:
+                previewContent
+            case .exporting:
+                exportingContent
+            case .finished:
+                finishedContent
+            case .failed:
+                failedContent
             }
         }
         #if os(macOS)
@@ -86,28 +78,6 @@ struct GlobalExportSheet: View {
         }
         #endif
         .macEscapeToDismiss { dismiss() }   // S1-5
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        HStack {
-            Text("全量备份")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundColor(Theme.textPrimary)
-            Spacer()
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18))
-                    .foregroundColor(Theme.textMuted)
-            }
-            .buttonStyle(.plain)
-            .disabled(phase == .exporting)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
     }
 
     // MARK: - Preview
@@ -169,36 +139,19 @@ struct GlobalExportSheet: View {
     // MARK: - Exporting
 
     private var exportingContent: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                ProgressView()
-                Text("正在导出...")
-                    .font(.system(size: 14))
-                    .foregroundColor(Theme.textPrimary)
-            }
-            ProgressView(value: progress.overallFraction)
-                .progressViewStyle(.linear)
-                .tint(Theme.branchIndicator)
-            Text("当前：\(displaySectionName(progress.currentSection))")
-                .font(.caption)
-                .foregroundColor(Theme.textMuted)
-            Text("整个过程不会动当前数据，导出完成才写出文件。请不要关闭 app。")
-                .font(.caption)
-                .foregroundColor(Theme.textMuted)
-        }
+        BackupProgressBlock(
+            title: "正在导出...",
+            fraction: progress.overallFraction,
+            section: displaySectionName(progress.currentSection),
+            note: "整个过程不会动当前数据，导出完成才写出文件。请不要关闭 app。"
+        )
     }
 
     // MARK: - Finished
 
     private var finishedContent: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(Theme.branchIndicator)
-                Text("导出完成")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
-            }
+            BackupStatusTitle(systemImage: "checkmark.circle.fill", color: Theme.branchIndicator, title: "导出完成")
 
             if let url = resultURL {
                 VStack(alignment: .leading, spacing: 6) {
@@ -257,50 +210,9 @@ struct GlobalExportSheet: View {
     // MARK: - Failed
 
     private var failedContent: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.orange)
-                Text("导出失败")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
-            }
-            if let err = errorMessage {
-                Text(err)
-                    .font(.caption)
-                    .foregroundColor(Theme.textMuted)
-                    .textSelection(.enabled)
-            }
-            Text("当前数据未被改动，可以稍后重试。")
-                .font(.caption)
-                .foregroundColor(Theme.textMuted)
-
-            Spacer(minLength: 10)
-
-            HStack(spacing: 10) {
-                Button {
-                    phase = .preview
-                    errorMessage = nil
-                } label: {
-                    Text("返回")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent))
-                        .foregroundColor(Theme.textPrimary)
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    dismiss()
-                } label: {
-                    Text("关闭")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent.opacity(0.5)))
-                        .foregroundColor(Theme.textPrimary)
-                }
-                .buttonStyle(.plain)
-            }
+        BackupFailedBlock(title: "导出失败", error: errorMessage, note: "当前数据未被改动，可以稍后重试。", retryTitle: "返回") {
+            phase = .preview
+            errorMessage = nil
         }
     }
 

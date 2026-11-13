@@ -11,18 +11,25 @@ import PhotosUI
 /// 「撤销」回到进页时的图 + 参数——换图 / 移除会立刻删掉原文件，所以进页先给原图留一份备份，离页再删（kimi 应改 4）。
 /// 「重置为默认」= 参数归零，两个按钮都留。「纯净背景」不在这（它改的是颜色，住颜色页）。
 /// 三段正文抽在 `ChatBackgroundSections`，「新建主题」页（`ThemeColorsPage(creating:)`）嵌同一份。
+/// `target: .person`（atrium P3④a）：编辑 TA 的聊天主题的背景；这套还有别人在用先问「复制一份给 TA / 一起改」，内置主题复制完给 TA。
 struct ChatBackgroundPage: View {
     @Environment(ThemeManager.self) private var themeManager: ThemeManager?
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.dismiss) private var dismiss
     /// nil = 编辑当前主题（外观页入口）；给定 = 编辑那一套（主题列表长按），不切换当前主题
     let fixedThemeId: String?
+    private let themeTarget: ThemeTarget
+    /// 人页入口：这套还有谁在用（非 nil = 弹共用提示）
+    @State private var sharers: [String]?
+    @State private var saveError: String?
     @State private var snapshot: BackgroundSnapshot?
     @State private var didAppear = false
     @State private var showBuiltInPrompt = false
     @State private var copiedThemeId: String?
 
-    init(themeId: String? = nil) {
+    init(themeId: String? = nil, target: ThemeTarget = .interface) {
         self.fixedThemeId = themeId
+        self.themeTarget = target
     }
 
     private struct BackgroundSnapshot {
@@ -34,7 +41,9 @@ struct ChatBackgroundPage: View {
     }
 
     private var manager: ThemeManager { themeManager ?? ThemeManager.shared }
-    private var themeId: String { copiedThemeId ?? fixedThemeId ?? manager.selectedThemeId }
+    private var themeId: String { copiedThemeId ?? fixedThemeId ?? themeTarget.themeId(manager, profileManager) }
+    /// 页底铺图：按目标走的入口铺正在改的那套，列表长按入口照旧铺界面主题
+    private var pageBackgroundThemeId: String { fixedThemeId == nil ? themeId : manager.selectedThemeId }
     private var theme: AppThemeDefinition { manager.themeDefinition(id: themeId) ?? manager.selectedTheme }
 
     private var canUndo: Bool {
@@ -75,9 +84,9 @@ struct ChatBackgroundPage: View {
         .background {
             ThemeBackgroundView(
                 fill: Theme.sidebarBg,
-                imageURL: manager.currentBackgroundImageURL,
+                imageURL: manager.backgroundImageURL(for: pageBackgroundThemeId),
                 scheme: manager.activeScheme,
-                backgroundStyle: manager.currentBackgroundStyle
+                backgroundStyle: manager.backgroundStyle(for: pageBackgroundThemeId)
             )
             .ignoresSafeArea()
         }
@@ -97,18 +106,32 @@ struct ChatBackgroundPage: View {
             Button("复制一份") { copyAndContinue() }
             Button("算了", role: .cancel) { dismiss() }
         } message: {
-            Text(fixedThemeId == nil
+            Text(themeTarget.profileId != nil && fixedThemeId == nil
+                 ? "复制一份「\(theme.name)」给 TA 再改？"
+                 : fixedThemeId == nil
                  ? "复制一份「\(theme.name)」再改？复制完自动切过去。"
                  : "复制一份「\(theme.name)」再改？当前主题不变。")
+        }
+        .sharedChatThemePrompt(sharers: $sharers, themeName: theme.name, onCopy: copyAndContinue, onCancel: { dismiss() })
+        .alert("保存失败", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+            Button("好", role: .cancel) { saveError = nil }
+        } message: {
+            Text(saveError ?? "")
         }
         .onAppear {
             guard !didAppear else { return }
             didAppear = true
             takeSnapshot()
-            if theme.isBuiltIn { showBuiltInPrompt = true }
+            if theme.isBuiltIn {
+                showBuiltInPrompt = true
+            } else if fixedThemeId == nil {
+                let others = themeTarget.sharers(of: themeId, manager, profileManager)
+                if !others.isEmpty { sharers = others }
+            }
         }
-        .onChange(of: manager.selectedThemeId) { _, _ in
-            guard fixedThemeId == nil else { return }   // 列表入口的靶子固定，不跟选中走
+        .onChange(of: themeId) { _, _ in
+            // 按目标走的入口（界面 = 选中的、人 = TA 的聊天主题）跟着它变重拍快照；列表入口的靶子固定
+            guard fixedThemeId == nil else { return }
             discardBackup()
             takeSnapshot()
         }
@@ -152,10 +175,15 @@ struct ChatBackgroundPage: View {
         manager.replaceBackgroundStyle(snapshot.style, for: themeId)
     }
 
+    /// 内置主题 / 人页共用提示选「复制一份给 TA」：外观页入口复制完切过去，人页入口复制完给 TA，列表入口不切、靶子换成新的那份
     private func copyAndContinue() {
-        let selectAfter = fixedThemeId == nil
+        let isPerson = themeTarget.profileId != nil && fixedThemeId == nil
+        let selectAfter = fixedThemeId == nil && !isPerson
         if let newId = manager.saveThemeCopy(from: themeId, name: "", select: selectAfter), !selectAfter {
             copiedThemeId = newId
+            if isPerson {
+                do { try themeTarget.apply(newId, manager, profileManager) } catch { saveError = error.localizedDescription }
+            }
         }
         discardBackup()
         takeSnapshot()

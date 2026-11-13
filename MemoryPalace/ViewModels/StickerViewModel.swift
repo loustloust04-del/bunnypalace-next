@@ -14,6 +14,9 @@ final class StickerViewModel {
     // 贴纸库
     var stickerAssets: [StickerAsset] = []
 
+    /// 面板点了要发的表情包（聊天页的 memeSending 取走后清空）
+    var pendingMemeSend: UUID?
+
     // 当前对话已贴的贴纸
     var placedStickers: [PlacedSticker] = []
 
@@ -115,7 +118,61 @@ final class StickerViewModel {
             predicate: #Predicate<StickerAsset> { asset in asset.profileId == pid },
             sortBy: [SortDescriptor(\StickerAsset.createdAt, order: .reverse)]
         )
-        stickerAssets = (try? context.fetch(desc)) ?? []
+        let fetched = (try? context.fetch(desc)) ?? []
+        panelOrderProfileId = profileId
+        panelOrder = StickerPanelOrder.load(from: Self.panelOrderURL(profileId: profileId))
+        stickerAssets = panelOrder.sorted(fetched) { $0.id }
+    }
+
+    // MARK: - 面板顺序（置顶 + 最近用过）
+
+    private(set) var panelOrder = StickerPanelOrder()
+    @ObservationIgnored private var panelOrderProfileId: String?
+
+    private static func panelOrderURL(profileId: String) -> URL {
+        StickerFileManager.stickerDirectory(profileId: profileId).appendingPathComponent("panel-order.json")
+    }
+
+    private func savePanelOrder() {
+        guard let profileId = panelOrderProfileId else { return }
+        panelOrder.prune(keeping: Set(stickerAssets.map(\.id)))
+        panelOrder.save(to: Self.panelOrderURL(profileId: profileId))
+        stickerAssets = panelOrder.sorted(stickerAssets) { $0.id }
+    }
+
+    /// 贴了一次：排到最近用过的最前
+    func noteAssetUsed(_ assetId: UUID) {
+        panelOrder.touch(assetId)
+        savePanelOrder()
+    }
+
+    /// iOS 面板长按拖动排完：整份顺序记下来
+    func reorderAssets(_ ids: [UUID]) {
+        panelOrder.setManual(ids)
+        savePanelOrder()
+    }
+
+    func togglePin(_ asset: StickerAsset) {
+        panelOrder.togglePin(asset.id)
+        savePanelOrder()
+    }
+
+    /// ➕ 面板点一下：贴到最新那条消息旁边，进编辑模式并选中。最新消息不在屏幕附近（没有位置）时返回 false
+    @discardableResult
+    func placeFromPanel(_ asset: StickerAsset, conversationId: String, lastMessageId: String, context: ModelContext) -> Bool {
+        guard let y = bubblePositions[lastMessageId] else { return false }
+        let position = CGPoint(x: 150 + CGFloat.random(in: -30...30), y: y)
+        if asset.isNote {
+            placeNote(content: asset.noteContent ?? "", style: asset.noteStyle ?? "yellow_square", conversationId: conversationId,
+                      position: position, nearestMessageId: lastMessageId, profileId: asset.profileId, context: context)
+        } else {
+            placeSticker(assetId: asset.id, conversationId: conversationId, position: position,
+                         nearestMessageId: lastMessageId, profileId: asset.profileId, context: context)
+        }
+        isEditingStickers = true
+        selectedPlacedStickerId = placedStickers.last?.id
+        noteAssetUsed(asset.id)
+        return true
     }
 
     func loadPlacedStickers(conversationId: String, profileId: String, context: ModelContext) {
@@ -507,9 +564,6 @@ final class StickerViewModel {
     }
 
     // MARK: - Export Note as PNG
-
-    /// iOS 导出触发：设了 data 后 SwiftUI sheet 弹出分享面板
-    var exportedNotePNGData: Data?
 
     /// 渲染便签为 PNG（不带画布上的 scale/rotation，原始尺寸 3x 高清）
     @MainActor

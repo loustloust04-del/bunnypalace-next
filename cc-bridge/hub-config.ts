@@ -17,6 +17,8 @@ export interface HubConfig {
   /// 只在 MP_CC_HUB_PORT=0（Mac App 内嵌 hub）时用：OS 第一次分配的端口记下来，下次先试它，
   /// 这样手机扫过的二维码重启后还连得上。
   port?: number
+  /// plan-opencli-in-app：让 AI 用这台 Mac 的 Chrome 登录态（chrome_read / site_query），默认关，只认本机 Mac app 改
+  opencli_enabled?: boolean
 }
 
 /// LAN / Tailscale 绑定开关（secrets/bind-config.json）。缺文件 / 坏文件 = 都开
@@ -70,6 +72,7 @@ export function loadHubConfig(path: string): HubConfig {
     const out: HubConfig = {}
     if (typeof raw.agent_workdir === "string" && raw.agent_workdir) out.agent_workdir = raw.agent_workdir
     if (Number.isInteger(raw.port) && raw.port > 0 && raw.port < 65536) out.port = raw.port
+    if (raw.opencli_enabled === true) out.opencli_enabled = true
     return out
   } catch {
     return {}
@@ -79,17 +82,40 @@ export function loadHubConfig(path: string): HubConfig {
 /// 原子写 + 0600。目标是软链就拒写（防被人换成指向别处的链接后写穿）；临时文件随机名 + 独占创建（wx），
 /// 已有同名（含软链）直接失败，不会写穿到别处。
 export function saveJsonPrivate(path: string, value: unknown): void {
+  writeFilePrivate(path, JSON.stringify(value, null, 2))
+}
+
+export function writeFilePrivate(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error(`${path} 是软链，不写`)
   const tmp = `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`
   try {
-    writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600, flag: "wx" })
+    writeFileSync(tmp, text, { mode: 0o600, flag: "wx" })
     chmodSync(tmp, 0o600)
     renameSync(tmp, path)
   } catch (e) {
     try { unlinkSync(tmp) } catch { /* 没建出来 */ }
     throw e
   }
+}
+
+/// hub 身份 id（secrets/hub-id，plan-multi-hub B0）：第一次启动生成随机 UUID，之后原样读回，hello 帧带上。
+/// 缺文件静默生成；文件坏 / 空 → 打日志重建（app 会把它当成另一台机器，提示人确认）。
+/// 写不进去也照样返回这次生成的（只是重启会变），不让 hub 起不来。
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+export function loadOrCreateHubId(path: string): string {
+  let raw: string | undefined
+  try { raw = readFileSync(path, "utf-8").trim() } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.warn(`[hub] hub-id 读不了（${(e as Error).message}），重建`)
+  }
+  if (raw && UUID_RE.test(raw)) return raw.toLowerCase()
+  if (raw !== undefined) console.warn(`[hub] hub-id 文件坏了 / 是空的（${JSON.stringify(raw.slice(0, 64))}），重建——app 会把这台当成新机器`)
+  const id = crypto.randomUUID()
+  try {
+    writeFilePrivate(path, id + "\n")
+    console.log(`[hub] hub-id 新生成 ${id}`)
+  } catch (e) { console.warn(`[hub] hub-id 写入失败（${(e as Error).message}），这次先用 ${id}，重启会变`) }
+  return id
 }
 
 /// stat 出任何错（循环软链 / 没权限 / 路径带 NUL）都当「没有」，不往上抛——hub 消息处理里抛出去会整个退出
@@ -211,6 +237,7 @@ export function readMachineInfo(): MachineInfo {
 
 export interface HelloInput {
   hubVersion: string
+  hubId: string
   machine: MachineInfo
   claudeHome: string
   codexHome: string
@@ -223,6 +250,7 @@ export function buildHelloPayload(input: HelloInput): string {
   const frame: Record<string, unknown> = {
     type: "hello",
     hub_version: input.hubVersion,
+    hub_id: input.hubId,
     host_name: input.machine.host_name,
     dirs: { claude_home: input.claudeHome, codex_home: input.codexHome, agent_workdir: input.agentWorkdir },
     tools: input.tools,

@@ -4,9 +4,71 @@ import Observation
 @MainActor
 @Observable
 final class Page2HomeStore {
-    static let shared: Page2HomeStore = {
+    /// 当前层的实例（atrium P3⑥b）：`activate(profileId:)` 换；激活前（楼层列表读坏的只读启动 / 测试）是老文件那一份
+    static var shared: Page2HomeStore {
+        if let current { return current }
+        let store = makeInitial()
+        current = store
+        return store
+    }
+
+    /// 老文件 = 默认主屏，P3⑥b 起只读；层文件 `floors/<profileId>/home-layout-v1.json`，这一层第一次保存才写。测试换目录 / defaults 后调 `dropInstances()`
+    static var storageDirectory = AppPaths.checked(AppPaths.applicationSupport.appendingPathComponent("MemoryPalace/Page2"))
+    static var storageDefaults: UserDefaults = .standard
+    static var defaultURL: URL { storageDirectory.appendingPathComponent("home-layout-v1.json") }
+    static func floorDirectory(_ profileId: String) -> URL { storageDirectory.appendingPathComponent("floors/\(profileId)", isDirectory: true) }
+    static func floorURL(_ profileId: String) -> URL { floorDirectory(profileId).appendingPathComponent("home-layout-v1.json") }
+
+    private static var current: Page2HomeStore?
+    private static var instances: [String: Page2HomeStore] = [:]
+    private static var activeProfileId: String?
+
+    /// 切层换实例（`ProfileManager.mirrorCurrent`，`currentProfile` 赋值之前）；同 id 不重建，UI 测试不换。新层 Dock 和镜像不同才重写 `page2DockTools_v1`
+    static func activate(profileId: String) {
+        guard !isUITest, profileId != activeProfileId else { return }
+        activeProfileId = profileId
+        let store = instances[profileId] ?? Page2HomeStore(defaults: storageDefaults, fileURL: floorURL(profileId), fallbackURL: defaultURL)
+        instances[profileId] = store
+        current = store
+        if store.isInitialized, storageDefaults.stringArray(forKey: dockKey) != store.layout.dockIDs { store.mirrorDock(store.layout.dockIDs) }
+    }
+
+    /// 删层：删这个人的文件夹、丢掉缓存的实例（之后再激活回到默认主屏）
+    static func removeFloor(_ profileId: String) {
+        instances[profileId] = nil
+        try? FileManager.default.removeItem(at: floorDirectory(profileId))
+    }
+
+    /// 新建：来源有自己的主屏就复制一份；没有 = 新人也跟默认
+    static func copyFloor(from source: String, to target: String) {
+        let from = floorURL(source)
+        guard FileManager.default.fileExists(atPath: from.path) else { return }
+        do {
+            try FileManager.default.createDirectory(at: floorDirectory(target), withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: from, to: floorURL(target))
+            instances[target] = nil
+        } catch { NSLog("[Page2HomeStore] 复制主屏 \(source) → \(target) 失败：\(error.localizedDescription)") }
+    }
+
+    static func dropInstances() {
+        current = nil
+        instances = [:]
+        activeProfileId = nil
+    }
+
+    private static let dockKey = "page2DockTools_v1"
+
+    private static var isUITest: Bool {
         #if DEBUG || PERF_BENCH
-        if ProcessInfo.processInfo.arguments.contains("page2-ui-test") {
+        return ProcessInfo.processInfo.arguments.contains("page2-ui-test")
+        #else
+        return false
+        #endif
+    }
+
+    private static func makeInitial() -> Page2HomeStore {
+        #if DEBUG || PERF_BENCH
+        if isUITest {
             let defaults = UserDefaults(suiteName: "page2-ui-test")!
             defaults.set(Data("[]".utf8), forKey: "dashboardWidgets_v2")
             let requested = ProcessInfo.processInfo.environment["PAGE2_UI_LAYOUT_CASE"] ?? UUID().uuidString
@@ -55,7 +117,7 @@ final class Page2HomeStore {
         }
         #endif
         return Page2HomeStore()
-    }()
+    }
 
     private(set) var layout = Page2Layout()
     private(set) var previousLayout: Page2Layout?
@@ -64,27 +126,43 @@ final class Page2HomeStore {
     private(set) var recoveryRequired = false
     private let defaults: UserDefaults
     private let fileURL: URL
+    /// 这一层没有自己的文件时读它（默认主屏），从不写
+    private let fallbackURL: URL?
     private let writeData: (Data, URL) throws -> Void
 
-    init(defaults: UserDefaults = .standard, fileURL: URL? = nil,
+    init(defaults: UserDefaults = .standard, fileURL: URL? = nil, fallbackURL: URL? = nil,
          writeData: @escaping (Data, URL) throws -> Void = { try $0.write(to: $1, options: .atomic) }) {
         self.defaults = defaults
-        self.fileURL = fileURL ?? AppPaths.checked(AppPaths.applicationSupport
-            .appendingPathComponent("MemoryPalace/Page2/home-layout-v1.json"))
+        self.fileURL = fileURL ?? Self.defaultURL
+        self.fallbackURL = fallbackURL
         self.writeData = writeData
-        if FileManager.default.fileExists(atPath: self.fileURL.path) {
+        if let source = sourceURL {
             do {
-                let data = try Data(contentsOf: self.fileURL)
-                var saved = try JSONDecoder().decode(Page2Layout.self, from: data)
-                saved.materializeDock()
-                guard Page2GridEngine.validate(saved) else { throw Page2GridError.invalidLayout }
-                layout = saved
+                layout = try Self.load(source)
                 isInitialized = true
             } catch {
                 recoveryRequired = true
                 errorMessage = "主屏存档暂时无法读取，原文件已保留。可以重试读取，或备份后恢复旧桌面。"
             }
         }
+    }
+
+    /// 读哪个：自己的文件，没有就默认主屏
+    private var sourceURL: URL? {
+        [fileURL, fallbackURL].compactMap { $0 }.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private static func load(_ url: URL) throws -> Page2Layout {
+        var saved = try JSONDecoder().decode(Page2Layout.self, from: Data(contentsOf: url))
+        saved.materializeDock()
+        guard Page2GridEngine.validate(saved) else { throw Page2GridError.invalidLayout }
+        return saved
+    }
+
+    /// 全新主屏的 Dock（atrium P4 §3.4 D1）：第一格「设置」，后面接原来的前 3 个。只喂给 `bootstrap`，已有布局文件不碰
+    static func bootstrapDock(_ ids: [String]) -> [String] {
+        let settings = RightPanelToolManager.gardenOSToolId
+        return [settings] + ids.filter { $0 != settings }.prefix(3)
     }
 
     func bootstrap(toolIDs: [String], dockIDs: [String]) {
@@ -107,10 +185,7 @@ final class Page2HomeStore {
 
     func retryLoad() {
         do {
-            var decoded = try JSONDecoder().decode(Page2Layout.self, from: Data(contentsOf: fileURL))
-            decoded.materializeDock()
-            guard Page2GridEngine.validate(decoded) else { throw Page2GridError.invalidLayout }
-            layout = decoded
+            layout = try Self.load(sourceURL ?? fileURL)
             isInitialized = true
             recoveryRequired = false
             errorMessage = nil
@@ -457,7 +532,19 @@ final class Page2HomeStore {
         if save(previousLayout, keepUndo: false) { self.previousLayout = nil }
     }
 
+    /// 恢复成默认主屏（§0-7）：删这一层自己的文件、回到默认主屏，可撤销；没有默认主屏（全新安装）才按装了的 App 重排
     func reset(toolIDs: [String]) {
+        if !recoveryRequired, let fallbackURL, FileManager.default.fileExists(atPath: fallbackURL.path) {
+            do {
+                let restored = try Self.load(fallbackURL)
+                if FileManager.default.fileExists(atPath: fileURL.path) { try FileManager.default.removeItem(at: fileURL) }
+                previousLayout = layout
+                layout = restored
+                mirrorDock(restored.dockIDs)
+                errorMessage = nil
+            } catch { errorMessage = "没有恢复成默认主屏：\(error.localizedDescription)" }
+            return
+        }
         var candidate = Page2Layout()
         let dockIDs = Set(layout.dockItems.flatMap { [$0.id] + $0.children })
         candidate.items = [.widget("todo")] + toolIDs.map(Page2Item.app) + layout.items.filter { dockIDs.contains($0.id) }
@@ -483,12 +570,16 @@ final class Page2HomeStore {
             try writeData(data, fileURL)
             if keepUndo { previousLayout = layout }
             layout = candidate
-            defaults.set(candidate.dockIDs, forKey: "page2DockTools_v1")
-            if defaults === UserDefaults.standard { NotificationCenter.default.post(name: Notification.Name("page2DockLayoutChanged"), object: nil) }
+            mirrorDock(candidate.dockIDs)
             defaults.set(true, forKey: "page2HomeLayoutMigrated_v1")
             errorMessage = nil
             return true
         } catch { errorMessage = "没有保存这次修改：\(error.localizedDescription)"; return false }
+    }
+
+    private func mirrorDock(_ dockIDs: [String]) {
+        defaults.set(dockIDs, forKey: Self.dockKey)
+        if defaults === UserDefaults.standard { NotificationCenter.default.post(name: Notification.Name("page2DockLayoutChanged"), object: nil) }
     }
 
     private func packed(_ items: [Page2Item]) -> Page2Board {

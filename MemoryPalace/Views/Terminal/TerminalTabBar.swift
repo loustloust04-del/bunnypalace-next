@@ -35,7 +35,8 @@ struct TerminalTabBar: View {
 
             TerminalNewWindowMenu(
                 connected: connected,
-                closedCount: TerminalWindowStore.shared.closed.count,
+                closedCount: model.store?.closed.count ?? 0,
+                tools: model.client?.currentHubInfo?.tools,
                 onOpen: { model.open(engine: $0) },
                 onOpenLocal: { model.openLocal() },
                 onSandbox: { model.showSandbox = true },
@@ -43,7 +44,9 @@ struct TerminalTabBar: View {
                     model.panelExpandsClosed = true
                     model.showWindowPanel = true
                 },
-                onConnect: { model.showConnect = true }
+                onConnect: { model.showConnect = true },
+                hubs: model.hubs,
+                selectedHub: Binding(get: { model.hubId }, set: { model.hubId = $0 })
             ) {
                 Image(systemName: "plus")
                     .font(.system(size: 16))
@@ -83,23 +86,24 @@ struct TerminalTabBar: View {
     private func tab(_ item: TerminalTabItem) -> some View {
         let selected = model.current == item.target
         return HStack(spacing: 5) {
-            if selected, let window = item.window {
-                closeMark { model.collapse(window.code) }
+            if selected, let window = item.window, let hub = item.target.hubId {
+                closeMark { model.collapse(window.code, hub: hub) }
             } else if selected, case .local(let id) = item.target {
                 // 小电脑没有「收起」：✕ = 结束，二次确认（D1）
                 closeMark { model.endingLocal = id }
             }
             TerminalStatusDot(dot: item.dot)
-            TerminalCellChip(cell: item.engine.cell)
+            TerminalCellChip(engine: item.engine)
             Text(item.title)
                 .font(.system(size: 12.5, weight: selected ? .medium : .regular))
                 .lineLimit(1)
                 .truncationMode(.tail)
+            if let name = item.hubName { TerminalHubTag(name: name) }
             Spacer(minLength: 0)
         }
         .foregroundColor(selected ? TerminalChrome.ink : TerminalChrome.dim)
         .padding(.horizontal, 10)
-        .frame(width: 140, height: 28)
+        .frame(width: item.hubName == nil ? 140 : 176, height: 28)
         .background(Capsule().fill(selected ? TerminalChrome.selected : .clear))
         .overlay(Capsule().strokeBorder(Color.white.opacity(selected ? 0.12 : 0), lineWidth: 0.5))
         .contentShape(Capsule())
@@ -108,9 +112,11 @@ struct TerminalTabBar: View {
             // builder 渲染时就会求值，只放便宜操作
             Button("改名…", systemImage: "pencil") { model.renaming = model.renameRequest(for: item) }
             Button("重新绘制画面", systemImage: "arrow.clockwise") { model.refresh(item.target) }
-            if let window = item.window {
-                Button("收起", systemImage: "chevron.down.square") { model.collapse(window.code) }
-                Button("结束…", systemImage: "xmark.octagon", role: .destructive) { model.ending = window }
+            if let window = item.window, let hub = item.target.hubId {
+                Button("收起", systemImage: "chevron.down.square") { model.collapse(window.code, hub: hub) }
+                Button("结束…", systemImage: "xmark.octagon", role: .destructive) {
+                    model.ending = TerminalHubWindow(hubId: hub, window: window)
+                }
             } else if case .local(let id) = item.target {
                 Button("结束…", systemImage: "xmark.octagon", role: .destructive) { model.endingLocal = id }
             }
@@ -133,23 +139,41 @@ struct TerminalTabBar: View {
 struct TerminalNewWindowMenu<Label: View>: View {
     let connected: Bool
     let closedCount: Int
-    /// 当前连接这台电脑的工具探测（`currentHubInfo?.tools`）；nil = 不知道
-    var tools: HubHello.Tools? = CCBridgeWebSocketClient.shared.currentHubInfo?.tools
+    /// 选中那台电脑的工具探测（`currentHubInfo?.tools`，调用方按所选那台给，R6）；nil = 不知道
+    let tools: HubHello.Tools?
     let onOpen: (String?) -> Void
     /// 新终端（离线）：手机里的小电脑（#045 T2）
     let onOpenLocal: () -> Void
     let onSandbox: () -> Void
     let onRestore: () -> Void
     let onConnect: () -> Void
+    /// ≥2 台时顶上「在哪台」（B4.3）：下面的新窗口开在选中那台，选了记住
+    var hubs: [CCHubRegistry.HubProfile] = []
+    var selectedHub: Binding<String>?
     @ViewBuilder let label: () -> Label
+
+    private var multi: Bool { hubs.count >= 2 && selectedHub != nil }
+    private var selectedName: String {
+        guard multi, let id = selectedHub?.wrappedValue else { return "我的电脑" }
+        return hubs.first { $0.id == id }?.name ?? "我的电脑"
+    }
 
     var body: some View {
         Menu {
+            if multi, let selectedHub {
+                Section("在哪台") {
+                    ForEach(hubs) { hub in
+                        Button { selectedHub.wrappedValue = hub.id } label: {
+                            if hub.id == selectedHub.wrappedValue { SwiftUI.Label(hub.name, systemImage: "checkmark") } else { Text(hub.name) }
+                        }
+                    }
+                }
+            }
             Section("手机里的小电脑") {
                 Button("新终端（离线）", systemImage: "iphone") { onOpenLocal() }
                 Button("小电脑状态…", systemImage: "info.circle") { onSandbox() }
             }
-            Section("我的电脑") {
+            Section(selectedName) {
                 Button("新 shell", systemImage: "terminal") { onOpen(nil) }
                     .disabled(!connected)
                 Button("恢复收起的窗口…（\(closedCount)）", systemImage: "arrow.uturn.backward") { onRestore() }
@@ -160,7 +184,8 @@ struct TerminalNewWindowMenu<Label: View>: View {
                 agentButton("新 Codex", systemImage: "chevron.left.forwardslash.chevron.right", engine: "codex",
                             missing: tools?.codex == false)
             }
-            if !connected {
+            // 连接我的电脑 = 配主电脑；选中的是附加那台、它断了就不给（管理这台里重新扫码）
+            if !connected, !multi || selectedHub?.wrappedValue == CCHubRegistry.primaryId {
                 Section {
                     Button("连接我的电脑…", systemImage: "link") { onConnect() }
                 }

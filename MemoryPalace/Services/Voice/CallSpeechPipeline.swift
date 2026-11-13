@@ -59,6 +59,8 @@ final class CallSpeechPipeline: CallSpeechSink {
         var serviceId: String?
         var effects: VoiceEffectConfiguration?
         var profileID: String?
+        /// 通话那一层的声音效果，建路由时取一次（没找到楼层 = 默认值，走的是系统音也不吃它）
+        var tuning = VoiceTuning.defaults
         /// 本该用楼层语音服务、却回落成系统音的原因（给通话页小字 + 日志）；服务本身就是系统音时 nil
         var fallbackReason: String?
         var usesEffects: Bool { effects?.callActive == true && profileID != nil }
@@ -75,7 +77,7 @@ final class CallSpeechPipeline: CallSpeechSink {
     var streamIdleTimeout: Duration = .seconds(10)
     /// 预建的流一个字都没等到、闲够这么久就收口（CC 回复永远不来时别保活到挂断）；之后来字按冷启动开新流
     var prewarmLimit: Duration = .seconds(60)
-    var tuning: () -> VoiceTuning.Settings = { VoiceTuning.current() }
+    var tuning: () -> VoiceTuning.Settings
     var effectLibrary: VoiceEffectLibrary = .shared
     /// 出错文字（已去 key）；默认打日志
     var reportError: (String) -> Void = { print("[CALL] 合成失败，转系统音：\($0)") }
@@ -96,6 +98,8 @@ final class CallSpeechPipeline: CallSpeechSink {
     init(route: Route, output: any CallAudioOutput) {
         self.route = route
         self.output = output
+        let settings = route.tuning
+        self.tuning = { settings }
     }
 
     // MARK: - CallSpeechSink
@@ -547,6 +551,7 @@ extension CallSpeechPipeline.Route {
         }
         route.effects = profile.voiceEffects
         route.profileID = profile.id
+        route.tuning = VoiceTuning.current(for: profile)
         if route.usesEffects, route.synthesizer == nil { route.synthesizer = SystemSynthesizer(); route.voice = route.systemVoice }
         return route
     }

@@ -166,9 +166,12 @@ final class CCTerminalControllerBackendTests: XCTestCase {
         XCTAssertEqual(c2.mouseMode, .local)
     }
 
-    func testDefaultBackendIsHub() {
-        let c = CCTerminalController(sessionName: "mp-cc")
-        XCTAssertTrue(c.backend is HubTerminalBackend)
+    func testClientInitUsesThatHub() {
+        let client = CCBridgeWebSocketClient(hubId: "hub-x", defaults: UserDefaults(suiteName: "test.terminal.\(UUID().uuidString)")!)
+        let c = CCTerminalController(sessionName: "mp-cc", client: client)
+        let backend = c.backend as? HubTerminalBackend
+        XCTAssertNotNil(backend)
+        XCTAssertTrue(backend?.client === client)
     }
 
     func testHubPasteRoute() {

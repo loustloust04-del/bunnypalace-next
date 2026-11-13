@@ -77,7 +77,7 @@ final class BackupStoreTests: XCTestCase {
 
     /// 往备份目录里写「楼层 <owner> 拥有 convId」的一天备份。
     /// extraEmptyProfiles 里的楼层也进 day-manifest（对话列表为空），用来构造整库还原的范围。
-    private func seedBackup(owner: String, extraEmptyProfiles: [String] = []) throws {
+    private func seedBackup(owner: String, extraEmptyProfiles: [String] = [], a1Events: Data? = nil) throws {
         let doc = SyncStore.ConversationDocument(
             schemaVersion: SyncStore.schemaVersion,
             conversationId: convId,
@@ -105,7 +105,7 @@ final class BackupStoreTests: XCTestCase {
                     createTime: Date(), parentId: "\(convId)-root", childrenIds: [],
                     isFavorite: false, isPinned: false, pinnedAt: nil, segmentsData: nil,
                     ccMessageId: nil, replyToId: nil, replyQuote: nil, ccEdited: false,
-                    ccThinking: nil, imageDescsData: nil
+                    ccThinking: nil, imageDescsData: nil, cardEventsData: a1Events
                 )
             ],
             isDeleted: false,
@@ -214,6 +214,19 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertEqual(result.conversationsSkippedCrossProfile, 1)
         XCTAssertEqual(conversations().first?.profileId, floorA)
         XCTAssertEqual(conversations().first?.title, "A 楼层原标题")
+    }
+
+    /// 10-29 返工 #9：节点的捎带事件（cardEventsData）随备份还原；本地已有节点也覆盖进去
+    @MainActor
+    func testRestoreCarriesCardEventsData() throws {
+        let events = try JSONEncoder().encode([ChatCardEvent(id: "ev", key: "reaction:x:❤️", text: "回了 ❤️")])
+        try seedBackup(owner: floorB, a1Events: events)
+        _ = try BackupStore.restore(date: date, scope: .profile(profileId: floorB), context: context)
+        XCTAssertEqual(nodes().first { $0.id == "\(convId)-a1" }?.cardEventsData, events)
+        nodes().first { $0.id == "\(convId)-a1" }?.cardEventsData = nil
+        try context.save()
+        _ = try BackupStore.restore(date: date, scope: .profile(profileId: floorB), context: context)
+        XCTAssertEqual(nodes().first { $0.id == "\(convId)-a1" }?.cardEventsData, events, "已有节点也补回来")
     }
 
     /// 无冲突的正常还原不受影响（回归锚）。

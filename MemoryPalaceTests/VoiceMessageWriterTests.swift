@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -44,7 +45,7 @@ final class VoiceMessageWriterTests: XCTestCase {
         }
         VoiceMessageWriter.serviceKeyProvider = { [unowned self] _ in self.serviceKey }
         VoiceMessageWriter.synthesizerProvider = { [unowned self] _ in self.synth }
-        VoiceMessageWriter.proactiveEnabledProvider = { true }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in true }
         VoiceMessageWriter.voiceNoteReporter = { _ in }   // 测试不打真 WS
     }
 
@@ -52,7 +53,7 @@ final class VoiceMessageWriterTests: XCTestCase {
         VoiceMessageWriter.serviceProvider = { VoiceServiceStore.shared.service(id: $0) }
         VoiceMessageWriter.serviceKeyProvider = { VoiceServiceStore.shared.key(for: $0) }
         VoiceMessageWriter.synthesizerProvider = { $0.makeSynthesizer() }
-        VoiceMessageWriter.proactiveEnabledProvider = { UserDefaults.standard.bool(forKey: VoiceTuning.proactiveKey) }
+        VoiceMessageWriter.proactiveEnabledProvider = { PermissionCenter.level(.voiceProactive, profileId: $0) == .bypass }
         VoiceMessageWriter.profilesProvider = { ProfileManager.loadProfiles() }
         VoiceMessageWriter.voiceNoteReporter = { payload in
             CCBridgeWebSocketClient.shared.send(payload) { _ in }
@@ -112,7 +113,7 @@ final class VoiceMessageWriterTests: XCTestCase {
 
     @MainActor
     func testDisabledDowngradesBlockToText() {
-        VoiceMessageWriter.proactiveEnabledProvider = { false }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in false }
         let id = makeNode(content: "正文。\n```voice\n[whispers] 嗨。\n```\n后文。")
         VoiceMessageWriter.processChatIntents(nodeId: id, context: context, profiles: [voiceProfile])
         let c = node(id).content
@@ -320,7 +321,7 @@ final class VoiceMessageWriterTests: XCTestCase {
 
     @MainActor
     func testScriptCapTruncates() {
-        VoiceMessageWriter.proactiveEnabledProvider = { false }   // 只验截断逻辑走降级路径
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in false }   // 只验截断逻辑走降级路径
         let long = String(repeating: "啊", count: 1500)
         let id = makeNode(content: "```voice\n\(long)\n```")
         VoiceMessageWriter.processChatIntents(nodeId: id, context: context, profiles: [voiceProfile])

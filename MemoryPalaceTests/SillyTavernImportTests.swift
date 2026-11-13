@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import ZIPFoundation
 @testable import 记忆花园

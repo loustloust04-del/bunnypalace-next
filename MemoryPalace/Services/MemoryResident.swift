@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 
@@ -68,8 +69,8 @@ enum MemoryResident {
         let ccEdited: Bool
     }
 
-    static func wikiNodes(in path: [MessageNode], excluding excludeId: String? = nil) -> [MessageNode] {
-        var recent: [MessageNode] = []
+    static func wikiNodes(in path: [ConversationMessage], excluding excludeId: String? = nil) -> [ConversationMessage] {
+        var recent: [ConversationMessage] = []
         for node in path.reversed() {
             guard node.id != excludeId, !node.isSyntheticRoot, !node.isSourceHidden,
                   node.role == "user" || node.role == "assistant" else { continue }
@@ -79,7 +80,7 @@ enum MemoryResident {
         return recent.reversed()
     }
 
-    static func wikiRevisions(in path: [MessageNode]) -> [WikiNodeRevision] {
+    static func wikiRevisions(in path: [ConversationMessage]) -> [WikiNodeRevision] {
         wikiNodes(in: path).map {
             WikiNodeRevision(id: $0.id, content: $0.content,
                              cardEditedAt: $0.cardEditedAt, ccEdited: $0.ccEdited)
@@ -89,7 +90,7 @@ enum MemoryResident {
     private static let wikiThinkingDelimiters = [("<think>", "</think>"), ("<thinking>", "</thinking>"),
                                                  ("[thinking]", "[/thinking]")]
 
-    static func wikiScanBody(_ node: MessageNode) -> String {
+    static func wikiScanBody(_ node: ConversationMessage) -> String {
         // 用户消息和历史窗口同口径只认正文（分段只有助手那边才分思考 / 正文）
         guard node.role == "assistant" else { return node.content }
         if let segments = node.segments, segments.contains(where: {
@@ -122,13 +123,12 @@ enum MemoryResident {
         }
     }
 
-    /// ids 已由主线程按真实节点截成四条；只在后台自己的 context 里读正文和外置分段。
-    static func wikiMessages(nodeIds: [String], context: ModelContext) -> [String] {
-        nodeIds.compactMap { id in
-            var descriptor = FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> { $0.id == id })
-            descriptor.fetchLimit = 1
-            guard let node = try? context.fetch(descriptor).first,
-                  !node.isSyntheticRoot, !node.isSourceHidden,
+    /// ids 已由主线程按真实节点截成四条；只按传入 id 顺序读正文和外置分段（source 自开后台 context）。
+    static func wikiMessages(nodeIds: [String], profileId: String, source: ConversationSource) -> [String] {
+        let messages = (try? source.messages(profileId: profileId, ids: nodeIds)) ?? []
+        let byId = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return nodeIds.compactMap { id in
+            guard let node = byId[id], !node.isSyntheticRoot, !node.isSourceHidden,
                   node.role == "user" || node.role == "assistant" else { return nil }
             return wikiScanBody(node)
         }
@@ -194,7 +194,7 @@ enum MemoryResident {
     }
 
     struct WikiRow: Equatable {
-        let indexCount: Int
+        let indexCount: Int?
         let hits: [WikiPageHit]
         let gate: Gate?
 
@@ -264,6 +264,26 @@ enum MemoryResident {
         var count: Int { archive.count + selfRows.count }
     }
 
+    /// 常驻页「上一轮实际注入」（plan-memory-receipt §2.4）：沿当前窗倒序走，先遇到哪个用哪个——
+    /// ① assistant 回执且自身 attempts 有 receivedResponse（只靠 `inheritedEffective` 生效的不算：重生成在途 / 首事件前取消
+    ///    不算「上一轮」，与 Meter 写入同口径）→ 它的注入快照（旧账没有快照时返回 nil，调用方退回楼层账）；
+    /// ② user 回执走 ccBridge → 「CC 没收到」；③ 都没有 = nil（调用方退回楼层账）
+    static func lastInjection(in path: [MessageNode],
+                              receipt: (MessageNode) -> RecallTurnReceipt?) -> MemoryInjectionRecord? {
+        for node in path.reversed() {
+            guard let decoded = receipt(node) else { continue }
+            if node.role == "assistant" {
+                guard decoded.attempts.contains(where: \.receivedResponse) else { continue }
+                return decoded.injectionRecord
+            }
+            if node.role == "user", decoded.delivery?.route == "ccBridge" {
+                return MemoryInjectionRecord(tokens: 0, stableCount: 0, hitCount: 0,
+                                             at: node.createTime ?? Date(), viaCCBridge: true)
+            }
+        }
+        return nil
+    }
+
     /// 纯函数：把已经算好的（同一次 roundInputs + memoryLayers）摆成每一行。
     /// - archive：规则上常驻的档案（活着的，按创建时间旧→新，同常驻层的行序）；injectedIds = hits 里 `persistent` 那一路
     /// - selfCandidates：全文候选；fullSlugs = 实际装进全文的（B4 没勾时 nil）
@@ -290,56 +310,85 @@ enum MemoryResident {
     /// 跑一遍实发那几个函数，上下两半都用这一次的结果。recentMessages = 当前对话最近几条（触发词 / 关键词按它算；空 = 按「刚开始聊」）。
     /// 读{助手}的记忆文件、组装注入都在这里：**在后台调**（自己开一个 ModelContext，主线程只接 `Summary`）。
     /// selfMemories = 调用方已经读好的{助手}的记忆（记忆格刷新时后台读过一份），给了就不再为列候选读一遍。
-    /// slotOn = 当前预设开没开记忆插槽（`memorySlotOn`）；availableTools = 这一轮调得到的工具名（nil = 不知道，尾注原样），
-    /// 下半预览照实发过一遍 `PromptAssembler.droppingOffToolMentions`（10-16 astra #6）
-    static func summary(profile: Profile, conversationMemoryEnabled: Bool, container: ModelContainer,
-                        selfMemories: [SelfMemory]? = nil, slotOn: Bool = true, availableTools: Set<String>? = nil,
-                        recentMessages: [String] = [], recentNodeIds: [String]? = nil, wikiStore: WikiStore? = nil) -> Summary {
+    /// participation = 与实发同一份 `EffectiveMemoryParticipation`（调用方用同一个 `resolve`）；
+    /// availableTools = 这一轮调得到的工具名（nil = 不知道，尾注原样），下半预览照实发过一遍 `PromptAssembler.droppingOffToolMentions`
+    static func summary(profile: Profile, participation: EffectiveMemoryParticipation, container: ModelContainer,
+                        selfMemories: [SelfMemory]? = nil, availableTools: Set<String>? = nil,
+                        recentMessages: [String] = [], recentNodeIds: [String]? = nil, wikiStore: WikiStore? = nil,
+                        previousWindow: PreviousWindowSnapshot? = nil) -> Summary {
         let context = ModelContext(container)
         context.autosaveEnabled = false
-        let recentMessages = recentNodeIds.map { wikiMessages(nodeIds: $0, context: context) } ?? recentMessages
+        let conversationSource = SwiftDataConversationSource(container: container)
+        let recentMessages = recentNodeIds.map {
+            wikiMessages(nodeIds: $0, profileId: profile.id, source: conversationSource)
+        } ?? recentMessages
         let store = SwiftDataMemoryStore()
-        let inputs = MemoryInjector.roundInputs(profileId: profile.id, conversationMemoryEnabled: conversationMemoryEnabled,
-                                                store: store, context: context, wikiStore: wikiStore)
+        // 原料：未闸的 {整体参与, 槽, 本窗勾}
+        let memoryOn = participation.participates
+        let slotOn = participation.switches.slot
+        let previous = participation.previousWindow ? previousWindow.map {
+            PreviousWindowPicker.validate($0, profileId: profile.id, context: context)
+        } : nil
+        // roundInputs 现状不看槽：检查器要那份候选（灰显列表 / injectedIds），传「槽视为开」的副本
+        var switches = participation.switches
+        switches.slot = true
+        // 来源窗隐藏集与实发同一份（检查器 = 实发）：已删 / 关参与的窗里出的碎片不列也不注
+        let hiddenSources = EffectiveMemoryParticipation.hiddenSources(profileId: profile.id, context: context)
+        let inputs = MemoryInjector.roundInputs(profileId: profile.id, participation: .init(switches),
+                                                store: store, context: context, wikiStore: wikiStore,
+                                                previousWindow: previous, hiddenSources: hiddenSources)
         let layers = PromptAssembler.memoryLayers(profile: profile,
                                                   selfMemory: (inputs.selfMemory?.text).flatMap { $0.isEmpty ? nil : $0 },
                                                   memories: inputs.memories, recentMessages: recentMessages, budget: inputs.archiveBudget,
                                                   wiki: inputs.wiki)
-        let memoryOn = MemoryFlags.masterEnabled && conversationMemoryEnabled
-        let cChecked = MemoryOpenWindow.isChecked(.c)
-        // C 没勾 / 记忆关着时 roundInputs 给的档案是空的：列表另取活着的，全部标灰
-        let active = memoryOn && cChecked ? inputs.memories : store.listActive(profileId: profile.id, context: context)
+        let cChecked = participation.choices.archive
+        // C 没勾 / 记忆关着时 roundInputs 给的档案是空的：列表另取活着的，全部标灰；
+        // 来源窗过滤与实发同一条规则（钉住豁免，隐藏来源的碎片不列）
+        let active = memoryOn && cChecked
+            ? inputs.memories
+            : store.listActive(profileId: profile.id, context: context).filter {
+                MemoryInjector.passesSourceWindow($0, hidden: hiddenSources)
+            }
         let archive = archiveRule().map { rule in active.filter(rule).sorted { $0.createdAt < $1.createdAt } } ?? []
         let recentCount = MemoryFlags.selfRecentCount
         let assistant = profile.assistantName.trimmingCharacters(in: .whitespacesAndNewlines)
         var s = compute(archive: archive,
                         injectedIds: Set(layers.hits.filter { $0.retrieverId == "persistent" }.map(\.memoryId)),
-                        selfCandidates: SelfMemoryInjection.fullCandidates(selfMemories ?? SelfMemoryStore.list(profileId: profile.id),
+                        selfCandidates: SelfMemoryInjection.fullCandidates(selfMemories ?? SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: profile.id), checkPath: AppPaths.checked),
                                                                            recentCount: recentCount),
                         fullSlugs: inputs.selfMemory?.fullSlugs, memoryOn: memoryOn, cChecked: cChecked,
                         assistant: assistant.isEmpty ? "助手" : assistant, recentCount: recentCount, slotOn: slotOn)
         // C 档案：没勾 / 记忆关着也列出来（灰字），快照另取
         let wiki = inputs.wiki ?? WikiInjectionCache.shared.snapshot(profileId: profile.id, store: wikiStore)
         if let wiki, !wiki.indexLines.isEmpty || !wiki.pages.isEmpty {
-            let gate: Gate? = !memoryOn ? .memoryOff : !slotOn ? .slotOff : !cChecked ? .archiveUnchecked : nil
-            s.wiki = WikiRow(indexCount: wiki.indexLines.count, hits: gate == nil ? layers.pages : [], gate: gate)
+            let gate: Gate? = !memoryOn ? .memoryOff : !slotOn ? .slotOff : !cChecked && layers.pages.isEmpty ? .archiveUnchecked : nil
+            let indexCount = wiki.indexLines.lazy.filter { $0.hasPrefix("- ") }.count
+            s.wiki = WikiRow(indexCount: cChecked ? indexCount : nil, hits: gate == nil ? layers.pages : [], gate: gate)
         }
         // 插槽关着：实发整段跳过，下半预览、「共 N 条」、全量兜底都是空的
         guard slotOn else { return s }
         s.fullFallbackCount = layers.hits.filter { $0.retrieverId == "fullFallback" }.count
-        s.stable = availableTools.map { PromptAssembler.droppingOffToolMentions(layers.stable, available: $0) } ?? layers.stable
+        let previousText = inputs.previousWindow.map { snapshot in
+            let names = EffectiveCharacterContext(profile: profile)
+            return snapshot.render(user: names.userName, assistant: names.charName, budget: MemoryInjector.tokenBudget).text
+        } ?? ""
+        let stable = layers.stable.isEmpty ? previousText
+            : previousText.isEmpty ? layers.stable : layers.stable + "\n\n" + previousText
+        s.stable = availableTools.map { PromptAssembler.droppingOffToolMentions(stable, available: $0) } ?? stable
         s.volatile = availableTools.map { PromptAssembler.droppingOffToolMentions(layers.volatile, available: $0) } ?? layers.volatile
         s.memoryCount = inputs.memories.count + (inputs.selfMemory?.fullCount ?? 0) + (inputs.selfMemory?.indexCount ?? 0)
         return s
     }
 
     /// 后台算一份，回主线程交出来
-    static func loadSummary(profile: Profile, conversationMemoryEnabled: Bool, container: ModelContainer,
-                            selfMemories: [SelfMemory]? = nil, slotOn: Bool = true, availableTools: Set<String>? = nil,
-                            recentNodeIds: [String] = [], wikiStore: WikiStore? = nil) async -> Summary {
+    static func loadSummary(profile: Profile, participation: EffectiveMemoryParticipation, container: ModelContainer,
+                            selfMemories: [SelfMemory]? = nil, availableTools: Set<String>? = nil,
+                            recentNodeIds: [String] = [], wikiStore: WikiStore? = nil,
+                            previousWindow: PreviousWindowSnapshot? = nil) async -> Summary {
         await Task.detached(priority: .userInitiated) {
-            summary(profile: profile, conversationMemoryEnabled: conversationMemoryEnabled, container: container, selfMemories: selfMemories,
-                    slotOn: slotOn, availableTools: availableTools, recentNodeIds: recentNodeIds, wikiStore: wikiStore)
+            summary(profile: profile, participation: participation, container: container, selfMemories: selfMemories,
+                    availableTools: availableTools, recentNodeIds: recentNodeIds, wikiStore: wikiStore,
+                    previousWindow: previousWindow)
         }.value
     }
 }

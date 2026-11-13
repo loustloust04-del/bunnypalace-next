@@ -24,8 +24,6 @@ enum CodingResumeTarget: String, CaseIterable, Sendable {
         }
     }
 
-    var isDeepLink: Bool { self == .claudeDesktop || self == .codexDesktop }
-
     /// 深链目标只接自家 agent 的会话；shell 目标只接有续跑形制的家
     func supports(_ agent: CodingAgent) -> Bool {
         switch self {

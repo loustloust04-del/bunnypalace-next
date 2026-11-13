@@ -385,7 +385,7 @@ private func drainMain() {
 /// 路由层：本机假服务器回中转原始字节，看重不重发、重发时改了什么
 @MainActor
 final class RelayCompatRouterTests: XCTestCase {
-    typealias Server = OutputTokenCapTests.ScriptedHTTPServer
+    typealias Server = ScriptedHTTPServer
     typealias Response = Server.Response
 
     private var cleanups: [() -> Void] = []

@@ -14,6 +14,8 @@ struct SegmentedAssistantBody: View {
     let lineSpacingScale: Double
     let paragraphSpacingScale: Double
     let regexScripts: [RegexScript]
+    let userName: String
+    let charName: String
     /// 浮条「引用」通道（CC/导入对话的 segmented 正文也要能选段引用——粟粟报"有的 session 不能引用"）
     var onQuoteText: ((String) -> Void)? = nil
 
@@ -29,6 +31,8 @@ struct SegmentedAssistantBody: View {
         lineSpacingScale: Double,
         paragraphSpacingScale: Double,
         regexScripts: [RegexScript],
+        userName: String = "",
+        charName: String = "",
         onQuoteText: ((String) -> Void)? = nil
     ) {
         self.node = node
@@ -40,6 +44,8 @@ struct SegmentedAssistantBody: View {
         self.lineSpacingScale = lineSpacingScale
         self.paragraphSpacingScale = paragraphSpacingScale
         self.regexScripts = regexScripts
+        self.userName = userName
+        self.charName = charName
         self.onQuoteText = onQuoteText
 
         let capturedVM = viewModel
@@ -52,7 +58,8 @@ struct SegmentedAssistantBody: View {
             nodeId: capturedNodeId,
             renderSnapshot: { [weak capturedVM] in
                 // N5：尾巴快照与定稿 .text 段同一个显示加工（正则），完成落段后不再内容跳变
-                SegmentDisplayText.apply(scripts: capturedScripts, to: capturedVM?.streamingText ?? "")
+                SegmentDisplayText.apply(scripts: capturedScripts, to: capturedVM?.streamingText ?? "",
+                                         userName: userName, charName: charName)
             }
         ))
     }
@@ -66,6 +73,8 @@ struct SegmentedAssistantBody: View {
                 lineSpacingScale: lineSpacingScale,
                 paragraphSpacingScale: paragraphSpacingScale,
                 regexScripts: regexScripts,
+                userName: userName,
+                charName: charName,
                 profileId: node.profileId,
                 nodeId: node.id,
                 isStreaming: viewModel.isNodeStreaming(nodeId: node.id, conversationId: conversationId),

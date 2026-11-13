@@ -47,7 +47,7 @@ struct TradingGatesSections: View {
                     Text("聊天时让{{char}}看到关注自选".expandingMacros(profile: profileManager?.currentProfile))
                         .font(m.body)
                 Spacer(minLength: 8)
-                PermissionLevelPicker(domain: .trading)
+                PermissionLevelReadout(domain: .trading)   // atrium P3⑤a：点进去改这个人的
             }
             } header: {
                 Text("AI 可见")

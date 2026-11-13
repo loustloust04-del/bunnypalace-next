@@ -9,6 +9,8 @@ import SwiftUI
 enum XiaoyaPairOutcome: Equatable {
     case paired(String)     // 「已配对 ✓ LAN+Tailscale」
     case failed(String)     // 「二维码里的地址不合法」
+    /// 已经配过一台、扫到的不是它 / 认不出：弹落点页让人定（b4 #1），不覆盖原来那台
+    case confirm(CCHubRegistry.PrimaryPairingCheck)
 }
 
 enum XiaoyaPairPhase: Equatable {
@@ -20,14 +22,15 @@ enum XiaoyaPairPhase: Equatable {
 
 struct XiaoyaPairCardView: View {
     let answer: XiaoyaCardAnswer?
-    let apply: (CCPairPayload) -> XiaoyaPairOutcome
+    let apply: @MainActor (CCPairPayload) async -> XiaoyaPairOutcome
     let onAnswer: (XiaoyaCardAnswer) -> Void
 
     @State private var phase: XiaoyaPairPhase
     @State private var scanning = false
+    @State private var pairingCheck: CCHubRegistry.PrimaryPairingCheck?
 
     init(answer: XiaoyaCardAnswer?, initialPhase: XiaoyaPairPhase = .idle,
-         apply: @escaping (CCPairPayload) -> XiaoyaPairOutcome,
+         apply: @escaping @MainActor (CCPairPayload) async -> XiaoyaPairOutcome,
          onAnswer: @escaping (XiaoyaCardAnswer) -> Void) {
         self.answer = answer
         self.apply = apply
@@ -51,17 +54,34 @@ struct XiaoyaPairCardView: View {
             CCPairScannerSheet { payload in
                 phase = .pairing
                 // 等扫码页关掉再落地，结果条和相机不抢同一帧
-                DispatchQueue.main.async {
-                    switch apply(payload) {
+                Task { @MainActor in
+                    switch await apply(payload) {
                     case .paired(let summary):
                         phase = .paired(summary)
                         onAnswer(.paired(summary))
                     case .failed(let why):
                         phase = .failed(why)
+                    case .confirm(let check):
+                        phase = .idle
+                        pairingCheck = check
                     }
                 }
             }
         }
+        .sheet(item: $pairingCheck) { HubPairingSheet(target: CCHubRegistry.primaryId, check: $0, onCommitted: committed) }
+    }
+
+    /// 落点页提交成了（R5.5）：这张卡就算配好了
+    private func committed(_ commit: CCHubPairingLanding.Commit) {
+        let hubs = CCHubRegistry.shared.hubs
+        let name: String?
+        switch commit {
+        case .update(let id): name = hubs.first { $0.id == id }?.name
+        case .add: name = hubs.last?.name
+        }
+        let summary = "已配对 ✓ " + (name ?? "")
+        phase = .paired(summary)
+        onAnswer(.paired(summary))
     }
 
     @ViewBuilder
@@ -112,11 +132,13 @@ struct XiaoyaPairCardView: View {
 }
 
 extension XiaoyaPairOutcome {
-    /// P4 接线用：落地走 CCPairingApply.apply（和设置页扫码同一份）。apply 只回一句话，成功那句以「已配对」开头
-    static func applying(providerManager: ProviderManager?) -> (CCPairPayload) -> XiaoyaPairOutcome {
+    /// P4 接线用：落地走 CCPairingApply.apply（和设置页扫码同一份）。成功那句以「已配对」开头
+    static func applying(providerManager: ProviderManager?) -> @MainActor (CCPairPayload) async -> XiaoyaPairOutcome {
         { payload in
-            let line = CCPairingApply.apply(payload, providerManager: providerManager)
-            return line.hasPrefix("已配对") ? .paired(line) : .failed(line)
+            switch await CCPairingApply.apply(payload, providerManager: providerManager) {
+            case .done(let line): return line.hasPrefix("已配对") ? .paired(line) : .failed(line)
+            case .confirm(let check): return .confirm(check)
+            }
         }
     }
 }

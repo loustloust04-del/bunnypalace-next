@@ -2,10 +2,9 @@ import SwiftUI
 
 /// 会流动的金属描边环（metal-fx 直译，见 LiquidMetal.metal）。挂在输入框 overlay，键盘在（焦点在）时显示。
 /// Shader 直接当 strokeBorder 的 ShapeStyle——环就是描边本身，不用整块画再挖空。
-/// 输入框金属环的可调参数（设置页仪表盘，AppStorage）。默认值 = 08-25 粟粟在仪表盘上调的那组。
+/// 输入框金属环的可调参数（AppStorage 键）。默认值 = 08-25 粟粟在仪表盘上调的那组，写在 `LiquidMetalRing` 的 @AppStorage 上（仪表盘 11-06 已删）。
 enum LiquidMetalTuning {
     static let enabledKey = "lmRing.enabled"
-    static let presetKey = "lmRing.preset"        // auto / chromatic / rainbowSilver / rainbowWhite / silver / chromaticLight / mintChocolate
     static let lineWidthKey = "lmRing.lineWidth"
     static let featherKey = "lmRing.feather"
     static let blurKey = "lmRing.blur"
@@ -15,15 +14,6 @@ enum LiquidMetalTuning {
     static let haloKey = "lmRing.halo"
     static let haloStrengthKey = "lmRing.haloStrength"
     static let haloLapKey = "lmRing.haloLap"
-
-    static let defaults: [String: Any] = [
-        enabledKey: true, presetKey: "auto", lineWidthKey: 0.8, featherKey: 0.5, blurKey: 1.5,
-        scaleKey: 0.7, complexityKey: 0.45, speedKey: 1.0, haloKey: true, haloStrengthKey: 0.65, haloLapKey: 7.0,
-    ]
-
-    static func reset() {
-        for k in defaults.keys { UserDefaults.standard.removeObject(forKey: k) }
-    }
 
     static func preset(named raw: String, dark: Bool) -> LiquidMetalPreset {
         switch raw {
@@ -36,11 +26,6 @@ enum LiquidMetalTuning {
         default: return dark ? .chromatic : .silver   // 粟粟：深色彩虹黑身，浅色银
         }
     }
-
-    static let presetOptions: [(raw: String, name: String)] = [
-        ("auto", "跟主题"), ("chromatic", "彩虹·黑身"), ("rainbowSilver", "彩虹·银身"), ("rainbowWhite", "彩虹·白身"),
-        ("silver", "银"), ("chromaticLight", "原版浅"), ("mintChocolate", "薄荷巧克力"),
-    ]
 }
 
 /// 会流动的金属描边环（metal-fx 直译，见 LiquidMetal.metal）。挂在输入框 overlay，键盘在（焦点在）时显示。
@@ -56,12 +41,12 @@ struct LiquidMetalRing: View {
     var blurFactor: CGFloat? = nil
     var preset: LiquidMetalPreset? = nil
     var halo: Bool? = nil
-    /// nil = 跟 app 当前主题底色亮度（不看系统 colorScheme——输入框在嵌套 HC 里环境值跟不上；也不看 themeMode——切主题定义也要跟）；预览用显式值
+    /// nil = 跟 app 当前聊天主题底色亮度（不看系统 colorScheme——输入框在嵌套 HC 里环境值跟不上；也不看 themeMode——切主题定义也要跟）；预览用显式值
     var forceDark: Bool? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var isDark: Bool {
         if let forceDark { return forceDark }
-        let bg = ThemeManager.shared.currentTokenSet.mainBg
+        let bg = ThemeManager.shared.currentChatTokenSet.mainBg
         return 0.2126 * bg.red + 0.7152 * bg.green + 0.0722 * bg.blue < 0.5
     }
     @AppStorage(LiquidMetalTuning.lineWidthKey) private var tLineWidth = 0.8
@@ -230,3 +215,33 @@ struct LiquidMetalPreset {
     /// 暖奶白 / 浅薄荷 / 白 / 薄荷 / 浅棕灰（08-25 首版，粟粟打回：跟原版完全不一样）
     static let mintChocolate = LiquidMetalPreset(colors: [0xFFFBF6, 0xE7EEEC, 0xFFFFFF, 0x8EBD9F, 0xC9C4BE])
 }
+
+#if os(iOS)
+import UIKit
+
+/// 自己上面有没有盖着 sheet / 弹窗：系统呈现带遮罩的界面时会把底下视图的 tint 调暗并逐个回调 `tintColorDidChange`，借它当信号。
+struct PresentationCoverProbe: UIViewRepresentable {
+    @Binding var covered: Bool
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.isUserInteractionEnabled = false
+        view.onChange = { covered = $0 }
+        return view
+    }
+
+    func updateUIView(_ view: ProbeView, context: Context) {
+        view.onChange = { covered = $0 }
+    }
+
+    final class ProbeView: UIView {
+        var onChange: (Bool) -> Void = { _ in }
+
+        override func tintColorDidChange() {
+            super.tintColorDidChange()
+            let dimmed = tintAdjustmentMode == .dimmed
+            DispatchQueue.main.async { [onChange] in onChange(dimmed) }
+        }
+    }
+}
+#endif

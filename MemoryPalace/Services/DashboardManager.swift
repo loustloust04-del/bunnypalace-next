@@ -60,9 +60,6 @@ enum WidgetSize: String, Codable {
         case .large:  return .small
         }
     }
-
-    /// 是否整屏宽（长条 / 大方独占一行；小方半宽）。
-    var isFullWidth: Bool { self != .small }
 }
 
 /// 桌面上的一个组件实例（种类 + 尺寸）。每种最多一个，故 id = kind。

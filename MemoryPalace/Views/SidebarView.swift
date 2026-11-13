@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
@@ -86,6 +87,9 @@ struct SidebarView: View {
     let onSelectAgoraRoom: (String) -> Void
     let onCreateAgoraRoom: () -> Void
     let onSelectConversation: () -> Void
+    /// page0 右上胶囊 → 人页（plan-atrium P2）
+    let onOpenProfile: () -> Void
+    let profileZoom: Namespace.ID?
     /// 路线 B 必填：tag 列表的 fetch 用 init(profileId:) 传进来的 profileId 构造 predicate。
     /// Parent (ContentView 在 App.body 层 `.id(profile.id)` 保证 profile 变化时 SidebarView
     /// 整个 re-init，onAppear 带新 profileId 重 fetch。
@@ -94,6 +98,7 @@ struct SidebarView: View {
     @Environment(\.modelContext) private var modelContext
     #if os(iOS)
     @Environment(\.launchPageSignal) private var launchSignal
+    @Environment(AtriumPresenter.self) private var atriumPresenter: AtriumPresenter?
     #endif
     /// input-jank C4：原本是 `@Query private var tags`，随**每次** `modelContext.save()`
     /// 失效（打字落盘、流式每 token）→ 驱动 `ForEach<Conversation>` 4.1 万条边重 diff
@@ -113,6 +118,8 @@ struct SidebarView: View {
         onSelectAgoraRoom: @escaping (String) -> Void,
         onCreateAgoraRoom: @escaping () -> Void,
         onSelectConversation: @escaping () -> Void,
+        onOpenProfile: @escaping () -> Void = {},
+        profileZoom: Namespace.ID? = nil,
         profileId: String
     ) {
         self._searchText = searchText
@@ -125,6 +132,8 @@ struct SidebarView: View {
         self.onSelectAgoraRoom = onSelectAgoraRoom
         self.onCreateAgoraRoom = onCreateAgoraRoom
         self.onSelectConversation = onSelectConversation
+        self.onOpenProfile = onOpenProfile
+        self.profileZoom = profileZoom
         self.profileId = profileId
     }
 
@@ -149,6 +158,31 @@ struct SidebarView: View {
         return liquidMetal && isIOSStyle && !widePanelMode
         #else
         return false
+        #endif
+    }
+
+    private var onTutu: Bool {
+        #if PERSONAL_APPS
+        SkinState.shared.active && isIOSStyle && !widePanelMode
+        #else
+        false
+        #endif
+    }
+
+    #if PERSONAL_APPS
+    #if os(iOS)
+    @State private var tutuScale: CGFloat = 1
+    #endif
+    #endif
+    private var tutuUnit: CGFloat {
+        #if PERSONAL_APPS
+        #if os(iOS)
+        onTutu ? tutuScale : 1
+        #else
+        1
+        #endif
+        #else
+        1
         #endif
     }
     @State private var roomFolderRevision = 0
@@ -925,6 +959,161 @@ struct SidebarView: View {
                 }
     }
 
+    @ViewBuilder
+    private var sidebarWordmark: some View {
+        #if os(iOS)
+        // 点字标进 atrium（plan-atrium P1）
+        Button { atriumPresenter?.present() } label: {
+            #if PERSONAL_APPS
+            if onTutu {
+                TutuPage0Wordmark().frame(width: 183 * tutuUnit, height: 35 * tutuUnit)
+                    .accessibilityLabel("mneme atrium")
+            } else {
+                ordinaryWordmark
+            }
+            #else
+            ordinaryWordmark
+            #endif
+        }
+            .buttonStyle(.plain)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityIdentifier("page0-wordmark")
+        #else
+        ordinaryWordmark
+        #endif
+    }
+
+    #if os(iOS)
+    /// 新建对话（始终显示）：点一下弹菜单选文章 / 气泡（群聊、Codex 也在菜单里）。
+    /// 10-29 粟粟推翻「点一下直接新建文章」：长按没提示，点一下看不见选模式
+    private var newConversationMenu: some View {
+        Menu {
+            Button(action: { createNewConversation() }) {
+                Label("新建文章对话", systemImage: "doc.text")
+            }
+            Button(action: { createNewConversation(displayMode: .bubble) }) {
+                Label("新建气泡对话", systemImage: "bubble.left.and.bubble.right")
+            }
+            #if os(iOS)
+            if agoraEnabled {
+                Button(action: onCreateAgoraRoom) {
+                    Label("新建群聊", systemImage: "person.2")
+                }
+            }
+            #endif
+            Button(action: { createNewCodexConversation() }) {
+                // Menu 行只吃 Text/Image/Label，用不了 AppIconView（自定义视图会被丢）
+                Label { Text("新建 Codex 对话") } icon: { Image("ri-openai") }
+            }
+        } label: {
+            Group {
+                #if PERSONAL_APPS && os(iOS)
+                if onTutu {
+                    TutuPage0ControlIcon(kind: .plus).frame(width: 18 * tutuUnit, height: 18 * tutuUnit)
+                } else {
+                    Image(systemName: "plus").font(.system(size: isIOSStyle ? 17 : 11, weight: .medium))
+                }
+                #else
+                Image(systemName: "plus").font(.system(size: isIOSStyle ? 17 : 11, weight: .medium))
+                #endif
+            }
+                .foregroundColor(onTutu || onMetal ? .white : Theme.textPrimary)
+                .frame(width: onTutu ? 44 * tutuUnit : (isIOSStyle ? 44 : 34), height: onTutu ? 44 * tutuUnit : (isIOSStyle ? 44 : 34))
+                #if os(iOS)
+                #if PERSONAL_APPS
+                .if(!onTutu) { $0.glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle) }
+                #else
+                .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle)
+                #endif
+                #else
+                .background(Capsule().fill(Theme.mainBg.opacity(0.8)))
+                .overlay(Capsule().stroke(Theme.accent.opacity(0.5), lineWidth: 0.5))
+                #endif
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("page0-new-conversation")
+    }
+
+    static let page0ProfileZoomID = "page0-profile-capsule"
+
+    /// 右上玻璃胶囊：当前层头像 + 名字，点开人页（plan-atrium P2）
+    private var profileCapsule: some View {
+        Button(action: onOpenProfile) {
+            HStack(spacing: 7) {
+                ProfileAvatarView(profile: profileManager?.currentProfile, size: 30)
+                Text(profileManager?.currentProfile.name ?? "")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(onTutu || onMetal ? .white : Theme.textPrimary)
+                    .lineLimit(1)
+            }
+            .padding(.leading, 7)
+            .padding(.trailing, 14)
+            .frame(height: onTutu ? 44 * tutuUnit : 44)
+            .contentShape(Capsule())
+            #if PERSONAL_APPS
+            .if(!onTutu) { $0.glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .capsule) }
+            #else
+            .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .capsule)
+            #endif
+            .modifier(Page0ProfileZoomSource(namespace: profileZoom))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("page0-profile")
+    }
+    #endif
+
+    private var ordinaryWordmark: some View {
+        Image("MnemeWordmark")
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .frame(height: 24)
+            .foregroundColor(onMetal ? .white : Theme.textPrimary)
+            .accessibilityLabel("mneme atrium")
+    }
+
+    @ViewBuilder
+    private func sidebarScrollContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        #if PERSONAL_APPS
+        #if os(iOS)
+        if onTutu {
+            TutuPage0List(content: content)
+        } else {
+            ScrollView(content: content)
+        }
+        #else
+        ScrollView(content: content)
+        #endif
+        #else
+        ScrollView(content: content)
+        #endif
+    }
+
+    @ViewBuilder
+    private func sidebarShell<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        let children = content()
+        #if PERSONAL_APPS
+        #if os(iOS)
+        if onTutu {
+            GeometryReader { geometry in
+                TutuPage0SidebarLayout { children }
+                    .environment(\.tutuPage0Appearance, TutuPage0Appearance(
+                        active: true, glass: SkinState.shared.page0Style == .glass,
+                        scale: geometry.size.width / 402))
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width / 402 } action: { tutuScale = $0 }
+            }
+            .ignoresSafeArea()
+        } else {
+            VStack(spacing: 0) { children }
+        }
+        #else
+        VStack(spacing: 0) { children }
+        #endif
+        #else
+        VStack(spacing: 0) { children }
+        #endif
+    }
+
     var body: some View {
         #if (DEBUG || PERF_BENCH) && os(macOS)
         let _ = PerfCountMac.hit(.sidebarBody)
@@ -947,7 +1136,7 @@ struct SidebarView: View {
             KBProbe.log(line)
         }()
         #endif
-        VStack(spacing: 0) {
+        sidebarShell {
             #if os(macOS)
             // Code 是左栏面板组里的另一个 tab（面板头「对话 | Code」），不是这里的筛选：
             // 切到 Code 时整块内容换成编程会话列表（自带搜索框 / 筛选），对话的搜索行和筛选行都不出
@@ -956,49 +1145,19 @@ struct SidebarView: View {
             // 字标 + 新建（搜索挪到底栏，plan-page0-brand-layout）
             HStack(spacing: 8) {
                 // 字标：粟粟 PSD「图层 63」的透明通道，模板图跟正文色走
-                Image("MnemeWordmark")
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(height: 24)
-                    .foregroundColor(onMetal ? .white : Theme.textPrimary)
-                    .accessibilityLabel("mneme atrium")
+                sidebarWordmark
 
                 Spacer()
 
-                // 新建对话（始终显示）：点按弹菜单
-                Menu {
-                    Button(action: { createNewConversation() }) {
-                        Label("新建对话", systemImage: "square.and.pencil")
-                    }
-                    #if os(iOS)
-                    if agoraEnabled {
-                        Button(action: onCreateAgoraRoom) {
-                            Label("新建群聊", systemImage: "person.2")
-                        }
-                    }
-                    #endif
-                    Button(action: { createNewCodexConversation() }) {
-                        // Menu 行只吃 Text/Image/Label，用不了 AppIconView（自定义视图会被丢）
-                        Label { Text("新建 Codex 对话") } icon: { Image("ri-openai") }
-                    }
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: isIOSStyle ? 17 : 11, weight: .medium))
-                        .foregroundColor(onMetal ? .white : Theme.textPrimary)
-                        .frame(width: isIOSStyle ? 44 : 34, height: isIOSStyle ? 44 : 34)
-                        #if os(iOS)
-                        .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle)
-                        #else
-                        .background(Capsule().fill(Theme.mainBg.opacity(0.8)))
-                        .overlay(Capsule().stroke(Theme.accent.opacity(0.5), lineWidth: 0.5))
-                        #endif
-                }
-                .buttonStyle(.plain)
+                // 窄屏 ＋ 挪到底栏原 ⚙ 的位置；宽屏底栏那格让给缩放弧，＋ 留在顶栏（plan-atrium P2）
+                if widePanelMode { newConversationMenu }
+
+                profileCapsule
             }
-            .padding(.horizontal, isIOSStyle ? 20 : 12)
-            .padding(.top, isIOSStyle ? 8 : 10)
-            .padding(.bottom, isIOSStyle ? 20 : 14)
+            .padding(.leading, onTutu ? 15 * tutuUnit : (isIOSStyle ? 20 : 12))
+            .padding(.trailing, onTutu ? 20 * tutuUnit : (isIOSStyle ? 20 : 12))
+            .padding(.top, onTutu ? 0 : (isIOSStyle ? 8 : 10))
+            .padding(.bottom, onTutu ? 0 : (isIOSStyle ? 20 : 14))
 
 
             #endif
@@ -1019,6 +1178,7 @@ struct SidebarView: View {
                     searchSortBar
                 } else {
                     sidebarTabBar
+                        .padding(.bottom, onTutu ? -tutuUnit : 0)
                 }
                 #else
                 if !isCodeTab { sidebarTabBar }
@@ -1090,6 +1250,16 @@ struct SidebarView: View {
             } else {
                 #if os(macOS)
                 macConversationList
+                    .overlay(alignment: .top) {
+                        if listHasNothingToShow && currentFolder == nil {
+                            compactEmptyCard(
+                                icon: compactListEmptyStateIcon,
+                                title: compactListEmptyStateTitle,
+                                subtitle: compactListEmptyStateSubtitle,
+                                showImport: searchText.isEmpty && !showTrash && !showFavoritesOnly && selectedTagId == nil
+                            )
+                        }
+                    }
                     .sidebarCardShape(topLeading: cardTopLeading, topTrailing: cardTopTrailing)
                 #else
                 // MARK: - Normal Conversation List
@@ -1111,7 +1281,7 @@ struct SidebarView: View {
 
                     Spacer(minLength: 0)
                 } else {
-                    ScrollView {
+                    sidebarScrollContainer {
                         LazyVStack(spacing: 0) {
                             conversationListContent
                         }
@@ -1181,9 +1351,17 @@ struct SidebarView: View {
                 ZStack {
                     Theme.sidebarBg.ignoresSafeArea()
                     #if os(iOS)
+                    #if PERSONAL_APPS
+                    if SkinState.shared.active && !widePanelMode {
+                        TutuPage0Background(cardHeight: isCompactEmptyCard ? 168 : 609)
+                    } else if onMetal {
+                        Page0LiquidMetalBackground()
+                    }
+                    #else
                     if onMetal {
                         Page0LiquidMetalBackground()
                     }
+                    #endif
                     #endif
                 }
             } else {
@@ -1395,12 +1573,28 @@ struct SidebarView: View {
                 .foregroundColor(Theme.textMuted)
             Spacer()
         } else {
-            Text("显示 \(conversations.count) / \(totalCount) 条对话")
-                .font(.caption2)
-                .foregroundColor(Theme.textMuted)
+            #if PERSONAL_APPS
+            #if os(iOS)
+            if onTutu {
+                TutuPage0Count(visible: conversations.count, total: totalCount)
+            } else {
+                ordinaryCount
+            }
+            #else
+            ordinaryCount
+            #endif
+            #else
+            ordinaryCount
+            #endif
             Spacer()
         }
 
+    }
+
+    private var ordinaryCount: some View {
+        Text("显示 \(conversations.count) / \(totalCount) 条对话")
+            .font(.caption2)
+            .foregroundColor(Theme.textMuted)
     }
 
     /// 匹配索引 + 上下快速翻页（只对消息命中）
@@ -1408,19 +1602,19 @@ struct SidebarView: View {
     private var searchMatchNav: some View {
         if !flatMatches.isEmpty {
             Text("\(currentMatchIndex + 1)/\(flatMatches.count)")
-                .font(.caption2)
-                .foregroundColor(Theme.textMuted)
+                .font(onTutu ? .custom("PingFangSC-Regular", fixedSize: 12.5 * tutuUnit) : .caption2)
+                .foregroundColor(onTutu ? tutuTabInk(selected: true).opacity(0.55) : Theme.textMuted)
                 .monospacedDigit()
             Button(action: { navigatePrev() }) {
                 Image(systemName: "chevron.up")
                     .font(.system(size: Theme.F.caption, weight: .medium))
-                    .foregroundColor(Theme.branchIndicator)
+                    .foregroundColor(onTutu ? tutuTabInk(selected: true) : Theme.branchIndicator)
             }
             .buttonStyle(.plain)
             Button(action: { navigateNext() }) {
                 Image(systemName: "chevron.down")
                     .font(.system(size: Theme.F.caption, weight: .medium))
-                    .foregroundColor(Theme.branchIndicator)
+                    .foregroundColor(onTutu ? tutuTabInk(selected: true) : Theme.branchIndicator)
             }
             .buttonStyle(.plain)
         }
@@ -1508,7 +1702,7 @@ struct SidebarView: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.top, 22)
+        .padding(.top, onTutu ? 0 : 22)
         .padding(.bottom, 8)
         .background(
             LinearGradient(
@@ -1520,7 +1714,7 @@ struct SidebarView: View {
                 startPoint: .top, endPoint: .bottom
             )
             .allowsHitTesting(false)
-            .opacity(isCompactEmptyCard ? 0 : 1)
+            .opacity(isCompactEmptyCard || onTutu ? 0 : 1)
         )
         .clipShape(UnevenRoundedRectangle(bottomLeadingRadius: 16, bottomTrailingRadius: 16))
         .padding(.horizontal, 20)
@@ -1528,15 +1722,24 @@ struct SidebarView: View {
 
     /// 底栏：搜索长条 + 设置圆钮（在搜时换成 ✕ 退出搜索）。打字时框里只有 ➡️；结果页（键盘已收）换成 ✕ 退出搜索。
     private var iosBottomBar: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(Theme.textMuted)
+        HStack(spacing: onTutu ? 10 * tutuUnit : 10) {
+            HStack(spacing: onTutu ? 12 * tutuUnit : 8) {
+                Group {
+                    #if PERSONAL_APPS
+                    if onTutu {
+                        TutuPage0ControlIcon(kind: .search).frame(width: 20 * tutuUnit, height: 20 * tutuUnit)
+                    } else {
+                        Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundColor(Theme.textMuted)
+                    }
+                    #else
+                    Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundColor(Theme.textMuted)
+                    #endif
+                }
 
                 TextField("搜索", text: $searchText)
                     .textFieldStyle(.plain)
-                    .font(.system(size: Theme.F.body))
+                    .font(onTutu ? .custom("PingFangSC-Regular", fixedSize: 16 * tutuUnit) : .system(size: Theme.F.body))
+                    .tracking(onTutu ? 0.96 * tutuUnit : 0)
                     .focused($searchFieldFocused)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -1549,8 +1752,8 @@ struct SidebarView: View {
                             searchText = ""   // onChange(searchText) 清空 → clearSearch + refreshList
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: Theme.F.body))
-                                .foregroundColor(Theme.textMuted)
+                                .font(.system(size: onTutu ? 16 * tutuUnit : Theme.F.body))
+                                .foregroundColor(onTutu ? tutuTabInk(selected: false) : Theme.textMuted)
                                 .frame(width: 32, height: 32)
                                 .contentShape(Rectangle())
                         }
@@ -1558,8 +1761,8 @@ struct SidebarView: View {
                     } else {
                         Button(action: submitSearch) {
                             Image(systemName: "arrow.right.circle.fill")
-                                .font(.system(size: Theme.F.body))
-                                .foregroundColor(Theme.branchIndicator)
+                                .font(.system(size: onTutu ? 16 * tutuUnit : Theme.F.body))
+                                .foregroundColor(onTutu ? tutuTabInk(selected: false) : Theme.branchIndicator)
                                 .frame(width: 32, height: 32)
                                 .contentShape(Rectangle())
                         }
@@ -1571,38 +1774,57 @@ struct SidebarView: View {
                     searchFieldFocused = false
                     showFilterSheet = true
                 } label: {
-                    Image(systemName: "line.3.horizontal.decrease")
-                        .font(.system(size: 15, weight: .medium))
+                    Group {
+                        #if PERSONAL_APPS
+                        if onTutu {
+                            TutuPage0ControlIcon(kind: .filter).frame(width: 20 * tutuUnit, height: 14 * tutuUnit)
+                        } else {
+                            Image(systemName: "line.3.horizontal.decrease").font(.system(size: 15, weight: .medium))
+                        }
+                        #else
+                        Image(systemName: "line.3.horizontal.decrease").font(.system(size: 15, weight: .medium))
+                        #endif
+                    }
                         .foregroundColor(activeConditions.isEmpty ? Theme.textMuted : Theme.branchIndicator)
-                        .frame(width: 32, height: 32)
+                        .frame(width: onTutu ? 32 * tutuUnit : 32, height: onTutu ? 32 * tutuUnit : 32)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.leading, 16)
-            .padding(.trailing, 6)
-            .frame(height: 44)
+            .padding(.leading, onTutu ? 18 * tutuUnit : 16)
+            .padding(.trailing, onTutu ? 12 * tutuUnit : 6)
+            .frame(height: onTutu ? 44 * tutuUnit : 44)
             .frame(maxWidth: .infinity)
+            #if PERSONAL_APPS
+            .if(!onTutu) { $0.glassEffect(.regular.tint(Color.white.opacity(0.15)), in: .capsule) }
+            #else
             .glassEffect(.regular.tint(Color.white.opacity(0.15)), in: .capsule)
+            #endif
 
-            // 宽屏下这颗压在对话窗右下角的缩放弧底下，两个手势抢一个点 → 收掉，入口在顶部悬浮条
-            // 在搜的时候齿轮换成 ✕ 退出搜索：「最近搜过」卡不是 ScrollView，下滑 / 点空白都收不了键盘
+            // 宽屏下这格压在对话窗右下角的缩放弧底下，两个手势抢一个点 → 收掉（宽屏 ＋ 在顶栏）
+            // 在搜的时候 ＋ 换成 ✕ 退出搜索：「最近搜过」卡不是 ScrollView，下滑 / 点空白都收不了键盘。
+            // 原来这格是 ⚙，P2 起设置只从 atrium「我」进（plan-atrium P2）
             if !widePanelMode {
-                Button(action: { if isInSearchMode { exitSearch() } else { showSettings = true } }) {
-                    Image(systemName: isInSearchMode ? "xmark" : "gearshape")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundColor(onMetal ? .white : Theme.textSecondary)
-                        .contentTransition(.symbolEffect(.replace))
-                        .animation(.snappy(duration: 0.2), value: isInSearchMode)
-                        .frame(width: 44, height: 44)
-                        .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle)
+                if isInSearchMode {
+                    Button(action: exitSearch) {
+                        Image(systemName: "xmark").font(.system(size: 17, weight: .medium))
+                            .foregroundColor(onTutu ? tutuTabInk(selected: false) : (onMetal ? .white : Theme.textSecondary))
+                            .frame(width: onTutu ? 44 * tutuUnit : 44, height: onTutu ? 44 * tutuUnit : 44)
+                            #if PERSONAL_APPS
+                            .if(!onTutu) { $0.glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle) }
+                            #else
+                            .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle)
+                            #endif
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    newConversationMenu
                 }
-                .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
+        .padding(.horizontal, onTutu ? 20 * tutuUnit : 20)
+        .padding(.top, onTutu ? 0 : 12)
+        .padding(.bottom, onTutu ? 0 : 8)
     }
 
     /// 在搜：框聚焦（打字 / 最近搜过）、框里有字（标题过滤）、结果页、查询报错卡
@@ -1675,11 +1897,11 @@ struct SidebarView: View {
     private var queryErrorCard: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("这条查询还差一点")
-                .font(.system(size: Theme.F.secondary, weight: .medium))
+                .font(onTutu ? .custom("PingFangSC-Regular", fixedSize: 15 * tutuUnit) : .system(size: Theme.F.secondary, weight: .medium))
                 .foregroundColor(Theme.danger)
             Text(searchErrors.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }.joined(separator: " "))
-                .font(.system(size: Theme.F.caption))
-                .foregroundColor(Theme.textSecondary)
+                .font(onTutu ? .custom("PingFangSC-Regular", fixedSize: 12.5 * tutuUnit) : .system(size: Theme.F.caption))
+                .foregroundColor(onTutu ? tutuTabInk(selected: true).opacity(0.55) : Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
@@ -1726,17 +1948,17 @@ struct SidebarView: View {
     private var recentSearchesCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("最近搜过")
-                .font(.system(size: Theme.F.caption))
-                .foregroundColor(Theme.textMuted)
+                .font(onTutu ? .custom("PingFangSC-Regular", fixedSize: 12.5 * tutuUnit) : .system(size: Theme.F.caption))
+                .foregroundColor(onTutu ? tutuTabInk(selected: true).opacity(0.55) : Theme.textMuted)
             FlowLayout(spacing: 6, lineSpacing: 6) {
                 ForEach(recentSearches, id: \.self) { word in
                     Text(word)
-                        .font(.system(size: Theme.F.secondary))
-                        .foregroundColor(Theme.textSecondary)
+                        .font(onTutu ? .custom("PingFangSC-Regular", fixedSize: 15 * tutuUnit) : .system(size: Theme.F.secondary))
+                        .foregroundColor(onTutu ? tutuTabInk(selected: true) : Theme.textSecondary)
                         .lineLimit(1)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background(Capsule().fill(Color.primary.opacity(0.05)))
+                        .background(Capsule().fill(onTutu ? Color(red: 238 / 255, green: 235 / 255, blue: 229 / 255) : Color.primary.opacity(0.05)))
                         .contentShape(Capsule())
                         .onTapGesture {
                             searchText = word
@@ -1883,11 +2105,12 @@ struct SidebarView: View {
         } label: {
             HStack(spacing: 4) {
                 Text(kindTitle(kind))
-                    .font(.system(size: Theme.F.secondary, weight: isSelected ? .semibold : .regular))
-                    .foregroundColor(isSelected ? Theme.textPrimary : (onMetal ? Color.white.opacity(0.78) : Theme.textSecondary))
+                    .font(onTutu ? .custom("PingFangSC-Regular", fixedSize: 15 * tutuUnit) : .system(size: Theme.F.secondary, weight: isSelected ? .semibold : .regular))
+                    .tracking(onTutu ? 0.3 * tutuUnit : 0)
+                    .foregroundColor(onTutu ? tutuTabInk(selected: isSelected) : (isSelected ? Theme.textPrimary : (onMetal ? Color.white.opacity(0.78) : Theme.textSecondary)))
                 Text(kindCount(kind).map { "\($0)" } ?? "…")
-                    .font(.system(size: Theme.F.caption))
-                    .foregroundColor(isSelected || !onMetal ? Theme.textMuted : Color.white.opacity(0.6))
+                    .font(onTutu ? .custom("PingFangSC-Regular", fixedSize: 12.5 * tutuUnit) : .system(size: Theme.F.caption))
+                    .foregroundColor(onTutu ? tutuTabInk(selected: isSelected).opacity(0.55) : (isSelected || !onMetal ? Theme.textMuted : Color.white.opacity(0.6)))
                     .monospacedDigit()
             }
             .opacity(isEmpty ? 0.45 : 1)
@@ -1897,20 +2120,20 @@ struct SidebarView: View {
             .padding(.vertical, 8)
             .background(
                 UnevenRoundedRectangle(
-                    topLeadingRadius: tabCornerRadius,
+                    topLeadingRadius: onTutu ? 12 * tutuUnit : tabCornerRadius,
                     bottomLeadingRadius: 0,
                     bottomTrailingRadius: 0,
-                    topTrailingRadius: tabCornerRadius
+                    topTrailingRadius: onTutu ? 12 * tutuUnit : tabCornerRadius
                 )
-                .fill(isSelected ? Theme.mainBg : Color.clear)
+                .fill(isSelected ? (onTutu ? tutuSearchPaper : Theme.mainBg) : Color.clear)
             )
             .overlay(alignment: .bottomLeading) {
-                if isSelected && !isFirst {
+                if isSelected && !isFirst && !onTutu {
                     InverseTabCorner(radius: 8, flipped: true)
                 }
             }
             .overlay(alignment: .bottomTrailing) {
-                if isSelected {
+                if isSelected && !onTutu {
                     InverseTabCorner(radius: 8, flipped: false)
                 }
             }
@@ -2013,12 +2236,12 @@ struct SidebarView: View {
             } label: {
                 HStack(spacing: 3) {
                     Text(sortTitle)
-                        .font(.system(size: Theme.F.secondary, weight: .semibold))
+                        .font(onTutu ? .custom("PingFangSC-Regular", fixedSize: 15 * tutuUnit) : .system(size: Theme.F.secondary, weight: .semibold))
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9, weight: .bold))
                         .opacity(searchFilter.resourceKind == .twitter ? 0 : 1)
                 }
-                .foregroundColor(Theme.textPrimary)
+                .foregroundColor(onTutu ? tutuTabInk(selected: true) : Theme.textPrimary)
                 .padding(.vertical, 4)
                 .contentShape(Rectangle())
             }
@@ -2032,11 +2255,11 @@ struct SidebarView: View {
                             Image(systemName: "xmark")
                                 .font(.system(size: 8, weight: .bold))
                         }
-                        .font(.system(size: Theme.F.caption, weight: .medium))
-                        .foregroundColor(Theme.textPrimary)
+                        .font(onTutu ? .custom("PingFangSC-Regular", fixedSize: 12.5 * tutuUnit) : .system(size: Theme.F.caption, weight: .medium))
+                        .foregroundColor(onTutu ? tutuTabInk(selected: true) : Theme.textPrimary)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 4)
-                        .background(Capsule().fill(Theme.branchIndicator.opacity(0.22)))
+                        .background(Capsule().fill(onTutu ? Color(red: 238 / 255, green: 235 / 255, blue: 229 / 255) : Theme.branchIndicator.opacity(0.22)))
                         .contentShape(Capsule())
                         .onTapGesture {
                             condition.reset()
@@ -2050,7 +2273,7 @@ struct SidebarView: View {
         .padding(.horizontal, 12)
         .padding(.top, 10)
         .padding(.bottom, 8)
-        .background(Theme.mainBg)
+        .background(onTutu ? tutuSearchPaper : Theme.mainBg)
         .overlay(alignment: .bottom) {
             Divider().opacity(0.3)
         }
@@ -2059,6 +2282,14 @@ struct SidebarView: View {
             topTrailingRadius: 16
         ))
         .padding(.horizontal, 20)
+    }
+
+    private var tutuSearchPaper: Color {
+        #if PERSONAL_APPS
+        SkinState.shared.page0Style == .paper ? Color(red: 251 / 255, green: 248 / 255, blue: 242 / 255) : .clear
+        #else
+        .clear
+        #endif
     }
 
     // MARK: C · 筛选 sheet
@@ -2419,19 +2650,29 @@ struct SidebarView: View {
             MenuActionSpec(title: conversation.memoryEnabled ? "关闭记忆参与" : "开启记忆参与",
                            systemImage: conversation.memoryEnabled ? "brain" : "brain.head.profile") {
                 conversation.memoryEnabled.toggle()
+                try? conversation.modelContext?.save()
+            },
+            MenuActionSpec(title: "这个窗口带什么", systemImage: "checklist") {
+                viewModel.editOpenWindowNote(for: conversation)
+            },
+            MenuActionSpec(title: conversation.isBubbleMode ? "换成文章" : "换成气泡",
+                           systemImage: conversation.isBubbleMode ? "doc.text" : "bubble.left.and.bubble.right") {
+                viewModel.setDisplayMode(conversation.isBubbleMode ? .article : .bubble, for: conversation, context: modelContext)
             },
         ]
 
         // 缓存保暖：按 tmux session 设（不是按对话）——共享同一 session 的
         // 对话共用一份 prompt cache，标题里带上 session 名让这件事看得见。
-        if let ccSession = conversation.ccBridgeSessionName, !ccSession.isEmpty {
-            let current = CCBridgeWebSocketClient.keepalivePolicy(for: ccSession)
+        // 按这条对话连的那台存 / 推（plan-multi-hub B2.4）；那台用不了就不给这项
+        if let ccSession = conversation.ccBridgeSessionName, !ccSession.isEmpty,
+           let hub = try? CCHubRegistry.shared.route(CCHubRegistry.hubId(of: conversation)).get() {
+            let current = CCBridgeWebSocketClient.keepalivePolicy(for: ccSession, hub: hub)
             specs.append(MenuActionSpec(
                 title: "缓存保暖 · \(ccSession)", systemImage: "flame",
                 children: ["always", "auto", "never"].map { policy in
                     MenuActionSpec(title: keepalivePolicyLabel(policy),
                                    systemImage: current == policy ? "checkmark" : keepalivePolicyIcon(policy)) {
-                        CCBridgeWebSocketClient.setKeepalivePolicy(policy, for: ccSession)
+                        CCBridgeWebSocketClient.setKeepalivePolicy(policy, for: ccSession, hub: hub)
                     }
                 }
             ) {})
@@ -2548,15 +2789,17 @@ struct SidebarView: View {
                 do {
                     try markdown.write(to: url, atomically: true, encoding: .utf8)
                 } catch {
-                    viewModel.transientNotice = TransientNotice("导出失败：\(error.localizedDescription)")
+                    ToastCenter.shared.show("导出失败：\(error.localizedDescription)")
                 }
             }
             #endif
         }
     }
 
-    private var shouldShowCompactListEmptyState: Bool {
-        guard isIOSStyle else { return false }
+    private var shouldShowCompactListEmptyState: Bool { isIOSStyle && listHasNothingToShow }
+
+    /// 当前筛选下列表一行都没有（两端共用；mac 用它盖一张空态卡）
+    private var listHasNothingToShow: Bool {
         if showTrash {
             return conversations.isEmpty && deletedNodes.isEmpty
         }
@@ -2631,9 +2874,18 @@ struct SidebarView: View {
         // .scrollBounceBehavior(.always) 让没内容也能 bounce → refresh 可触发。
         // .scrollIndicators(.hidden) 去掉滚动条。
         ScrollView {
+            #if PERSONAL_APPS
+            if onTutu {
+                TutuPage0EmptyContent(title: title, subtitle: subtitle, showImport: showImport,
+                                      onImport: { showImporter = true })
+            } else {
+                cardBody
+            }
+            #else
             cardBody
+            #endif
         }
-        .frame(height: 170)
+        .frame(height: onTutu ? 168 * tutuUnit : 170)
         .scrollBounceBehavior(.always)
         .scrollIndicators(.hidden)
         .refreshable {
@@ -2701,7 +2953,8 @@ struct SidebarView: View {
                     .strokeBorder(macSearchFocused ? Theme.branchIndicator : ShellStyle.hairline, lineWidth: 0.5)
             }
             Menu {
-                Button("新建对话", action: createNewConversation)
+                Button("新建文章对话") { createNewConversation() }
+                Button("新建气泡对话") { createNewConversation(displayMode: .bubble) }
                 Button("新建 Codex 对话", action: createNewCodexConversation)
             } label: {
                 Image(systemName: "square.and.pencil")
@@ -2709,7 +2962,7 @@ struct SidebarView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .frame(width: 26)
-            .help("新建对话（⌘N）；菜单可新建 Codex 对话")
+            .help("新建文章对话（⌘N）；菜单可新建气泡对话（⇧⌘N）、Codex 对话")
             Button { showImporter = true } label: {
                 Image(systemName: "square.and.arrow.down")
             }
@@ -2964,14 +3217,43 @@ struct SidebarView: View {
         Button {
             showNewTagSheet = true
         } label: {
-            Image(systemName: "plus")
-                .font(.system(size: Theme.F.secondary, weight: .medium))
-                .foregroundColor(onMetal ? Color.white.opacity(0.7) : Theme.textMuted)
-                .frame(width: 32, height: 32)
-                .contentShape(Rectangle())
+            Group {
+                #if PERSONAL_APPS && os(iOS)
+                if onTutu {
+                    TutuPage0FolderPlus()
+                } else {
+                    Image(systemName: "plus")
+                        .font(.system(size: Theme.F.secondary, weight: .medium))
+                        .foregroundColor(onMetal ? Color.white.opacity(0.7) : Theme.textMuted)
+                        .frame(width: 32, height: 32)
+                }
+                #else
+                Image(systemName: "plus")
+                    .font(.system(size: Theme.F.secondary, weight: .medium))
+                    .foregroundColor(onMetal ? Color.white.opacity(0.7) : Theme.textMuted)
+                    .frame(width: 32, height: 32)
+                #endif
+            }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(.leading, 4)
+        .padding(.leading, onTutu ? 8 * tutuUnit : 4)
+    }
+
+    private var tutuTabFill: Color {
+        #if PERSONAL_APPS
+        if onTutu { return .clear }
+        #endif
+        return Theme.mainBg
+    }
+
+    private func tutuTabInk(selected: Bool) -> Color {
+        #if PERSONAL_APPS
+        if selected, SkinState.shared.page0Style == .paper {
+            return Color(red: 47 / 255, green: 42 / 255, blue: 38 / 255)
+        }
+        #endif
+        return Color(red: 239 / 255, green: 232 / 255, blue: 221 / 255).opacity(selected ? 1 : 0.62)
     }
 
     @ViewBuilder
@@ -2982,17 +3264,30 @@ struct SidebarView: View {
         let folder = tagIdOf(tab).flatMap { id in tags.first { $0.id == id } }
 
         Button { selectTab(tab) } label: {
-            HStack(spacing: 4) {
-                if let folder { FolderIconView(tag: folder, size: Theme.F.secondary) }
+            HStack(spacing: onTutu ? 5 * tutuUnit : 4) {
+                if let folder {
+                    #if PERSONAL_APPS && os(iOS)
+                    if onTutu && folder.instructions.hasPrefix(StudyTemplate.markerPrefix) {
+                        TutuPage0ControlIcon(kind: .cap).frame(width: 17 * tutuUnit, height: 14 * tutuUnit)
+                    } else {
+                        FolderIconView(tag: folder, size: Theme.F.secondary)
+                    }
+                    #else
+                    FolderIconView(tag: folder, size: Theme.F.secondary)
+                    #endif
+                }
                 Text(folder?.name ?? tab.displayTitle)
             }
-                .font(.system(size: Theme.F.secondary, weight: isSelected ? .semibold : .regular))
-                .foregroundColor(isSelected ? Theme.textPrimary : (onMetal ? Color.white.opacity(0.78) : Theme.textSecondary))
+                .font(onTutu ? .custom("PingFangSC-Regular", fixedSize: 15 * tutuUnit) : .system(size: Theme.F.secondary, weight: isSelected ? .semibold : .regular))
+                .tracking(onTutu ? 0.3 * tutuUnit : 0)
+                .foregroundColor(onTutu ? tutuTabInk(selected: isSelected) : (isSelected ? Theme.textPrimary : (onMetal ? Color.white.opacity(0.78) : Theme.textSecondary)))
                 .lineLimit(1)
                 .if(!fillWidth) { $0.fixedSize() }
-                .padding(.horizontal, isIOSStyle ? 16 : 8)
-                .padding(.vertical, isIOSStyle ? 8 : 6)
-                .if(fillWidth) { $0.frame(maxWidth: .infinity) }
+                .padding(.horizontal, onTutu ? 0 : (isIOSStyle ? 16 : 8))
+                .padding(.vertical, onTutu ? 0 : (isIOSStyle ? 8 : 6))
+                .frame(width: onTutu ? (index == 0 ? 57 : (index == 1 ? 52 : 62)) * tutuUnit : nil,
+                       height: onTutu ? 32 * tutuUnit : nil)
+                .if(fillWidth && !onTutu) { $0.frame(maxWidth: .infinity) }
                 #if os(macOS)
                 .background(isSelected ? ShellStyle.selection : Color.clear, in: RoundedRectangle(cornerRadius: 6))
                 #else
@@ -3003,21 +3298,32 @@ struct SidebarView: View {
                         bottomTrailingRadius: 0,
                         topTrailingRadius: tabCornerRadius
                     )
-                    .fill(isSelected ? Theme.mainBg : Color.clear)
+                    .fill(isSelected ? tutuTabFill : Color.clear)
                 )
                 .overlay(alignment: .bottomLeading) {
-                    if isSelected && !isFirst {
+                    if isSelected && !isFirst && !onTutu {
                         InverseTabCorner(radius: 8, flipped: true)
                     }
                 }
                 .overlay(alignment: .bottomTrailing) {
                     // 选中即显示右凹弧 — 最后一个 tab 右边是 "+" 按钮（sidebarBg），也需要过渡
-                    if isSelected {
+                    if isSelected && !onTutu {
                         InverseTabCorner(radius: 8, flipped: false)
                     }
                 }
                 #endif
                 .contentShape(Rectangle())   // 整个 frame 都响应点击，不只是 Text 区域
+                #if PERSONAL_APPS
+                #if os(iOS)
+                .background {
+                    if onTutu, isSelected, SkinState.shared.page0Style == .paper {
+                        TutuPage0TabShape().fill(TutuPage0Appearance.paper)
+                    }
+                }
+                #endif
+                #endif
+                .padding(.leading, onTutu && index == 0 ? tutuUnit : 0)
+                .padding(.trailing, onTutu ? (index == 0 ? 8 : (index == 1 ? 6 : 10)) * tutuUnit : 0)
         }
         .buttonStyle(.plain)
         .zIndex(isSelected ? 1 : 0)
@@ -3793,11 +4099,12 @@ struct SidebarView: View {
         }
     }
 
-    /// 新建 = 内存草稿（startDraftConversation），发出首条才落库进列表；没发就切走直接丢。
-    private func createNewConversation() {
+    /// 新建 = 内存草稿（startDraftConversation），发出首条才落库进列表；没发就切走直接丢。默认文章
+    private func createNewConversation(displayMode: ConversationDisplayMode = .article) {
         onSelectConversation()
         let profileId = profileManager?.currentProfile.id ?? ""
-        viewModel.startNewConversation(profileId: profileId, fresh: true, cards: cardManager)
+        viewModel.startNewConversation(profileId: profileId, fresh: true, displayMode: displayMode, cards: cardManager,
+                                       explicit: true, context: modelContext)
         // 在文件夹 tab 里新建 = 直接建在这个文件夹里（落库时一起带进去）
         viewModel.selectedConversation?.folderId = selectedTagId
     }
@@ -3813,6 +4120,7 @@ struct SidebarView: View {
         conversation.folderId = selectedTagId
         let n = UserDefaults.standard.integer(forKey: "codexSessionCounter") + 1
         UserDefaults.standard.set(n, forKey: "codexSessionCounter")
+        CCHubRegistry.shared.bindNewCCConversation(conversation)
         conversation.ccBridgeSessionName = "mp-codex-\(n)"
         conversation.selectedModelId = APIProvider.codexBridge.models[0].id   // "codex-bridge/codex-local"
     }
@@ -4516,6 +4824,11 @@ struct ConversationRow: View {
 
     @Environment(\.modelContext) private var modelContext
     @State private var preview = ""
+    #if PERSONAL_APPS
+    #if os(iOS)
+    @Environment(\.tutuPage0Appearance) private var tutuAppearance
+    #endif
+    #endif
 
     /// 行首类型图标色：CC = Claude 橙、codex = GPT 绿（都压低饱和度，不再用荧光绿胶囊分伙伴）
     static let ccTint = Color(red: 0.80, green: 0.52, blue: 0.40)
@@ -4561,7 +4874,31 @@ struct ConversationRow: View {
         return date.formatted(.dateTime.year().month(.abbreviated).day())
     }
 
+    @ViewBuilder
     var body: some View {
+        #if PERSONAL_APPS
+        #if os(iOS)
+        if tutuAppearance.active {
+            TutuPage0Row(title: conversation.title,
+                         session: sessionName.map(Self.sessionShortName) ?? "",
+                         metadata: (conversation.nodeCount > 0 ? "\(conversation.nodeCount) · " : "") + Self.smartDate(conversation.updateTime),
+                         icon: sessionName != nil ? .code : (isStudy ? .cap : .chat))
+                .background(isSelected ? tutuAppearance.ink.opacity(0.045) : Color.clear)
+                .overlay(alignment: .trailing) {
+                    statusSlot(showUnreadDot: true).padding(.trailing, 8 * tutuAppearance.scale)
+                }
+        } else {
+            ordinaryBody
+        }
+        #else
+        ordinaryBody
+        #endif
+        #else
+        ordinaryBody
+        #endif
+    }
+
+    private var ordinaryBody: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 if pure { pureContent } else if detailed { detailedContent } else { compactContent }
@@ -4659,7 +4996,7 @@ struct ConversationRow: View {
                     // 第二行右端一格：在跑 = 转圈，否则未读数字（第一行日期因此能贴右对齐）
                     ZStack(alignment: .trailing) {
                         let badgeOn = hasUnread && !isRunning
-                        Text("\(conversation.unreadCount)")
+                        Text(Page0LocalState.unreadLabel(conversation.unreadCount))
                             .font(.system(size: Theme.F.badge, weight: .semibold))
                             .foregroundColor(.white)
                             .padding(.horizontal, 6)
@@ -5575,8 +5912,30 @@ private struct FavoriteTagHost: ViewModifier {
 private struct SidebarCardShape: ViewModifier {
     let topLeading: CGFloat
     let topTrailing: CGFloat
+    #if PERSONAL_APPS
+    #if os(iOS)
+    @Environment(\.tutuPage0Appearance) private var tutuAppearance
+    #endif
+    #endif
 
+    @ViewBuilder
     func body(content: Content) -> some View {
+        #if os(macOS)
+        content.background(ShellStyle.chrome)
+        #else
+        #if PERSONAL_APPS
+        if tutuAppearance.active {
+            TutuPage0Card { content }
+        } else {
+            ordinary(content)
+        }
+        #else
+        ordinary(content)
+        #endif
+        #endif
+    }
+
+    private func ordinary(_ content: Content) -> some View {
         #if os(macOS)
         content.background(ShellStyle.chrome)
         #else
@@ -5606,6 +5965,9 @@ private struct SidebarCardShape: ViewModifier {
 /// 卡片是 Theme.mainBg 实底，顶边叠一层 mainBg → 透明的渐变，跟「行变透明露卡片底色」同一个效果，液态金属开 / 关两种底都一样；
 /// 在顶部（含下拉刷新）时不遮。不用 .mask：mask 包住 ScrollView 后卡片顶边被画低约 2/3pt，「全部」页签和卡片之间漏缝（粟粟 10-02）
 private struct Page0ListTopFade: ViewModifier {
+    #if PERSONAL_APPS
+    @Environment(\.tutuPage0Appearance) private var tutuAppearance
+    #endif
     @State private var scrolled = false
     private static let height: CGFloat = 24
 
@@ -5617,12 +5979,22 @@ private struct Page0ListTopFade: ViewModifier {
                 scrolled = isScrolled
             }
             .overlay(alignment: .top) {
-                LinearGradient(stops: fadeStops, startPoint: .top, endPoint: .bottom)
-                    .frame(height: Self.height)
-                    .opacity(scrolled ? 1 : 0)
-                    .animation(.easeInOut(duration: 0.2), value: scrolled)
-                    .allowsHitTesting(false)
+                #if PERSONAL_APPS
+                if !tutuAppearance.active {
+                    topFade
+                }
+                #else
+                topFade
+                #endif
             }
+    }
+
+    private var topFade: some View {
+        LinearGradient(stops: fadeStops, startPoint: .top, endPoint: .bottom)
+            .frame(height: Self.height)
+            .opacity(scrolled ? 1 : 0)
+            .animation(.easeInOut(duration: 0.2), value: scrolled)
+            .allowsHitTesting(false)
     }
 
     /// 顶边不透明 → 下沿透明，smoothstep 反向（= 原 mask 的 1 − alpha）
@@ -5681,3 +6053,17 @@ struct TagReorderDropDelegate: DropDelegate {
         NotificationCenter.default.post(name: .conversationTagsChanged, object: nil)
     }
 }
+
+#if os(iOS)
+private struct Page0ProfileZoomSource: ViewModifier {
+    let namespace: Namespace.ID?
+
+    func body(content: Content) -> some View {
+        if let namespace {
+            content.matchedTransitionSource(id: SidebarView.page0ProfileZoomID, in: namespace) { $0.clipShape(RoundedRectangle(cornerRadius: 22)) }   // 胶囊高 44：半径 22 = 两头圆
+        } else {
+            content
+        }
+    }
+}
+#endif

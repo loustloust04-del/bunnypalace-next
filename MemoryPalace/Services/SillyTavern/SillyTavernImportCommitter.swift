@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 
@@ -177,7 +178,9 @@ enum SillyTavernImportCommitter {
 
         let context = ModelContext(env.container)
         context.autosaveEnabled = false
-        let conversationIds = Array(ids(.conversation))
+        let sourceIds = ids(.conversation)
+        PreviousWindowPicker.invalidateCopies(of: sourceIds, context: context)
+        let conversationIds = Array(sourceIds)
         for chunk in conversationIds.chunked(200) {
             for conversation in try context.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { chunk.contains($0.id) })) {
                 context.delete(conversation)

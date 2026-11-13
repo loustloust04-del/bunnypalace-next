@@ -34,6 +34,8 @@ struct StickerKeyboardPanel: View {
     @State private var panelHeight: CGFloat = 260
     @State private var dragOffset: CGFloat = 0
     @State private var showStylePicker = false
+    /// 卡片里显示表情包网格（点即发）而不是贴纸网格（拖到画布）——plan-bubble-sticker-send §1.6
+    @State private var showMemeGrid = false
     @Bindable private var styleManager = StyleManager.shared
 
     private let minHeight: CGFloat = 160
@@ -71,6 +73,7 @@ struct StickerKeyboardPanel: View {
                         #if os(iOS)
                         toolButton("photo", isActive: !showCard && showPhotoStrip) {
                             withAnimation(.easeInOut(duration: 0.2)) {
+                                showMemeGrid = false
                                 if showCard {
                                     onStickerTap?()
                                     showPhotoStrip = true
@@ -94,6 +97,7 @@ struct StickerKeyboardPanel: View {
 
                         toolButton("paperclip", isActive: showFileStrip) {
                             withAnimation(.easeInOut(duration: 0.2)) {
+                                showMemeGrid = false
                                 #if os(iOS)
                                 if showCard {
                                     onStickerTap?()
@@ -121,14 +125,31 @@ struct StickerKeyboardPanel: View {
                                 .accessibilityLabel("打电话")
                         }
                         #endif
-                        toolButton("square.fill.on.circle.fill", isActive: cardVisible) {
+                        toolButton("square.fill.on.circle.fill", isActive: cardVisible && !showMemeGrid) {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 showPhotoStrip = false
                                 showFileStrip = false
                                 pickedFilePaths.removeAll()
-                                onStickerTap?()
+                                // 表情包网格开着 → 切回贴纸网格，不收卡片
+                                if showMemeGrid && cardVisible { showMemeGrid = false } else { onStickerTap?() }
                             }
                         }
+                        // 表情包：点即发（和贴纸那格并排，贴纸还是拖）
+                        toolButton("face.smiling", isActive: cardVisible && showMemeGrid) {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                showPhotoStrip = false
+                                showFileStrip = false
+                                pickedFilePaths.removeAll()
+                                if !showMemeGrid && cardVisible {
+                                    showMemeGrid = true
+                                } else {
+                                    showMemeGrid = true
+                                    onStickerTap?()
+                                }
+                            }
+                        }
+                        .accessibilityLabel("表情包")
+                        .accessibilityIdentifier("panel-meme")
                         #if os(macOS)
                         // 打开右栏「贴纸」工具（导入 / 重命名 / 管理在那边；⧫12，mac 独有一颗——iOS 面板网格只拖拽）
                         toolButton("square.grid.2x2") {
@@ -251,8 +272,9 @@ struct StickerKeyboardPanel: View {
                             }
                     )
 
-                // 贴纸网格
-                if stickerVM.stickerAssets.isEmpty {
+                if showMemeGrid, let pid = profileManager?.currentProfile.id {
+                    MemeGridCard(stickerVM: stickerVM, viewModel: viewModel, profileId: pid)
+                } else if stickerVM.stickerAssets.isEmpty {
                     VStack(spacing: 6) {
                         AppIconView(name: "ri-emoji-sticker", size: 24,
                                     tint: Theme.textMuted.opacity(0.3))
@@ -262,15 +284,35 @@ struct StickerKeyboardPanel: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
+                    #if os(iOS)
+                    // 网格走 UIKit（plan-贴纸面板 下一刀）：系统自带长按拖动排序 + 拖出去贴，两个手势不打架
+                    StickerPanelGrid(
+                        assets: stickerVM.stickerAssets,
+                        profileId: profileManager?.currentProfile.id ?? "",
+                        pinTitle: { stickerVM.panelOrder.manual?.isEmpty == false ? "移到最前" : (stickerVM.panelOrder.isPinned($0) ? "取消置顶" : "置顶") },
+                        onTap: { placeFromPanel($0) },
+                        onPinToggle: { stickerVM.togglePin($0) },
+                        onReorder: { stickerVM.reorderAssets($0) }
+                    )
+                    #else
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 8) {
                             ForEach(stickerVM.stickerAssets, id: \.id) { asset in
                                 PanelStickerCell(asset: asset, profileId: profileManager?.currentProfile.id ?? "")
+                                    // 点一下就贴（plan-贴纸面板）：不经过系统拖放，AI 生成途中 / mac 上也能贴
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { placeFromPanel(asset) }
+                                    .contextMenu {
+                                        Button(stickerVM.panelOrder.isPinned(asset.id) ? "取消置顶" : "置顶") {
+                                            withAnimation(.easeOut(duration: 0.2)) { stickerVM.togglePin(asset) }
+                                        }
+                                    }
                             }
                         }
                         .padding(.horizontal, 14)
                         .padding(.bottom, 14)
                     }
+                    #endif
                 }
             }
             .frame(height: cardVisible ? max(minHeight, min(maxHeight, panelHeight - dragOffset)) : 0)
@@ -362,6 +404,23 @@ struct StickerKeyboardPanel: View {
             Button("好") { attachmentError = nil }
         } message: {
             Text(attachmentError ?? "")
+        }
+    }
+
+    private func placeFromPanel(_ asset: StickerAsset) {
+        guard let convId = viewModel.selectedConversation?.id, let last = viewModel.currentPath.last else {
+            ToastCenter.shared.show("先发一条消息再贴")
+            return
+        }
+        let placed = withAnimation(.easeOut(duration: 0.2)) {
+            stickerVM.placeFromPanel(asset, conversationId: convId, lastMessageId: last.id, context: modelContext)
+        }
+        if placed {
+            #if os(iOS)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            #endif
+        } else {
+            ToastCenter.shared.show("回到最新消息再贴")
         }
     }
 
@@ -470,7 +529,9 @@ struct PanelStickerCell: View {
                     .overlay(ProgressView().scaleEffect(0.4))
             }
         }
+        #if os(macOS)
         .onDrag { NSItemProvider(object: asset.id.uuidString as NSString) }
+        #endif
         .task { if image == nil { load() } }
         .onReceive(NotificationCenter.default.publisher(for: .stickerImageUpdated)) { n in
             if n.object as? UUID == asset.id { load() }

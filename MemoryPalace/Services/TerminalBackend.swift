@@ -35,10 +35,12 @@ struct TerminalBackendEvents {
 @MainActor
 final class HubTerminalBackend: TerminalBackend {
     let sessionName: String
-    private var client: CCBridgeWebSocketClient { .shared }
+    /// 哪台 hub 的 tmux（plan-multi-hub B3.4）：构造时显式给，attach / 输入 / 粘贴 / 结束都只落到这台
+    let client: CCBridgeWebSocketClient
 
-    init(sessionName: String) {
+    init(sessionName: String, client: CCBridgeWebSocketClient) {
         self.sessionName = sessionName
+        self.client = client
     }
 
     var isReachable: Bool { client.isConnected }

@@ -5,7 +5,6 @@ import SwiftStreamingMarkdown
 struct LinkCardView: View {
     let url: URL
     let label: String?
-    @Environment(\.openURL) private var openURL
     @AppStorage(LocalMode.key) private var localMode = true
     @State private var preview: LinkPreview?
 
@@ -22,7 +21,7 @@ struct LinkCardView: View {
     static let bannerAspect: CGFloat = 1200.0 / 630.0
 
     var body: some View {
-        Button { openURL(url) } label: {
+        Button { openWebLink(url) } label: {
             VStack(alignment: .leading, spacing: 0) {
                 // 头图：按网页预览图的通用比例 1.91:1（og:image 1200×630）占位，图片等比铺满、裁掉多出的边。
                 // 以前是把图硬拉成 16:9（非 16:9 的图会变形），骨架又只有 120 高（图出来时卡片跳一下）
@@ -63,7 +62,7 @@ struct LinkCardView: View {
         .buttonStyle(.plain)
         .contextMenu {
             Button("复制链接") { PlatformClipboard.copyString(url.absoluteString) }
-            Button("打开") { openURL(url) }
+            Button("打开") { openWebLink(url) }
         }
         .task(id: "\(url.absoluteString)|\(localMode)") {
             if let now = LinkPreviewStore.shared.immediate(url) { preview = now }

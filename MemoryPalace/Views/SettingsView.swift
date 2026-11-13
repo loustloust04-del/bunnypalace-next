@@ -95,7 +95,7 @@ struct SettingsView: View {
     #if os(iOS)
     /// 底部玻璃胶囊点开的全屏搜索面板（收起态就是那颗胶囊本身）
     @State private var showSearchPanel = false
-    /// 设置页右上角花园开关：lite/pro 模式
+    /// lite / pro：只剩 `.persona` / `.memory` 路由按它分页；切换入口 11-09 摘了（plan-atrium P3 附 a），值冻结在当前
     @AppStorage("settings.proMode") private var settingsProMode = false
     /// 搜索框「?」弹的玻璃选项单：新手引导 / App 文档（未写，占位）
     @State private var showHelpMenu = false
@@ -106,6 +106,8 @@ struct SettingsView: View {
     @State private var searchBarHeight: CGFloat = 46
     /// 报错「去改」跳 Prompt 页某一行：简洁版没有那几行，这一次走完整页（SettingsJump）
     @State private var jumpFullPersona = false
+    /// 「我」根里点「通用」只露 App 自己的那几项；从搜索跳进来（我的名字 / 楼层…）还是整页
+    @State private var jumpFullGeneral = false
     #endif
 
     #if os(iOS)
@@ -117,81 +119,9 @@ struct SettingsView: View {
                 }
                 .listRowBackground(Theme.mainBg)
 
-                if settingsProMode {
-                    // ── Pro：九块全量 ──
-                    Section {
-                        settingsButton(icon: "gearshape", title: "通用", color: Theme.textSecondary, tab: .general)
-                        languageRow()
-                        settingsButton(icon: "lock.shield", title: "权限", color: Theme.textSecondary, tab: .permissions)
-                        settingsButton(icon: "archivebox", title: "数据与备份", color: Theme.textSecondary, tab: .data)
-                        settingsButton(icon: "square.and.arrow.up.on.square", title: "config", color: Theme.textSecondary, tab: .config)
-                    }
-                    Section {
-                        settingsButton(icon: "paintbrush", title: "外观", color: Theme.textSecondary, tab: .appearance)
-                        settingsButton(icon: "square.grid.3x3", title: "子应用", color: Theme.textSecondary, tab: .subApps)
-                    }
-                    Section {
-                        settingsButton(icon: "text.bubble", title: "Prompt", color: Theme.branchIndicator, tab: .persona)
-                        settingsButton(icon: "xiaoya-cameo", title: "小芽", color: Theme.textSecondary, tab: .xiaoya)
-                        settingsButton(icon: "brain.head.profile", title: "记忆", color: Theme.textSecondary, tab: .memory)
-                    }
-                    Section {
-                        settingsButton(icon: "network", title: "模型和API", color: Theme.textSecondary, tab: .api)
-                        settingsButton(icon: "chart.bar.xaxis", title: "用量", color: Theme.textSecondary, tab: .usage)
-                        SettingsFoldRow(icon: "puzzlepiece.extension", title: "AI 连接与拓展", storageKey: "settingsFold.aiExt") {
-                            settingsButton(icon: "speaker.wave.2", title: "语音", color: Theme.textSecondary, tab: .tts, guide: .middle)
-                            placeholderRow(icon: "photo.on.rectangle", title: "生图", guide: .middle)
-                            placeholderRow(icon: "puzzlepiece", title: "Skill", guide: .middle)
-                            settingsButton(icon: "point.3.connected.trianglepath.dotted", title: "MCP", color: Theme.textSecondary, tab: .mcp, guide: .last)
-                        }
-                    }
-                    Section {
-                        SettingsFoldRow(icon: "terminal", title: "编程工具", storageKey: "settingsFold.devTools") {
-                            settingsButton(icon: "laptopcomputer.and.iphone", title: "我的电脑", color: Theme.textSecondary, tab: .myComputer, guide: .middle)
-                            settingsButton(icon: "ri-claude", title: "Claude Code", color: Theme.textSecondary, tab: .claudeCode, guide: .middle)
-                            settingsButton(icon: "ri-openai", title: "Codex", color: Theme.textSecondary, tab: .codex, guide: .middle)
-                            // R5：Agent 页 iOS 开放——数据经 cc-bridge WS 拉 Mac 快照/发配置补丁（N-D9 堵漏解除）
-                            settingsButton(icon: "ri-robot-2", title: "Agent", color: Theme.textSecondary, tab: .agent, guide: .middle)
-                            settingsButton(icon: "terminal", title: "终端", color: Theme.textSecondary, tab: .terminal, guide: .last)
-                        }
-                    }
-                    Section {
-                        settingsButton(icon: "sidebar.right", title: "右栏", color: Theme.textSecondary, tab: .rightPanel)
-                    }
-                    Section {
-                        SettingsFoldRow(icon: "externaldrive", title: "储存与文件", storageKey: "settingsFold.storage") {
-                            placeholderRow(icon: "externaldrive", title: "储存", guide: .middle)
-                            settingsButton(icon: "folder.fill", title: "文件库", color: Theme.textSecondary, tab: .fileLibrary, guide: .middle)
-                            settingsButton(icon: "shippingbox", title: "手机里的小电脑", color: Theme.textSecondary, tab: .sandbox, guide: .middle)
-                            placeholderRow(icon: "folder.badge.plus", title: "挂载和共享文件夹", guide: .last)
-                        }
-                    }
-                    Section {
-                        settingsButton(icon: "ladybug", title: "开发调试", color: Theme.textSecondary, tab: .debug)
-                    }
-                } else {
-                    // ── Lite：只露 6 个入口（design-lite-mode.md），数据与 pro 共通，只是藏入口 ──
-                    Section {
-                        settingsButton(icon: "gearshape", title: "通用", color: Theme.textSecondary, tab: .general)
-                        languageRow()
-                        settingsButton(icon: "lock.shield", title: "权限", color: Theme.textSecondary, tab: .permissions)
-                    }
-                    Section {
-                        settingsButton(icon: "paintbrush", title: "外观", color: Theme.textSecondary, tab: .appearance)
-                        settingsButton(icon: "square.grid.3x3", title: "子应用", color: Theme.textSecondary, tab: .subApps)
-                    }
-                    Section {
-                        settingsButton(icon: "face.smiling", title: "AI 性格", color: Theme.branchIndicator, tab: .persona)
-                        settingsButton(icon: "xiaoya-cameo", title: "小芽", color: Theme.textSecondary, tab: .xiaoya)
-                        settingsButton(icon: "brain.head.profile", title: "记忆", color: Theme.textSecondary, tab: .memory)
-                    }
-                    Section {
-                        settingsButton(icon: "network", title: "模型和API", color: Theme.textSecondary, tab: .api)
-                        settingsButton(icon: "chart.bar.xaxis", title: "用量", color: Theme.textSecondary, tab: .usage)
-                    }
-                }
+                myRootSections
 
-                // ── 关于坨：lite / pro 都有，垫底 ──
+                // ── 关于坨：垫底 ──
                 Section {
                     settingsButton(icon: "leaf", title: "关于记忆花园", color: Theme.textSecondary, tab: .about)
                     placeholderRow(icon: "hand.raised", title: "隐私政策")
@@ -206,7 +136,7 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(item: $selectedSettingsTab) { tab in
                 switch tab {
-                case .general: GeneralPage()
+                case .general: GeneralPage(appOnly: !jumpFullGeneral)
                 case .tts: TTSPage()
                 case .attachment: AttachmentPage()
                 case .appearance: AppearancePage()
@@ -242,7 +172,8 @@ struct SettingsView: View {
                 case .groupChat:
                     GroupChatSettingsTab()
                 case .rightPanel:
-                    RightPanelPage()
+                    // atrium P4-a：iOS 推 gardenOS 设置（和主屏「设置」App 同一个 View）；mac 侧栏照旧推 RightPanelPage
+                    GardenOSSettingsView(title: "gardenOS 设置")
                 case .fileLibrary: FileLibrarySettingsTab()
                 case .sandbox:
                     // #045：「打开终端」= 关掉设置，交给 ContentView 打开终端页开一个新的小电脑 shell
@@ -267,18 +198,9 @@ struct SettingsView: View {
                         .foregroundColor(Theme.branchIndicator)
                 }
                 ToolbarItem(placement: .principal) {
-                    HStack(spacing: 5) {
-                        Text("设置")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(Theme.textPrimary)
-                        Text(settingsProMode ? "pro" : "lite")
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Theme.textSecondary)
-                            .offset(y: 2)   // 跟大标题基线对齐
-                    }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    GardenModeToggle(isPro: $settingsProMode)
+                    Text("设置")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
                 }
             }
             // 底部玻璃搜索框（仿 iOS 26 设置）：overlay 浮在列表上才有真模糊；
@@ -299,6 +221,7 @@ struct SettingsView: View {
             .overlay {
                 SettingsHelpMenu(isPresented: $showHelpMenu, onOnboarding: replayOnboarding, onManual: { selectedSettingsTab = .manual })
             }
+            .onChange(of: selectedSettingsTab) { _, tab in if tab == nil { jumpFullGeneral = false } }
             .scrollDismissesKeyboard(.interactively)
             // 点外面收键盘：window 层挂 cancelsTouchesInView=false 的识别器，不拦点击、不打架
             .background(KeyboardDismissInstaller())
@@ -608,8 +531,7 @@ struct SettingsView: View {
     // MARK: - Settings Row Helper (iOS)
 
     #if os(iOS)
-    /// 搜索结果跳转：先展开目标所在折叠组（否则返回根列表按钮「消失」），再赋值 push。
-    /// 面板收起与 push 同帧会打架，延一拍（rootshell :1300-1306 同款做法）。
+    /// 搜索结果跳转：赋值 push。面板收起与 push 同帧会打架，延一拍（rootshell :1300-1306 同款做法）。
     private func jumpToSearchResult(_ entry: SettingsSearchEntry) {
         // 卡库页签里的行（设置 / 世界书 / 正则）：关设置，交给 ContentView 打开卡库对应页签（⑥）
         if let cardLibraryTarget = entry.cardLibraryTarget, let rightPanelNavigator {
@@ -618,7 +540,7 @@ struct SettingsView: View {
             return
         }
         guard let tab = entry.tab else { return }
-        SettingsSearchEntry.expandFoldGroup(for: tab)
+        jumpFullGeneral = tab == .general
         // 锚点得赶在 push 之前投进信箱——页面 onAppear 一上来就取
         SettingsSearchRouter.shared.request(anchor: entry.anchor)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -627,11 +549,10 @@ struct SettingsView: View {
     }
 
     /// 占位行：还没做的功能入口。灰掉、点不动、右侧「敬请期待」。
-    private func placeholderRow(icon: String, title: String, guide: SettingsFoldGuide? = nil) -> some View {
+    private func placeholderRow(icon: String, title: String) -> some View {
         HStack(spacing: 12) {
             AppIconView(name: icon, size: 16, tint: Theme.textMuted.opacity(0.5))
                 .frame(width: 28)
-                .foldGuide(guide)
             Text(title)
                 .font(.system(size: 16))
                 .foregroundColor(Theme.textMuted)
@@ -695,18 +616,61 @@ struct SettingsView: View {
         return Locale(identifier: "zh-Hans").localizedString(forIdentifier: code) ?? code
     }
 
-    private func settingsButton(icon: String, title: String, color: Color, tab: SettingsTab, guide: SettingsFoldGuide? = nil) -> some View {
+    /// atrium「我」的根列表（plan-atrium P2）：只列 App 自己的；权限档位 / MCP 暂时还放这，带「目前所有人共用」
+    @ViewBuilder
+    private var myRootSections: some View {
+        Section {
+            settingsButton(icon: "gearshape", title: "通用", color: Theme.textSecondary, tab: .general)
+            // atrium P3④a §7-1：人页那几行都按人了，界面主题 / 明暗 / 列表样式这些 App 自己的外观从这里进
+            settingsButton(icon: "paintbrush", title: "外观", color: Theme.textSecondary, tab: .appearance)
+            languageRow()
+            NavigationLink {
+                SystemAuthorizationPage()
+            } label: {
+                HStack(spacing: 12) {
+                    AppIconView(name: "checkmark.shield", size: 16, tint: Theme.textSecondary)
+                        .frame(width: 28)
+                    Text("系统授权")
+                        .font(.system(size: 16))
+                        .foregroundColor(Theme.textPrimary)
+                }
+            }
+            .listRowBackground(Theme.mainBg)
+            .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
+        }
+        Section {
+            settingsButton(icon: "network", title: "模型和API", color: Theme.textSecondary, tab: .api)
+            settingsButton(icon: "chart.bar.xaxis", title: "用量", color: Theme.textSecondary, tab: .usage)
+        }
+        Section {
+            settingsButton(icon: "archivebox", title: "数据与备份", color: Theme.textSecondary, tab: .data)
+            settingsButton(icon: "square.and.arrow.up.on.square", title: "config", color: Theme.textSecondary, tab: .config)
+        }
+        Section {
+            settingsButton(icon: "lock.shield", title: "权限", color: Theme.textSecondary, tab: .permissions)
+            settingsButton(icon: "point.3.connected.trianglepath.dotted", title: "MCP", color: Theme.textSecondary, tab: .mcp, sharedByAll: true)
+        } footer: {
+            Text("MCP 所有人共用。权限这里是默认，单独给某个人改去 TA 的人页。")
+                .font(.system(size: Theme.F.caption))
+                .foregroundColor(Theme.textMuted)
+        }
+        Section {
+            settingsButton(icon: "ladybug", title: "开发调试", color: Theme.textSecondary, tab: .debug)
+        }
+    }
+
+    private func settingsButton(icon: String, title: String, color: Color, tab: SettingsTab, sharedByAll: Bool = false) -> some View {
         Button {
             selectedSettingsTab = tab
         } label: {
             HStack(spacing: 12) {
                 AppIconView(name: icon, size: 16, tint: color)
                     .frame(width: 28)
-                    .foldGuide(guide)
                 Text(title)
                     .font(.system(size: 16))
                     .foregroundColor(Theme.textPrimary)
                 Spacer()
+                if sharedByAll { SharedByAllBadge() }
                 Image(systemName: "chevron.right")
                     .font(.system(size: 13))
                     .foregroundColor(Theme.textMuted.opacity(0.5))
@@ -717,82 +681,6 @@ struct SettingsView: View {
     }
     #endif
 }
-
-// MARK: - Settings Fold Row (iOS)
-
-#if os(iOS)
-/// 折叠组引导竖线位置：middle=顶+底段，last=只顶段（收尾），header=只底段（折叠标题行）
-private enum SettingsFoldGuide {
-    case middle, last, header
-}
-
-/// 图标列的引导竖线：每个行间间隙一根独立短胶囊，两端完整露出才是正圆头。
-/// 不再用整条长线+色块遮罩（切断面看着像方头）。middle/header 画图标下方的段，last 不画。
-private struct SettingsFoldGuideModifier: ViewModifier {
-    let guide: SettingsFoldGuide?
-    func body(content: Content) -> some View {
-        content.background {
-            if let guide, guide != .last {
-                Capsule()
-                    .fill(Theme.branchIndicator.opacity(0.5))
-                    .frame(width: 2, height: 14)
-                    .offset(y: 23)
-            }
-        }
-    }
-}
-
-private extension View {
-    func foldGuide(_ guide: SettingsFoldGuide?) -> some View {
-        modifier(SettingsFoldGuideModifier(guide: guide))
-    }
-}
-
-/// 设置根列表的折叠分组行：一级就地展开收起，展开状态逐组持久化。
-/// 不用 DisclosureGroup——它的 chevron 在 List 里不吃 .tint()，颜色跟普通行对不上。
-/// Button + 自绘 chevron，样式跟 settingsButton 完全一致；内容摊平成多行，不包 VStack。
-/// 展开时标题变薄荷绿，图标下方接引导竖线。
-private struct SettingsFoldRow<Content: View>: View {
-    let icon: String
-    let title: String
-    @AppStorage private var expanded: Bool
-    @ViewBuilder let content: () -> Content
-
-    init(icon: String, title: String, storageKey: String, @ViewBuilder content: @escaping () -> Content) {
-        self.icon = icon
-        self.title = title
-        self._expanded = AppStorage(wrappedValue: false, storageKey)
-        self.content = content
-    }
-
-    var body: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() }
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 16))
-                    .foregroundColor(Theme.textSecondary)
-                    .frame(width: 28)
-                    .foldGuide(expanded ? .header : nil)
-                Text(title)
-                    .font(.system(size: 16))
-                    .foregroundColor(expanded ? Theme.branchIndicator : Theme.textPrimary)
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13))
-                    .foregroundColor(Theme.textMuted.opacity(0.5))
-                    .rotationEffect(.degrees(expanded ? 90 : 0))
-            }
-        }
-        .listRowBackground(Theme.mainBg)
-        .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
-        if expanded {
-            content()
-        }
-    }
-}
-#endif
 
 // MARK: - Settings Search Bar + Keyboard Dismiss (iOS)
 

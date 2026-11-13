@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -12,7 +13,7 @@ final class CatalogOriginalRetrievalTests: XCTestCase {
     private let nodeId = "cloudbridge-original-node"
     private let conversationId = "cloudbridge-window"
     private var submit: String {
-        "{\"items\":[{\"type\":\"new_page\",\"path\":\"楼层/主题/云桥城\",\"kind\":\"主题\",\"title\":\"云桥城\",\"records\":[{\"text\":\"虚构作品的桥每晚移位\",\"aline\":[{\"layer\":\"原文\",\"nodeId\":\"\(nodeId)\"}]}]}]}"
+        "{\"items\":[{\"type\":\"new_page\",\"path\":\"主题/云桥城\",\"kind\":\"主题\",\"title\":\"云桥城\",\"records\":[{\"text\":\"虚构作品的桥每晚移位\",\"aline\":[{\"layer\":\"原文\",\"nodeId\":\"\(nodeId)\"}]}]}]}"
     }
 
     override func setUp() async throws {
@@ -46,7 +47,7 @@ final class CatalogOriginalRetrievalTests: XCTestCase {
         try store.apply(upserts: [.init(nodeId: nodeId, conversationId: conversationId, profileId: pid, role: "user",
                                        created: now, trashed: false, body: originalBody, identifierKey: nil)], epoch: store.epoch)
         for index in [nil, store] {
-            let material = await CatalogWriter.material(.init(path: "楼层/主题/云桥城", title: "云桥城", kind: .topic, existing: false),
+            let material = await CatalogWriter.material(.init(path: "主题/云桥城", title: "云桥城", kind: .topic, existing: false),
                                                          fragments: [], floorPrompt: "", wiki: wiki, memoryRoot: root, now: now,
                                                          embedder: CatalogFakeEmbedder.unavailable(), originalSearch: source(index: index))
             var actual = ""
@@ -154,7 +155,7 @@ final class CatalogOriginalRetrievalTests: XCTestCase {
     func testAgentRejectsFragmentNotActuallyProvidedAfterTruncation() async throws {
         let first = CatalogFragment(id: UUID(), content: String(repeating: "solarship ", count: 100), category: "fact", day: "2026-10-18")
         let tail = CatalogFragment(id: UUID(), content: "solarship " + String(repeating: "background ", count: 2000), category: "fact", day: "2026-10-18")
-        let submission = "{\"items\":[{\"type\":\"new_page\",\"path\":\"楼层/主题/船\",\"records\":[{\"text\":\"实际提供\",\"fragments\":[\"f1\"]},{\"text\":\"尾部未提供\",\"fragments\":[\"f2\"]}]}]}"
+        let submission = "{\"items\":[{\"type\":\"new_page\",\"path\":\"主题/船\",\"records\":[{\"text\":\"实际提供\",\"fragments\":[\"f1\"]},{\"text\":\"尾部未提供\",\"fragments\":[\"f2\"]}]}]}"
         let backend = FakeCatalogBackend { round, _ in
             .toolCalls([round == 1 ? CatalogTestKit.call("search_fragments", "{\"terms\":[\"solarship\"]}")
                 : CatalogTestKit.call(CatalogAgentTools.submit, submission)])
@@ -184,7 +185,7 @@ final class CatalogOriginalRetrievalTests: XCTestCase {
                                                           memoryFixtures: false, modelId: type == .anthropic ? "claude-sonnet-4-6" : "gpt-4o"))
         let searchArgs: [String: Any] = ["terms": ["云桥城"]]
         let submitArgs = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(submit.utf8)) as? [String: Any])
-        let server = try OutputTokenCapTests.ScriptedHTTPServer { index, _ in
+        let server = try ScriptedHTTPServer { index, _ in
             let name = index == 0 ? "search_aline" : CatalogAgentTools.submit
             let args = index == 0 ? searchArgs : submitArgs
             let body: [String: Any]

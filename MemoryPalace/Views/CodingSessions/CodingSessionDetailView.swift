@@ -511,7 +511,14 @@ struct CodingMessageRow: View {
 
     private var isUser: Bool { message.role == .user }
 
+    /// 编程会话不是聊天页：复用的聊天组件（MessageSegmentsView / ChatMarkdownView）整套读全局色，
+    /// 字色和下面全局的泡底同源，不被气泡主题染（ThemeScope）
     var body: some View {
+        rowContent.environment(\.themeScope, .global)
+    }
+
+    @ViewBuilder
+    private var rowContent: some View {
         switch (message.role, message.kind) {
         case (_, .compactSummary):
             HStack(spacing: 8) {

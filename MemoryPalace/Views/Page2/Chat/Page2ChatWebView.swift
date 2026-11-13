@@ -448,7 +448,7 @@ private struct ChatWebViewRepresentable: UIViewRepresentable {
             guard let host = webView?.owningViewController() else { return }
             let alert = UIAlertController(title: "打开外部链接？", message: url.absoluteString, preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-            alert.addAction(UIAlertAction(title: "打开", style: .default) { _ in UIApplication.shared.open(url) })
+            alert.addAction(UIAlertAction(title: "打开", style: .default) { _ in openWebLink(url) })
             host.present(alert, animated: true)
         }
 
@@ -499,6 +499,7 @@ private struct ChatWebViewRepresentable: UIViewRepresentable {
 
         private func sendModel(_ pm: ProviderManager) -> ProviderModel {
             pm.resolveModel(conversationModelId: viewModel.selectedConversation?.selectedModelId,
+                            profileModelId: deps.profile?.preferredModel,
                             globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
         }
 
@@ -627,6 +628,7 @@ private struct ChatWebViewRepresentable: UIViewRepresentable {
             let preset = deps.preset ?? Preset.balanced
             let model = pm.resolveModel(
                 conversationModelId: viewModel.selectedConversation?.selectedModelId,
+                profileModelId: prof.preferredModel,
                 globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
             if node.role == "assistant" {
                 viewModel.regenerate(assistantNodeId: node.id, model: model, profile: prof,
@@ -649,6 +651,7 @@ private struct ChatWebViewRepresentable: UIViewRepresentable {
             let preset = deps.preset ?? Preset.balanced
             let model = pm.resolveModel(
                 conversationModelId: viewModel.selectedConversation?.selectedModelId,
+                profileModelId: prof.preferredModel,
                 globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
             viewModel.selectedConversation?.selectedModelId = model.id
 

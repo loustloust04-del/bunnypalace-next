@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -169,13 +170,13 @@ final class TimelineDailyTests: XCTestCase {
         let calls = Calls()
         let r = await TimelineDaily.perform(input([a, b, none], calls), now: date(10, 13, 9), force: false)
         XCTAssertEqual(r.pendingAdded, 3)
-        var items = try XCTUnwrap(PendingStore.load(profileId: pid, memoryRoot: root))
+        var items = try XCTUnwrap(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root))
         XCTAssertEqual(Set(items.map(\.text)), ["周三问结果", "买药", "讲完那个故事"])
         XCTAssertEqual(items.first { $0.text == "周三问结果" }?.anchor, "conv-a-1", "锚点 = 段末条消息")
         XCTAssertEqual(items.first { $0.text == "讲完那个故事" }?.day, "2026-10-12")
         XCTAssertTrue(calls.systems.allSatisfy { $0 == TimelineWriter.systemPrompt }, "只有主调调用，搬待续不调模型")
 
-        try PendingStore.mutate(profileId: pid, memoryRoot: root) { list in
+        try PendingStore.mutate(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root) { list in
             if let i = list.firstIndex(where: { $0.text == "买药" }) { list[i].state = .done }
         }
         var s = b.summary!
@@ -184,7 +185,7 @@ final class TimelineDailyTests: XCTestCase {
         b = .init(conversationId: b.conversationId, title: b.title, messages: b.messages, summary: s)
         let again = await TimelineDaily.perform(input([a, b, none], calls), now: date(10, 13, 9, 30), force: false)
         XCTAssertEqual(again.pendingAdded, 0, "同一句不再加，做完了的也不翻出来")
-        items = try XCTUnwrap(PendingStore.load(profileId: pid, memoryRoot: root))
+        items = try XCTUnwrap(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root))
         XCTAssertEqual(items.count, 3)
         XCTAssertEqual(items.first { $0.text == "买药" }?.state, .done)
     }
@@ -212,7 +213,7 @@ final class TimelineDailyTests: XCTestCase {
                                         summary: saved)
         let r = await TimelineDaily.perform(input([w], Calls()), now: date(10, 13, 9), force: false)
         XCTAssertEqual(r.pendingAdded, 2)
-        let items = try XCTUnwrap(PendingStore.load(profileId: pid, memoryRoot: root))
+        let items = try XCTUnwrap(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root))
         XCTAssertEqual(items.map(\.text), ["周三问结果", "买药"])
         XCTAssertTrue(items.allSatisfy { $0.anchor == "conv-w-1" && $0.state == .open })
     }
@@ -431,8 +432,8 @@ final class TimelineDailyTests: XCTestCase {
         let m = TimelineStore.month("2026-10", in: dir)
         XCTAssertEqual(m.days.map(\.date), ["2026-10-05"])
         XCTAssertEqual(m.entries.map(\.dayKey).sorted(), ["2026-10-05", "2026-10-06", "2026-10-07"], "老条目一条不删")
-        XCTAssertEqual(PendingStore.load(profileId: pid, memoryRoot: root)?.map(\.text), ["周三问结果"], "旧待续迁进待续本子")
-        XCTAssertTrue(PendingStore.isLegacyDone(profileId: pid, memoryRoot: root))
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root)?.map(\.text), ["周三问结果"], "旧待续迁进待续本子")
+        XCTAssertTrue(PendingStore.isLegacyDone(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root))
         XCTAssertEqual(TimelineSourceState.load(dir).dirty, ["2026-10-06"], "没写成的日子留在待拼里")
 
         let r2 = await TimelineDaily.perform(input([a, o], calls), now: date(10, 20, 9), force: false)
@@ -444,7 +445,7 @@ final class TimelineDailyTests: XCTestCase {
 
         let inj = TimelineStore.injection(records: ["2026-10-05": TimelineStore.day("2026-10-05", in: dir)!], entries: [:], today: "2026-10-06",
                                           currentConversationId: "", windowIds: [],
-                                          openPending: PendingStore.load(profileId: pid, memoryRoot: root).map { items in
+                                          openPending: PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root).map { items in
                                               Dictionary(grouping: items, by: \.conversationId).mapValues { $0.map(\.text) } }, days: 7)
         XCTAssertTrue(inj.text?.contains("周三问结果") == true, "待续照样注入")
     }
@@ -502,7 +503,7 @@ final class TimelineDailyTests: XCTestCase {
         try SessionSummaryStore.save(SessionSummary(conversationId: "conv-in", title: "窗口conv-in", compressedCount: 0, segments: [
             SessionSegment(kind: .rolling, title: "段", start: date(10, 12, 9), end: date(10, 12, 9, 3), from: 0, to: 4, lastNodeId: "conv-in-3",
                            story: "", quotes: "", pending: "")], updatedAt: Date()), in: SessionSummaryStore.dir(root: root))
-        let ws = TimelineDaily.windows(profileId: pid, container: c, memoryRoot: root,
+        let ws = TimelineDaily.windows(profileId: pid, source: SwiftDataConversationSource(container: c), memoryRoot: root,
                                        in: DateInterval(start: date(10, 12, 5), end: date(10, 13, 5)))
         XCTAssertNil(ws.error)
         XCTAssertEqual(ws.windows.map(\.conversationId), ["conv-in"])
@@ -558,7 +559,7 @@ final class TimelineDailyTests: XCTestCase {
 
     /// astra #2：备份没做成 → 待续本子一个字节不变（不先迁、不先搬）、月文件不变、不调模型
     func testBackupFailureLeavesPendingUntouched() async throws {
-        try PendingStore.mutate(profileId: pid, memoryRoot: root) { $0 = [PendingItem(id: "p1", text: "原有的一条", state: .open,
+        try PendingStore.mutate(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root) { $0 = [PendingItem(id: "p1", text: "原有的一条", state: .open,
                                                                                     conversationId: "conv-z", day: "2026-10-01", anchor: nil)] }
         try TimelineStore.seedLegacy(legacy(5, "conv-a", "开发", pending: "老待续"), in: dir)
         try FileManager.default.createSymbolicLink(at: dir.appendingPathComponent("链接"), withDestinationURL: root)
@@ -600,12 +601,12 @@ final class TimelineDailyTests: XCTestCase {
         let r = await TimelineDaily.perform(input([w], Calls()), now: date(10, 20, 9), force: false)
         XCTAssertEqual(r.written, ["2026-10-05"])
         XCTAssertEqual(TimelineStore.month("2026-10", in: dir).entries.map(\.pending), ["周三问结果"], "老条目原样")
-        XCTAssertEqual(PendingStore.load(profileId: pid, memoryRoot: root)?.map(\.text), ["周三问结果"])
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root)?.map(\.text), ["周三问结果"])
         let backup = MemoryRegeneration.backupRoot(memoryRoot: root).appendingPathComponent(try XCTUnwrap(r.backup))
         XCTAssertEqual(try TimelineStore.monthStrict("2026-10", in: TimelineStore.dir(root: backup)).entries.map(\.pending), ["周三问结果"])
         XCTAssertFalse(FileManager.default.fileExists(atPath: PendingStore.fileURL(root: backup).path))
         // 迁完以后 A 线按本子：她标了做完，老条目那条不再当待续读到
-        let items = try XCTUnwrap(PendingStore.load(profileId: pid, memoryRoot: root))
+        let items = try XCTUnwrap(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root))
         let entry = try XCTUnwrap(TimelineStore.month("2026-10", in: dir).entries.first)
         XCTAssertEqual(CatalogALineReader.a4Lines(entry, book: items).flatMap { $0.map(\.text) }.contains("周三问结果"), true)
         var done = items
@@ -666,7 +667,7 @@ final class TimelineDailyTests: XCTestCase {
         let sessions = SessionSummaryStore.dir(root: root)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         try Data("随便写的\n<!-- seg kind=rolling -->\n".utf8).write(to: sessions.appendingPathComponent("conv-bad-坏文件.md"))
-        let src = TimelineDaily.windows(profileId: pid, container: c, memoryRoot: root, in: DateInterval(start: date(10, 12, 5), end: date(10, 13, 5)))
+        let src = TimelineDaily.windows(profileId: pid, source: SwiftDataConversationSource(container: c), memoryRoot: root, in: DateInterval(start: date(10, 12, 5), end: date(10, 13, 5)))
         XCTAssertNotNil(src.windows.first { $0.conversationId == "conv-bad" }?.summaryError)
     }
 
@@ -751,11 +752,11 @@ final class TimelineDailyTests: XCTestCase {
         let w = window("conv-e", "早", minutes(date(10, 5, 9), 2), segments: [(0..<2, "五号的段")], pending: "早先的待续")
         let r1 = await TimelineDaily.perform(input([w], Calls(), startDay: date(10, 10, 5)), now: date(10, 20, 9), force: false)
         XCTAssertEqual(r1.written, [])
-        XCTAssertNil(PendingStore.load(profileId: pid, memoryRoot: root), "起点以前的段不搬")
+        XCTAssertNil(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root), "起点以前的段不搬")
         XCTAssertEqual(TimelineSourceState.load(dir).harvestedFrom, "2026-10-10")
         let r2 = await TimelineDaily.perform(input([w], Calls(), startDay: date(10, 1, 5)), now: date(10, 20, 9), force: false)
         XCTAssertEqual(r2.written, ["2026-10-05"], "补拼")
-        XCTAssertEqual(PendingStore.load(profileId: pid, memoryRoot: root)?.map(\.text), ["早先的待续"], "补搬")
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root)?.map(\.text), ["早先的待续"], "补搬")
         XCTAssertEqual(TimelineSourceState.load(dir).harvestedFrom, "2026-10-01")
     }
 
@@ -768,10 +769,10 @@ final class TimelineDailyTests: XCTestCase {
         try Data("随便写的\n<!-- seg kind=rolling -->\n".utf8).write(to: file)
         let r1 = await TimelineDaily.perform(i, now: date(10, 13, 9), force: false)
         XCTAssertEqual(r1.sourceErrors.count, 1)
-        XCTAssertEqual(PendingStore.load(profileId: pid, memoryRoot: root)?.map(\.text), ["好的待续"])
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root)?.map(\.text), ["好的待续"])
         XCTAssertNil(TimelineSourceState.load(dir).harvestedFrom, "有文件读不了，不记盘完")
         _ = await TimelineDaily.perform(input([a, b], Calls()), now: date(10, 13, 9, 30), force: false)
-        XCTAssertEqual(PendingStore.load(profileId: pid, memoryRoot: root)?.map(\.text), ["好的待续", "坏文件里的待续"], "修好后补搬")
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root)?.map(\.text), ["好的待续", "坏文件里的待续"], "修好后补搬")
         XCTAssertEqual(TimelineSourceState.load(dir).harvestedFrom, "")
     }
 
@@ -871,7 +872,7 @@ final class TimelineDailyTests: XCTestCase {
         XCTAssertNil(r2.blocked)
         XCTAssertEqual(TimelineSourceState.load(dir).dirty, [], "出队")
         XCTAssertFalse(TimelineSourceState.load(dir).files.isEmpty)
-        XCTAssertTrue(PendingStore.isLegacyDone(profileId: pid, memoryRoot: root))
+        XCTAssertTrue(PendingStore.isLegacyDone(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root))
     }
 
     /// astra #8：一段 A2 很晚才落盘、盖到七天以前的日子：按 A2 文件变化标出来，那几天也补拼（起点以前的不碰），全程只有主调调用
@@ -900,7 +901,7 @@ final class TimelineDailyTests: XCTestCase {
         let recent = window("conv-new", "最近", minutes(date(10, 12, 9), 2), segments: [(0..<2, "昨天的事")])
         let calls = Calls()
         let r = await TimelineDaily.perform(input([w, recent], calls), now: date(10, 13, 9), force: false)
-        XCTAssertEqual(PendingStore.load(profileId: pid, memoryRoot: root)?.map(\.text), ["回头问问"])
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root)?.map(\.text), ["回头问问"])
         XCTAssertEqual(r.written, ["2026-10-02", "2026-10-12"])
         XCTAssertEqual(TimelineStore.day("2026-10-02", in: dir)?.items.map(\.conversationId), ["conv-old"], "那天只读到它，区间外的窗口没混进来")
     }
@@ -925,14 +926,14 @@ final class TimelineDailyTests: XCTestCase {
     func testEditedPendingNotHarvestedAgain() async throws {
         var w = window("conv-a", "开发", minutes(date(10, 12, 9), 3), segments: [(0..<3, "尾段")], kind: .closeout, tail: true, pending: "买药")
         _ = await TimelineDaily.perform(input([w], Calls()), now: date(10, 13, 9), force: false)
-        try PendingStore.mutate(profileId: pid, memoryRoot: root) { items in
+        try PendingStore.mutate(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root) { items in
             items[0].text = "买感冒药"
             items[0].state = .done
         }
         w = with(w) { $0.segments[0].title = "尾段重写了" }
         let r = await TimelineDaily.perform(input([w], Calls()), now: date(10, 13, 9, 30), force: false)
         XCTAssertEqual(r.pendingAdded, 0)
-        let items = try XCTUnwrap(PendingStore.load(profileId: pid, memoryRoot: root))
+        let items = try XCTUnwrap(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid), memoryRoot: root))
         XCTAssertEqual(items.map(\.text), ["买感冒药"])
         XCTAssertEqual(items[0].state, .done)
     }

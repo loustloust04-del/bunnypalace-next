@@ -63,7 +63,9 @@ final class MemoryFullPresenceTests: XCTestCase {
     func testColdMemoryInjectedUnderBudget() {
         seed("她在宿务学英语", weight: 0.01)
         let memories = store.listActive(profileId: pid, context: context)
-        let (stable, volatilePart, _) = MemoryInjector.buildInjectionSplit(memories: memories, recentMessages: [])
+        let split = MemoryInjector.buildInjectionSplit(memories: memories, recentMessages: [])
+        let stable = split.stable
+        let volatilePart = split.volatile
         XCTAssertTrue((stable + volatilePart).contains("她在宿务学英语"), "冷记忆预算内必须注入")
     }
 
@@ -89,7 +91,9 @@ final class MemoryFullPresenceTests: XCTestCase {
         defer { UserDefaults.standard.removeObject(forKey: "mem_inject_budget") }
 
         let memories = store.listActive(profileId: pid, context: context)
-        let (stable, volatilePart, _) = MemoryInjector.buildInjectionSplit(memories: memories, recentMessages: [])
+        let split = MemoryInjector.buildInjectionSplit(memories: memories, recentMessages: [])
+        let stable = split.stable
+        let volatilePart = split.volatile
         let all = stable + volatilePart
         XCTAssertTrue(stable.contains("钉住的老条目"), "钉住在 stable 层豁免截断")
         XCTAssertTrue(all.contains("最新的条目"), "新条目优先保留")
@@ -123,7 +127,9 @@ final class MemoryFullPresenceTests: XCTestCase {
         defer { UserDefaults.standard.removeObject(forKey: "mem_inject_budget") }
 
         let memories = store.listActive(profileId: pid, context: context)
-        let (stable, volatilePart, _) = MemoryInjector.buildInjectionSplit(memories: memories, recentMessages: [])
+        let split = MemoryInjector.buildInjectionSplit(memories: memories, recentMessages: [])
+        let stable = split.stable
+        let volatilePart = split.volatile
         let all = stable + volatilePart
         XCTAssertTrue(all.contains("老的但没定的一条"), "没定（= 3）的比重要度 1 的先装")
         XCTAssertFalse(all.contains("不太要紧的一条"), "装不下先丢重要度低的")

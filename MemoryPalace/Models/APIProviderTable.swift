@@ -49,7 +49,6 @@ struct PresetRegion: Identifiable, Equatable {
     var name: String
     var endpoints: [ProviderType: String]   // 规整后的 base（BaseURLNormalizer 口径）；账号 / 桥 / 本机类只放一个
     var keysURL: URL? = nil
-    var docsURL: URL? = nil
     var catalogIds: [String] = []           // models.dev provider id
     var listsModels: Bool = true            // false = 不问 /models，直接用种子
     var seedModelIds: [String] = []         // 区域专属种子；空 = 用 APIProvider.models

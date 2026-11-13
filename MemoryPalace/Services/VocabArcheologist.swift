@@ -45,16 +45,7 @@ enum VocabArcheologist {
 
     /// 聊天模型优先（和普通对话同一个提供商）；CC / 本机 / 不认识的卡走不了一次性长文，退副模型（记忆提取用的那个）。
     static func resolveModel(providerManager: ProviderManager, defaults: UserDefaults = .standard) -> ProviderModel? {
-        for key in ["selectedChatModel", "memoryExtractModelId"] {
-            let id = defaults.string(forKey: key) ?? ""
-            guard !id.isEmpty, let m = providerManager.model(byId: id),
-                  let type = providerManager.provider(for: m)?.type else { continue }
-            switch type {
-            case .openaiCompatible, .anthropic, .chatgptOAuth: return m
-            case .ccBridge, .localMLX, .unsupported: continue
-            }
-        }
-        return nil
+        providerManager.sideModel(ids: ["selectedChatModel", "memoryExtractModelId"].map { defaults.string(forKey: $0) ?? "" })
     }
 
     /// 进行中的请求（router 要活到回调结束）

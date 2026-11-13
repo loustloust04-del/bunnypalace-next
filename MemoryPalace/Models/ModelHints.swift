@@ -50,3 +50,18 @@ final class ModelHints: @unchecked Sendable {
         return read
     }
 }
+
+/// 模型能不能看图（plan-model-vision-check §1.1）：卡上 /models 旁表 > models.dev 目录 > 不知道。
+/// 只有明确 `.no` 才拦图；不知道照发（没收录的模型不能突然看不到图）
+enum VisionCapability: Equatable {
+    case yes, no, unknown
+
+    static func of(_ model: ProviderModel, providerType: ProviderType?,
+                   hints: ModelHints = .shared, catalog: ModelCatalog = .shared) -> VisionCapability {
+        if providerType == .ccBridge { return .yes }   // CC 后端自己收附件
+        let modalities = hints.hint(credentialId: model.credentialId, modelId: model.modelId)?.inputModalities
+            ?? catalog.model(for: model.modelId)?.inputModalities
+        guard let modalities else { return .unknown }
+        return modalities.contains("image") ? .yes : .no
+    }
+}

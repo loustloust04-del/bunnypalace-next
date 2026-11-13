@@ -26,6 +26,11 @@ struct CCSettingsView: View {
     #if os(macOS)
     @State private var cleanupDays: Int? = nil      // ~/.claude/settings.json 的 cleanupPeriodDays，nil=未设置
     @State private var retentionWriteFailed = false
+    #if os(macOS)
+    /// 「让 AI 用这台 Mac 的 Chrome 登录态」（plan-opencli-in-app）：改了等 hub 回话期间先显示新值
+    @State private var opencliPending: Bool?
+    @State private var opencliError: String?
+    #endif
     private static let retentionPresets = [30, 365, 3650, 36500]
     private static var claudeSettingsPath: String {
         AppPaths.checked(AppPaths.home.appendingPathComponent(".claude/settings.json")).path
@@ -58,16 +63,34 @@ struct CCSettingsView: View {
     @Environment(ProviderManager.self) private var providerManager: ProviderManager?
     @State private var showScanner = false
     @State private var pairResult: String?
+    /// 扫到的不是主电脑 / 认不出：弹落点（b4 #1）
+    @State private var pairingCheck: CCHubRegistry.PrimaryPairingCheck?
     private var currentHubURL: String {
         let o = UserDefaults.standard.string(forKey: "ccBridgeBaseURLOverride") ?? ""
         return o.isEmpty ? "ws://127.0.0.1:7890/cc（默认）" : o
     }
     private func applyPairing(_ p: CCPairPayload) {
-        pairResult = CCPairingApply.apply(p, providerManager: providerManager)
+        pairResult = CCPairingApply.checking
+        Task {
+            switch await CCPairingApply.apply(p, providerManager: providerManager) {
+            case .done(let line): pairResult = line
+            case .confirm(let check):
+                pairResult = nil
+                pairingCheck = check
+            }
+        }
     }
     #endif
 
-    private func sync() { CCBridgeWebSocketClient.shared.sendCCConfig() }
+    /// 只在手动改的时候记手改时间（hub 回推写本机会动 @AppStorage，onChange 分不清是谁改的，所以都走 Binding 的 set）
+    private func edited(_ wires: String...) {
+        CCConfigSync.markEdited(wires, defaults: .standard, now: Date())
+        CCHubRegistry.shared.broadcastCCConfig()
+    }
+
+    private func userBinding<T>(_ value: Binding<T>, _ wire: String) -> Binding<T> {
+        Binding(get: { value.wrappedValue }, set: { value.wrappedValue = $0; edited(wire) })
+    }
 
     #if os(iOS) && DEBUG
     private var liveActivitiesEnabled: Bool {
@@ -104,6 +127,10 @@ struct CCSettingsView: View {
         let c = Calendar.current.dateComponents([.hour, .minute], from: d)
         return (c.hour ?? 0) * 60 + (c.minute ?? 0)
     }
+
+    #if os(macOS)
+    private var opencliOn: Bool { CCBridgeWebSocketClient.shared.currentHubInfo?.capabilities.contains("opencli") == true }
+    #endif
 
     var body: some View {
         // 搜索锚点：命中叶子条目时滚到那一行（`.settingsAnchorScroll` 在 List 上）
@@ -170,7 +197,7 @@ struct CCSettingsView: View {
                 }
                 .font(m.rowLabel)
                 .foregroundColor(Theme.textPrimary)
-                .onChange(of: pushPreview) { _, mode in CCBridgeWebSocketClient.shared.updatePushPreview(mode) }
+                .onChange(of: pushPreview) { _, mode in CCHubRegistry.shared.updatePushPreview(mode) }
                 .searchAnchor("leaf-cc-pushcontent")
 
                 HStack {
@@ -193,28 +220,27 @@ struct CCSettingsView: View {
 
             // MARK: 主动找我（nudge）
             Section {
-                Toggle("让 AI 主动找我", isOn: $nudgeEnabled)
+                Toggle("让 AI 主动找我", isOn: userBinding($nudgeEnabled, "nudgeEnabled"))
                     .font(m.rowLabel)
                     .foregroundColor(Theme.textPrimary)
-                    .onChange(of: nudgeEnabled) { _, _ in sync() }
                     .searchAnchor("leaf-cc-nudge")
 
                 if nudgeEnabled {
                     ParameterRow(label: "沉默下限（分钟）",
                                  value: Binding(get: { Double(idleMin) },
-                                                set: { idleMin = Int($0); if idleMax < idleMin { idleMax = idleMin }; sync() }),
+                                                set: { idleMin = Int($0); if idleMax < idleMin { idleMax = idleMin }; edited("idleMinMin", "idleMaxMin") }),
                                  range: 1...180, step: 1, intMode: true)
                     ParameterRow(label: "沉默上限（分钟）",
                                  value: Binding(get: { Double(idleMax) },
-                                                set: { idleMax = Int($0); if idleMax < idleMin { idleMin = idleMax }; sync() }),
+                                                set: { idleMax = Int($0); if idleMax < idleMin { idleMin = idleMax }; edited("idleMinMin", "idleMaxMin") }),
                                  range: 1...240, step: 1, intMode: true)
                     ParameterRow(label: "冷却（分钟）",
                                  value: Binding(get: { Double(cooldown) },
-                                                set: { cooldown = Int($0); sync() }),
+                                                set: { cooldown = Int($0); edited("cooldownMin") }),
                                  range: 0...720, step: 5, intMode: true)
 
                     DatePicker("休眠从", selection: Binding(get: { dateFromMin(quietStartMin) },
-                                                          set: { quietStartMin = minFromDate($0); sync() }),
+                                                          set: { quietStartMin = minFromDate($0); edited("quietStartMin") }),
                                displayedComponents: .hourAndMinute)
                         #if os(macOS)
                         .font(ShellStyle.bodyFont.weight(.regular)).foregroundColor(Theme.textPrimary)
@@ -223,7 +249,7 @@ struct CCSettingsView: View {
                         #endif
                         .searchAnchor("leaf-cc-quiet")
                     DatePicker("休眠到", selection: Binding(get: { dateFromMin(quietEndMin) },
-                                                          set: { quietEndMin = minFromDate($0); sync() }),
+                                                          set: { quietEndMin = minFromDate($0); edited("quietEndMin") }),
                                displayedComponents: .hourAndMinute)
                         #if os(macOS)
                         .font(ShellStyle.bodyFont.weight(.regular)).foregroundColor(Theme.textPrimary)
@@ -233,25 +259,23 @@ struct CCSettingsView: View {
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text("系统提示文案").font(m.rowLabel).foregroundColor(Theme.textPrimary)
-                        TextField(Self.defaultTemplate, text: $template, axis: .vertical)
+                        TextField(Self.defaultTemplate, text: userBinding($template, "nudgeTemplate"), axis: .vertical)
                             .font(.system(size: 13))
                             .lineLimit(3...6)
-                            .onChange(of: template) { _, _ in sync() }
                     }
                 }
             } header: {
                 Text("主动找我")
             } footer: {
-                Text("你沉默够久（且非休眠时段、非冷却中）时，AI 会收到一条系统提示，自行决定要不要主动找你。文案留空用上面灰字默认；可用 {idle}=分钟数、{name}=你的名字。休眠时段按这台电脑的时区算。")
+                Text("你沉默够久（且非休眠时段、非冷却中）时，AI 会收到一条系统提示，自行决定要不要主动找你。文案留空用上面灰字默认；可用 {idle}=分钟数、{name}=你的名字。休眠时段按这台电脑的时区算。\n这一节和下面「新会话不带终端」存在电脑上的 CC 里，连着同一台电脑的手机、iPad 共用一份：在哪台改，别的设备跟着变。")
             }
             .listRowBackground(Theme.mainBg)
 
             // MARK: 会话传输（stream 无终端模式）
             Section {
-                Toggle("新会话不带终端", isOn: $newSessionStream)
+                Toggle("新会话不带终端", isOn: userBinding($newSessionStream, "newSessionTransport"))
                     .font(m.rowLabel)
                     .foregroundColor(Theme.textPrimary)
-                    .onChange(of: newSessionStream) { _, _ in sync() }
                     .searchAnchor("leaf-cc-stream")
             } footer: {
                 Text("开了之后新建的 CC 会话不在终端里跑：消息直接送达、权限和提问在对话里答，终端页看不到它。已有会话不变。单个对话可在长按菜单「终端」里单独设，不带终端的会逐字流式显示。")
@@ -318,6 +342,36 @@ struct CCSettingsView: View {
             }
             .listRowBackground(Theme.mainBg)
 
+            #if os(macOS)
+            // MARK: Chrome 登录态（plan-opencli-in-app）：总开关存在 hub，只认本机 Mac app 改
+            Section {
+                Toggle("让 AI 用这台 Mac 的 Chrome 登录态", isOn: Binding(
+                    get: { opencliPending ?? opencliOn },
+                    set: { on in
+                        opencliPending = on
+                        opencliError = nil
+                        CCBridgeWebSocketClient.shared.setOpencliEnabled(on) { failure in
+                            opencliPending = nil
+                            opencliError = failure
+                        }
+                    }
+                ))
+                .font(m.rowLabel)
+                .foregroundColor(Theme.textPrimary)
+                .disabled(CCBridgeWebSocketClient.shared.currentHubInfo == nil || opencliPending != nil)
+                .searchAnchor("leaf-cc-opencli")
+                if let opencliError {
+                    Text(opencliError)
+                        .font(ShellStyle.secondaryFont).foregroundColor(.red.opacity(0.8))
+                }
+            } header: {
+                Text("Chrome 登录态")
+            } footer: {
+                Text("开了以后，手机和 Mac 上的 AI 能借这台 Mac 上 Chrome 的登录态读网页（chrome_read）、查站点（site_query：YouTube 字幕、知乎、B 站……），只能读。另外受「联网搜索」权限和黑名单管（想拦邮箱这类就加进黑名单）。要先装 opencli，并在 Chrome 里启用它的扩展；电脑没连上时这里点不了。")
+            }
+            .listRowBackground(Theme.mainBg)
+            #endif
+
             #if os(iOS) && DEBUG
             Section {
                 if !liveActivitiesEnabled {
@@ -383,6 +437,7 @@ struct CCSettingsView: View {
         .fullScreenCover(isPresented: $showScanner) {
             CCPairScannerSheet { payload in applyPairing(payload) }
         }
+        .sheet(item: $pairingCheck) { HubPairingSheet(target: CCHubRegistry.primaryId, check: $0) }
         #endif
         }
     }

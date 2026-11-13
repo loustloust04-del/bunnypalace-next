@@ -109,6 +109,74 @@ private struct DiagonalTrailingShape: Shape {
     }
 }
 
+/// 主题页改谁（atrium P3④a）：`.interface` = 界面主题（`selectedThemeId`，外观页入口，现状）；
+/// `.person(楼层 id)` = 那一层的聊天主题（iOS 人页「聊天时的样子」、Mac 外观「聊天主题 / 聊天背景（这一层）」）。
+/// 聊天背景跟着聊天主题走（粟粟 11-09 §0-1），不单独按人存。
+enum ThemeTarget: Hashable {
+    case interface
+    case person(String)
+
+    var profileId: String? {
+        if case .person(let id) = self { return id }
+        return nil
+    }
+
+    /// 人目标：这一层存的聊天主题 id（nil = 跟随界面主题）
+    func storedChatThemeId(_ profiles: ProfileManager?) -> String? {
+        guard let profileId else { return nil }
+        return profiles?.profiles.first(where: { $0.id == profileId })?.chatAppearance?.themeId
+    }
+
+    /// 人目标：跟随界面主题（没选过，或选的那套已经不在了）
+    func isFollowingInterface(_ manager: ThemeManager, _ profiles: ProfileManager?) -> Bool {
+        storedChatThemeId(profiles).flatMap(manager.themeDefinition(id:)) == nil
+    }
+
+    /// 这个目标现在实际用的那套
+    func themeId(_ manager: ThemeManager, _ profiles: ProfileManager?) -> String {
+        switch self {
+        case .interface: return manager.selectedThemeId
+        case .person: return manager.chatTheme(for: storedChatThemeId(profiles)).id
+        }
+    }
+
+    /// 给这个目标换上一套（人目标 nil = 回到跟随界面主题）
+    func apply(_ id: String?, _ manager: ThemeManager, _ profiles: ProfileManager?) throws {
+        switch self {
+        case .interface:
+            if let id { manager.selectTheme(id: id) }
+        case .person(let profileId):
+            guard let profiles else { throw ProfileManager.SaveError.profileMissing }
+            try profiles.setChatTheme(id, profileId: profileId)
+        }
+    }
+
+    /// 人目标改 `themeId` 那套之前：还有谁也在用它（别的层的名字；它是界面主题时加一个「界面（宫殿默认）」）。空 = 只有 TA 自己
+    func sharers(of themeId: String, _ manager: ThemeManager, _ profiles: ProfileManager?) -> [String] {
+        guard let profileId else { return [] }
+        var names = (profiles?.profiles(usingChatTheme: themeId) ?? [])
+            .filter { $0.id != profileId }
+            .map(\.name)
+        if themeId == manager.selectedThemeId { names.append("界面（宫殿默认）") }
+        return names
+    }
+}
+
+extension View {
+    /// 人页进主题颜色 / 聊天背景时，这套还有别人在用 → 先问（atrium P3④a §3「共用提示」）。`sharers` nil = 不弹
+    func sharedChatThemePrompt(sharers: Binding<[String]?>, themeName: String,
+                               onCopy: @escaping () -> Void, onCancel: @escaping () -> Void) -> some View {
+        alert("「\(themeName)」还有 \((sharers.wrappedValue ?? []).joined(separator: "、")) 在用",
+              isPresented: Binding(get: { sharers.wrappedValue != nil }, set: { if !$0 { sharers.wrappedValue = nil } })) {
+            Button("复制一份给 TA") { onCopy() }
+            Button("一起改") {}
+            Button("取消", role: .cancel) { onCancel() }
+        } message: {
+            Text("复制一份只改 TA 的；一起改，用这套的都会跟着变。")
+        }
+    }
+}
+
 /// 主题列表（外观 › 主题，两端共用一份 body）：只负责「挑」。
 ///
 /// plan-theme-decouple M3.2（学 rootshell #2 #3）：每行 = 迷你聊天预览 + 名字 + 勾，**点行 = 立即应用**；
@@ -117,10 +185,14 @@ private struct DiagonalTrailingShape: Shape {
 /// 直接开 `ThemeColorsPage(creating:)` 一页设名称 + 颜色 + 聊天背景，**不切换**当前主题；「取消」把这套删掉。
 /// 没有「保存当前主题 / 编辑当前主题」两行，也没有「草稿」徽标——数据层的 custom 主题照旧，UI 上当普通自定义主题。
 /// 外观页另两个入口（`ThemeColorsPage` / `ChatBackgroundPage`）编辑当前选中的这一套。
-/// 删除必过确认弹窗（kimi 应改 2）：`deleteTheme` 会连带删掉背景图文件。
+/// 删除必过确认弹窗（kimi 应改 2）：`deleteTheme` 会连带删掉背景图文件；有层单独选了它的，提示名字、删后那些层回到界面主题。
+/// `target: .person`（atrium P3④a）：顶上多一行「跟随界面主题」，点行 = 给 TA 换，复制 / 新建以 TA 的那套为起点、建完给 TA。
 struct ThemeLibraryPage: View {
     @Environment(ThemeManager.self) private var themeManager: ThemeManager?
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.settingsMetrics) private var m
+    private let themeTarget: ThemeTarget
+    @State private var saveError: String?
     /// 长按「复制一份」的来源主题 → 开 `ThemeSaveSheet`
     @State private var copySource: AppThemeDefinition?
     @State private var pendingThemeName = ""
@@ -138,8 +210,21 @@ struct ThemeLibraryPage: View {
         var id: String { "\(kind)-\(themeId)" }
     }
 
+    init(target: ThemeTarget = .interface) {
+        self.themeTarget = target
+    }
+
     private var manager: ThemeManager {
         themeManager ?? ThemeManager.shared
+    }
+
+    private var isPerson: Bool { themeTarget.profileId != nil }
+    private var following: Bool { isPerson && themeTarget.isFollowingInterface(manager, profileManager) }
+    /// 这个目标现在用的那套（页底铺它的图；「+」从它起步）
+    private var targetThemeId: String { themeTarget.themeId(manager, profileManager) }
+
+    private func isSelected(_ theme: AppThemeDefinition) -> Bool {
+        isPerson ? !following && targetThemeId == theme.id : manager.selectedThemeId == theme.id
     }
 
     var body: some View {
@@ -147,9 +232,27 @@ struct ThemeLibraryPage: View {
 
         SettingsSectionList(.list) {
             Section {
+                if isPerson {
+                    Button {
+                        apply(nil)
+                    } label: {
+                        ThemeListRow(
+                            theme: manager.selectedTheme,
+                            tokenSet: manager.currentTokenSet,
+                            backgroundImageURL: manager.currentBackgroundImageURL,
+                            backgroundStyle: manager.currentBackgroundStyle,
+                            scheme: manager.activeScheme,
+                            isSelected: following,
+                            title: "跟随界面主题（宫殿默认）",
+                            note: "现在是「\(manager.selectedTheme.name)」"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 ForEach(manager.themeDefinitions) { theme in
                     Button {
-                        manager.selectTheme(id: theme.id)
+                        apply(theme.id)
                     } label: {
                         ThemeListRow(
                             theme: theme,
@@ -157,7 +260,7 @@ struct ThemeLibraryPage: View {
                             backgroundImageURL: manager.backgroundImageURL(for: theme.id),
                             backgroundStyle: manager.backgroundStyle(for: theme.id),
                             scheme: manager.activeScheme,
-                            isSelected: manager.selectedThemeId == theme.id
+                            isSelected: isSelected(theme)
                         )
                     }
                     .buttonStyle(.plain)
@@ -182,7 +285,9 @@ struct ThemeLibraryPage: View {
             } header: {
                 Text("\(manager.themeDefinitions.count) 套")
             } footer: {
-                Text("点一下就切换。「+」新建一套：从当前主题起步，一页设好名字、颜色和聊天背景，建好不切换。长按可以编辑颜色、编辑聊天背景、重命名、复制一份、删除。编辑改的是那一套主题本身，不会切换过去；内置主题会先复制一份再改。")
+                Text(isPerson
+                     ? "这里换的是和 TA 聊天时的主题和背景，界面和别人不变。「跟随界面主题」= 用 我 › 外观 里那套。「+」从 TA 现在这套起步新建一套，建好就给 TA 用上。长按可以编辑颜色、编辑聊天背景、重命名、复制一份、删除。"
+                     : "点一下就切换。「+」新建一套：从当前主题起步，一页设好名字、颜色和聊天背景，建好不切换。长按可以编辑颜色、编辑聊天背景、重命名、复制一份、删除。编辑改的是那一套主题本身，不会切换过去；内置主题会先复制一份再改。")
             }
             .listRowBackground(Theme.mainBg)
             .listRowSeparator(.hidden)
@@ -197,13 +302,13 @@ struct ThemeLibraryPage: View {
         .background {
             ThemeBackgroundView(
                 fill: Theme.sidebarBg,
-                imageURL: manager.currentBackgroundImageURL,
+                imageURL: manager.backgroundImageURL(for: targetThemeId),
                 scheme: manager.activeScheme,
-                backgroundStyle: manager.currentBackgroundStyle
+                backgroundStyle: manager.backgroundStyle(for: targetThemeId)
             )
             .ignoresSafeArea()
         }
-        .navigationTitle("主题库")
+        .navigationTitle(isPerson ? "聊天主题" : "主题库")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
@@ -237,8 +342,11 @@ struct ThemeLibraryPage: View {
                             .foregroundColor(Theme.textSecondary)
                         }
                         ToolbarItem(placement: .confirmationAction) {
-                            Button("完成") { editTarget = nil }
-                                .foregroundColor(Theme.branchIndicator)
+                            Button("完成") {
+                                editTarget = nil
+                                if isPerson { apply(target.themeId) }   // 人页新建的这套建完给 TA 用上
+                            }
+                            .foregroundColor(Theme.branchIndicator)
                         }
                     } else {
                         ToolbarItem(placement: .cancellationAction) {
@@ -261,7 +369,11 @@ struct ThemeLibraryPage: View {
                 previewBackgroundImageURL: manager.backgroundImageURL(for: source.id),
                 previewBackgroundStyle: manager.backgroundStyle(for: source.id)
             ) {
-                manager.saveThemeCopy(from: source.id, name: pendingThemeName)
+                if isPerson {
+                    if let id = manager.saveThemeCopy(from: source.id, name: pendingThemeName, select: false) { apply(id) }
+                } else {
+                    manager.saveThemeCopy(from: source.id, name: pendingThemeName)
+                }
                 copySource = nil
             }
             .environment(manager)
@@ -295,14 +407,29 @@ struct ThemeLibraryPage: View {
         ) { theme in
             Button("删除", role: .destructive) {
                 manager.deleteTheme(id: theme.id)
+                profileManager?.forgetChatTheme(theme.id)
                 pendingDeleteTheme = nil
             }
             Button("取消", role: .cancel) {
                 pendingDeleteTheme = nil
             }
-        } message: { _ in
-            Text("这套主题的背景图会一起删掉，不能恢复。")
+        } message: { theme in
+            let users = (profileManager?.profiles ?? []).filter { $0.chatAppearance?.themeId == theme.id }.map(\.name)
+            Text(users.isEmpty
+                 ? "这套主题的背景图会一起删掉，不能恢复。"
+                 : "\(users.joined(separator: "、")) 在用，删了回到界面主题。这套主题的背景图会一起删掉，不能恢复。")
         }
+        .alert("保存失败", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+            Button("好", role: .cancel) { saveError = nil }
+        } message: {
+            Text(saveError ?? "")
+        }
+    }
+
+    /// 点行 / 建完 / 复制完：界面 = 切界面主题；人 = 写那一层（当前层经镜像立刻生效）
+    private func apply(_ id: String?) {
+        do { try themeTarget.apply(id, manager, profileManager) }
+        catch { saveError = error.localizedDescription }
     }
 
     // MARK: - 动作
@@ -375,7 +502,7 @@ struct ThemeLibraryPage: View {
             name = "新主题 \(n)"
             n += 1
         }
-        guard let id = manager.saveThemeCopy(from: manager.selectedThemeId, name: name, select: false) else { return }
+        guard let id = manager.saveThemeCopy(from: targetThemeId, name: name, select: false) else { return }
         editTarget = EditTarget(kind: .create, themeId: id)
     }
 }
@@ -389,6 +516,9 @@ private struct ThemeListRow: View {
     let backgroundStyle: ThemeBackgroundStyle
     let scheme: ColorScheme
     let isSelected: Bool
+    /// 「跟随界面主题」那一行借界面主题的预览，名字和小字自己给
+    var title: String? = nil
+    var note: String? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -401,10 +531,10 @@ private struct ThemeListRow: View {
             )
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(theme.name)
+                Text(title ?? theme.name)
                     .font(m.action)
                     .foregroundColor(Theme.textPrimary)
-                Text(subtitle)
+                Text(note ?? subtitle)
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
             }

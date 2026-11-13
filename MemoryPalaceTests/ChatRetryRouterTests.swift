@@ -4,7 +4,7 @@ import XCTest
 /// 5xx / 429 有限重试（plan-model-compat-p0 §7.4 / §7.7）：本机假服务器，不发真请求；等待时间注入成 0 并记下来
 @MainActor
 final class ChatRetryRouterTests: XCTestCase {
-    typealias Server = OutputTokenCapTests.ScriptedHTTPServer
+    typealias Server = ScriptedHTTPServer
     typealias Response = Server.Response
 
     static let unavailable503 = Data(#"{"error":{"message":"Service Unavailable","type":"server_error"}}"#.utf8)
@@ -49,6 +49,8 @@ final class ChatRetryRouterTests: XCTestCase {
         var outcome: Outcome
         var tokens: String
         var notices: [String]
+        var effectiveEvents = 0
+        var attempts = 0
     }
 
     private func send(_ router: ProviderRouter, _ pm: ProviderManager, _ model: ProviderModel) async -> Result {
@@ -62,7 +64,9 @@ final class ChatRetryRouterTests: XCTestCase {
             providerManager: pm, samplingParams: sampling,
             onToken: { result.tokens += $0 }, onComplete: { t, _ in result.outcome = .ok(t); done.fulfill() },
             onError: { result.outcome = .error($0); done.fulfill() },
-            onRetry: { result.notices.append($0) }
+            onRetry: { result.notices.append($0) },
+            onEffectiveEvent: { result.effectiveEvents += 1 },
+            onRequestAttempt: { result.attempts += 1 }
         )
         await fulfillment(of: [done], timeout: 5)
         return result
@@ -79,6 +83,8 @@ final class ChatRetryRouterTests: XCTestCase {
         let r = await send(router, pm, model)
         XCTAssertEqual(r.outcome, .ok("ok"))
         XCTAssertEqual(server.requestBodies.count, 3)
+        XCTAssertEqual(r.attempts, 3, "每次真实提交都记录 attempt，包括自动重试")
+        XCTAssertEqual(r.effectiveEvents, 1, "503 不生效；成功正文只生效一次")
         XCTAssertEqual(waits, [1, 3])
         XCTAssertEqual(r.notices, ["⏳ 服务器有点忙，1 秒后自动重试（1/2）", "⏳ 服务器有点忙，3 秒后自动重试（2/2）"])
         let rows = router.ledger.load()
@@ -95,6 +101,8 @@ final class ChatRetryRouterTests: XCTestCase {
         let r = await send(router, pm, model)
         guard case .error(let message) = r.outcome else { return XCTFail("不该成功") }
         XCTAssertEqual(server.requestBodies.count, 3, "最多重试 2 次")
+        XCTAssertEqual(r.attempts, 3)
+        XCTAssertEqual(r.effectiveEvents, 0)
         XCTAssertTrue(message.hasPrefix("服务器暂时出问题，已自动重试 2 次还是不行"), message)
         XCTAssertTrue(message.contains("HTTP 503）"), message)
         XCTAssertEqual(r.notices.count, 2)
@@ -242,6 +250,8 @@ final class ChatRetryRouterTests: XCTestCase {
         let r = await send(router, pm, model)
         guard case .error = r.outcome else { return XCTFail("不该成功") }
         XCTAssertEqual(server.requestBodies.count, 1, "思考也算已输出（Q11）")
+        XCTAssertEqual(r.attempts, 1)
+        XCTAssertEqual(r.effectiveEvents, 0, "思考阻止旧重试策略，但不推进召回状态")
     }
 
     func testAnthropicNoRetryAfterThinkingStarted() async throws {
@@ -256,6 +266,8 @@ final class ChatRetryRouterTests: XCTestCase {
         let r = await send(router, pm, model)
         guard case .error = r.outcome else { return XCTFail("不该成功") }
         XCTAssertEqual(server.requestBodies.count, 1)
+        XCTAssertEqual(r.attempts, 1)
+        XCTAssertEqual(r.effectiveEvents, 0)
     }
 
     func testAnthropicOverloadedRightAfterStartRetries() async throws {
@@ -270,6 +282,8 @@ final class ChatRetryRouterTests: XCTestCase {
         let r = await send(router, pm, model)
         XCTAssertEqual(r.outcome, .ok("ok"))
         XCTAssertEqual(server.requestBodies.count, 2)
+        XCTAssertEqual(r.attempts, 2)
+        XCTAssertEqual(r.effectiveEvents, 1, "message_start 的用量不算首个有效响应")
         XCTAssertEqual(r.notices, ["⏳ 服务器有点忙，1 秒后自动重试（1/2）"])
         XCTAssertEqual(router.ledger.load().map(\.status), [.error, .ok])
     }
@@ -288,6 +302,8 @@ final class ChatRetryRouterTests: XCTestCase {
         let r = await send(router, pm, model)
         XCTAssertEqual(r.outcome, .ok("ok"))
         XCTAssertEqual(server.requestBodies.count, 3)
+        XCTAssertEqual(r.attempts, 3, "参数自适配和瞬态重试都必须传递回调")
+        XCTAssertEqual(r.effectiveEvents, 1)
         let third = try XCTUnwrap(JSONSerialization.jsonObject(with: server.requestBodies[2]) as? [String: Any])
         XCTAssertNil(third["temperature"], "服务器重试沿用参数自愈后的请求")
         let baseURL = try XCTUnwrap(pm.provider(for: model)?.baseURL)

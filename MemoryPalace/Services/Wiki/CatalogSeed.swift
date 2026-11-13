@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// CC 原料（种子读的 CC 记忆文件，private_ 的不打开）与种子完成记录；文件 IO 由调用方放后台。
@@ -190,13 +191,18 @@ enum CatalogSeed {
         var taskId: String?
     }
 
+    static let stateFileName = ".seed-state.json"
+
     static func stateURL(_ wiki: WikiStore) -> URL {
-        wiki.root.appendingPathComponent(WikiStore.proposalsFolder, isDirectory: true).appendingPathComponent(".seed-state.json")
+        wiki.root.appendingPathComponent(WikiStore.proposalsFolder, isDirectory: true).appendingPathComponent(stateFileName)
     }
+
+    /// 完成标记的读写恢复都走 `SafeWiki`：楼层目录 / wiki 根 / .proposals 是链接、标记文件是链接 = 读不到、写不进、不删
+    private static let stateParts = [WikiStore.proposalsFolder]
 
     /// 新种子任务的完成（整份目录处理完、获批页都交了正文）；旧格式不算，界面不再被它拦住
     static func completion(wiki: WikiStore) -> (at: Date, taskId: String)? {
-        guard let data = try? Data(contentsOf: stateURL(wiki)), let state = try? JSONDecoder().decode(State.self, from: data),
+        guard let data = SafeWiki.read(stateFileName, in: stateParts, under: wiki.root), let state = try? JSONDecoder().decode(State.self, from: data),
               let taskId = state.taskId else { return nil }
         return (state.completedAt, taskId)
     }
@@ -208,18 +214,18 @@ enum CatalogSeed {
 
     /// 写完成标记前的原样（没有 = nil），点了停时用它恢复
     static func stateData(wiki: WikiStore) -> Data? {
-        try? Data(contentsOf: stateURL(wiki))
+        SafeWiki.read(stateFileName, in: stateParts, under: wiki.root)
     }
 
     static func restoreState(wiki: WikiStore, data: Data?) throws {
         if let data {
-            try WikiStore.writeAtomic(data, to: stateURL(wiki))
-        } else if MemoryRegeneration.itemExists(stateURL(wiki)) {
-            try FileManager.default.removeItem(at: stateURL(wiki))
+            try SafeWiki.write(data, name: stateFileName, in: stateParts, under: wiki.root)
+        } else {
+            try SafeWiki.remove(stateFileName, in: stateParts, under: wiki.root)
         }
     }
 
     static func finish(wiki: WikiStore, at date: Date, taskId: String) throws {
-        try WikiStore.writeAtomic(JSONEncoder().encode(State(completedAt: date, taskId: taskId)), to: stateURL(wiki))
+        try SafeWiki.write(JSONEncoder().encode(State(completedAt: date, taskId: taskId)), name: stateFileName, in: stateParts, under: wiki.root)
     }
 }

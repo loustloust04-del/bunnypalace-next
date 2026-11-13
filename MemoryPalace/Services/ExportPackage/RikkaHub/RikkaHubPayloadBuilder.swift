@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// RikkaHub 一段对话 → `ImportedConversationPayload`（不写库）。附件段默认内联；导入时 `attachments` 传外置到文件库的函数。

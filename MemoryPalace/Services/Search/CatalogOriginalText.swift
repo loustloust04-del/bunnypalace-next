@@ -1,52 +1,48 @@
+import MemoryCore
 import Foundation
 
 /// 编目专用正文；不改变搜索框或已有索引。必须在持有 node 的 ModelContext 内调用。
-enum CatalogOriginalText {
+/// 正文口径已搬包（`MemoryCore.CatalogOriginalText`），这里只留 `MessageNode` 便利重载。
+extension MemoryCore.CatalogOriginalText {
     static func body(of node: MessageNode) -> String {
-        guard node.role == "user" || node.role == "assistant" else { return "" }
-        let text: String
-        if node.segmentsData != nil {
-            // 有结构却解不开时，不相信供旧搜索使用的扁平 content。
-            guard let segments = node.segments else { return "" }
-            if node.role == "assistant", node.contentType == "text", !segments.isEmpty,
-               segments.allSatisfy({ if case .audioRef = $0 { return true }; return false }) {
-                // 原生回复后挂语音条：正文仍在 content，script 不是正文。
-                text = node.content
-            } else {
-                text = segments.compactMap { segment in
-                    if case .text(let value) = segment { return value }
-                    return nil
-                }.joined(separator: "\n\n")
-            }
-        } else {
-            switch node.contentType {
-            case "segmented", "multimodal_text", "image_asset_pointer", "thoughts", "reasoning_recap",
-                 "execution_output", "computer_output", "tether_browsing_display", "tether_quote", "system_error":
-                return ""
-            default:
-                text = node.content
-            }
-        }
-        return cleanedBody(text)
+        body(of: ConversationMessage(node))
+    }
+}
+
+extension ConversationMessage {
+    /// 完整转换：读 `segmentsData`（SwiftData 外部存储）并解码。
+    /// 正文口径 / 后台取数（`wikiScanBody`、`CatalogOriginalText`）用它；
+    /// 刷新键与扫描窗口筛选**不要**用（会扩大观察范围并在主线程解码整条路径的外置分段）。
+    init(_ node: MessageNode) {
+        self.init(node, includeSegments: true)
     }
 
-    private static func cleanedBody(_ text: String) -> String {
-        var body = text
-        // 只认已落盘的明确思考标记；缺闭合/嵌套损坏时不回退到含思考的原串。
-        for (open, close) in [("<<<THINK>>>", "<<</THINK>>>"), ("[thinking]", "[/thinking]")] {
-            while let start = body.range(of: open, options: .caseInsensitive) {
-                guard let end = body.range(of: close, options: .caseInsensitive, range: start.upperBound..<body.endIndex),
-                      body.range(of: open, options: .caseInsensitive, range: start.upperBound..<end.lowerBound) == nil,
-                      body.range(of: close, options: .caseInsensitive, range: body.startIndex..<start.lowerBound) == nil
-                else { return "" }
-                body.removeSubrange(start.lowerBound..<end.upperBound)
-            }
-            guard body.range(of: close, options: .caseInsensitive) == nil else { return "" }
-        }
-        // 沿用原生兼容路：仅开头的 <think> 是思考，正文中引用该标签不猜测。
-        var splitter = LeadingThinkTagSplitter()
-        var reasoning = ReasoningCapture()
-        body = splitter.feed(body, into: &reasoning, enabled: true) + splitter.flush(into: &reasoning)
-        return ContentCleaner.clean(body, cached: false).trimmingCharacters(in: .whitespacesAndNewlines)
+    /// 标量转换：只读已驻内存的普通字段，**不访问 `segmentsData`**，`segments = nil`。
+    /// `MemoryResident.WikiNodeRevision` 的契约：刷新只观察已驻内存的值；
+    /// `MemoryResidentPage.refreshKey` 与 `ConversationViewModel.wikiScanWindow` 的筛选必须走这个。
+    init(scalar node: MessageNode) {
+        self.init(node, includeSegments: false)
+    }
+
+    private init(_ node: MessageNode, includeSegments: Bool) {
+        self.init(
+            id: node.id, conversationId: node.conversationId, role: node.role, content: node.content,
+            // segmentsData 有值却解不开 = 空分段（正文口径返回 ""，不回退扁平 content）；
+            // 值类型用 nil 表示「没有分段数据」，所以这里刻意保留非 nil。
+            // 标量模式三元短路掉整段，连 `segmentsData` 这个属性都不读。
+            segments: includeSegments
+                ? (node.segmentsData == nil ? nil : (node.segments ?? []).map { segment in
+                    switch segment {
+                    case .text(let value): return .text(value)
+                    case .thinking(let text, _, _): return .thinking(text)
+                    case .audioRef: return .audioRef
+                    default: return .other
+                    }
+                })
+                : nil,
+            contentType: node.contentType, createTime: node.createTime, parentId: node.parentId,
+            childrenIds: node.childrenIds, isTrashed: node.isTrashed, isSyntheticRoot: node.isSyntheticRoot,
+            sourceVisibility: node.sourceVisibility, ccMessageId: node.ccMessageId,
+            cardEditedAt: node.cardEditedAt, ccEdited: node.ccEdited)
     }
 }

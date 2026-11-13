@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -24,6 +25,7 @@ final class MemoryMigrationTests: XCTestCase {
     }
 
     private func cleanup() {
+        MemoryWriteLog.flush()
         PendingStore.forget(profileId: pid)
         UserDefaults.standard.removeObject(forKey: PendingStore.migratedKey(profileId: pid))
         try? FileManager.default.removeItem(at: FileLibraryStore.memoryRoot(profileId: pid).deletingLastPathComponent())
@@ -54,11 +56,11 @@ final class MemoryMigrationTests: XCTestCase {
         // 第一代 · 起点以前，只有 summaries/
         let a = msgs(10, from: date(9, 20, 9), prefix: "a")
         SummaryFileStore.save(ContextSummary(summary: "第一代老摘要 · 早", coveredCount: 10, updatedAt: date(9, 20, 12)),
-                              conversationId: g1pre, profileId: pid, conversationTitle: "早")
+                              conversationId: g1pre, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), conversationTitle: "早")
         // 第一代 · 起点以后还在聊
         let b = msgs(10, from: date(9, 20, 9), prefix: "b") + msgs(20, from: date(10, 5, 9), prefix: "c")
         SummaryFileStore.save(ContextSummary(summary: "第一代老摘要 · 晚", coveredCount: 10, updatedAt: date(9, 20, 12)),
-                              conversationId: g1post, profileId: pid, conversationTitle: "晚")
+                              conversationId: g1post, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), conversationTitle: "晚")
         // 第二代上半：第三刀压缩段（带【待续】）+ 老收尾段；时间轴只有一条老格式
         let d = msgs(100, from: date(10, 3, 9), prefix: "d")
         try SessionSummaryStore.save(SessionSummary(conversationId: g2cut, title: "第三刀", compressedCount: 60,
@@ -130,7 +132,7 @@ final class MemoryMigrationTests: XCTestCase {
                 let k = self.kind(system)
                 log.calls.append((writer, k, conv))
                 switch try answer(k, conv, log.calls.count) {
-                case .good: return self.goodSegment
+                case .good: return k == "window" ? "标题：新段\n【走向】转向北门\n【原话】粟粟：「嗯」\n【关键词】北门" : self.goodSegment
                 case .none: return nil
                 case .text(let t): return t
                 }
@@ -164,7 +166,7 @@ final class MemoryMigrationTests: XCTestCase {
     }
     private func pending(_ id: String) -> [String] {
         PendingStore.forget(profileId: pid)
-        return (PendingStore.load(profileId: pid) ?? []).filter { $0.conversationId == id }.map(\.text)
+        return (PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid)) ?? []).filter { $0.conversationId == id }.map(\.text)
     }
 
     /// 一个窗口在盘上的全部样子（A2 / A3 文件原文 + 时间轴条目 + 待续）
@@ -198,6 +200,29 @@ final class MemoryMigrationTests: XCTestCase {
     private func marker(_ id: String) throws -> MemoryMigration.Marker? { try MemoryMigration.loadMarker(id, memoryRoot: root) }
 
     // MARK: - 测
+
+    func testCrossDayEstimateMatchesActualFormalAndTailCalls() async throws {
+        for (kind, anchor) in [(MemoryMigration.Kind.a2Full, 30), (.tailA3, 0)] {
+            let id = kind == .a2Full ? "crossformal-01" : "crosstail-01"
+            let messages = msgs(20, from: date(10, 3, 4, 50), prefix: "a")
+                + msgs(60, from: date(10, 4, 4, 30), prefix: "b")
+            let old = SessionSummary(conversationId: id, title: "云桥城", compressedCount: anchor,
+                                     segments: anchor == 0 ? [] : [seg(.rolling, messages, 0..<anchor, title: "旧段")], updatedAt: now)
+            let state = MemoryMigration.State(a2: old, a2OnDisk: false, a3: nil)
+            let source = MemoryRegeneration.Source(title: "云桥城", messages: messages, isCC: false)
+            let plan = MemoryMigration.Plan(kind: kind)
+            let estimate = MemoryMigration.estimateCalls(plan, state: state, source: source, scope: startDay, now: now,
+                                                        persona: "", speakers: speakers)
+            let log = Log()
+            try await MemoryMigration.migrateWindow(id: id, source: source, state: state, plan: plan, scope: startDay, now: now,
+                                                    profileId: pid, writers: writers(log), counter: .init())
+            XCTAssertEqual(estimate.map(\.writer), log.calls.map(\.writer), "\(kind)")
+            XCTAssertEqual(estimate.count, kind == .a2Full ? 5 : 4)
+            let written = try XCTUnwrap(a2(id))
+            XCTAssertTrue(written.segments.allSatisfy { MemoryDay.key($0.start) == MemoryDay.key($0.end) })
+            XCTAssertEqual(written.segments.last?.lastNodeId, messages.last?.id)
+        }
+    }
 
     /// 三代各搬成 v5 的样子；各写手用自己的 caller（M5）；估的次数和真调的一样（M8）；结果写进备份（B4）
     func testThreeGenerationsMigrate() async throws {
@@ -274,7 +299,9 @@ final class MemoryMigrationTests: XCTestCase {
         let report = try await run(writers(Log()) { k, conv, _ in
             conv == self.g2cut && k == "window" ? .text("（想了很久）……") : .good
         })
-        XCTAssertEqual(report.failures, ["《第三刀》第 4 步 窗口总结：格式不对（缺了【经过】），这个窗口原样留着"])
+        XCTAssertEqual(report.failures.count, 1, "失败应记入结果，不钉诊断措辞")
+        XCTAssertTrue(report.failures[0].contains("窗口总结：格式不对"))
+        XCTAssertTrue(report.failures[0].contains("原样留着"))
         XCTAssertEqual(windowFiles(g2cut), before, "A2 已经在内存里写好了也不提交")
         XCTAssertEqual(report.done, 3)
         XCTAssertEqual(a3(g2v41)?.segments.count, 1, "后面的窗口照搬")
@@ -397,7 +424,7 @@ final class MemoryMigrationTests: XCTestCase {
                                  pending: "", day: "2026-10-03", lastNodeId: "d79")]
             m.days = [TimelineDayRecord(date: "2026-10-12", headline: "一句", items: [])]
         }
-        let added = try PendingStore.add(["半成品加的"], conversationId: g2cut, day: "2026-10-03", anchor: nil, profileId: pid)
+        let added = try PendingStore.add(["半成品加的"], conversationId: g2cut, day: "2026-10-03", anchor: nil, profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         var old = MemoryMigration.Marker(conversationId: g2cut)
         old.months = ["2026-10": TimelineStore.render([original], month: "2026-10")]
         old.addedPending = added.map { .init(id: $0.id, text: $0.text) }
@@ -564,12 +591,15 @@ final class MemoryMigrationTests: XCTestCase {
         XCTAssertEqual(try WindowSummaryStore.loadStrict(conversationId: g2cut, in: alt)?.segments.count, 1)
         let tl = TimelineStore.dir(root: alt)
         XCTAssertEqual(try TimelineStore.entriesStrict(month: "2026-10", in: tl).map(\.text), ["老的一大段"], "时间轴不碰")
-        XCTAssertEqual(PendingStore.load(profileId: pid, memoryRoot: alt)?.map(\.text), ["仍未问到"], "覆盖前保全的旧段待续落在注入的根上")
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: alt, memoryRoot: alt)?.map(\.text), ["仍未问到"], "覆盖前保全的旧段待续落在注入的根上")
 
+        MemoryWriteLog.flush()
+        let log = alt.appendingPathComponent(MemoryWriteLog.folder).appendingPathComponent(MemoryWriteLog.fileName)
+        XCTAssertTrue(MemoryWriteLog.decode(try Data(contentsOf: log)).contains { $0.note.hasPrefix("A2 软检查") })
         XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: live.path)) ?? [], liveBefore, "真根一个文件不多")
         XCTAssertFalse(FileManager.default.fileExists(atPath: MemoryRegeneration.backupRoot(memoryRoot: live).path), "真根旁边没有备份")
         XCTAssertFalse(PendingStore.isMigrated(profileId: pid), "不记「迁移过」")
-        XCTAssertNil(PendingStore.load(profileId: pid), "这一层的活本子还是没有")
+        XCTAssertNil(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid)), "这一层的活本子还是没有")
     }
 
     /// 10-16 晚：单次调用总上限 120 → 300 秒（长窗口一截 60 条，Air 上 120 秒真超时过）

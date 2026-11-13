@@ -10,6 +10,8 @@ struct TurnActivity: Equatable {
         let startedAt: Date
         /// nil = 还在跑
         var ok: Bool?
+        let action: String
+        var detail: ChatToolStep
     }
 
     /// 卡住的原因（读审批中心 / 提问暂停，不存在这里）
@@ -18,29 +20,67 @@ struct TurnActivity: Equatable {
         case question
     }
 
-    let maxRounds: Int
+    /// 用到浏览器工具的那一轮会调大（plan-ai-browser-operate：点一下就是一轮）
+    var maxRounds: Int
     private(set) var round = 0
     private(set) var steps: [Step] = []
+    private(set) var thoughts: [String] = []
+    private(set) var pendingTool: ChatToolStep?
+    private(set) var pendingAction: String?
 
     init(maxRounds: Int) { self.maxRounds = maxRounds }
 
     var running: Step? { steps.last(where: { $0.ok == nil }) }
 
     /// round 从 1 数（循环里的 round 从 0 起，调用方 +1）
-    mutating func startRound(_ r: Int) { round = min(max(r, 1), maxRounds) }
+    mutating func startRound(_ r: Int, thinking: String? = nil) {
+        round = min(max(r, 1), maxRounds)
+        if let thinking { thoughts.append(thinking) }
+    }
+
+    mutating func startTool(_ call: ToolCallBlock) {
+        let tool = ChatToolStep(id: call.id, name: call.name, inputJSON: call.argumentsJSON,
+                                result: nil, isError: false, integration: nil, icon: nil)
+        pendingTool = tool
+        pendingAction = tool.action
+    }
+
+    mutating func finishTool(_ id: String) {
+        guard pendingTool?.id == id else { return }
+        pendingTool = nil
+        pendingAction = nil
+    }
 
     /// 工具循环每往 segs 里记一段就喂进来
     mutating func observe(_ seg: MessageSegment, at now: Date = Date()) {
         switch seg {
-        case .toolUse(let id, let name, _, let integration, let icon):
+        case .toolUse(let id, let name, let inputJSON, let integration, let icon):
             guard !steps.contains(where: { $0.id == id }) else { return }
-            steps.append(Step(id: id, label: Self.label(name: name, integration: integration), icon: icon, startedAt: now, ok: nil))
-        case .toolResult(let id, _, let isError, _):
+            let detail = ChatToolStep(id: id, name: name, inputJSON: inputJSON, result: nil,
+                                      isError: false, integration: integration, icon: icon)
+            let action = detail.action
+            if pendingTool?.id == id {
+                pendingTool = detail
+                pendingAction = action
+            }
+            steps.append(Step(id: id, label: Self.label(name: name, integration: integration), icon: icon,
+                              startedAt: now, ok: nil, action: action, detail: detail))
+        case .toolResult(let id, let text, let isError, _):
             guard let i = steps.firstIndex(where: { $0.id == id }), steps[i].ok == nil else { return }
+            let old = steps[i].detail
             steps[i].ok = !isError
+            steps[i].detail = ChatToolStep(id: old.id, name: old.name, inputJSON: old.inputJSON,
+                                          result: text, isError: isError, integration: old.integration, icon: old.icon)
         default:
             return
         }
+    }
+
+    mutating func replaceOffloadedResult(toolUseId: String, text: String) {
+        guard let i = steps.firstIndex(where: { $0.id == toolUseId }) else { return }
+        let old = steps[i].detail
+        steps[i].detail = ChatToolStep(id: old.id, name: old.name, inputJSON: old.inputJSON,
+                                      result: text, isError: old.isError, integration: old.integration, icon: old.icon)
     }
 
     func headline(now: Date, blocked: Block? = nil) -> String {

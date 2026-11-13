@@ -94,7 +94,7 @@ final class ElevenLabsClientTests: XCTestCase {
             MockURLProtocol.handler = { _ in (status, Data()) }
             do {
                 _ = try await makeClient().synthesize(script: "s", voiceId: "v", apiKey: "k",
-                                                      settings: VoiceTuning.current())
+                                                      settings: VoiceTuning.defaults)
                 XCTFail("状态码 \(status) 应抛错")
             } catch let err as ElevenLabsError {
                 XCTAssertEqual(err.shortPhrase, expected)
@@ -102,20 +102,5 @@ final class ElevenLabsClientTests: XCTestCase {
                 XCTFail("错误类型不对：\(error)")
             }
         }
-    }
-
-    func testVoiceTuningDefaultsAndOverride() {
-        let d = UserDefaults(suiteName: "xctest-voice-tuning")!
-        d.removePersistentDomain(forName: "xctest-voice-tuning")
-        XCTAssertEqual(VoiceTuning.current(defaults: d),
-                       VoiceTuning.Settings(stability: 0.0, similarityBoost: 0.75, style: 0.88, speed: 1.1))
-        d.set(0.5, forKey: VoiceTuning.stabilityKey)
-        d.set(0.3, forKey: VoiceTuning.styleKey)
-        XCTAssertEqual(VoiceTuning.current(defaults: d).stability, 0.5)
-        XCTAssertEqual(VoiceTuning.current(defaults: d).style, 0.3)
-        XCTAssertEqual(VoiceTuning.current(defaults: d).speed, 1.1, "没动的键保持默认")
-        VoiceTuning.resetToDefaults(defaults: d)
-        XCTAssertEqual(VoiceTuning.current(defaults: d).stability, 0.0)
-        d.removePersistentDomain(forName: "xctest-voice-tuning")
     }
 }

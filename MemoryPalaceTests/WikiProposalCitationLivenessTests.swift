@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -60,7 +61,7 @@ final class WikiProposalCitationLivenessTests: XCTestCase {
 
     private func loadedTargets(_ fixture: Fixture) -> Set<WikiProposalDisplay.MessageTarget> {
         WikiProposalDisplay.liveMessageTargets(for: [fixture.cite], currentProfileId: pid,
-                                               context: ModelContext(fixture.container))
+                                               source: SwiftDataConversationSource(container: fixture.container))
     }
 
     func testLoadingRejectsMissingDeletedOrInvisibleOriginals() throws {
@@ -111,8 +112,7 @@ final class WikiProposalCitationLivenessTests: XCTestCase {
 
     func testWrongCurrentFloorAndIncompleteCitationCannotLocateOriginal() throws {
         let f = try fixture()
-        XCTAssertTrue(WikiProposalDisplay.liveMessageTargets(for: [f.cite], currentProfileId: "another-floor",
-                                                            context: ModelContext(f.container)).isEmpty)
+        XCTAssertTrue(WikiProposalDisplay.liveMessageTargets(for: [f.cite], currentProfileId: "another-floor", source: SwiftDataConversationSource(container: f.container)).isEmpty)
         let vm = ConversationViewModel()
         XCTAssertFalse(WikiProposalDisplay.navigateToMessage(f.target, currentProfileId: "another-floor",
                                                             container: f.container, viewModel: vm))
@@ -121,7 +121,7 @@ final class WikiProposalCitationLivenessTests: XCTestCase {
         var missingWindow = f.cite
         missingWindow.windowId = nil
         XCTAssertTrue(WikiProposalDisplay.liveMessageTargets(for: [missingNode, missingWindow], currentProfileId: pid,
-                                                            context: ModelContext(f.container)).isEmpty)
+                                                            source: SwiftDataConversationSource(container: f.container)).isEmpty)
         XCTAssertNil(vm.selectedConversation)
         XCTAssertNil(vm.transientNotice)
     }
@@ -173,8 +173,7 @@ final class WikiProposalCitationLivenessTests: XCTestCase {
         let f = try fixture()
         let cite = WikiProposal.Cite(layer: "A2", windowId: f.conversation.id, segment: 2)
         XCTAssertNil(WikiProposalDisplay.messageTarget(for: cite, currentProfileId: pid))
-        XCTAssertTrue(WikiProposalDisplay.liveMessageTargets(for: [cite], currentProfileId: pid,
-                                                            context: ModelContext(f.container)).isEmpty)
+        XCTAssertTrue(WikiProposalDisplay.liveMessageTargets(for: [cite], currentProfileId: pid, source: SwiftDataConversationSource(container: f.container)).isEmpty)
         let text = WikiProposalDisplay.citeText(cite, titles: [f.conversation.id: "虚构创作"], originalAvailable: false)
         XCTAssertTrue(text.contains("虚构创作"))
         XCTAssertTrue(text.contains("第 2 段"))

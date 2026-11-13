@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 
@@ -391,7 +392,7 @@ enum MarkdownExporter {
     }
 
     /// Build effective children map (same logic as ViewModel)
-    private static func buildEffectiveChildrenMap(nodeMap: [String: MessageNode]) -> [String: [String]] {
+    static func buildEffectiveChildrenMap(nodeMap: [String: MessageNode]) -> [String: [String]] {
         var map: [String: [String]] = [:]
         map.reserveCapacity(nodeMap.count)
 
@@ -399,8 +400,9 @@ enum MarkdownExporter {
             map[nodeId] = node.childrenIds.filter { nodeMap[$0] != nil }
         }
 
-        for (nodeId, node) in nodeMap {
-            if let pid = node.parentId, nodeMap[pid] != nil {
+        // 漏挂的孩子按 id 排序补回（同 BranchSelection.effectiveChildren）：字典遍历序每次不同，导出的分支顺序会跟着变
+        for nodeId in nodeMap.keys.sorted() {
+            if let pid = nodeMap[nodeId]?.parentId, nodeMap[pid] != nil {
                 if !(map[pid]?.contains(nodeId) ?? false) {
                     map[pid, default: []].append(nodeId)
                 }

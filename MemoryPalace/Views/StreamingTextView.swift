@@ -11,6 +11,8 @@ struct StreamingTextView<Source: ObservableObject & StreamedMarkdownSource>: Vie
     @ObservedObject var source: Source
     @AppStorage("selectedFont") private var selectedFont: String = ""
     @AppStorage("fontScale") private var fontScale: Double = 1.2
+    /// 被非聊天页（小芽面板）复用时整套读全局色，和定稿的 ChatMarkdownView 同一套规则（ThemeScope）
+    @Environment(\.themeScope) private var themeScope
 
     #if os(macOS)
     // L4：mac 流式 config 补「外观 › 排版」两滑杆（读法同 ChatMarkdownView mac renderConfig），
@@ -29,7 +31,9 @@ struct StreamingTextView<Source: ObservableObject & StreamedMarkdownSource>: Vie
                 fontName: selectedFont,
                 scale: CGFloat(fontScale),
                 animated: true,
-                textColor: ChatTextRole.assistant.color   // 流式尾巴永远是 AI 正文
+                textColor: ChatTextRole.assistant.color(in: themeScope),   // 流式尾巴永远是 AI 正文
+                palette: chatPalette,
+                blockQuoteColor: blockQuoteColor
             )
         )
         .chatCardRenderer(nodeId: nil, streaming: true)
@@ -43,10 +47,16 @@ struct StreamingTextView<Source: ObservableObject & StreamedMarkdownSource>: Vie
                 animated: true,
                 lineSpacingScale: spacingOverride?.lineSpacing ?? lineSpacingScale,
                 paragraphSpacingScale: spacingOverride?.paragraphSpacing ?? paragraphSpacingScale,
-                textColor: ChatTextRole.assistant.color   // 流式尾巴永远是 AI 正文
+                textColor: ChatTextRole.assistant.color(in: themeScope),   // 流式尾巴永远是 AI 正文
+                palette: chatPalette,
+                blockQuoteColor: blockQuoteColor
             )
         )
         .chatCardRenderer(nodeId: nil, streaming: true)
         #endif
     }
+
+    /// 同 ChatMarkdownView：聊天页取聊天配色，全局作用域 nil = 渲染器默认（全局）
+    private var chatPalette: ThemePalette? { themeScope == .global ? nil : Theme.chat }
+    private var blockQuoteColor: Color? { themeScope == .chat ? Theme.chatBlockQuoteColor(for: .assistant) : nil }
 }

@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 #if canImport(FoundationModels)
@@ -12,6 +13,7 @@ enum ConversationTitler {
 
     /// 消息正文 → 一行纯文本：剥 thinking、卡片围栏换短标签、其余围栏只留代码、去 markdown 符号、压空白。
     static func plainText(_ raw: String) -> String {
+        if MemeToken.match(raw) != nil { return "[表情包]" }
         var text = ContentCleaner.extractThinking(from: raw).content
         text = replacingFences(in: text)
         text = text.replacingOccurrences(of: #"!\[[^\]]*\]\([^)]*\)"#, with: "[图片]", options: .regularExpression)
@@ -140,14 +142,9 @@ extension ConversationTitler {
         #endif
         guard let model, let providerManager else { return nil }
         let router = ProviderRouter(usageContext: UsageContext(kind: kind, conversationId: conversationId, profileId: profileId))
-        guard let (text, usage) = try? await router.sendNonStreaming(
+        return try? await router.sendNonStreaming(
             model: model, messages: [(role: "user", content: prompt)],
             systemPrompt: instructions, providerManager: providerManager
-        ) else { return nil }
-        if let usage, let provider = providerManager.provider(for: model) {
-            providerManager.commitSpend(providerId: provider.id,
-                                        amount: BudgetCalculator.actualCost(provider: provider, modelId: model.modelId, usage: usage), usage: usage)
-        }
-        return text
+        ).0
     }
 }

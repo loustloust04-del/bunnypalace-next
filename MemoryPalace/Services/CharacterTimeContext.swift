@@ -6,9 +6,9 @@ import Foundation
 
 enum CharacterTimeContext {
 
-    /// 注入文本；全局开关关 / 时区无效 → nil（不注入）
+    /// 注入文本；这一层「作息感知」关 / 时区无效 → nil（不注入）
     static func promptText(profile: Profile, now: Date = Date()) -> String? {
-        guard UserDefaults.standard.bool(forKey: "timeAwareness.enabled"),
+        guard profile.timeAwarenessEnabled,
               let tzName = profile.characterTimeZone?.trimmingCharacters(in: .whitespaces),
               !tzName.isEmpty,
               let tz = TimeZone(identifier: tzName) else { return nil }
@@ -24,6 +24,26 @@ enum CharacterTimeContext {
         }
         let sysTime = formatter(in: sysTz).string(from: now)
         return "〔时间〕用户本地：\(sysTime)（\(sysTz.identifier)）；\(charName)本地：\(charTime)（\(tzName)）。\(instruction)"
+    }
+
+    /// 老的全局开关（09-11 起全局一个）；atrium P3② 起只给一次性迁移读
+    static let legacyGlobalKey = "timeAwareness.enabled"
+    static let migratedKey = "timeAwareness.perFloorMigrated"
+
+    /// 全局开关开着 → 所有已有楼层都开。改过的楼层全部落盘成功才落标记，失败下次启动重试；返回是否落了标记
+    @discardableResult
+    static func migrateGlobalSwitch(profiles: [Profile], defaults: UserDefaults, persist: ([Profile]) -> Bool) -> Bool {
+        guard !defaults.bool(forKey: migratedKey) else { return false }
+        if defaults.bool(forKey: legacyGlobalKey) {
+            let changed = profiles.filter { !$0.timeAwarenessEnabled }.map { p -> Profile in
+                var p = p
+                p.timeAwarenessEnabled = true
+                return p
+            }
+            if !changed.isEmpty, !persist(changed) { return false }
+        }
+        defaults.set(true, forKey: migratedKey)
+        return true
     }
 
     private static func formatter(in tz: TimeZone) -> DateFormatter {

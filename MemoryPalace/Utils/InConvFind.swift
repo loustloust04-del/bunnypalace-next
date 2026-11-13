@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 
 /// 对话内查找（plan-chat-find）的纯逻辑层：解析 + 后台过滤。不碰 SwiftData，快照由 VM 在主线程取

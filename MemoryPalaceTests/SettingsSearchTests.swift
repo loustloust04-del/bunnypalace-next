@@ -147,7 +147,6 @@ final class SettingsSearchTests: XCTestCase {
             XCTAssertEqual(SettingsSearchEntry.filtered(for: query).first?.tab, .macWorkspace, query)
         }
         XCTAssertNotNil(SettingsSearchEntry.iconByTab[.macWorkspace])
-        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .macWorkspace))
     }
     #endif
 
@@ -226,45 +225,92 @@ final class SettingsSearchTests: XCTestCase {
         for query in ["配对", "我的电脑", "工作目录", "局域网直连", "依赖检查"] {
             XCTAssertEqual(SettingsSearchEntry.filtered(for: query).first?.tab, .myComputer, query)
         }
-        XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .myComputer), "settingsFold.devTools")
         XCTAssertNotNil(SettingsSearchEntry.iconByTab[.myComputer])
     }
 
-    // MARK: 折叠组
-
-    func testFoldGroupMapping() {
-        XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .terminal), "settingsFold.devTools")
-        XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .mcp), "settingsFold.aiExt")
-        // C3：「模块」折叠组并进「子应用」页，这些页不再挂折叠组
-        #if PERSONAL_APPS
-        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .trading))
+    /// atrium P4-0：App 里有自己 ⚙ 的 9 个工具页，iOS 副标题写「X App …」、落点不变；mac 副标题原样
+    func testToolSettingsSubtitlesNameTheApp() {
+        let expected: [String: SettingsView.SettingsTab] = [
+            "page-calendar": .calendar, "page-terminal": .terminal, "page-reading": .reading,
+            "page-vocab": .vocab, "page-claudecode": .claudeCode, "page-codex": .codex,
+            "page-mycomputer": .myComputer, "page-sandbox": .sandbox, "page-xiaoya": .xiaoya,
+        ]
+        let pages = Dictionary(uniqueKeysWithValues: SettingsSearchEntry.pageEntries.map { ($0.id, $0) })
+        for (id, tab) in expected {
+            let page = pages[id]
+            XCTAssertEqual(page?.tab, tab, id)
+            #if os(iOS)
+            XCTAssertEqual(page?.subtitle.contains("App"), true, "\(id): \(page?.subtitle ?? "nil")")
+            #else
+            XCTAssertEqual(page?.subtitle.contains("App"), false, "\(id): \(page?.subtitle ?? "nil")")
+            #endif
+        }
+        XCTAssertEqual(pages["page-mcp"]?.subtitle, "设置 › AI 连接与拓展", "MCP 不动")
+        #if os(iOS)
+        for (id, sub) in [("leaf-calendar-style", "日历 App › 月历"), ("leaf-terminal-layout", "终端 App › 按键布局"),
+                          ("leaf-vocab-order", "单词 App › 出词顺序"), ("leaf-xiaoya-stage", "小芽 App › 舞台"),
+                          ("leaf-mycomputer-workdir", "终端 App › 我的电脑 › Agent 干活的目录"),
+                          ("leaf-sandbox-reset", "手机里的小电脑")] {
+            XCTAssertEqual(SettingsSearchEntry.all.first { $0.id == id }?.subtitle, sub, id)
+        }
+        #else
+        XCTAssertEqual(SettingsSearchEntry.all.first { $0.id == "leaf-calendar-style" }?.subtitle, "日历 › 月历")
         #endif
-        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .sticker))
-        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .groupChat))
-        XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .sandbox), "settingsFold.storage")
-        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .general))
-        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .worldBook))
     }
 
-    /// 折叠组 key 必须跟根列表 SettingsFoldRow 的三个 storageKey 一致
-    func testFoldGroupKeysAreKnown() {
-        let known: Set<String> = ["settingsFold.aiExt", "settingsFold.devTools", "settingsFold.storage"]
-        for tab in SettingsView.SettingsTab.allCases {
-            if let key = SettingsSearchEntry.foldStorageKey(for: tab) {
-                XCTAssertTrue(known.contains(key), "\(tab.rawValue) 映射到未知折叠组 \(key)")
-            }
-        }
+    /// atrium P4-a：iOS「右栏」那页叫 gardenOS 设置，搜「gardenOS」「主屏」先到它；mac 仍是「右栏」，字节不变
+    func testRightPanelEntryNamesGardenOSOnIOSOnly() {
+        let page = SettingsSearchEntry.pageEntries.first { $0.id == "page-rightpanel" }
+        XCTAssertEqual(page?.tab, .rightPanel)
+        #if os(iOS)
+        XCTAssertEqual(page?.title, "gardenOS 设置")
+        XCTAssertEqual(page?.subtitle, "主屏 › 设置 App")
+        XCTAssertEqual(SettingsSearchEntry.filtered(for: "gardenOS").first?.tab, .rightPanel)
+        XCTAssertEqual(SettingsSearchEntry.filtered(for: "主屏").first?.tab, .rightPanel)
+        XCTAssertEqual(SettingsSearchEntry.all.first { $0.id == "leaf-rightpanel-tools" }?.subtitle, "gardenOS 设置 › 默认")
+        #else
+        XCTAssertEqual(page?.title, "右栏")
+        XCTAssertEqual(page?.subtitle, "设置")
+        XCTAssertEqual(page?.keywords, ["桌面", "小组件", "工具管理", "默认", "按人", "装", "卸", "主屏上的 App", "panel", "desktop", "widget"])
+        XCTAssertEqual(SettingsSearchEntry.filtered(for: "右栏").first?.tab, .rightPanel)
+        XCTAssertEqual(SettingsSearchEntry.all.first { $0.id == "leaf-rightpanel-tools" }?.subtitle, "右栏 › 工具管理")
+        #endif
     }
 
-    func testExpandFoldGroupWritesDefaults() {
-        let key = "settingsFold.devTools"
-        let old = UserDefaults.standard.object(forKey: key)
-        defer {
-            if let old { UserDefaults.standard.set(old, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) }
+    /// atrium P4-b：iOS 搜「壁纸 / 图标」能到 gardenOS 设置那条，「子应用」改名「App 设置」仍能搜到；mac 没有这些
+    func testWallpaperAndAppSettingsEntriesOnIOSOnly() {
+        let wallpaper = SettingsSearchEntry.all.first { $0.id == "leaf-gardenos-wallpaper" }
+        #if os(iOS)
+        XCTAssertEqual(wallpaper?.tab, .rightPanel)
+        XCTAssertEqual(wallpaper?.subtitle, "gardenOS 设置")
+        for query in ["壁纸", "图标", "大图标", "wallpaper"] {
+            XCTAssertTrue(SettingsSearchEntry.filtered(for: query).contains { $0.id == "leaf-gardenos-wallpaper" }, query)
         }
-        UserDefaults.standard.set(false, forKey: key)
-        SettingsSearchEntry.expandFoldGroup(for: .claudeCode)
-        XCTAssertTrue(UserDefaults.standard.bool(forKey: key))
+        let page = SettingsSearchEntry.pageEntries.first { $0.id == "page-subapps" }
+        XCTAssertEqual(page?.title, "App 设置")
+        XCTAssertEqual(SettingsSearchEntry.filtered(for: "子应用").first?.tab, .subApps)
+        XCTAssertEqual(SettingsSearchEntry.filtered(for: "App 设置").first?.tab, .subApps)
+        XCTAssertFalse(SettingsSearchEntry.all.contains { $0.subtitle.hasPrefix("子应用 ›") }, "叶子页名跟着改")
+        #else
+        XCTAssertNil(wallpaper)
+        XCTAssertFalse(SettingsSearchEntry.filtered(for: "壁纸").contains { $0.tab == .rightPanel })
+        #endif
+    }
+
+    /// b4 #10：多台电脑三条只在 iOS 出（Mac 本期不出添加入口），iOS 上落到「我的电脑」
+    func testHubEntriesPlatformFilterAndLanding() {
+        let ids: Set<String> = ["leaf-mycomputer-hubs", "leaf-mycomputer-addhub", "leaf-mycomputer-managehub"]
+        #if os(macOS)
+        for query in ["添加电脑", "管理电脑", "多台电脑"] {
+            XCTAssertFalse(SettingsSearchEntry.filtered(for: query).contains { ids.contains($0.id) }, query)
+        }
+        #else
+        for (query, id) in [("添加电脑", "leaf-mycomputer-addhub"), ("管理电脑", "leaf-mycomputer-managehub"), ("多台电脑", "leaf-mycomputer-hubs")] {
+            let hit = SettingsSearchEntry.filtered(for: query).first
+            XCTAssertEqual(hit?.id, id, query)
+            XCTAssertEqual(hit?.tab, .myComputer, query)
+        }
+        #endif
     }
 
     func testRegistryIDsUnique() {
@@ -311,6 +357,45 @@ final class SettingsSearchTests: XCTestCase {
 
     func testVocabCapCarriesAnchor() {
         XCTAssertEqual(SettingsSearchEntry.filtered(for: "每日复习上限").first?.anchor, "leaf-vocab-cap")
+    }
+
+    /// atrium P3④b：字体字号 / 行距段距 / 气泡几何按人存——Mac 留在外观「这一层」节（带锚点）；iOS 只在人页，注册表里没有
+    func testPerLayerAppearanceEntries() {
+        let ids = ["leaf-appear-font", "leaf-appear-text", "leaf-appear-typeset", "leaf-appear-bubblechat", "leaf-appear-geometry"]
+        #if os(macOS)
+        for id in ids {
+            let e = SettingsSearchEntry.all.first { $0.id == id }
+            XCTAssertEqual(e?.subtitle.hasPrefix("外观 › 这一层"), true, id)
+            XCTAssertEqual(e?.anchor, id)
+        }
+        XCTAssertEqual(SettingsSearchEntry.filtered(for: "聊天字号").first?.id, "leaf-appear-text")
+        #else
+        XCTAssertTrue(SettingsSearchEntry.all.allSatisfy { !ids.contains($0.id) })
+        #endif
+    }
+
+    func testRecallQueriesReachTheirPageAndRetiredFeedbackIsNotASetting() {
+        for (query, route) in [("太短的不找", SettingsRoute.memoryArchiveTrigger),
+                               ("最多翻几次", .memoryRecallBrowse),
+                               ("命中的只带一行目录", .memoryOpenWindow),
+                               ("翻记忆", .memoryRecallBrowse)] {
+            let hit = SettingsSearchEntry.filtered(for: query).first
+            XCTAssertEqual(hit?.tab, .memory, query)
+            XCTAssertEqual(hit?.anchor.flatMap(SettingsSearchEntry.memorySubpage), route, query)
+        }
+        XCTAssertFalse(SettingsSearchEntry.filtered(for: "召回反馈").contains { $0.id == "leaf-mem-feedback" })
+        XCTAssertEqual(SettingsSearchEntry.memorySubpage(for: "leaf-mem-tuning-previousWindowMessages"), .memoryOpenWindow)
+        XCTAssertNil(SettingsSearchEntry.memorySubpage(for: "leaf-mem-tuning-maximumPages"))
+        XCTAssertNil(SettingsSearchEntry.memorySubpage(for: "leaf-mem-maximumpages"))
+    }
+
+    func testCCMemorySyncQueriesReachMemoryWritingSettings() throws {
+        for query in ["同步 CC 的记忆", "CC 记忆 同步", "Claude Code 同步"] {
+            let hit = try XCTUnwrap(SettingsSearchEntry.filtered(for: query).first, query)
+            XCTAssertEqual(hit.tab, .memory, query)
+            XCTAssertEqual(hit.anchor, "leaf-mem-ccmemory", query)
+            XCTAssertNil(SettingsSearchEntry.memorySubpage(for: try XCTUnwrap(hit.anchor)), query)
+        }
     }
 
     // MARK: Router 状态机

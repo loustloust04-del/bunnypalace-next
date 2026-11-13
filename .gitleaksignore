@@ -7,3 +7,26 @@ cf40ab794c884e86474759802253b1ecb91ac464:scripts/steward-checkpoint.test.sh:aws-
 cf40ab794c884e86474759802253b1ecb91ac464:scripts/steward-checkpoint.test.sh:aws-access-token:99
 cf40ab794c884e86474759802253b1ecb91ac464:scripts/steward-checkpoint.test.sh:generic-api-key:87
 cf40ab794c884e86474759802253b1ecb91ac464:scripts/steward-checkpoint.test.sh:generic-api-key:99
+# 已核实的误报（Warden 11-11，粟粟「放行名单然后 ignore」）：cc-bridge 配对金样现生成测试钥 / 口令、RFC 6455 示例 Sec-WebSocket-Key、token=x、no-such-key.p8、sk-test 假 key
+bcf2f84acbfe2610f4949824f2a4348ec34f131f:MemoryPalaceTests/SmallBugFixTests.swift:generic-api-key:8
+bcf2f84acbfe2610f4949824f2a4348ec34f131f:MemoryPalaceTests/SmallBugFixTests.swift:generic-api-key:9
+dce13165e977d0a31b860b5d2e7902daa769254c:cc-bridge/hub-device-auth.test.ts:generic-api-key:202
+1d8d09643c471854d54a26d558067b4282ab3fd9:cc-bridge/hub-device-auth.test.ts:generic-api-key:675
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/hub-device-auth.test.ts:generic-api-key:33
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:private-key:216
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:private-key:223
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:41
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:54
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:68
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:81
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:94
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:108
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:122
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:136
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:150
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:164
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:178
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:192
+ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:206
+d8e9b9b66ff507d3f1430c48403054e46e737a3c:cc-bridge/deploy/VPS.md:generic-api-key:185
+d8e9b9b66ff507d3f1430c48403054e46e737a3c:cc-bridge/extra-hosts.test.ts:generic-api-key:92

@@ -233,6 +233,9 @@ def main() -> None:
         "chat_id": chat_id,
         "thinking": thinking,
     }
+    # MP 轮没正文也带 message_id：hub 靠它把思考挂到这一轮消息对应的回复上（plan-cc-reactions 2a）
+    if terminal_input is None and message_id:
+        payload["message_id"] = message_id
     if reply_text:
         payload["reply_text"] = reply_text
         payload["turn_uuid"] = turn_uuid
@@ -253,8 +256,6 @@ def main() -> None:
             payload["rows"] = kept
         if terminal_input is not None:
             payload["terminal_input"] = terminal_input
-        else:
-            payload["message_id"] = message_id
     body = json.dumps(payload).encode("utf-8")
     # 先落盘再投（09-19：hub 卡了 3 秒，hook 超时放弃，正文就丢了）。投成功才删；失败留给 hub 定时补投（幂等）。
     spool = None

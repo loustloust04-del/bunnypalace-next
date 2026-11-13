@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 /// 导入聊天记录（#043）：一个入口收 Claude（新旧三代）/ ChatGPT / Gemini（#047，实验性）的 zip、文件夹、单个文件，自动识别。
 /// 选包 → 识别中 → 预览（勾选每类去哪）→ 导入中 → 完成。小样：docs/design-import-ui.html
-struct ImportView: View {
+struct ImportView: View, ImportFormWidgets {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -25,13 +25,7 @@ struct ImportView: View {
 
     var body: some View {
         let _ = themeManager?.themeChangeID
-        Group {
-            #if os(iOS)
-            iOSBody
-            #else
-            macOSBody
-            #endif
-        }
+        ImportFormPage(title: "导入聊天记录", isBusy: session.isBusy) { content }
         .fileImporter(
             isPresented: $showFilePicker,
             // .data：AI Studio 的文件没有扩展名
@@ -58,51 +52,6 @@ struct ImportView: View {
             if finished { importDownloaded() }
         }
     }
-
-    // MARK: - 容器
-
-    #if os(iOS)
-    private var iOSBody: some View {
-        NavigationStack {
-            List { content }
-                .listStyle(.insetGrouped)
-                .scrollContentBackground(.hidden)
-                .background(Theme.sidebarBg)
-                .navigationTitle("导入聊天记录")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("关闭") { dismiss() }
-                            .foregroundColor(session.isBusy ? Theme.textMuted : Theme.branchIndicator)
-                            .disabled(session.isBusy)
-                    }
-                }
-        }
-    }
-    #else
-    private var macOSBody: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("导入聊天记录")
-                    .font(.title3.weight(.medium))
-                    .foregroundColor(Theme.textPrimary)
-                Spacer()
-                Button("关闭") { dismiss() }
-                    .disabled(session.isBusy)
-            }
-                .padding(.horizontal, 24)
-                .padding(.top, 20)
-                .padding(.bottom, 8)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) { content }
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 20)
-            }
-        }
-        .frame(minWidth: 460, idealWidth: 480, minHeight: 440, idealHeight: 560)
-        .background(Theme.mainBg)
-    }
-    #endif
 
     // MARK: - 各状态
 
@@ -688,40 +637,7 @@ struct ImportView: View {
         return notes
     }
 
-    // MARK: - 小部件（iOS 是 List 的 Section / 行，mac 是卡片）
-
-    @ViewBuilder
-    private func group<C: View>(_ title: String?, footer: String? = nil, @ViewBuilder _ rows: () -> C) -> some View {
-        #if os(iOS)
-        Section {
-            rows()
-        } header: {
-            if let title { Text(title) }
-        } footer: {
-            if let footer { Text(footer).font(.system(size: Theme.F.caption)) }
-        }
-        .listRowBackground(Theme.mainBg)
-        .listRowSeparator(.hidden)
-        #else
-        VStack(alignment: .leading, spacing: 8) {
-            if let title {
-                Text(title)
-                    .font(.system(size: Theme.F.secondary, weight: .semibold))
-                    .foregroundColor(Theme.textSecondary)
-            }
-            VStack(alignment: .leading, spacing: 10) { rows() }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.sidebarBg))
-            if let footer {
-                Text(footer)
-                    .font(.system(size: Theme.F.caption))
-                    .foregroundColor(Theme.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        #endif
-    }
+    // MARK: - 小部件（共用的在 ImportFormKit）
 
     private func checkRow(_ title: String, _ detail: String, isOn: Binding<Bool>) -> some View {
         Button { isOn.wrappedValue.toggle() } label: {
@@ -767,91 +683,11 @@ struct ImportView: View {
         }
     }
 
-    private func resultRow(_ title: String, _ value: String, _ detail: String?) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: Theme.F.body, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
-                if let detail {
-                    Text(detail)
-                        .font(.system(size: Theme.F.caption))
-                        .foregroundColor(Theme.textMuted)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer()
-            Text(value)
-                .font(.system(size: Theme.F.secondary, weight: .semibold))
-                .foregroundColor(Theme.textSecondary)
-        }
-    }
-
-    private func busyGroup(_ title: String, _ text: String) -> some View {
-        group(title) {
-            HStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text(text)
-                    .font(.system(size: Theme.F.secondary))
-                    .foregroundColor(Theme.textSecondary)
-            }
-            .padding(.vertical, 4)
-        }
-    }
-
     private func howToText(_ text: String) -> some View {
         Text(text)
             .font(.system(size: Theme.F.caption))
             .foregroundColor(Theme.textMuted)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.top, 4)
-    }
-
-    @ViewBuilder
-    private func primaryButton(_ title: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-        #if os(iOS)
-        Section {
-            Button(action: action) {
-                HStack { Spacer(); Text(title); Spacer() }
-                    .font(.system(size: Theme.F.body, weight: .semibold))
-                    .foregroundColor(.white)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!enabled)
-            .listRowBackground(enabled ? Theme.branchIndicator : Theme.textMuted)
-        }
-        .listRowSeparator(.hidden)
-        #else
-        HStack {
-            Spacer()
-            Button(title, action: action)
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.branchIndicator)
-                .disabled(!enabled)
-        }
-        #endif
-    }
-
-    @ViewBuilder
-    private func secondaryButton(_ title: String, action: @escaping () -> Void) -> some View {
-        #if os(iOS)
-        Section {
-            Button(action: action) {
-                HStack { Spacer(); Text(title); Spacer() }
-                    .font(.system(size: Theme.F.body))
-                    .foregroundColor(Theme.branchIndicator)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
-        #else
-        HStack {
-            Spacer()
-            Button(title, action: action)
-        }
-        #endif
     }
 }

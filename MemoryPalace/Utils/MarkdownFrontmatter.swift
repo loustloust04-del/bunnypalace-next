@@ -55,7 +55,7 @@ enum MarkdownFrontmatter {
                 out.append(Field(key: last.key, value: last.value.isEmpty ? item : last.value + "、" + item))
                 continue
             }
-            guard let colon = line.firstIndex(of: ":") else { continue }
+            guard let colon = line.firstIndex(where: { $0 == ":" || $0 == "：" }) else { continue }
             let key = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
             guard !key.isEmpty else { continue }
             out.append(Field(key: key, value: clean(line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces))))

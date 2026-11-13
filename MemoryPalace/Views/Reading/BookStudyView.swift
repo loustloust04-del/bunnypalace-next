@@ -17,7 +17,9 @@ struct BookStudyContent: View {
     var onOpenQuote: (StudyQuote) -> Void = { _ in }
 
     @Environment(\.page2AppActive) private var appActive
-    @Environment(\.scenePhase) private var scenePhase
+    /// 前后台听 UIKit 通知，不读环境 scenePhase：page2 子应用宿主拷的是环境快照，后台往返后停在 inactive，
+    /// 叶影不晃、陀螺仪不开（同 8ef0b21e6 终端 3D / 4214a8b33 桌面长按）
+    @State private var foreground = UIApplication.shared.applicationState == .active
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedId: String?
     @State private var tilt = StudyTilt()
@@ -39,7 +41,7 @@ struct BookStudyContent: View {
     private var recent: BookEntry? { entries.first { $0.lastReadAt != nil } }
     private var selected: BookEntry? { entries.first { $0.id == selectedId } ?? recent ?? entries.first }
     /// 陀螺仪只在书房在前台、没开着书时读（⧫ 粟粟 09-25：进去看书就关）
-    private var motionWanted: Bool { layout == .study && appActive && !isReading && scenePhase == .active && !reduceMotion }
+    private var motionWanted: Bool { layout == .study && appActive && !isReading && foreground && !reduceMotion }
 
     var body: some View {
         ZStack {
@@ -95,6 +97,8 @@ struct BookStudyContent: View {
             Task { await reloadMarks() }
         }
         .onDisappear { tilt.stop() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in foreground = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in foreground = false }
         .sheet(isPresented: $showSettings, onDismiss: { Task { await reloadMarks() } }) {
             NavigationStack {
                 ReadingSettingsTab()

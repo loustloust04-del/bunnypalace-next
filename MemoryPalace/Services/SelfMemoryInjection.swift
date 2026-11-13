@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// 每轮常驻注入的「我的记忆」段（B3）：五级全文 + 最近 N 条全文 + 其余一行目录 + 指路。

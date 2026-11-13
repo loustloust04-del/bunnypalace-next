@@ -3,7 +3,7 @@ import { WebSocket } from "ws"
 import { mkdtempSync, writeFileSync, utimesSync, readdirSync, existsSync, unlinkSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { buildChannelTag, setTmuxRunner, isLoopback, pasteAwareSendAndEnter, planStreamReconcile, writeReadingStatus, writeVocabStatus, writeReadingContext, appendVoiceNote, markReplySeen, seenMpMsgIds, cursorRestoreSeq, PASTE_MODE_LENGTH_THRESHOLD, PASTE_RETRY_MAX, type PasteIO } from "./hub.ts"
+import { buildChannelTag, setTmuxRunner, isLoopback, pasteAwareSendAndEnter, planStreamReconcile, writeReadingStatus, writeVocabStatus, writeReadingContext, appendVoiceNote, markReplySeen, seenMpMsgIds, cursorRestoreSeq, PASTE_MODE_LENGTH_THRESHOLD, PASTE_RETRY_MAX, type PasteIO, pushPreviewFor } from "./hub.ts"
 import { deliverBookNote, pendingBookNotes, ackBookNote } from "./book-notes.ts"
 import { agentStatusSnapshot, applyAgentConfigPatch, writeVoiceInstructions, MP_VOICE_BEGIN, MP_VOICE_END, sendAckFrame, sendErrorFrame, uncertainSendFrame, admitAppSend, ensureSessionAndSendAsync, sendStatusBook, type AdmittedSend } from "./hub.ts"
 import { SendTracker, type TrackDeps } from "./send-track.ts"
@@ -159,6 +159,21 @@ test("#046 hello：连上第一帧，带主机名 / 两个家 / 工具探测 / �
   expect(Object.keys(frame.tools).sort()).toEqual(["claude", "codex", "tmux"])
   expect(frame.capabilities).toContain("dirs")
   ws.close()
+})
+
+test("B0.1 hello 带 hub_id：等于 secrets/hub-id，重连不变", async () => {
+  const read = async () => {
+    const ws = new WebSocket(CC_URL)
+    const hello = firstFrame(ws)
+    const frame = await hello
+    ws.close()
+    return frame
+  }
+  const a = await read(), b = await read()
+  expect(a.type).toBe("hello")
+  expect(a.hub_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+  expect(readFileSync(join(TEST_SECRETS, "hub-id"), "utf-8").trim()).toBe(a.hub_id)
+  expect(b.hub_id).toBe(a.hub_id)
 })
 
 test("hub acks send messages", async () => {
@@ -489,6 +504,35 @@ test("#046 list_dirs：只列子文件夹；读不了给 error", async () => {
   ws.close()
 })
 
+test("opencli 开关：默认关、只认本机改、开了 hello 带 capability、请求帧带回 request_id", async () => {
+  const ws = await openMP()
+  ws.send(JSON.stringify({ type: "opencli_req", tool: "chrome_read", url: "https://example.com", request_id: "r-off" }))
+  expect(await msgOfType(ws, "opencli_result")).toEqual({ type: "opencli_result", ok: false, error: "Mac 上没开「让 AI 用 Chrome 登录态」", request_id: "r-off" })
+
+  const remote = new WebSocket(CC_URL, { headers: { "x-forwarded-for": "10.0.0.9" } })
+  const remoteHello = firstFrame(remote)
+  await new Promise<void>((resolve, reject) => { remote.on("open", resolve); remote.on("error", reject) })
+  await remoteHello
+  remote.send(JSON.stringify({ type: "set_opencli_enabled", enabled: true, request_id: "r-remote" }))
+  expect(await msgOfType(remote, "hub_config_error")).toEqual({ type: "hub_config_error", reason: "这个开关只能在 Mac 上改", request_id: "r-remote" })
+  remote.close()
+
+  ws.send(JSON.stringify({ type: "set_opencli_enabled", enabled: true, request_id: "r-on" }))
+  const cfg = await msgOfType(ws, "hub_config")
+  expect(cfg.opencli_enabled).toBe(true)
+  expect(cfg.request_id).toBe("r-on")
+  expect((await msgOfType(ws, "hello")).capabilities).toContain("opencli")
+  expect(JSON.parse(readFileSync(join(TEST_SECRETS, "hub-config.json"), "utf-8")).opencli_enabled).toBe(true)
+
+  ws.send(JSON.stringify({ type: "opencli_req", tool: "chrome_read", url: "file:///etc/passwd", request_id: "r-bad" }))
+  expect(await msgOfType(ws, "opencli_result")).toEqual({ type: "opencli_result", ok: false, error: "网址要以 http:// 或 https:// 开头", request_id: "r-bad" })
+
+  ws.send(JSON.stringify({ type: "set_opencli_enabled", enabled: false }))
+  expect((await msgOfType(ws, "hub_config")).opencli_enabled).toBe(false)
+  expect((await msgOfType(ws, "hello")).capabilities).not.toContain("opencli")
+  ws.close()
+})
+
 test("#046 restore_window 不认识的窗口：ok=false + 中文原因", async () => {
   const ws = await openMP()
   ws.send(JSON.stringify({ type: "restore_window", code: "zzzzzz" }))
@@ -629,6 +673,69 @@ test("thinking: replayed to new client after replies", async () => {
   expect(replyIdx).toBeGreaterThanOrEqual(0)
   expect(thinkIdx).toBeGreaterThan(replyIdx)
   mp.close()
+})
+
+// ---------- 推送预览剥 react 块（plan-cc-reactions 2a.1 第 5 条）----------
+test("pushPreviewFor: 只有 react 块、没文件 → null（不推）", () => {
+  expect(pushPreviewFor("```react\n❤️\n```", false)).toBeNull()
+  expect(pushPreviewFor("  \n```react\n❤️ 3F2A\n```\n\n", false)).toBeNull()
+})
+
+test("pushPreviewFor: 正文 + 块 → 预览不含块", () => {
+  const out = pushPreviewFor("晚安\n\n```react\n❤️\n```", false)
+  expect(out).toBe("晚安")
+  expect(out).not.toContain("react")
+})
+
+test("pushPreviewFor: 带文件、正文只有块 → 照推（预览空串）", () => {
+  expect(pushPreviewFor("```react\n❤️\n```", true)).toBe("")
+})
+
+function thinkingLogEntry(thinkingId: string): any {
+  const log = JSON.parse(readFileSync(join(TEST_SECRETS, "thinking-log.json"), "utf8"))
+  return log.find((e: any) => e.thinking_id === thinkingId)
+}
+
+test("thinking: 没正文、message_id 是别的消息 → 不挂（以前错挂上一条）", async () => {
+  const mcp = await openMCP()
+  mcp.send(JSON.stringify({ type: "reply", chat_id: "conv-anchor-miss", content: "早", message_id: "m1", mp_msg_id: "s_miss_m1" }))
+  await new Promise(r => setTimeout(r, 150))
+  const o = await (await postThinking({ chat_id: "conv-anchor-miss", thinking: "想到别处去了", message_id: "m2" })).json()
+  expect(o.ok).toBe(false)
+  expect(o.reason).toBe("no_anchor")
+  mcp.close()
+})
+
+test("thinking: 没正文、message_id 那一轮的回复在 → 挂到它", async () => {
+  const mcp = await openMCP()
+  mcp.send(JSON.stringify({ type: "reply", chat_id: "conv-anchor-hit", content: "旧", message_id: "m1", mp_msg_id: "s_hit_m1" }))
+  mcp.send(JSON.stringify({ type: "reply", chat_id: "conv-anchor-hit", content: "新", message_id: "m2", mp_msg_id: "s_hit_m2" }))
+  await new Promise(r => setTimeout(r, 150))
+  const o = await (await postThinking({ chat_id: "conv-anchor-hit", thinking: "这轮的想法", message_id: "m2" })).json()
+  expect(o.ok).toBe(true)
+  expect(thinkingLogEntry(o.thinking_id)?.mp_msg_id).toBe("s_hit_m2")
+  mcp.close()
+})
+
+test("thinking: 回复没带 message_id — 晚于最近一次 app 发送才挂，早于不挂", async () => {
+  const mp = await openMP()
+  const mcp = await openMCP()
+  // 先有一条上一轮的回复（没带 message_id）
+  mcp.send(JSON.stringify({ type: "reply", chat_id: "conv-sendtime", content: "早回复", mp_msg_id: "s_before_nomid" }))
+  await new Promise(r => setTimeout(r, 100))
+  // 她在 app 里发了一条 → 之后的那条回复才能靠「发送时间」锚上
+  mp.send(JSON.stringify({ type: "send", chat_id: "conv-sendtime", message_id: "m-app-1", content: "在吗", user: "susu" }))
+  await new Promise(r => setTimeout(r, 150))
+  const miss = await (await postThinking({ chat_id: "conv-sendtime", thinking: "上一轮的想法", message_id: "m-app-1" })).json()
+  expect(miss.ok).toBe(false)
+  expect(miss.reason).toBe("no_anchor")
+  // 这一轮 CC 用 reply 工具回了但没传 message_id
+  mcp.send(JSON.stringify({ type: "reply", chat_id: "conv-sendtime", content: "在的", mp_msg_id: "s_after_nomid" }))
+  await new Promise(r => setTimeout(r, 150))
+  const hit = await (await postThinking({ chat_id: "conv-sendtime", thinking: "这轮的想法", message_id: "m-app-1" })).json()
+  expect(hit.ok).toBe(true)
+  expect(thinkingLogEntry(hit.thinking_id)?.mp_msg_id).toBe("s_after_nomid")
+  mp.close(); mcp.close()
 })
 
 test("thinking: terminal_input → 她那句做成引用块放正文前，s_txt_<turn> 去重", async () => {
@@ -1320,6 +1427,39 @@ test("policy always: 多个一起保，且不吃掉 auto 的单选名额", () =>
   const plan = planKeepalive(map, now, KA, ALIVE, (s) => (s.startsWith("mp-cc-pin") ? "always" : "auto"))
   // 两个 pin 全保 + auto 里最活跃的 auto1；auto2 落选
   expect(plan.sort()).toEqual(["mp-cc-auto1", "mp-cc-pin1", "mp-cc-pin2"])
+})
+
+// ── B0.2 · unregister_push_token：从 push-tokens.json 删掉；不在表里也不报错（幂等），跟 register 一样不回帧 ──
+test("B0.2 unregister_push_token：注册过的删掉并落盘，别的 token 不动；再注销 / 注销没注册过的不回 error、表不变", async () => {
+  const pushPath = join(TEST_SECRETS, "push-tokens.json")
+  const readTable = (): Record<string, unknown> => existsSync(pushPath) ? JSON.parse(readFileSync(pushPath, "utf-8")) : {}
+  const until = async (pred: () => boolean) => {
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline && !pred()) await new Promise(r => setTimeout(r, 50))
+    expect(pred()).toBe(true)
+  }
+  const ws = await openMP()
+  const frames = collectFrames(ws)
+  ws.send(JSON.stringify({ type: "register_push_token", token: "b02-keep", env: "sandbox" }))
+  ws.send(JSON.stringify({ type: "register_push_token", token: "b02-drop", env: "production", preview: "hidden" }))
+  await until(() => "b02-keep" in readTable() && "b02-drop" in readTable())
+
+  ws.send(JSON.stringify({ type: "unregister_push_token", token: "b02-drop" }))
+  await until(() => !("b02-drop" in readTable()))
+  expect(readTable()["b02-keep"]).toEqual({ env: "sandbox", preview: "full" })
+
+  const before = readFileSync(pushPath, "utf-8")
+  ws.send(JSON.stringify({ type: "unregister_push_token", token: "b02-drop" }))
+  ws.send(JSON.stringify({ type: "unregister_push_token", token: "b02-never-registered" }))
+  ws.send(JSON.stringify({ type: "unregister_push_token" }))
+  await new Promise(r => setTimeout(r, 400))
+  expect(readFileSync(pushPath, "utf-8")).toBe(before)
+  expect(frames.filter(f => f.type === "error" || /push/.test(String(f.type)))).toEqual([])
+  expect((await fetch(`http://127.0.0.1:${TEST_PORT}/health`)).ok).toBe(true)
+
+  ws.send(JSON.stringify({ type: "unregister_push_token", token: "b02-keep" }))
+  await until(() => !("b02-keep" in readTable()))
+  ws.close()
 })
 
 // ── M2 · Live Activity token 注册链（D6）WS 往返 ──
@@ -2333,4 +2473,186 @@ test("A1 R5 P1-d：app 消息的发送上下文一路带到会话链（ensureSes
   } finally {
     setTmuxRunner({ send: () => {}, sendRaw: () => {}, key: async () => {}, capture: async () => "", hasSession: () => true, list: () => [], paneTitles: () => new Map(), spawn: async () => {}, kill: async () => {}, paste: async () => ({ ok: true }) } as any)
   }
+})
+
+// MARK: 状态面板（plan-status-panel §7）：POST /agent/status/:id + status_* 帧
+
+const STATUS_URL = (id: string) => `http://127.0.0.1:${TEST_PORT}/agent/status/${id}`
+const statusPending = (id: string) => join(TEST_AGENT_DIR, "pending-status-alerts", `${id}.json`)
+
+function postStatus(id: string, body: unknown): Promise<Response> {
+  return fetch(STATUS_URL(id), { method: "POST", headers: { "content-type": "application/json" }, body: typeof body === "string" ? body : JSON.stringify(body) })
+}
+
+function statusBody(bad: string[], good: string[] = ["服务器B"]) {
+  return {
+    title: "测试源", checkedAt: new Date().toISOString(),
+    items: [...good.map((name) => ({ name, ok: true })), ...bad.map((name) => ({ name, ok: false, detail: "连不上 192.0.2.1" }))],
+  }
+}
+
+function collectFrames(ws: WebSocket): any[] {
+  const frames: any[] = []
+  ws.on("message", (d) => frames.push(JSON.parse(d.toString())))
+  return frames
+}
+
+async function waitFrame(frames: any[], pred: (f: any) => boolean, ms = 3_000): Promise<any> {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    const f = frames.find(pred)
+    if (f) return f
+    await new Promise((r) => setTimeout(r, 20))
+  }
+  throw new Error("等帧超时")
+}
+
+async function waitGone(path: string): Promise<void> {
+  const deadline = Date.now() + 2_000
+  while (existsSync(path) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+}
+
+test("status：非本机 403；坏 id / 坏 body 400 带 reason；超 64KB 413", async () => {
+  const fwd = await rawPost("/agent/status/itest-guard", ["X-Forwarded-For: 192.0.2.1"])
+  expect(fwd.split("\r\n")[0]).toBe("HTTP/1.1 403 Forbidden")
+  for (const [id, body] of [["Bad_ID", statusBody([])], ["itest-guard", "不是 json"], ["itest-guard", { items: [] }]] as const) {
+    const res = await postStatus(id, body)
+    expect(res.status).toBe(400)
+    const o = await res.json()
+    expect(o.ok).toBe(false)
+    expect(typeof o.reason).toBe("string")
+  }
+  const big = { ...statusBody([]), items: [{ name: "线路A", ok: true, detail: "x".repeat(70_000) }] }
+  const res = await postStatus("itest-guard", big).catch(() => null)
+  // hub 413 或直接断连（req.destroy）都算拒绝
+  if (res) expect(res.status).toBe(413)
+  expect(existsSync(join(TEST_AGENT_DIR, "status", "itest-guard.json"))).toBe(false)
+})
+
+test("status：POST 后 WS 收到 status_result；坏了收到 status_alert，ack 后 pending 删掉；重 POST 不再出提醒；全绿出 recovered", async () => {
+  const ws = await openMP()
+  const frames = collectFrames(ws)
+  const res = await postStatus("itest-a", statusBody(["线路A"]))
+  expect(await res.json()).toEqual({ ok: true, alert: "bad" })
+
+  const result = await waitFrame(frames, (f) => f.type === "status_result" && f.sources.some((s: any) => s.id === "itest-a"))
+  expect(result.quiet).toEqual({ start: "23:30", end: "08:30", tz: "Asia/Shanghai" })
+  expect(result.sources.find((s: any) => s.id === "itest-a")).toMatchObject({
+    id: "itest-a", title: "测试源", staleAfterHours: 36, canRun: false, running: false,
+    items: [{ name: "服务器B", ok: true, detail: "" }, { name: "线路A", ok: false, detail: "连不上 192.0.2.1" }],
+  })
+  const alertFrame = await waitFrame(frames, (f) => f.type === "status_alert" && f.alert.source === "itest-a")
+  expect(alertFrame.alert).toMatchObject({ source: "itest-a", title: "测试源", kind: "bad", names: ["线路A"], text: "测试源掉了 1 颗：线路A。点我看原因。" })
+  expect(typeof alertFrame.alert.id).toBe("string")
+  expect(Number.isNaN(Date.parse(alertFrame.alert.createdAt))).toBe(false)
+  expect(existsSync(statusPending(alertFrame.alert.id))).toBe(true)
+
+  ws.send(JSON.stringify({ type: "status_alert_ack", id: alertFrame.alert.id }))
+  await waitGone(statusPending(alertFrame.alert.id))
+  expect(existsSync(statusPending(alertFrame.alert.id))).toBe(false)
+
+  frames.length = 0
+  expect(await (await postStatus("itest-a", statusBody(["线路A"]))).json()).toEqual({ ok: true, alert: null })
+  await waitFrame(frames, (f) => f.type === "status_result")
+  await new Promise((r) => setTimeout(r, 150))
+  expect(frames.some((f) => f.type === "status_alert" && f.alert.source === "itest-a")).toBe(false)
+
+  expect(await (await postStatus("itest-a", statusBody([]))).json()).toEqual({ ok: true, alert: "recovered" })
+  const rec = await waitFrame(frames, (f) => f.type === "status_alert" && f.alert.source === "itest-a")
+  expect(rec.alert).toMatchObject({ kind: "recovered", names: ["线路A"], text: "测试源又串满了，刚才那 1 条都通了。" })
+  ws.send(JSON.stringify({ type: "status_alert_ack", id: rec.alert.id }))
+  await waitGone(statusPending(rec.alert.id))
+  ws.close()
+})
+
+test("status：不 ack 就断开，重连补投全部未 ack 的 status_alert", async () => {
+  const ws = await openMP()
+  const frames = collectFrames(ws)
+  await postStatus("itest-b", statusBody(["线路A", "服务器C"]))
+  const first = await waitFrame(frames, (f) => f.type === "status_alert" && f.alert.source === "itest-b")
+  ws.close()
+
+  const ws2 = new WebSocket(CC_URL)
+  const frames2 = collectFrames(ws2)
+  const replay = await waitFrame(frames2, (f) => f.type === "status_alert" && f.alert.id === first.alert.id)
+  expect(replay.alert).toEqual(first.alert)
+  ws2.send(JSON.stringify({ type: "status_alert_ack", id: first.alert.id }))
+  await waitGone(statusPending(first.alert.id))
+  expect(existsSync(statusPending(first.alert.id))).toBe(false)
+  ws2.close()
+})
+
+test("status：status_get 回 status_result；status_quiet_set 存盘 + 广播，坏值不收", async () => {
+  await postStatus("itest-c", statusBody([]))
+  const ws = await openMP()
+  const frames = collectFrames(ws)
+  ws.send(JSON.stringify({ type: "status_get" }))
+  const got = await waitFrame(frames, (f) => f.type === "status_result")
+  expect(got.sources.some((s: any) => s.id === "itest-c")).toBe(true)
+
+  frames.length = 0
+  ws.send(JSON.stringify({ type: "status_quiet_set", start: "23:00", end: "07:30", tz: "Mars/Olympus" }))
+  ws.send(JSON.stringify({ type: "status_quiet_set", start: "23:00", end: "07:30", tz: "Europe/London" }))
+  const q = await waitFrame(frames, (f) => f.type === "status_result")
+  expect(q.quiet).toEqual({ start: "23:00", end: "07:30", tz: "Europe/London" })
+  expect(JSON.parse(readFileSync(join(TEST_AGENT_DIR, "status-quiet.json"), "utf8"))).toEqual({ start: "23:00", end: "07:30", tz: "Europe/London" })
+  ws.send(JSON.stringify({ type: "status_quiet_set", start: "23:30", end: "08:30", tz: "Asia/Shanghai" }))
+  await waitFrame(frames, (f) => f.type === "status_result" && f.quiet.tz === "Asia/Shanghai")
+  ws.close()
+})
+
+test("status：status_run 只跑 status-sources.json 配了 run 的假脚本，running true → false 都广播", async () => {
+  const scriptDir = mkdtempSync(join(tmpdir(), "cc-hub-status-run-"))
+  const script = join(scriptDir, "fake-check.sh")
+  const mark = join(scriptDir, "ran")
+  writeFileSync(script, `sleep 0.4\necho ok > "${mark}"\n`)
+  writeFileSync(join(TEST_AGENT_DIR, "status-sources.json"), JSON.stringify({ "itest-run": { title: "假检修", run: script } }))
+  await postStatus("itest-run", statusBody([]))
+  await postStatus("itest-c", statusBody([]))
+  const ws = await openMP()
+  const frames = collectFrames(ws)
+  ws.send(JSON.stringify({ type: "status_get" }))
+  const before = await waitFrame(frames, (f) => f.type === "status_result")
+  expect(before.sources.find((s: any) => s.id === "itest-run")).toMatchObject({ title: "假检修", canRun: true, running: false })
+  expect(before.sources.find((s: any) => s.id === "itest-c")).toMatchObject({ canRun: false })
+
+  frames.length = 0
+  ws.send(JSON.stringify({ type: "status_run", id: "itest-c" }))   // 没配 run：不跑
+  ws.send(JSON.stringify({ type: "status_run", id: "itest-run" }))
+  ws.send(JSON.stringify({ type: "status_run", id: "itest-run" }))   // 正在跑：忽略
+  const on = await waitFrame(frames, (f) => f.type === "status_result" && f.sources.find((s: any) => s.id === "itest-run")?.running === true)
+  expect(on.sources.find((s: any) => s.id === "itest-c").running).toBe(false)
+  await waitFrame(frames, (f) => f.type === "status_result" && f.sources.find((s: any) => s.id === "itest-run")?.running === false, 5_000)
+  expect(existsSync(mark)).toBe(true)
+  expect(frames.filter((f) => f.type === "status_result").length).toBe(2)
+  ws.close()
+})
+
+test("刀 5 D-B1：set_cc_config 按字段合并、落盘、回推所有连着的 app；没手改过的设备连上不覆盖", async () => {
+  const a = await openMP()
+  const b = await openMP()
+  const fromA = msgOfType(a, "cc_config")
+  const fromB = msgOfType(b, "cc_config")
+  a.send(JSON.stringify({ type: "set_cc_config", pushName: "小雾", idleMinMin: 25, idleMaxMin: 50, nudgeEnabled: false, editedAt: {} }))
+  expect((await fromA).idleMinMin).toBe(25)
+  const pushed = await fromB
+  expect(pushed.idleMaxMin).toBe(50)
+  expect(pushed.nudgeEnabled).toBe(false)
+  const saved = await pollJSON(join(TEST_SECRETS, "cc-config.json"))
+  expect(saved.config.idleMinMs).toBe(25 * 60_000)
+  expect(saved.config.pushName).toBe("小雾")
+
+  // 第二台从没手改过，带着自己的默认值连上 → hub 不动
+  const stale = msgOfType(b, "cc_config")
+  b.send(JSON.stringify({ type: "set_cc_config", idleMinMin: 15, nudgeEnabled: true, editedAt: {} }))
+  expect((await stale).idleMinMin).toBe(25)
+
+  // 第二台手改了 → 收下，回推给第一台
+  const edited = msgOfType(a, "cc_config")
+  b.send(JSON.stringify({ type: "set_cc_config", nudgeEnabled: true, editedAt: { nudgeEnabled: Date.now() } }))
+  const after = await edited
+  expect(after.nudgeEnabled).toBe(true)
+  expect(after.idleMinMin).toBe(25)
+  a.close()
+  b.close()
 })

@@ -7,6 +7,8 @@ struct TerminalSessionPane: View {
     let sessionName: String
     /// 全局窗口才有。session 没了时「重新开一个」要按它的引擎开
     let windowCode: String?
+    /// session 在哪台 hub 上（显式给，plan-multi-hub B3.4）：attach / 输入 / 粘贴 / Esc / 重连都只落到这台
+    let client: CCBridgeWebSocketClient
     let model: TerminalPanelModel
     let paired: Bool
 
@@ -19,15 +21,14 @@ struct TerminalSessionPane: View {
     /// 按了「重新连接」还没连上（T05）：卡上按钮变「连接中…」。连上或 12 秒没连上都收
     @State private var reconnecting = false
 
-    init(sessionName: String, windowCode: String?, model: TerminalPanelModel, paired: Bool) {
+    init(sessionName: String, windowCode: String?, client: CCBridgeWebSocketClient, model: TerminalPanelModel, paired: Bool) {
         self.sessionName = sessionName
         self.windowCode = windowCode
+        self.client = client
         self.model = model
         self.paired = paired
-        _controller = StateObject(wrappedValue: CCTerminalController(sessionName: sessionName))
+        _controller = StateObject(wrappedValue: CCTerminalController(sessionName: sessionName, client: client))
     }
-
-    private var client: CCBridgeWebSocketClient { .shared }
     private var connected: Bool { client.isConnected }
 
     private var issue: TerminalBridgeIssue? {
@@ -59,13 +60,14 @@ struct TerminalSessionPane: View {
             .overlay {
                 if let issue {
                     TerminalBridgeCard(issue: issue,
+                                       computerName: model.hubName(client.hubId),
                                        reason: issue == .disconnected ? BridgeDisconnectWording.humanize(client.lastError) : nil,
                                        hint: issue == .disconnected
                                            ? BridgeDisconnectWording.tailscaleHint(lastError: client.lastError, candidateHosts: client.candidateHosts)
                                            : nil,
                                        busy: issue == .disconnected && reconnecting,
                                        primary: { primaryAction(issue) },
-                                       secondary: { model.showConnect = true })
+                                       secondary: { if client.isPrimary { model.showConnect = true } else { model.managingHub = client.hubId } })
                         .transition(.opacity)
                 }
             }
@@ -78,7 +80,7 @@ struct TerminalSessionPane: View {
         .onChange(of: controller.usage, initial: true) { _, usage in model.usage = usage }
         // T21：终端在前台、画面真出来了才算看过（这块只给当前选中的 tab 画）
         .onChange(of: appActive && controller.hasShownSnapshot, initial: true) { _, seen in
-            if seen { CCBridgeWebSocketClient.shared.sendTerminalSeen(session: sessionName) }
+            if seen { client.sendTerminalSeen(session: sessionName) }
         }
         .task(id: connected) {
             guard !connected else { bridgeDown = false; reconnecting = false; return }
@@ -101,7 +103,7 @@ struct TerminalSessionPane: View {
             // Agent session 幂等 spawn（已存在 hub 回 session_exists，忽略）→ 新会话终端不黑屏。
             // 全局窗口由 hub 的 open_window 起，不走这条（这条会 spawn claude）。
             if !sessionName.hasPrefix("mp-win-") {
-                CCBridgeWebSocketClient.shared.spawnSession(sessionName) { _ in }
+                client.spawnSession(sessionName) { _ in }
             }
             // attach 由 sizeChanged 拿到真实 cols/rows 负责；2s 兜底防 layout 异常 sizeChanged 没 fire
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak controller] in
@@ -144,15 +146,68 @@ struct TerminalSessionPane: View {
             // 立刻重连桥（T05），不等退避；连上后 didOpen 自动补订阅这个终端，session 没了会自动 spawn（T06）
             reconnecting = true
             client.reconnectNow()
+        case .needsPairing:
+            break
         case .sessionGone:
             if let windowCode {
-                let engine = TerminalWindowStore.shared.windows.first { $0.code == windowCode }?.engine
-                model.open(engine: engine == "shell" ? nil : engine)
+                let engine = CCHubRegistry.shared.windowStore(for: client.hubId)?.windows.first { $0.code == windowCode }?.engine
+                model.open(engine: engine == "shell" ? nil : engine, hub: client.hubId)
             } else {
                 // Agent session：reconnect 会先幂等 spawn 再 attach，等于重新开一个
                 controller.reconnect()
             }
         }
+    }
+}
+/// 连不上那台的收起窗口（b4 #8）：先盖断桥卡、不接终端；那台连上了再恢复，恢复成了 restore 自己切过去接上
+struct TerminalPendingRestorePane: View {
+    let client: CCBridgeWebSocketClient
+    let model: TerminalPanelModel
+    let code: String
+
+    @State private var reconnecting = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 22, style: .continuous)
+            .fill(Color.black)
+            .overlay {
+                TerminalBridgeCard(issue: .disconnected,
+                                   computerName: model.hubName(client.hubId),
+                                   reason: BridgeDisconnectWording.humanize(client.lastError),
+                                   hint: BridgeDisconnectWording.tailscaleHint(lastError: client.lastError, candidateHosts: client.candidateHosts),
+                                   busy: reconnecting,
+                                   primary: {
+                                       reconnecting = true
+                                       client.reconnectNow()
+                                   },
+                                   secondary: { if client.isPrimary { model.showConnect = true } else { model.managingHub = client.hubId } })
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .padding(.bottom, 10)
+            .onChange(of: client.isConnected, initial: true) { _, connected in
+                if connected { model.restore(code, hub: client.hubId) }
+            }
+    }
+}
+/// 那台待配对 / 换了机器时打开它的窗口（R5.6）：不接终端（不 attach），留在带原 hub 的修复卡上，按钮去那台的配对页
+struct TerminalRepairPane: View {
+    let hubId: String
+    let reason: CCHubRegistry.Unavailable
+    let model: TerminalPanelModel
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 22, style: .continuous)
+            .fill(Color.black)
+            .overlay {
+                TerminalBridgeCard(issue: .needsPairing,
+                                   reason: reason == .identityChanged ? "连上的是另一台电脑，先停住了" : nil,
+                                   primary: {
+                                       if hubId == CCHubRegistry.primaryId { model.showConnect = true } else { model.rescanningHub = hubId }
+                                   },
+                                   secondary: {})
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .padding(.bottom, 10)
     }
 }
 #endif

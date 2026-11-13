@@ -96,9 +96,14 @@ final class CCTerminalController: ObservableObject {
     /// 首次 = controller 建出来（sizeChanged 可能早于 onAppear）；离开再进由 onAppear 重记
     private var openedAt: Date? = Date()
 
-    init(sessionName: String, backend: (any TerminalBackend)? = nil) {
+    init(sessionName: String, backend: any TerminalBackend) {
         self.sessionName = sessionName
-        self.backend = backend ?? HubTerminalBackend(sessionName: sessionName)
+        self.backend = backend
+    }
+
+    /// 某台 hub 上的 session（plan-multi-hub B3.4：client 显式给，不默认主 hub）
+    convenience init(sessionName: String, client: CCBridgeWebSocketClient) {
+        self.init(sessionName: sessionName, backend: HubTerminalBackend(sessionName: sessionName, client: client))
     }
 
     func noteOpened() {
@@ -915,9 +920,13 @@ struct CCTerminalPanelView: View {
         viewModel.selectedConversation?.ccBridgeSessionName ?? "mp-cc"
     }
 
+    /// 全局窗口是桌面级入口：显式在主 hub 上（plan-multi-hub B3.4；选台是 B4，Mac 本期不出）
+    private var windowHub: String { CCHubRegistry.primaryId }
+    private var windowStore: TerminalWindowStore? { CCHubRegistry.shared.windowStore(for: windowHub) }
+
     private var requestedWindow: String? {
-        guard let target = navigator?.pendingTarget, target.tool == "ccTerminal",
-              TerminalWindowStore.shared.windows.contains(where: { $0.code == target.id && !$0.isClosed }) else { return nil }
+        guard let target = navigator?.pendingTarget, target.tool == "ccTerminal", target.hubId == windowHub,
+              windowStore?.windows.contains(where: { $0.code == target.id && !$0.isClosed }) == true else { return nil }
         return target.id
     }
     private var displayedWindow: String? { requestedWindow ?? selectedWindow }
@@ -927,19 +936,32 @@ struct CCTerminalPanelView: View {
         displayedWindow.map { "mp-win-\($0)" } ?? conversationSession
     }
 
+    /// 那个 session 在哪台：全局窗口在主 hub，对话终端在这条对话连的那台
+    private var displayedHub: String {
+        displayedWindow != nil ? windowHub : viewModel.selectedConversation.map(CCHubRegistry.hubId(of:)) ?? CCHubRegistry.primaryId
+    }
+
     var body: some View {
-        // .id(displayedSession)：切对话或切窗口都强制重建 → 新 controller + 重 attach。
+        // .id(hub + session)：切对话、切窗口、对话改绑都强制重建 → 新 controller + 重 attach。
         // 旧 view 的 onDisappear 会 detach，attach/detach 成对。
-        CCTerminalSessionView(sessionName: displayedSession,
-                              onReopenWindow: displayedWindow.map { code in { reopen(code) } })
-            .id(displayedSession)
+        Group {
+            switch CCHubRegistry.shared.route(displayedHub) {
+            case .success(let client):
+                CCTerminalSessionView(sessionName: displayedSession, client: client,
+                                      onReopenWindow: displayedWindow.map { code in { reopen(code) } })
+            case .failure(let why):
+                // 那台用不了：不接终端、不落到主 hub
+                Color.clear.onAppear { ToastCenter.shared.show(why.message) }
+            }
+        }
+        .id("\(displayedHub)|\(displayedSession)")
         .onAppear { consumeDesktopTarget() }
         .onChange(of: navigator?.pendingTarget) { _, _ in consumeDesktopTarget() }
     }
 
     /// 全局窗口的 tmux 没了：按它原来的引擎开一个新的切过去（同 iOS 断桥卡「重新开一个」）
     private func reopen(_ code: String) {
-        let store = TerminalWindowStore.shared
+        guard let store = windowStore else { return }
         let engine = (store.windows + store.closed).first { $0.code == code }?.engine
         store.open(engine: engine == "shell" ? nil : engine) { result in
             switch result {
@@ -968,13 +990,15 @@ private struct CCTerminalSessionView: View {
     /// 按了「重新连接」还没连上（T55）：按钮显示「连接中…」，连上或 12 秒没连上都收
     @State private var reconnecting = false
 
-    init(sessionName: String, onReopenWindow: (() -> Void)?) {
-        self.sessionName = sessionName
-        self.onReopenWindow = onReopenWindow
-        _controller = StateObject(wrappedValue: CCTerminalController(sessionName: sessionName))
-    }
+    /// session 在哪台 hub 上（显式给，plan-multi-hub B3.4）
+    private let client: CCBridgeWebSocketClient
 
-    private var client: CCBridgeWebSocketClient { .shared }
+    init(sessionName: String, client: CCBridgeWebSocketClient, onReopenWindow: (() -> Void)?) {
+        self.sessionName = sessionName
+        self.client = client
+        self.onReopenWindow = onReopenWindow
+        _controller = StateObject(wrappedValue: CCTerminalController(sessionName: sessionName, client: client))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1072,7 +1096,7 @@ private struct CCTerminalSessionView: View {
             // 全局窗口不走这条（它由 hub 的 open_window 起裸 shell，这条会 spawn claude），
             // 但下面的 attach 兜底两者都要。
             if !sessionName.hasPrefix("mp-win-") {
-                CCBridgeWebSocketClient.shared.spawnSession(sessionName) { _ in }
+                client.spawnSession(sessionName) { _ in }
             }
             // L4 P0b: 不再立即 attach with 40x20 fallback——之前会导致 hub 用错的
             // pane size capture，跟 SwiftTerm 真实 viewport 不一致触发乱码。

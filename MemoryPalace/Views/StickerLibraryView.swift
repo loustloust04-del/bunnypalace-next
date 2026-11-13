@@ -275,9 +275,7 @@ struct StickerThumbnailView: View {
     @State private var thumbnailImage: Image?
     // 每个贴纸固定的微旋转角度
     private var tiltAngle: Double {
-        // 基于 id 生成确定性的微旋转
-        let hash = abs(asset.id.hashValue)
-        return Double(hash % 11) - 5.0  // -5° 到 +5°
+        StickerTilt.angle(for: asset.id.uuidString)
     }
 
     var body: some View {
@@ -351,8 +349,7 @@ struct NoteThumbnailView: View {
     let hasAppeared: Bool
 
     private var tiltAngle: Double {
-        let hash = abs(asset.id.hashValue)
-        return Double(hash % 11) - 5.0
+        StickerTilt.angle(for: asset.id.uuidString)
     }
 
     var body: some View {
@@ -383,5 +380,13 @@ struct NoteThumbnailView: View {
             .onDrag {
                 NSItemProvider(object: asset.id.uuidString as NSString)
             }
+    }
+}
+
+/// 每个贴纸固定的微旋转（-5° 到 +5°）。`hashValue` 每次启动加盐，倾角会跟着变；这里按 id 的字节算
+enum StickerTilt {
+    static func angle(for id: String) -> Double {
+        let sum = id.utf8.reduce(UInt32(2166136261)) { ($0 ^ UInt32($1)) &* 16777619 }
+        return Double(sum % 11) - 5.0
     }
 }

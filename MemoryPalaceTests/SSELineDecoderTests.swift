@@ -29,7 +29,7 @@ final class SSELineDecoderTests: XCTestCase {
     }
 
     func testEmptyLineAndComment() throws {
-        XCTAssertEqual(try decode([": keep-alive\n\ndata: x\n\n"]), [.comment, .other, .data("x"), .other])
+        XCTAssertEqual(try decode([": keep-alive\n\ndata: x\n\n"]), [.comment, .blank, .data("x"), .blank])
     }
 
     func testFieldValueSpaceRules() {
@@ -160,6 +160,150 @@ final class SSEProviderFeedTests: XCTestCase {
 
     private static func oaiChunk(_ obj: [String: Any]) -> String {
         "data: " + String(decoding: try! JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]), as: UTF8.self) + "\n\n"
+    }
+
+    func testWhitespaceFirstDeltaDoesNotRespondBeforeVisibleText() {
+        let examples: [(BaseChatProvider, (String) -> String)] = [
+            (OpenAICompatibleProvider(), { Self.oaiChunk(["choices": [["delta": ["content": $0]]]]) }),
+            (AnthropicProvider(), {
+                "event: content_block_delta\n" + Self.oaiChunk(["index": 0, "delta": ["type": "text_delta", "text": $0]])
+            }),
+            (ChatGPTOAuthProvider(), { Self.oaiChunk(["type": "response.output_text.delta", "delta": $0]) })
+        ]
+        for (provider, frame) in examples {
+            var effective = 0
+            var tokens = ""
+            provider.resetState(onToken: { tokens += $0 }, onComplete: { _, _ in }, onError: { XCTFail($0) })
+            provider.onEffectiveEvent = { effective += 1 }
+            provider.processData(Data(frame(" \t\r\n\u{3000}").utf8))
+            drain()
+            XCTAssertEqual(effective, 0, "\(type(of: provider)): 空白不提交回忆轮")
+            XCTAssertEqual(tokens, " \t\r\n\u{3000}", "不为修复生效判定而删掉实际正文 token")
+            provider.processData(Data(frame(" 星砚的正文\n").utf8))
+            drain()
+            XCTAssertEqual(effective, 1)
+            XCTAssertEqual(tokens, " \t\r\n\u{3000} 星砚的正文\n")
+            provider.processData(Data(frame("后续正文").utf8))
+            XCTAssertEqual(effective, 1, "同一 attempt 只生效一次")
+            provider.cancel()
+        }
+    }
+
+    func testOpenAIEffectiveEventIgnoresMetadataAndThinkingThenFiresAtToolStart() {
+        let provider = OpenAICompatibleProvider()
+        var effective = 0
+        var completedTools = 0
+        provider.resetState(onToken: { _ in }, onComplete: { _, _ in }, onError: { _ in })
+        provider.onEffectiveEvent = { effective += 1 }
+        provider.onToolCalls = { _ in completedTools += 1 }
+        provider.splitsLeadingThinkTag = true
+        func feed(_ delta: [String: Any]) {
+            provider.processData(Data(Self.oaiChunk(["choices": [["delta": delta]]]).utf8))
+        }
+        feed(["role": "assistant"])
+        feed(["content": ""])
+        feed(["reasoning_content": "岚舟还在思考"])
+        provider.processData(Data(Self.oaiChunk(["choices": [], "usage": ["prompt_tokens": 2, "completion_tokens": 1]]).utf8))
+        feed(["tool_calls": [["index": 0, "id": "call-recall", "function": ["arguments": "{"]]]])
+        XCTAssertEqual(effective, 0, "角色、空正文、思考、用量和缺名称工具不构成生效事件")
+        feed(["tool_calls": [["index": 0, "function": ["name": "recall", "arguments": "\"query\":"]]]])
+        XCTAssertEqual(effective, 1, "工具参数尚未流完就生效，不等 DONE 或工具完成")
+        XCTAssertEqual(completedTools, 0)
+        feed(["tool_calls": [["index": 0, "function": ["arguments": "\"林栖\"}"]]]])
+        feed(["content": "岚舟的正文"])
+        XCTAssertEqual(effective, 1)
+        provider.cancel()
+        provider.resetState(onToken: { _ in }, onComplete: { _, _ in }, onError: { _ in })
+        feed(["content": "新 attempt 的正文"])
+        XCTAssertEqual(effective, 2, "新网络 attempt 重置一次性生效锁")
+        provider.cancel()
+    }
+
+    func testOpenAILeadingThinkMarkupDoesNotCountAsVisibleResponse() {
+        let provider = OpenAICompatibleProvider()
+        var effective = 0
+        provider.resetState(onToken: { _ in }, onComplete: { _, _ in }, onError: { _ in })
+        provider.onEffectiveEvent = { effective += 1 }
+        provider.splitsLeadingThinkTag = true
+        provider.processData(Data(Self.oaiChunk(["choices": [["delta": ["content": "<think>岚舟想了一下</think>"]]]]).utf8))
+        XCTAssertEqual(effective, 0)
+        provider.processData(Data(Self.oaiChunk(["choices": [["delta": ["content": "星砚，继续吧"]]]]).utf8))
+        XCTAssertEqual(effective, 1)
+        provider.cancel()
+    }
+
+    func testAnthropicEffectiveEventFiresAtValidToolUseStartWithoutFinish() {
+        let provider = AnthropicProvider()
+        var effective = 0
+        var completedTools = 0
+        provider.resetState(onToken: { _ in }, onComplete: { _, _ in }, onError: { _ in })
+        provider.onEffectiveEvent = { effective += 1 }
+        provider.onToolCalls = { _ in completedTools += 1 }
+        func feed(_ event: String, _ body: [String: Any]) {
+            let json = String(decoding: try! JSONSerialization.data(withJSONObject: body), as: UTF8.self)
+            provider.processData(Data("event: \(event)\ndata: \(json)\n\n".utf8))
+        }
+        feed("ping", ["type": "ping"])
+        feed("message_start", ["message": ["usage": ["input_tokens": 3, "output_tokens": 0]]])
+        feed("content_block_start", ["index": 0, "content_block": ["type": "thinking", "thinking": ""]])
+        feed("content_block_delta", ["index": 0, "delta": ["type": "thinking_delta", "thinking": "岚舟思考"]])
+        feed("content_block_delta", ["index": 1, "delta": ["type": "text_delta", "text": ""]])
+        feed("content_block_start", ["index": 1, "content_block": ["type": "tool_use", "id": "", "name": "recall"]])
+        XCTAssertEqual(effective, 0)
+        feed("content_block_start", ["index": 2, "content_block": ["type": "tool_use", "id": "recall-start", "name": "recall", "input": [:]]])
+        XCTAssertEqual(effective, 1)
+        XCTAssertEqual(completedTools, 0, "只收到 tool_use start，不等 input_json_delta / block_stop / message_stop")
+        feed("content_block_delta", ["index": 2, "delta": ["type": "input_json_delta", "partial_json": "{\"query\":\"林栖"]])
+        feed("content_block_delta", ["index": 3, "delta": ["type": "text_delta", "text": "岚舟答复"]])
+        XCTAssertEqual(effective, 1)
+        provider.cancel()
+        provider.resetState(onToken: { _ in }, onComplete: { _, _ in }, onError: { _ in })
+        feed("content_block_delta", ["index": 0, "delta": ["type": "text_delta", "text": "星砚的新回复"]])
+        XCTAssertEqual(effective, 2)
+        provider.cancel()
+    }
+
+    func testAnthropicEffectiveEventRecognizesInitialTextBlockButNotThinking() {
+        let provider = AnthropicProvider()
+        var effective = 0
+        provider.resetState(onToken: { _ in }, onComplete: { _, _ in }, onError: { _ in })
+        provider.onEffectiveEvent = { effective += 1 }
+        func start(_ index: Int, _ block: [String: Any]) {
+            let json = String(decoding: try! JSONSerialization.data(withJSONObject: ["index": index, "content_block": block]), as: UTF8.self)
+            provider.processData(Data("event: content_block_start\ndata: \(json)\n\n".utf8))
+        }
+        start(0, ["type": "thinking", "thinking": "岚舟想了一下"])
+        start(1, ["type": "text", "text": ""])
+        start(2, ["type": "text", "text": " \t\r\n\u{3000}"])
+        XCTAssertEqual(effective, 0)
+        start(2, ["type": "text", "text": "星砚的正文"])
+        XCTAssertEqual(effective, 1, "首个有效正文可以随 block_start 到达，无需等 text_delta")
+        start(3, ["type": "tool_use", "id": "call-recall", "name": "recall", "input": [:]])
+        XCTAssertEqual(effective, 1)
+        provider.cancel()
+    }
+
+    func testOAuthEffectiveEventStartsAtFunctionItemNotUsageOrReasoning() {
+        let provider = ChatGPTOAuthProvider()
+        var effective = 0
+        var completedTools = 0
+        provider.resetState(onToken: { _ in }, onComplete: { _, _ in }, onError: { _ in })
+        provider.onEffectiveEvent = { effective += 1 }
+        provider.onToolCalls = { _ in completedTools += 1 }
+        func feed(_ body: [String: Any]) {
+            provider.processData(Data(Self.oaiChunk(body).utf8))
+        }
+        feed(["type": "response.created", "response": ["usage": ["input_tokens": 3]]])
+        feed(["type": "response.reasoning_text.delta", "delta": "岚舟思考"])
+        feed(["type": "response.output_text.delta", "delta": ""])
+        XCTAssertEqual(effective, 0)
+        feed(["type": "response.output_item.added", "item": ["type": "function_call", "id": "fc-recall", "call_id": "call-recall", "name": "recall"]])
+        XCTAssertEqual(effective, 1)
+        XCTAssertEqual(completedTools, 0)
+        feed(["type": "response.function_call.arguments.delta", "item_id": "fc-recall", "delta": "{\"query\":\"林栖"])
+        feed(["type": "response.output_text.delta", "delta": "岚舟的正文"])
+        XCTAssertEqual(effective, 1)
+        provider.cancel()
     }
 
     static let openAISSE: String = [

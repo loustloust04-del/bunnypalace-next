@@ -42,6 +42,9 @@ struct Page2StackPager: UIViewControllerRepresentable {
             view.layer.cornerRadius = 24
             dataSource = self; delegate = self
             applySelection()
+            #if DEBUG
+            Page2DesktopProbe.shared.attach(stack: self)
+            #endif
         }
         func configure(items: [Page2Item], selectedID: UUID, environment: EnvironmentValues) {
             self.items = items; self.selectedID = selectedID; inherited = environment
@@ -68,6 +71,9 @@ struct Page2StackPager: UIViewControllerRepresentable {
         }
         func pageViewController(_ pageViewController: UIPageViewController, willTransitionTo pendingViewControllers: [UIViewController]) {
             transitioning = true; onScrolling(true)
+            #if DEBUG
+            Page2DesktopProbe.shared.stackScroll(self, began: true)
+            #endif
         }
         func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool,
                                 previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
@@ -76,6 +82,9 @@ struct Page2StackPager: UIViewControllerRepresentable {
                 selectedID = id; onSelect(id)
             }
             applySelection(); onScrolling(false)
+            #if DEBUG
+            Page2DesktopProbe.shared.stackScroll(self, began: false)
+            #endif
         }
         func stop() { dataSource = nil; delegate = nil; onScrolling(false) }
     }

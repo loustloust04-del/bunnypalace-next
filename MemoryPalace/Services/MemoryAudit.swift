@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 
@@ -180,11 +181,9 @@ enum MemoryAudit {
     }
 
     /// 窗口标题：按 id 集合一次取（不逐条 fetch）
-    static func windowTitles(ids: Set<String>, profileId: String, context: ModelContext) -> [String: String] {
+    static func windowTitles(ids: Set<String>, profileId: String, source: any ConversationSource) -> [String: String] {
         guard !ids.isEmpty else { return [:] }
-        let pid = profileId
-        let descriptor = FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> { ids.contains($0.id) && $0.profileId == pid })
-        return Dictionary(((try? context.fetch(descriptor)) ?? []).map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
+        return (try? source.titles(profileId: profileId, ids: Array(ids))) ?? [:]
     }
 
     /// 卡上一行小字（plan-memory-c3-catalog 2.2，不算审计三态）：已整理进《页》/ 单条就够 / 整理时驳回；都没有 nil

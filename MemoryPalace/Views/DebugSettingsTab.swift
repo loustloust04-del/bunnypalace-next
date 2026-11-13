@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 
 /// 开发调试页：一份 body 两端共用（plan-settings-merge-x 刀 3，E 形态——原 mac 是 `SettingsView` 里的内联块）。
@@ -16,6 +17,7 @@ struct DebugPage: View {
     #endif
     #if os(iOS) && DEBUG
     @AppStorage("perfProbeOn") private var perfProbeOn = false
+    @AppStorage("stallSentinelOn") private var stallSentinelOn = false
     #endif
     @Environment(\.settingsMetrics) private var m
     #if os(macOS) && DEBUG
@@ -113,6 +115,12 @@ struct DebugPage: View {
                 Text("开启或关闭后需完全退出并重新打开 App。记录翻页、聊天滚动与全局卡顿，日志保存在本机 Documents/perf-probe。")
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
+                Toggle("卡顿哨兵", isOn: $stallSentinelOn)
+                    .tint(Theme.branchIndicator)
+                    .searchAnchor("leaf-debug-stall-sentinel")
+                Text("开启或关闭后需完全退出并重新打开 App。只记主线程一次忙过 100ms 的段和当时的区段名，日志保存在本机 Documents/perf-sentinel。")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
                 Toggle("悬浮调试球", isOn: $debugOrbEnabled)
                     .tint(Theme.branchIndicator)
             } footer: {
@@ -199,6 +207,11 @@ struct DebugPage: View {
             #endif
 
             ParamAdaptSection()
+
+            #if DEBUG
+            PreUpgradeRestoreSection()
+            FloorSnapshotExportSection()
+            #endif
 
             #if os(iOS)
             // F2 输入框字号：iOS-only（第 2 类）
@@ -298,6 +311,185 @@ private struct InputFontSizeTuner: View {
                 .foregroundColor(Theme.textPrimary)
         }
         .padding(.vertical, 4)
+    }
+}
+#endif
+
+#if DEBUG
+/// 开发调试 → 回到装包前（research-backup-while-open 段 B）：新包首启、开库前留的库快照，点一份下次启动换回主位
+private struct PreUpgradeRestoreSection: View {
+    private struct Row: Identifiable {
+        let id: String
+        let detail: String
+    }
+
+    @Environment(\.settingsMetrics) private var m
+    @State private var rows: [Row] = []
+    @State private var pending: String?
+    @State private var confirming: String?
+    @State private var error: String?
+
+    var body: some View {
+        Section {
+            if rows.isEmpty {
+                Text("还没有装包前快照（新包第一次启动时才做）")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+            }
+            ForEach(rows) { row in
+                Button { confirming = row.id } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(row.id)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(Theme.textPrimary)
+                        Text(row.detail)
+                            .font(m.caption)
+                            .foregroundColor(Theme.textSecondary)
+                        if pending == row.id {
+                            Text("下次启动换回：上滑关掉 app 再打开")
+                                .font(m.caption)
+                                .foregroundColor(.orange)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            if let error {
+                Text(error)
+                    .font(m.caption)
+                    .foregroundColor(.red)
+            }
+        } header: {
+            Text("回到装包前")
+        } footer: {
+            Text("新包第一次启动、开库之前留的数据库快照。点一份，下次启动时换回去；现在的库挪进 pre-upgrade/replaced-…，不删。换回后新包会再迁移一次。")
+                .font(m.caption)
+                .foregroundColor(Theme.textMuted)
+        }
+        .listRowBackground(Theme.mainBg)
+        .listRowSeparator(.hidden)
+        .onAppear(perform: reload)
+        .confirmationDialog("下次启动换回这份快照？", isPresented: Binding(
+            get: { confirming != nil }, set: { if !$0 { confirming = nil } }), titleVisibility: .visible) {
+            Button("换回 \(confirming ?? "")", role: .destructive) {
+                guard let name = confirming else { return }
+                do {
+                    try PreUpgradeSnapshot.requestRestore(name)
+                    pending = name
+                    error = nil
+                } catch {
+                    self.error = "没写成：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func reload() {
+        let root = StagingPaths.preUpgradeRoot
+        rows = PreUpgradeSnapshot.clones(root: root).map { name in
+            guard let mf = PreUpgradeSnapshot.manifest(of: name, root: root) else { return Row(id: name, detail: "清单读不了") }
+            let schema = mf.schemaChanged.map { $0 ? "schema 变了" : "schema 没变" } ?? "schema 未知"
+            let bytes = ByteCountFormatter.string(fromByteCount: mf.files.values.reduce(0, +), countStyle: .file)
+            return Row(id: name, detail: "\(mf.fromBuild?.description ?? "旧包未知") → \(mf.toBuild.description) · \(schema) · \(bytes)")
+        }
+        pending = PreUpgradeSnapshot.pendingRestore()
+    }
+}
+#endif
+
+#if DEBUG
+/// 开发调试 → 导出本楼层快照（E2-6）：整楼层对话（含回收站 / 原文）写成 memoryd 能读的 JSON，
+/// 只落本机 `memory/exports/`。Release 包里没有这段。
+private struct FloorSnapshotExportSection: View {
+    @Environment(\.settingsMetrics) private var m
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+    @State private var running = false
+    @State private var result: String?
+    @State private var error: String?
+    @State private var exported: URL?
+    /// 上面三项属于哪层；切楼层就清空，导出完成时若已切走只落盘不更新 UI
+    @State private var resultProfileId: String?
+
+    var body: some View {
+        Section {
+            Button {
+                export()
+            } label: {
+                Label(running ? "导出中…" : "导出本楼层快照", systemImage: "square.and.arrow.up")
+                    .font(m.body)
+            }
+            .buttonStyle(.plain)
+            .disabled(running || profileManager == nil)
+            if let result, resultProfileId == profileManager?.currentProfile.id {
+                Text(result)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(Theme.textSecondary)
+                    .textSelection(.enabled)
+            }
+            if let error, resultProfileId == profileManager?.currentProfile.id {
+                Text(error)
+                    .font(m.caption)
+                    .foregroundColor(.red)
+            }
+            #if os(macOS)
+            if let exported, resultProfileId == profileManager?.currentProfile.id {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([exported])
+                } label: {
+                    Label("在访达中显示", systemImage: "folder")
+                        .font(m.body)
+                }
+                .buttonStyle(.plain)
+            }
+            #endif
+        } header: {
+            Text("楼层快照")
+        } footer: {
+            Text("只写在本机 memory/exports/（Documents 下），不进 App 备份、助手和文件库看不到；iOS『文件』App / 访达共享里能看到这个目录。")
+                .font(m.caption)
+                .foregroundColor(Theme.textMuted)
+        }
+        .listRowBackground(Theme.mainBg)
+        .listRowSeparator(.hidden)
+        .onChange(of: profileManager?.currentProfile.id) { _, _ in
+            result = nil
+            error = nil
+            exported = nil
+            resultProfileId = nil
+        }
+    }
+
+    private func export() {
+        guard let profileManager else { return }
+        let profileId = profileManager.currentProfile.id
+        let container = profileManager.container
+        running = true
+        error = nil
+        Task { @MainActor in
+            let outcome = await Task.detached(priority: .userInitiated) {
+                () -> Result<(url: URL, windows: Int, nodes: Int), Error> in
+                do {
+                    let memoryRoot = FileLibraryStore.memoryRoot(profileId: profileId)
+                    return .success(try FloorSnapshotExport.export(profileId: profileId, container: container, memoryRoot: memoryRoot))
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+            running = false
+            // 导出期间切了楼层：文件已落盘，但不把结果贴到别的楼层上
+            guard profileId == profileManager.currentProfile.id else { return }
+            resultProfileId = profileId
+            switch outcome {
+            case let .success(done):
+                exported = done.url
+                result = "已写 \(done.windows) 个窗口 / \(done.nodes) 条消息 → memory/\(FloorSnapshotExportFolder.name)/\(done.url.lastPathComponent)"
+                error = nil
+            case let .failure(failure):
+                result = nil
+                error = "导出失败：\(failure.localizedDescription)"
+            }
+        }
     }
 }
 #endif

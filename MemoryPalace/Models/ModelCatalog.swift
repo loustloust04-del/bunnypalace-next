@@ -14,6 +14,8 @@ struct CatalogModel: Codable, Equatable, Sendable {
     let pricing: ModelPricing?
     /// models.dev `temperature`：false = 只收默认值（OpenAI 推理模型）；nil = 没标 / 旧缓存
     let temperature: Bool?
+    /// models.dev `modalities.input`（text / image / pdf…）；nil = 没标 / 旧缓存（不知道能不能看图）
+    var inputModalities: [String]? = nil
 }
 
 /// models.dev 模型目录：本地缓存 `api.json` 的精简版，TTL 1 天、后台刷新、失败保旧缓存。
@@ -93,6 +95,8 @@ final class ModelCatalog: @unchecked Sendable {
               let file = try? JSONDecoder().decode(CacheFile.self, from: data),
               !file.models.isEmpty else { return false }
         install(file.models, fetchedAt: file.fetchedAt)
+        // 看图字段加进来之前写的旧缓存（一条 modalities 都没有）→ 不等 TTL，下次就重拉（plan-model-vision-check）
+        if !file.models.contains(where: { $0.inputModalities != nil }) { lock.withLock { pricingNeedsRefresh = true } }
         return true
     }
 
@@ -130,7 +134,7 @@ final class ModelCatalog: @unchecked Sendable {
             return CatalogModel(id: model.id, providerId: model.providerId, name: model.name,
                                 contextTokens: model.contextTokens, outputTokens: model.outputTokens,
                                 reasoning: model.reasoning, reasoningEfforts: model.reasoningEfforts,
-                                pricing: pricing, temperature: model.temperature)
+                                pricing: pricing, temperature: model.temperature, inputModalities: model.inputModalities)
         }
         let built = Self.buildIndex(versioned)
         lock.withLock {
@@ -192,7 +196,8 @@ final class ModelCatalog: @unchecked Sendable {
                     id: id, providerId: providerId, name: (m["name"] as? String) ?? id,
                     contextTokens: int(limit?["context"]), outputTokens: int(limit?["output"]),
                     reasoning: (m["reasoning"] as? Bool) ?? false, reasoningEfforts: efforts, pricing: pricing,
-                    temperature: m["temperature"] as? Bool
+                    temperature: m["temperature"] as? Bool,
+                    inputModalities: (m["modalities"] as? [String: Any])?["input"] as? [String]
                 ))
             }
         }

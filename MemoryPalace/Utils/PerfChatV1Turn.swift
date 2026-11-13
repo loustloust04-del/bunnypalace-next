@@ -105,7 +105,7 @@ final class TurnOcc {
         self.reqId = reqId
         self.t0 = t0
         self.script = script
-        article = !UserDefaults.standard.bool(forKey: "chatBubbleMode")
+        article = !target.conv.isBubbleMode
         tracker = Core.OpTracker(spec: .turn(scriptDuration: script.duration), reqId: reqId, t0: t0)
         stability = Core.ChainStability(scale: UIScreen.main.scale)
     }

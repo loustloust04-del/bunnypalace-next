@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import CryptoKit
 #if os(iOS)
@@ -459,6 +460,7 @@ enum FileLibraryStore {
 
     /// 本仓写入后：按实际落盘状态就地更新缓存（一个文件一次 stat）
     private static func noteWritten(_ url: URL, profileId: String) {
+        CatalogRecallIndexer.shared.changed(at: url)
         guard isSupportedFile(url), let rel = relativePath(url, profileId: profileId) else { return }
         let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         ListCache.apply(profileId: profileId, upsert: FileMeta(path: rel, bytes: values?.fileSize ?? 0,
@@ -466,6 +468,7 @@ enum FileLibraryStore {
     }
 
     private static func noteRemoved(_ url: URL, profileId: String) {
+        CatalogRecallIndexer.shared.changed(at: url)
         guard let rel = relativePath(url, profileId: profileId) else { return }
         ListCache.apply(profileId: profileId, remove: [rel])
     }
@@ -709,11 +712,19 @@ enum FileLibraryStore {
         let root = memoryRoot(profileId: profileId).standardizedFileURL
         let target = root.appendingPathComponent(rel).standardizedFileURL
         guard target.path.hasPrefix(root.path + "/") else { return nil }
+        // 符号链接别名（memory/alias → exports）也要挡：解析后必须仍在 root 下，且不能落到顶层 exports
+        let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedTarget = target.resolvingSymlinksInPath().standardizedFileURL
+        guard resolvedTarget.path.hasPrefix(resolvedRoot.path + "/") else { return nil }
+        let top = resolvedTarget.path.dropFirst(resolvedRoot.path.count + 1)
+            .split(separator: "/").first.map(String.init) ?? ""
+        guard top.lowercased() != FloorSnapshotExportFolder.name else { return nil }
         return AppPaths.checked(target)
     }
 
-    /// 记忆树文件清单（路径带 memory/ 前缀，与 fs_* 工具视角一致）
-    static func memoryList(profileId: String) -> [FileMeta] {
+    /// 记忆树文件清单（路径带 memory/ 前缀，与 fs_* 工具视角一致）。
+    /// 顶层 `exports/`（楼层快照，整楼层原文）不列：助手 / `memorySearch` 都走这份清单。
+    static func memoryList(profileId: String, memoryRoot: URL? = nil) -> [FileMeta] {
         MainThreadIO.assertOffMain(.enumerate, "FileLibraryStore.memoryList")
         #if (DEBUG || PERF_BENCH) && os(iOS)
         let airSpan = AirProbeSections.enabled ? AirProbeSections.enter("FileLibraryStore.memoryList") : nil
@@ -726,7 +737,7 @@ enum FileLibraryStore {
         let probeStart = AirPerfProbe.enabled ? AirPerfProbe.beginTimed(probeKey) : nil
         defer { if let probeStart { AirPerfProbe.endTimed(probeKey, since: probeStart) } }
         #endif
-        let root = memoryRoot(profileId: profileId)
+        let root = memoryRoot ?? Self.memoryRoot(profileId: profileId)
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if airSpan != nil { airRoot = root }
         #endif
@@ -735,8 +746,15 @@ enum FileLibraryStore {
             includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
         ) else { return [] }
         let rootPrefix = RootPrefix(rootPath: root.path)
+        let rootParentPath = root.standardizedFileURL.path
         var out: [FileMeta] = []
-        for case let url as URL in en where isSupportedFile(url) {
+        for case let url as URL in en {
+            if url.lastPathComponent.lowercased() == FloorSnapshotExportFolder.name,
+               url.deletingLastPathComponent().standardizedFileURL.path == rootParentPath {
+                en.skipDescendants()
+                continue
+            }
+            guard isSupportedFile(url) else { continue }
             let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey])
             guard values?.isRegularFile == true else { continue }
             out.append(.init(path: memoryVirtualPrefix + relativeToRoot(url, root: rootPrefix), bytes: values?.fileSize ?? 0,
@@ -763,7 +781,13 @@ enum FileLibraryStore {
                              modifiedAt: values.contentModificationDate ?? .distantPast))
         }
         if let entries = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys)) {
+            let rootPath = root.standardizedFileURL.path
             for case let url as URL in entries {
+                if url.lastPathComponent.lowercased() == FloorSnapshotExportFolder.name,
+                   url.deletingLastPathComponent().standardizedFileURL.path == rootPath {
+                    entries.skipDescendants()
+                    continue
+                }
                 let path = memoryVirtualPrefix + relativeToRoot(url, root: rootPrefix)
                 if FileLibraryMemoryFolder.isHiddenWikiPath(path) {
                     if url.hasDirectoryPath { entries.skipDescendants() }

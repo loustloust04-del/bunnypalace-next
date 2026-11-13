@@ -25,16 +25,19 @@ struct HubHello: Equatable {
     var hostModelId: String?
     /// 如「MacBook Air (15-inch, M5)」，Intel 机器没有
     var hostModelName: String?
+    /// hub 身份 id（`secrets/hub-id`，plan-multi-hub B0）：同一台电脑换地址 / 换口令也不变。老 hub 不报 = nil
+    var hubId: String?
     var dirs: Dirs
     var tools: Tools
     var capabilities: Set<String>
 
     init(hubVersion: String? = nil, hostName: String? = nil, hostModelId: String? = nil, hostModelName: String? = nil,
-         dirs: Dirs = Dirs(), tools: Tools = Tools(), capabilities: Set<String> = []) {
+         hubId: String? = nil, dirs: Dirs = Dirs(), tools: Tools = Tools(), capabilities: Set<String> = []) {
         self.hubVersion = hubVersion
         self.hostName = hostName
         self.hostModelId = hostModelId
         self.hostModelName = hostModelName
+        self.hubId = hubId
         self.dirs = dirs
         self.tools = tools
         self.capabilities = capabilities
@@ -47,6 +50,7 @@ struct HubHello: Equatable {
         hostName = Self.text(frame["host_name"])
         hostModelId = Self.text(frame["host_model_id"])
         hostModelName = Self.text(frame["host_model_name"])
+        hubId = Self.text(frame["hub_id"])
         let d = frame["dirs"] as? [String: Any] ?? [:]
         dirs = Dirs(claudeHome: Self.text(d["claude_home"]),
                     codexHome: Self.text(d["codex_home"]),
@@ -80,6 +84,21 @@ struct HubHello: Equatable {
     private static func flag(_ any: Any?) -> Bool? {
         guard let n = any as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
         return n.boolValue
+    }
+}
+
+/// `opencli_result` 的回帧（plan-opencli-in-app）：成功给正文（hub 已加不可信标记）和续读位置，失败给 hub 的中文原因。
+struct HubOpencliReply: Equatable {
+    var text: String
+    var nextStart: Int?
+
+    static func parse(_ frame: [String: Any]) -> Result<HubOpencliReply, CCBridgeRemoteError>? {
+        guard frame["type"] as? String == "opencli_result" else { return nil }
+        guard frame["ok"] as? Bool == true, let text = frame["text"] as? String else {
+            let error = (frame["error"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "Mac 没给结果"
+            return .failure(CCBridgeRemoteError(reason: error, fromHub: true))
+        }
+        return .success(HubOpencliReply(text: text, nextStart: frame["next_start"] as? Int))
     }
 }
 

@@ -3,59 +3,87 @@ import SwiftData
 
 // MARK: - 通用页（两端一份 body）
 
+struct ProfileNameDraft {
+    var userName = ""
+    var assistantName = ""
+    private var profileId: String?
+    private var baselineUserName = ""
+    private var baselineAssistantName = ""
+
+    private var userNameEdited: Bool {
+        userName.trimmingCharacters(in: .whitespacesAndNewlines) != baselineUserName
+    }
+
+    private var assistantNameEdited: Bool {
+        assistantName.trimmingCharacters(in: .whitespacesAndNewlines) != baselineAssistantName
+    }
+
+    mutating func refresh(profileId: String, userName: String, assistantName: String) {
+        let sameProfile = self.profileId == profileId
+        if !sameProfile || !userNameEdited { self.userName = userName }
+        if !sameProfile || !assistantNameEdited { self.assistantName = assistantName }
+        self.profileId = profileId
+        baselineUserName = userName.trimmingCharacters(in: .whitespacesAndNewlines)
+        baselineAssistantName = assistantName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func save(using manager: ProfileManager) throws {
+        try manager.renameCurrent(userName: userNameEdited ? userName : "",
+                                  assistantName: assistantNameEdited ? assistantName : "")
+    }
+}
+
 /// 设置 · 通用：楼层切换 + 气泡标签（名字 / 头像 / 风格标记）。
 ///
 /// 一份 body 两端共用（plan-settings-merge-x 刀 3）：容器走 `SettingsSectionList(.list)`，字号走 `settingsMetrics`。
 /// `dismiss()` 两端语义不同（mac 关整个设置窗 / iOS pop 回根列表）是合流前就有的现状，本刀不改（第 3 类）。
 struct GeneralPage: View {
+    var showsNameToolbar = false
+    /// atrium「我 → 通用」（plan-atrium P2）：楼层 / 名字 / 头像归人页和 atrium，这里只剩 App 自己的
+    var appOnly = false
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.settingsMetrics) private var m
 
-    @AppStorage("userName") private var userName = "你"
-    @AppStorage("assistantName") private var assistantName = "助手"
     @AppStorage("showStyleChip") private var showStyleChip = true
-    @State private var editingUserName = ""
-    @State private var editingAssistantName = ""
+    @State private var names = ProfileNameDraft()
+    @State private var renameError: String?
 
     var body: some View {
         SettingsSectionList(.list) {
-            Section("楼层") {
-                if let pm = profileManager {
-                    ProfileSwitcher(profileManager: pm)
+            if !appOnly {
+                Section("楼层") {
+                    if let pm = profileManager {
+                        ProfileSwitcher(profileManager: pm)
+                    }
                 }
+                .listRowBackground(Theme.mainBg)
+                .listRowSeparator(.hidden)
             }
-            .listRowBackground(Theme.mainBg)
-            .listRowSeparator(.hidden)
 
             Section {
-                VStack(spacing: 8) {
-                    SettingsTextField(label: "我的名字", placeholder: "你", text: $editingUserName)
-                    SettingsTextField(label: "AI 的名字", placeholder: "助手", text: $editingAssistantName)
-                }
-
-                AvatarSettingsRows()
-
-                HStack {
-                    Text("显示在每条消息气泡上方的名称标签")
-                        .font(.caption)
-                        .foregroundColor(Theme.textMuted)
-                    Spacer()
-                    Button(action: {
-                        let newUser = editingUserName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let newAssistant = editingAssistantName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !newUser.isEmpty { userName = newUser }
-                        // 当前楼层才是真相源（小芽 / 楼层编辑写的都是它），只写镜像键会被楼层值盖回去；顺带记默认称呼（H9）
-                        profileManager?.renameCurrent(userName: newUser, assistantName: newAssistant)
-                        if !newAssistant.isEmpty { assistantName = newAssistant }
-                        dismiss()
-                    }) {
-                        Text("确认")
-                            .font(m.secondary.weight(.medium))
-                            .settingsCapsuleLabel(filled: true, hPadding: 16)
+                if !appOnly {
+                    VStack(spacing: 8) {
+                        SettingsTextField(label: "我的名字", placeholder: "你", text: $names.userName)
+                        SettingsTextField(label: "AI 的名字", placeholder: "助手", text: $names.assistantName)
                     }
-                    .settingsActionButton()
+
+                    AvatarSettingsRows()
+
+                    HStack {
+                        Text("修改当前楼层的称呼，用于对话提示词和消息名称标签")
+                            .font(.caption)
+                            .foregroundColor(Theme.textMuted)
+                        Spacer()
+                        if !showsNameToolbar {
+                            Button(action: saveNames) {
+                                Text("确认")
+                                    .font(m.secondary.weight(.medium))
+                                    .settingsCapsuleLabel(filled: true, hPadding: 16)
+                            }
+                            .settingsActionButton()
+                        }
+                    }
                 }
 
                 // G1：mac 独有的「显示风格标记」并进两端，key 与默认值不变
@@ -78,9 +106,42 @@ struct GeneralPage: View {
         .navigationTitle("通用")
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .onAppear {
-            editingUserName = userName
-            editingAssistantName = assistantName
+        .onChange(of: profileManager?.currentProfile.id, initial: true) { _, _ in refreshNames() }
+        .onChange(of: profileManager?.currentProfile.userName) { _, _ in refreshNames() }
+        .onChange(of: profileManager?.currentProfile.assistantName) { _, _ in refreshNames() }
+        .toolbar {
+            if showsNameToolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("完成", action: saveNames) }
+            }
+        }
+        .alert("改名失败", isPresented: Binding(
+            get: { renameError != nil },
+            set: { if !$0 { renameError = nil } }
+        )) {
+            Button("好", role: .cancel) { renameError = nil }
+        } message: {
+            Text(renameError ?? "")
+        }
+    }
+
+    private func refreshNames() {
+        guard let profileManager else { return }
+        names.refresh(profileId: profileManager.currentProfile.id,
+                      userName: profileManager.currentProfile.userName,
+                      assistantName: profileManager.currentProfile.assistantName)
+    }
+
+    private func saveNames() {
+        guard let profileManager else {
+            renameError = "无法读取当前楼层，请重新打开设置后再试。"
+            return
+        }
+        do {
+            try names.save(using: profileManager)
+            dismiss()
+        } catch {
+            renameError = error.localizedDescription
         }
     }
 }
@@ -265,9 +326,17 @@ struct TTSPage: View {
 /// ——mac 原来那个 `sendImagesToModel` Toggle 只写 legacy key，真闸读 `perm.images`，开关是失效的。
 struct AttachmentPage: View {
     @Environment(\.settingsMetrics) private var m
-    @AppStorage("sendImagesToModel") private var sendImagesToModel = true
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @AppStorage("imageTranscriptionEnabled") private var imageTranscriptionEnabled = true
     @AppStorage("maxImagesToModel") private var maxImagesToModel = 20
+    /// 档位在 UserDefaults（默认 + 按层），变了重算显隐
+    @State private var tick = 0
+
+    /// 真闸是这个人生效的 images 档位（UI-S7：旧 key 只投影「自动允许」；atrium P3⑤a 起按层）
+    private var imagesLevel: PermissionLevel {
+        _ = tick
+        return PermissionCenter.level(.images, profileId: profileManager?.currentProfile.id)
+    }
 
     var body: some View {
         SettingsSectionList(.list) {
@@ -275,10 +344,10 @@ struct AttachmentPage: View {
                 HStack {
                     Text("发送图片给模型")
                     Spacer(minLength: 8)
-                    PermissionLevelPicker(domain: .images)
+                    PermissionLevelReadout(domain: .images)   // atrium P3⑤a：点进去改这个人的
                 }
             }
-            if sendImagesToModel {
+            if imagesLevel != .notAllowed {
                 Section {
                     ParameterRow(
                         label: "每次携带图片数",
@@ -313,5 +382,8 @@ struct AttachmentPage: View {
         .navigationTitle("附件")
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification).receive(on: RunLoop.main)) { _ in
+            tick += 1
+        }
     }
 }

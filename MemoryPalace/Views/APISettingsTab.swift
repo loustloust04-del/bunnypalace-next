@@ -30,6 +30,7 @@ struct APISettingsTab: View {
     @AppStorage(WebSearchSettings.kEnabled) private var webSearchEnabled: Bool = false
     @AppStorage(WebSearchSettings.kResultSize) private var webSearchResultSize: Int = 10
     @AppStorage(WebSearchSettings.kTimeoutMs) private var webSearchTimeoutMs: Int = 5000
+    @AppStorage(GardenBrowserSettings.linkOpenModeKey) private var linkOpenMode: GardenLinkOpenMode = .inApp
     @StateObject private var webSearchSettings = WebSearchSettings.shared
     #if os(macOS)
     @State private var showWebSearchServices: Bool = false
@@ -238,7 +239,7 @@ struct APISettingsTab: View {
             HStack {
                 Text("启用联网搜索")
                 Spacer(minLength: 8)
-                PermissionLevelPicker(domain: .webSearch)
+                PermissionLevelReadout(domain: .webSearch)   // atrium P3⑤a：只显示这个人的，点进去改这个人的
             }
                 .listRowBackground(Theme.mainBg)
 
@@ -315,6 +316,17 @@ struct APISettingsTab: View {
                                      trailing: webSearchBlockedCountText)
                 }
                 .listRowBackground(Theme.mainBg)
+
+                // 花园浏览器：聊天里点链接在哪打开（浏览器 ⋯ › 浏览器设置 里也能改）
+                Picker(selection: $linkOpenMode) {
+                    ForEach(GardenLinkOpenMode.allCases) { Text($0.label).tag($0) }
+                } label: {
+                    Text("链接打开方式")
+                        .font(m.body)
+                        .foregroundColor(Theme.textPrimary)
+                }
+                .listRowBackground(Theme.mainBg)
+                .searchAnchor("leaf-api-linkopen")
                 #else
                 Button { showWebLoginStatus = true } label: {
                     settingsRowLabel(title: "网页登录态", trailing: "AI 能用你登录的站")

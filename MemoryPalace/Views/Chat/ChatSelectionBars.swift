@@ -82,7 +82,7 @@ struct ChatSelectTopBar: View {
         ZStack {
             Text("已选 \(selection.selected.count) 条")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(Theme.textPrimary)
+                .foregroundColor(Theme.chat.textPrimary)
                 .monospacedDigit()
                 .padding(.horizontal, 18)
                 .frame(height: ChatFindMetrics.size)
@@ -91,7 +91,7 @@ struct ChatSelectTopBar: View {
                 Button(action: onCancel) {
                     Text("取消")
                         .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(Theme.textSecondary)
+                        .foregroundColor(Theme.chat.textSecondary)
                 }
                 // 玻璃按钮只能用 .buttonStyle(.glass)：glassEffect + .plain 会吞点击（同 ChatFindTopBar ✕）
                 .buttonStyle(.glass)
@@ -156,7 +156,7 @@ struct ChatSelectActionBar: View {
                 Image(systemName: symbol)
                     .font(.system(size: 18))
                     .frame(height: 22)
-                    .foregroundStyle(destructive ? Color.red : Theme.textPrimary)
+                    .foregroundStyle(destructive ? Color.red : Theme.chat.textPrimary)
                 Text(label)
                     .font(.system(size: 10, weight: .medium))
                     .lineLimit(1)
@@ -199,7 +199,7 @@ struct MacChatSelectionBar: View {
         HStack(spacing: 16) {
             Text("已选 \(picked.count) 条")
                 .fontWeight(.semibold)
-                .foregroundColor(Theme.textPrimary)
+                .foregroundColor(Theme.chat.textPrimary)
                 .monospacedDigit()
             Spacer(minLength: 0)
             Group {
@@ -219,12 +219,12 @@ struct MacChatSelectionBar: View {
                 .help("退出多选（Esc）")
         }
         .font(.system(size: 12.5))
-        .foregroundColor(Theme.textSecondary)
+        .foregroundColor(Theme.chat.textSecondary)
         .buttonStyle(.plain)
         .padding(.horizontal, 14)
         .frame(height: 40)
         .background(RoundedRectangle(cornerRadius: 12).fill(ChatSelectionStyle.paper(scheme)))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.textMuted.opacity(0.2), lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.chat.textMuted.opacity(0.2), lineWidth: 0.5))
         .padding(.horizontal, metrics.composerInsetH)
         .padding(.vertical, 10)
         .alert("删除 \(picked.count) 条消息？", isPresented: $confirmDelete) {

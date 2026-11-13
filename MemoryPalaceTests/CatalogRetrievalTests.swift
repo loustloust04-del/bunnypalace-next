@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -131,7 +132,7 @@ final class CatalogRetrievalTests: XCTestCase {
             try files(id, day: day)
         }
         try context.save()
-        let ids = await CatalogMaterial.conversationIds(profileId: pid, container: container)
+        let ids = await CatalogMaterial.conversationIds(profileId: pid, source: SwiftDataConversationSource(container: container))
         let fake = CatalogFakeEmbedder()
         fake.isReady = false
         let search = CatalogRetrieval(memoryRoot: root, fragments: [], conversationIds: ids, embedder: fake)
@@ -154,7 +155,7 @@ final class CatalogRetrievalTests: XCTestCase {
             let memory = Memory(content: "编造碎片\(index)", category: "fact", profileId: index == 5 ? "other" : pid)
             memory.occurredDay = index == 3 ? "2026-09-30" : index == 6 ? nil : "2026-10-12"
             memory.reviewedAt = index == 2 ? nil : time(12)
-            if index == 0 { memory.organizedAt = time(12); memory.organizedPage = "楼层/主题/航线" }
+            if index == 0 { memory.organizedAt = time(12); memory.organizedPage = "主题/航线" }
             if index == 1 { memory.organizeRejectedAt = time(12) }
             if index == 4 { memory.supersededAt = time(12) }
             context.insert(memory)
@@ -183,14 +184,14 @@ final class CatalogRetrievalTests: XCTestCase {
         let fake = CatalogFakeEmbedder()
         fake.vectors["远航安排"] = [1, 0]
         let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
-        let topic = CatalogSorter.Topic(path: "楼层/主题/远航", title: "远航安排", kind: .topic, existing: false)
+        let topic = CatalogSorter.Topic(path: "主题/远航", title: "远航安排", kind: .topic, existing: false)
         let material = await CatalogWriter.material(topic, fragments: [], floorPrompt: "", wiki: wiki, memoryRoot: root, now: time(18),
                                                      snapshot: [unrelated, target, target], embedder: fake)
         var actual = ""
         let run = CatalogRunRecord(wiki: wiki, topic: "远航安排", kind: "P0 路径烟测")
         let parsed = try await CatalogWriter.write(material, names: .init(userName: "{u}", assistantName: "{c}"), wiki: wiki, caller: { _, user in
             actual = user
-            return "{\"items\":[{\"type\":\"new_page\",\"path\":\"楼层/主题/远航\",\"kind\":\"主题\",\"title\":\"远航\",\"records\":[{\"text\":\"银帆周末停泊北湾\",\"fragments\":[\"f2\"]}]}]}"
+            return "{\"items\":[{\"type\":\"new_page\",\"path\":\"主题/远航\",\"kind\":\"主题\",\"title\":\"远航\",\"records\":[{\"text\":\"银帆周末停泊北湾\",\"fragments\":[\"f2\"]}]}]}"
         }, drafts: nil, run: run)
         let fragmentLine = try XCTUnwrap(actual.components(separatedBy: "\n").first { $0.hasPrefix("- f2 · ") })
         XCTAssertTrue(fragmentLine.hasPrefix("- f2 · 2026-10-12 · 没整理 · "))
@@ -246,7 +247,7 @@ final class CatalogRetrievalTests: XCTestCase {
         }
         try context.save()
         let submit = """
-        {"items":[{"type":"new_page","path":"楼层/主题/航线","kind":"主题","title":"航线","records":[
+        {"items":[{"type":"new_page","path":"主题/航线","kind":"主题","title":"航线","records":[
         {"text":"云桥城每局轮流领航","fragments":["f2"],"aline":[{"layer":"A2","window":"valid000","segment":1}]}]}]}
         """
         var writerInput = ""
@@ -271,7 +272,7 @@ final class CatalogRetrievalTests: XCTestCase {
             report = await session.daily(now: time(18))
             XCTAssertEqual(writerCalls, 0, "自动先只提方向，不搜不写")
             let direction = try XCTUnwrap(store.list().first)
-            XCTAssertEqual(direction.items.first?.change.direction?.path, "楼层/主题/模型船配色与云桥城航线")
+            XCTAssertEqual(direction.items.first?.change.direction?.path, "主题/模型船配色与云桥城航线")
             try await WikiProposalReview.approve(direction.id, store: store, profileId: pid, context: ModelContext(container))
             report = await CatalogSession(job: job).directions(direction.id, now: time(18))
         case "now": report = await session.organizeNow(now: time(18))
@@ -329,7 +330,7 @@ final class CatalogRetrievalTests: XCTestCase {
         }
         try context.save()
         let submit = """
-        {"items":[{"type":"new_page","path":"楼层/主题/电影观影计划","kind":"事","title":"电影观影计划","records":[
+        {"items":[{"type":"new_page","path":"主题/电影观影计划","kind":"事","title":"电影观影计划","records":[
         {"text":"观影计划对照导演风格","fragments":["f1","f2","f3"],"aline":[{"layer":"A4","window":"c3movie1"}]}]}]}
         """
         let backend = FakeCatalogBackend { round, _ in
@@ -350,7 +351,7 @@ final class CatalogRetrievalTests: XCTestCase {
         let report = await CatalogSession(job: job).organizeNow(now: time(18))
         let grouped = CatalogSorter.group(eligible, pages: [], blocked: [job.names.user, job.names.char])
         print("[P0 FIX1] eligible=\(eligible.count), topics=\(grouped.topics.count), agentRequests=\(backend.requests.count), proposals=\(report.proposals)")
-        XCTAssertEqual(grouped.topics.map(\.path), ["楼层/主题/电影观影计划"])
+        XCTAssertEqual(grouped.topics.map(\.path), ["主题/电影观影计划"])
         XCTAssertEqual(modelCalls, 0, "现在整理按碎片标题列主题，不再调分拣模型")
         XCTAssertEqual(report.failures, [])
         XCTAssertEqual(report.proposals, 1)
@@ -419,7 +420,7 @@ final class CatalogRetrievalTests: XCTestCase {
 
     private var attributionSubmit: String {
         """
-        {"items":[{"type":"new_page","path":"楼层/主题/灯塔航线","kind":"主题","title":"灯塔航线","records":[
+        {"items":[{"type":"new_page","path":"主题/灯塔航线","kind":"主题","title":"灯塔航线","records":[
           {"text":"虚构航线的约定与状态","fragments":["f2","f3","f4","f5"]}
         ]}]}
         """
@@ -430,7 +431,7 @@ final class CatalogRetrievalTests: XCTestCase {
         let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
         let names = MemoryExtractor.Names(userName: "青穗", assistantName: "纸鸢")
 
-        let topic = CatalogSorter.Topic(path: "楼层/主题/灯塔航线", title: "灯塔航线", kind: .topic, existing: false)
+        let topic = CatalogSorter.Topic(path: "主题/灯塔航线", title: "灯塔航线", kind: .topic, existing: false)
         let assigned = [snapshot[1], snapshot[4]]
         let material = await CatalogWriter.material(topic, fragments: assigned, floorPrompt: "", wiki: wiki, memoryRoot: root,
                                                      now: time(18), snapshot: snapshot, embedder: CatalogFakeEmbedder.unavailable())

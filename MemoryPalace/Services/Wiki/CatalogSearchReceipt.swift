@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 struct CatalogSearchEvidence: Codable, Equatable, Sendable {

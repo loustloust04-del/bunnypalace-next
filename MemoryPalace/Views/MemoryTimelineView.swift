@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -86,8 +87,8 @@ enum TimelineListLayout {
         return "在记：一天一条、跨所有窗口，过了 05:00 把前一天拼好、写一句主调；新窗口能看到最近几天"
     }
 
-    /// 「正在记」每行的状态，照 `SessionCloseout` 的真实规则：静默够了（默认 12 小时）后的下一次巡检才记（巡检 = 回到前台 / 进后台 /
-    /// 聊完一轮 / 切换对话 / 新建对话时喊一声）；新建对话那次，最近 2 小时聊过的不等静默马上记
+    /// 「正在记」每行的状态，照 `SessionCloseout` 的真实规则：静默够了（A3 默认 24 小时）后的下一次巡检才记（巡检 = 回到前台 / 进后台 /
+    /// 聊完一轮 / 切换对话 / 新建对话时喊一声）；新建对话那次，最近 12 小时聊过的不等静默马上记
     static func queueStatus(_ state: SessionCloseout.QueueState, running: Bool, now: Date = Date(), calendar: Calendar = .current) -> String? {
         if running { return "正在整理…" }
         switch state {
@@ -124,8 +125,13 @@ final class MemoryTimelineModel {
     private(set) var goneIds: Set<String> = []
     private(set) var hasLoaded = false
     private var profileId: String?
-    private var stale = false
+    private(set) var stale = false
     private var generation = 0
+    /// 正在重写主调的那天：父级持有，mac 切格拆掉时间轴视图也不丢，在跑就不再提交（10-24 astra P2）
+    private(set) var regenerating: String?
+    /// 重写结果 / 跳转失败的提示：存着，只在时间轴段看得见时弹，隐藏时攒到切回来再弹
+    var notice: String?
+    private var regenToken = 0
 
     var isEmpty: Bool { days.isEmpty }
     var nextMonth: String? { loadedMonthCount < months.count ? months[loadedMonthCount] : nil }
@@ -148,6 +154,37 @@ final class MemoryTimelineModel {
         hasLoaded = false
         profileId = nil
         stale = false
+        regenToken += 1
+        regenerating = nil
+        notice = nil
+    }
+
+    func presentsNotice(active: Bool) -> Bool { active && notice != nil }
+
+    /// 提交重写某天；已有一个在跑（含切格前提交的）就不提交、返回 false。跑完重读、把结果放进 notice；换楼层后到的旧结果丢掉
+    @discardableResult
+    func regenerate(_ day: String, profileId: String, container: ModelContainer,
+                    run: @escaping () async -> TimelineDaily.Report?) -> Bool {
+        guard regenerating == nil else { return false }
+        regenerating = day
+        regenToken += 1
+        let token = regenToken
+        Task {
+            let report = await run()
+            guard token == regenToken else { return }
+            regenerating = nil
+            reload(profileId: profileId, container: container)
+            notice = Self.regenerateNotice(day: day, report: report, timelineEnabled: SessionCloseout.timelineEnabled)
+        }
+        return true
+    }
+
+    nonisolated static func regenerateNotice(day: String, report: TimelineDaily.Report?, timelineEnabled: Bool) -> String? {
+        guard let report else { return timelineEnabled ? "正在搬迁 / 恢复记忆，这会儿不写，等会儿再试" : nil }
+        if let why = report.failed[day] ?? report.blocked { return why }
+        if report.invalidated { return "中途在搬迁 / 恢复记忆，这天没写，等会儿再试" }
+        if report.written.isEmpty { return "这天没写：没有能拼的上下文摘要 / 消息，或者和原来一样" }
+        return nil
     }
 
     func loadMore(container: ModelContainer) {
@@ -185,7 +222,7 @@ final class MemoryTimelineModel {
 
     /// 后台：枚举月份 → 读前 monthCount 个月 → 查哪些对话还在（后台 context，只取 id）
     nonisolated static func read(profileId: String, monthCount: Int, container: ModelContainer) -> Snapshot {
-        let dir = TimelineStore.dir(profileId: profileId)
+        let dir = TimelineStore.dir(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
         let months = TimelineStore.months(in: dir)
         let loaded = Array(months.prefix(monthCount)).map { TimelineStore.month($0, in: dir) }
         let records = loaded.flatMap(\.days), entries = loaded.flatMap(\.entries)
@@ -206,6 +243,8 @@ final class MemoryTimelineModel {
 struct MemoryTimelineView: View {
     let model: MemoryTimelineModel
     var viewModel: ConversationViewModel
+    /// 时间轴段此刻看得见（格选中 + 段在台上）：不是就不弹提示，攒在 model 里
+    var isActive = true
     @Environment(\.modelContext) private var modelContext
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.settingsMetrics) private var m
@@ -221,9 +260,6 @@ struct MemoryTimelineView: View {
     /// 「重写某一天…」选日期
     @State private var pickingDay = false
     @State private var pickedDate = Date()
-    /// 正在重写主调的那天
-    @State private var regenerating: String? = nil
-    @State private var notice: String? = nil
     /// 点开了「旧格式」的那几天
     @State private var openLegacy: Set<String> = []
 
@@ -256,8 +292,9 @@ struct MemoryTimelineView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in Task { await reloadPending() } }
         .modifier(MemoryStopRecordingAlert(target: $pendingStop))
-        .alert(notice ?? "", isPresented: Binding(get: { notice != nil }, set: { if !$0 { notice = nil } })) {
-            Button("好", role: .cancel) { notice = nil }
+        .alert(model.notice ?? "", isPresented: Binding(get: { model.presentsNotice(active: isActive) },
+                                                        set: { if !$0 { model.notice = nil } })) {
+            Button("好", role: .cancel) { model.notice = nil }
         }
         .sheet(isPresented: $pickingDay) {
             VStack(spacing: 12) {
@@ -322,7 +359,7 @@ struct MemoryTimelineView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(regenerating != nil || !timelineOn || !memMaster)
+                .disabled(model.regenerating != nil || !timelineOn || !memMaster)
             }
             .panelRowBackground()
             ForEach(model.days) { day in
@@ -385,7 +422,7 @@ struct MemoryTimelineView: View {
         let (items, why) = await Task.detached { () -> ([PendingItem], String?) in
             var why: String?
             do { try TimelineDaily.preparePendingForEdit(profileId: pid) } catch { why = TimelineDaily.pendingProblem(error) }
-            return (PendingStore.load(profileId: pid) ?? [], why)
+            return (PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid)) ?? [], why)
         }.value
         guard pid == profileId else { return }
         pendingProblem = why
@@ -410,7 +447,7 @@ struct MemoryTimelineView: View {
     /// 主调（和注入那一行同一份字）+ 话题词；长按重写这天的主调
     private func headlineRow(_ r: TimelineDayRecord) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(regenerating == r.date ? "正在重写主调…" : TimelineStore.headlineText(r))
+            Text(model.regenerating == r.date ? "正在重写主调…" : TimelineStore.headlineText(r))
                 .font(.system(size: m.bodySize, weight: .semibold))
                 .foregroundColor(r.headline == nil ? Theme.textMuted : Theme.textPrimary)
                 .textSelection(.enabled)
@@ -423,7 +460,7 @@ struct MemoryTimelineView: View {
         .padding(.vertical, 4)
         .contextMenu {
             Button { regenerate(r.date) } label: { Label("重写这天的主调", systemImage: "arrow.clockwise") }
-                .disabled(regenerating != nil || !timelineOn || !memMaster)
+                .disabled(model.regenerating != nil || !timelineOn || !memMaster)
             Button { copy(r) } label: { Label("复制这一天", systemImage: "doc.on.doc") }
         }
     }
@@ -538,7 +575,7 @@ struct MemoryTimelineView: View {
             Button { copy(e) } label: { Label("复制这一条", systemImage: "doc.on.doc") }
             // 只有老条目的日子没有主调行：从这里重写这天（不受恢复冻结限制）
             Button { regenerate(e.dayKey) } label: { Label("重写这天", systemImage: "arrow.clockwise") }
-                .disabled(regenerating != nil || !timelineOn || !memMaster)
+                .disabled(model.regenerating != nil || !timelineOn || !memMaster)
             if !gone {
                 Button(role: .destructive) {
                     pendingStop = MemoryStopTarget(conversationId: e.conversationId, title: e.title)
@@ -549,18 +586,8 @@ struct MemoryTimelineView: View {
 
     private func regenerate(_ day: String) {
         guard let profile = profileManager?.currentProfile else { return }
-        regenerating = day
-        Task {
-            let report = await SessionCloseoutTrigger.shared.timelineRegenerate(day: day, profile: profile)
-            regenerating = nil
-            model.reload(profileId: profile.id, container: modelContext.container)
-            if let report {
-                if let why = report.failed[day] ?? report.blocked { notice = why }
-                else if report.invalidated { notice = "中途在搬迁 / 恢复记忆，这天没写，等会儿再试" }
-                else if report.written.isEmpty { notice = "这天没写：没有能拼的上下文摘要 / 消息，或者和原来一样" }
-            } else if SessionCloseout.timelineEnabled {
-                notice = "正在搬迁 / 恢复记忆，这会儿不写，等会儿再试"
-            }
+        model.regenerate(day, profileId: profile.id, container: modelContext.container) {
+            await SessionCloseoutTrigger.shared.timelineRegenerate(day: day, profile: profile)
         }
     }
 
@@ -577,7 +604,7 @@ struct MemoryTimelineView: View {
                                                   context: modelContext, viewModel: viewModel) {
         case .opened: break
         case .windowGone: model.markGone(item.conversationId)
-        case .messageGone: notice = "这一项的消息找不到了（可能切了分支或删了），已经打开这个窗口"
+        case .messageGone: model.notice = "这一项的消息找不到了（可能切了分支或删了），已经打开这个窗口"
         }
     }
 
@@ -721,6 +748,39 @@ enum MemoryConversationLink {
             return .messageGone
         }
         viewModel.navigateToNode(nodeId: nodeId, conversation: conv, context: context)
+        return .opened
+    }
+
+    /// 记忆条目的「去原对话 / 跳到这条」（记忆列表、整理台、设置里的条目页共用）：窗口没了不动、说一声；
+    /// 出处那条消息没了（删了 / 藏了）只打开窗口并说一声，不进会误报「已切换到分支」的搜索跳转
+    @MainActor
+    @discardableResult
+    static func openSource(of memory: Memory, profileId: String, context: ModelContext,
+                           viewModel: ConversationViewModel) -> MessageResult {
+        guard let cid = memory.sourceConversationId else { return .windowGone }
+        let desc = FetchDescriptor<Conversation>(
+            predicate: #Predicate<Conversation> { conv in conv.id == cid && conv.profileId == profileId }
+        )
+        guard let conv = try? context.fetch(desc).first, !conv.isTrashed else {
+            ToastCenter.shared.show("原对话已经不在了")
+            return .windowGone
+        }
+        guard let nodeId = memory.sourceNodeId else {
+            viewModel.loadConversation(conv, context: context)
+            NotificationCenter.default.post(name: .conversationNavigationRequested, object: nil)
+            return .opened
+        }
+        let nodeDesc = FetchDescriptor<MessageNode>(
+            predicate: #Predicate<MessageNode> { $0.id == nodeId && $0.conversationId == cid && $0.profileId == profileId }
+        )
+        guard let node = try? context.fetch(nodeDesc).first, !node.isTrashed, node.hasDisplayableContent,
+              node.role == "user" || node.role == "assistant" else {
+            viewModel.loadConversation(conv, context: context)
+            NotificationCenter.default.post(name: .conversationNavigationRequested, object: nil)
+            ToastCenter.shared.show("原消息找不到了，已打开这个窗口")
+            return .messageGone
+        }
+        viewModel.navigateToSearchResult(nodeId: nodeId, conversation: conv, context: context)
         return .opened
     }
 

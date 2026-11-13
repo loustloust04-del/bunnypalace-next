@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -192,7 +193,7 @@ final class CatalogRunRecordTests: XCTestCase {
                 let backlog = CatalogRunRecord.code(String(repeating: "后台积压原文", count: 40_000))
                 for _ in 0..<24 { run.section("写盘积压", body: backlog) }
             } else {
-                let rows = await Task.detached { MemoryWriteLog.entries(profileId: pid) }.value
+                let rows = await Task.detached { MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)) }.value
                 guard let entry = rows.first else {
                     XCTFail("上一轮日志必须已发布")
                     return nil
@@ -243,7 +244,7 @@ final class CatalogRunRecordTests: XCTestCase {
         let backend = FakeCatalogBackend { _, _ in .failed(message) }
         let report = await CatalogSession(job: CatalogTestKit.job(pid: pid, root: root, container: container, backend: backend)).seed()
         XCTAssertEqual(report.failures.count, 1)
-        let rows = await Task.detached { MemoryWriteLog.entries(profileId: pid) }.value
+        let rows = await Task.detached { MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)) }.value
         XCTAssertGreaterThanOrEqual(rows.count, 3)
         for entry in rows {
             guard case .loaded(let document) = await MemoryWriteLogRunReader.load(entry, wiki: wiki) else { return XCTFail("每条日志都能打开同一次记录") }
@@ -268,7 +269,8 @@ final class CatalogRunRecordTests: XCTestCase {
         let container = try ModelContainer(for: Memory.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none))
         let model = SeedModel()
         model.wiki = WikiStore(root: root.appendingPathComponent("wiki"))
-        model.outline = [["path": "楼层/主题/电影", "kind": "主题", "title": "电影", "sources": ["memory/cc/movies.md"]]]
+        model.cards = ["memory/cc/movies.md": ["title": "喜欢科幻电影", "gist": "喜欢科幻电影", "mentions": [], "about_user": false, "group": "主题"]]
+        model.topics = [("电影", "主题/电影", ["memory/cc/movies.md"])]
         let job = CatalogTestKit.job(pid: "", root: root, container: container, backend: model.backend)
         let report = await CatalogSession(job: job).seed()
         XCTAssertEqual(report.items, 1)
@@ -276,9 +278,10 @@ final class CatalogRunRecordTests: XCTestCase {
         let files = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
         XCTAssertEqual(files.count, 1)
         let text = try String(contentsOf: XCTUnwrap(files.first), encoding: .utf8)
-        XCTAssertTrue(text.contains("memory/cc/movies.md"))
-        XCTAssertTrue(text.contains("喜欢科幻电影"), "文件调用的完整回执进记录")
-        XCTAssertTrue(text.contains("\"phase\":\"outline\""), "交的目录原参数进记录")
+        XCTAssertTrue(text.contains("memory/cc/movies.md"), "目录项列原料路径")
+        XCTAssertTrue(text.contains("喜欢科幻电影"), "原料全文进出卡那一批的请求记录")
+        XCTAssertTrue(text.contains("\"cards\""), "模型回的卡原文进记录")
+        XCTAssertTrue(text.contains("要点卡 第 1 批 · 校验") && text.contains("## 目录"), "每步一节")
         XCTAssertEqual(job.wiki.pagePaths(), [], "运行记录不能变成 wiki 页")
     }
 }

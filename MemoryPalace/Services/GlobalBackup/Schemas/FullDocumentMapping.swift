@@ -19,7 +19,9 @@ private let kSchemaV: Int = 4
 // MARK: - Conversation + MessageNode
 
 extension FullConversationDocument {
-    init(model: Conversation, nodes: [MessageNode]) {
+    /// hubIdentity：备份带的 hub_id，同同步导出（impl1 #3）：对话自己记的；没记补本机那台现在记下的（单测注入）
+    init(model: Conversation, nodes: [MessageNode],
+         hubIdentity: (Conversation) -> String? = { CCHubRegistry.exportedIdentity(of: $0) }) {
         self.init(
             schemaVersion: kSchemaV,
             id: model.id,
@@ -55,7 +57,16 @@ extension FullConversationDocument {
             personaId: model.personaId,
             archiveKind: model.archiveKind,
             sourceMetadata: model.sourceMetadata,
-            cardVariablesData: model.cardVariablesData
+            cardVariablesData: model.cardVariablesData,
+            recallStateData: model.recallStateData,
+            memoryWindowChoicesData: model.memoryWindowChoicesData,
+            previousWindowId: model.previousWindowId,
+            previousWindowSnapshotData: model.previousWindowSnapshotData,
+            lastRealChatAt: model.lastRealChatAt,
+            displayMode: model.displayMode,
+            displayModeUpdatedAt: model.displayModeUpdatedAt,
+            ccHubId: model.ccHubId,
+            ccHubIdentity: hubIdentity(model)
         )
     }
 
@@ -92,6 +103,15 @@ extension FullConversationDocument {
         conv.archiveKind = archiveKind
         conv.sourceMetadata = sourceMetadata
         conv.cardVariablesData = cardVariablesData
+        conv.recallStateData = recallStateData
+        conv.memoryWindowChoicesData = memoryWindowChoicesData
+        conv.previousWindowId = previousWindowId
+        conv.previousWindowSnapshotData = previousWindowSnapshotData
+        conv.lastRealChatAt = lastRealChatAt
+        conv.displayMode = displayMode ?? ConversationDisplayMode.article.rawValue
+        conv.displayModeUpdatedAt = displayModeUpdatedAt
+        conv.ccHubId = ccHubId
+        conv.ccHubIdentity = ccHubIdentity
         return conv
     }
 }
@@ -139,7 +159,12 @@ extension FullNodeDocument {
             sourceVisibility: model.sourceVisibility,
             cardVariablesData: model.cardVariablesData,
             cardEditedAt: model.cardEditedAt,
-            cardEventsData: model.cardEventsData
+            cardEventsData: model.cardEventsData,
+            recallHitsData: model.recallHitsData,
+            recallReceiptData: model.recallReceiptData,
+            agentOrigin: model.agentOrigin,
+            replyOutcome: model.replyOutcome,
+            finishReason: model.finishReason
         )
     }
 
@@ -180,6 +205,11 @@ extension FullNodeDocument {
         node.cardVariablesData = cardVariablesData
         node.cardEditedAt = cardEditedAt
         node.cardEventsData = cardEventsData
+        node.recallHitsData = recallHitsData
+        node.recallReceiptData = recallReceiptData
+        node.agentOrigin = agentOrigin
+        node.replyOutcome = replyOutcome
+        node.finishReason = finishReason
         return node
     }
 }
@@ -471,6 +501,24 @@ extension FullWorldBookDocument {
 }
 
 // MARK: - StickerAsset / PlacedSticker
+
+extension FullChatMemeDocument {
+    init(model: ChatMeme) {
+        self.init(
+            schemaVersion: kSchemaV, id: model.id, name: model.name, detail: model.detail,
+            fileName: model.fileName, mimeType: model.mimeType, isFavorite: model.isFavorite,
+            lastSentAt: model.lastSentAt, createdAt: model.createdAt, profileId: model.profileId
+        )
+    }
+
+    func toModel() -> ChatMeme {
+        let meme = ChatMeme(id: id, name: name, detail: detail, fileName: fileName, mimeType: mimeType, profileId: profileId)
+        meme.isFavorite = isFavorite
+        meme.lastSentAt = lastSentAt
+        meme.createdAt = createdAt
+        return meme
+    }
+}
 
 extension FullStickerAssetDocument {
     init(model: StickerAsset) {

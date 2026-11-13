@@ -35,6 +35,19 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
     private let scrollView = UIScrollView()
     private var requestedScrollEnabled = true
     private var page2DragLockOwners: Set<UUID> = []
+    #if PERSONAL_APPS
+    private(set) static var tutuProjectedTheme: String?
+    private(set) static var tutuPage0InputAllowed = false
+    private var tutuEdgeOnly = false
+    private var tutuLeftEdgePan: UIScreenEdgePanGestureRecognizer?
+    private var tutuRightEdgePan: UIScreenEdgePanGestureRecognizer?
+    private var tutuEdgeSourcePage: Int? {
+        didSet { updateTutuPage0Input() }
+    }
+    private var tutuEdgeTargetPage: Int? {
+        didSet { updateTutuPage0Input() }
+    }
+    #endif
     private var hostingControllers: [UIHostingController<AnyView>] = []
     private var pageContainers: [UIView] = []
     private var pageDimmers: [UIView] = []
@@ -356,6 +369,9 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
          launchRequired: Bool, launchChatReady: @escaping () -> Bool) {
         self.currentPage = initialPage
         super.init(nibName: nil, bundle: nil)
+        #if PERSONAL_APPS
+        Self.tutuProjectedTheme = nil
+        #endif
         launchReadiness.owner = self
         configureLaunch(profile: launchProfile, required: launchRequired, chatReady: launchChatReady)
         for (index, page) in pages.enumerated() {
@@ -493,6 +509,9 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
             name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(pageMotionPreferenceChanged),
             name: UIAccessibility.voiceOverStatusDidChangeNotification, object: nil)
+        #if PERSONAL_APPS
+        installTutuEdgePaging()
+        #endif
 
         applyPageInteraction()
         applyDeckBase()
@@ -1017,11 +1036,6 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         }
     }
 
-    /// 翻页落地后补记一次（对比翻页瞬间：谁在这中间挪了 offset）
-    func probeSettledAfterPaging() {
-        KBProbe.log(svState("  page-settled sv page=\(currentPage)"))
-    }
-
     /// 翻到 chat 页：等 guide 收敛（下一 runloop）后强制 layout 并重发几何，冲掉别页留下的过渡值
     private func resyncChatGeometryAfterPaging() {
         #if (DEBUG || PERF_BENCH) && os(iOS)
@@ -1147,6 +1161,13 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
     /// 宿主宽度变了（转屏 / 改窗 / Split View / 宽窄切换）：拖动 / 减速中按旧宽度下的 q 就近完成
     ///（未过半回源页、已过半到目标页，§1.9 E1）；静止时照旧把 offset 对到当前页
     private func handleHostWidthChange(oldWidth: CGFloat, newWidth: CGFloat) {
+        #if PERSONAL_APPS
+        if oldWidth > 0, tutuEdgeSourcePage != nil || tutuEdgeTargetPage != nil {
+            let page = min(max(Int((scrollView.contentOffset.x / oldWidth).rounded()), 0), hostingControllers.count - 1)
+            endTransition(.size, to: page)
+            return
+        }
+        #endif
         if oldWidth > 0, scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating {
             let page = min(max(Int((scrollView.contentOffset.x / oldWidth).rounded()), 0), hostingControllers.count - 1)
             endTransition(.size, to: page)
@@ -1233,6 +1254,14 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         endingTarget = nil
         // §1.9：命令打断手势 / 惯性 → 取消翻页 pan，无动画完成到命令目标页（晚到的 finishPaging 看到的就是目标页）
         let interrupting = scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
+        #if PERSONAL_APPS
+        if tutuEdgeSourcePage != nil || tutuEdgeTargetPage != nil {
+            if page != currentPage { dismissKeyboard() }
+            mountPendingPages()
+            endTransition(.command, to: page)
+            return
+        }
+        #endif
         if interrupting, isViewLoaded, scrollView.bounds.width > 0 {
             if page != currentPage { dismissKeyboard() }
             mountPendingPages()
@@ -1335,6 +1364,9 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
     private var midTransition: Bool {
         let w = scrollView.bounds.width
         guard w > 0 else { return false }
+        #if PERSONAL_APPS
+        if tutuEdgeSourcePage != nil || tutuEdgeTargetPage != nil { return true }
+        #endif
         let q = scrollView.contentOffset.x / w
         return scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating || abs(q - q.rounded()) > 0.001
     }
@@ -1356,6 +1388,9 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         endingTarget = page
         endingGeneration += 1
         let generation = endingGeneration
+        #if PERSONAL_APPS
+        cancelTutuEdgePaging()
+        #endif
         cancelPagingPan()
         scrollView.setContentOffset(CGPoint(x: CGFloat(page) * w, y: 0), animated: false)
         finishPaging()
@@ -1433,6 +1468,20 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
 
     private func applyScrollEnabled() {
         let enabled = requestedScrollEnabled && page2DragLockOwners.isEmpty
+        #if PERSONAL_APPS
+        defer { updateTutuPage0Input() }
+        if tutuEdgeOnly {
+            let edgeEnabled = enabled && !widePanelMode
+            if !edgeEnabled, tutuEdgeSourcePage != nil || tutuEdgeTargetPage != nil {
+                endTransition(.scrollDisabled, to: currentPage)
+            }
+            if scrollView.isScrollEnabled != enabled { scrollView.isScrollEnabled = enabled }
+            scrollView.panGestureRecognizer.isEnabled = false
+            tutuLeftEdgePan?.isEnabled = edgeEnabled
+            tutuRightEdgePan?.isEnabled = edgeEnabled
+            return
+        }
+        #endif
         // §1.9 E3：禁滑那一刻不在整页位置 → 先回源页再禁
         if !enabled, scrollView.isScrollEnabled, midTransition { endTransition(.scrollDisabled, to: currentPage) }
         if scrollView.isScrollEnabled != enabled { scrollView.isScrollEnabled = enabled }
@@ -1522,6 +1571,9 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         if wide {
             if midTransition || endingTarget != nil { endTransition(.size, to: 1) } else { scrollToPage(1, animated: false) }
         }
+        #if PERSONAL_APPS
+        tutuSkinActivationChanged()
+        #endif
         applyPageInteraction()
         applyDeckBase()
         if isViewLoaded { applyPageTransition() }
@@ -1563,6 +1615,9 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         for (i, page) in pages.enumerated() where i < hostingControllers.count {
             if pendingPages[i] != nil { pendingPages[i] = page } else { assignLaunchRoot(page, index: i, reason: "update") }
         }
+        #if PERSONAL_APPS
+        Self.tutuProjectedTheme = lastContentKey?.theme
+        #endif
     }
 
     /// L4：把还没挂的页挂上真内容（幂等）；only 给定时只挂这几页
@@ -1578,6 +1633,10 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        beginTransition()
+    }
+
+    private func beginTransition(velocityX: CGFloat? = nil) {
         PagingFlip.begin("finger")
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if AirPerfProbe.enabled { AirPerfProbe.shared.endPaging(to: currentPage, reason: "interrupted") }
@@ -1586,7 +1645,7 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         PerfHarness.noteDragBegan(state: launchReadiness, from: currentPage)
         if LaunchTrace.mountSequence != nil {
             // 诊断入口只保证手势目标；不发页码通知，不让单页组偷挂另一页。
-            let target = min(2, max(0, currentPage + (scrollView.panGestureRecognizer.velocity(in: view).x < 0 ? 1 : -1)))
+            let target = min(2, max(0, currentPage + ((velocityX ?? scrollView.panGestureRecognizer.velocity(in: view).x) < 0 ? 1 : -1)))
             mountPendingPages(only: [target])
         } else { mountPendingPages() }
         #else
@@ -1768,6 +1827,18 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         if deckActive { applyDeckPoses(position: position, width: width) } else { applyClassicPoses(position: position, width: width, enabled: enabled) }
+        #if PERSONAL_APPS
+        if tutuEdgeOnly, tutuEdgeSourcePage != nil {
+            let boundedPosition = min(max(position, 0), CGFloat(pageContainers.count - 1))
+            let overflow = (position - boundedPosition) * width
+            if overflow != 0 {
+                for (index, container) in pageContainers.enumerated() {
+                    let shown = flipSnapshots[index] ?? container
+                    shown.layer.setAffineTransform(shown.layer.affineTransform().translatedBy(x: -overflow, y: 0))
+                }
+            }
+        }
+        #endif
         CATransaction.commit()
         #if (DEBUG || PERF_BENCH) && os(iOS)
         PagingScreenFitProbe.capture(root: view, stage: stageView, pages: pageContainers,
@@ -1897,6 +1968,9 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
             let on = !deck || index == currentPage
             if container.isUserInteractionEnabled != on { container.isUserInteractionEnabled = on }
         }
+        #if PERSONAL_APPS
+        updateTutuPage0Input()
+        #endif
     }
 
     /// 叠牌是否生效：舞台模式、非宽屏、VoiceOver 关（VoiceOver 维持 UIView 回退路径，plan §1.6）。减弱动态下照样叠牌（只是没有减速动画）
@@ -1934,6 +2008,14 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
     }
 
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+        #if PERSONAL_APPS
+        if tutuEdgeTargetPage != nil {
+            tutuEdgeSourcePage = nil
+            tutuEdgeTargetPage = nil
+            finishPaging()
+            return
+        }
+        #endif
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure { PerfChatV1.flipEnd() }
         #endif
@@ -2027,6 +2109,135 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         flashPageDots()
     }
 }
+
+    #if PERSONAL_APPS
+    extension PagingViewController: UIGestureRecognizerDelegate {
+        private func updateTutuPage0Input() {
+            let allowed = tutuEdgePagingAllowed && currentPage == 0
+                && tutuEdgeSourcePage == nil && tutuEdgeTargetPage == nil
+            guard Self.tutuPage0InputAllowed != allowed else { return }
+            Self.tutuPage0InputAllowed = allowed
+            NotificationCenter.default.post(name: Notification.Name("tutuPage0InputChanged"), object: nil)
+        }
+
+        private var tutuEdgePagingAllowed: Bool {
+            tutuEdgeOnly && requestedScrollEnabled && page2DragLockOwners.isEmpty && !widePanelMode
+        }
+
+        private func installTutuEdgePaging() {
+            let left = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleTutuEdgePan(_:)))
+            left.edges = .left
+            let right = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleTutuEdgePan(_:)))
+            right.edges = .right
+            for pan in [left, right] {
+                pan.delegate = self
+                pan.isEnabled = false
+                view.addGestureRecognizer(pan)
+            }
+            tutuLeftEdgePan = left
+            tutuRightEdgePan = right
+            NotificationCenter.default.addObserver(self, selector: #selector(tutuSkinActivationChanged),
+                                                  name: .tutuSkinActivationChanged, object: nil)
+            tutuSkinActivationChanged()
+        }
+
+        @objc private func tutuSkinActivationChanged() {
+            let active = SkinState.shared.active && !widePanelMode
+            guard active != tutuEdgeOnly else { return }
+            endTransition(.command, to: nearestPage)
+            tutuEdgeOnly = active
+            if !active {
+                scrollView.panGestureRecognizer.isEnabled = true
+                tutuLeftEdgePan?.isEnabled = false
+                tutuRightEdgePan?.isEnabled = false
+            }
+            applyScrollEnabled()
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard tutuEdgePagingAllowed else { return false }
+            let edge: TutuEdgePaging.Edge = gestureRecognizer === tutuLeftEdgePan ? .left : .right
+            return TutuEdgePaging.acceptsStart(x: touch.location(in: view).x, width: view.bounds.width, edge: edge)
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard tutuEdgePagingAllowed, tutuEdgeSourcePage == nil, tutuEdgeTargetPage == nil,
+                  hostingControllers.count > 1, scrollView.bounds.width > 0,
+                  let pan = gestureRecognizer as? UIScreenEdgePanGestureRecognizer else { return false }
+            let velocity = pan.velocity(in: view)
+            let inwardVelocity = pan === tutuLeftEdgePan ? velocity.x : -velocity.x
+            return inwardVelocity > abs(velocity.y)
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            tutuEdgePagingAllowed && otherGestureRecognizer is UIPanGestureRecognizer
+                && otherGestureRecognizer !== tutuLeftEdgePan && otherGestureRecognizer !== tutuRightEdgePan
+        }
+
+        @objc private func handleTutuEdgePan(_ pan: UIScreenEdgePanGestureRecognizer) {
+            let edge: TutuEdgePaging.Edge = pan === tutuLeftEdgePan ? .left : .right
+            switch pan.state {
+            case .began:
+                guard tutuEdgePagingAllowed else { return }
+                if midTransition || endingTarget != nil { endTransition(.command, to: nearestPage) }
+                endingGeneration += 1
+                endingTarget = nil
+                tutuEdgeSourcePage = currentPage
+                beginTransition(velocityX: pan.velocity(in: view).x)
+                updateTutuEdgeOffset(pan, edge: edge)
+            case .changed:
+                guard tutuEdgeSourcePage != nil else { return }
+                guard tutuEdgePagingAllowed else {
+                    endTransition(.scrollDisabled, to: currentPage)
+                    return
+                }
+                updateTutuEdgeOffset(pan, edge: edge)
+            case .ended, .cancelled, .failed:
+                guard let source = tutuEdgeSourcePage else { return }
+                let target = TutuEdgePaging.targetPage(source: source, pageCount: hostingControllers.count,
+                                                      width: scrollView.bounds.width, translation: pan.translation(in: view).x,
+                                                      velocity: pan.velocity(in: view).x, edge: edge,
+                                                      cancelled: pan.state != .ended || !tutuEdgePagingAllowed)
+                if target != source { dismissKeyboard() }
+                tutuEdgeTargetPage = target
+                let offset = CGPoint(x: CGFloat(target) * scrollView.bounds.width, y: 0)
+                if UIAccessibility.isReduceMotionEnabled || abs(scrollView.contentOffset.x - offset.x) < 0.5 {
+                    scrollView.setContentOffset(offset, animated: false)
+                    tutuEdgeSourcePage = nil
+                    tutuEdgeTargetPage = nil
+                    finishPaging()
+                } else {
+                    scrollView.setContentOffset(offset, animated: true)
+                }
+            default:
+                break
+            }
+        }
+
+        private func updateTutuEdgeOffset(_ pan: UIScreenEdgePanGestureRecognizer, edge: TutuEdgePaging.Edge) {
+            guard let source = tutuEdgeSourcePage else { return }
+            let offset = TutuEdgePaging.offset(source: source, pageCount: hostingControllers.count,
+                                              width: scrollView.bounds.width, translation: pan.translation(in: view).x, edge: edge)
+            scrollView.setContentOffset(CGPoint(x: offset, y: 0), animated: false)
+        }
+
+        private func cancelTutuEdgePaging() {
+            guard tutuEdgeSourcePage != nil || tutuEdgeTargetPage != nil else { return }
+            tutuEdgeSourcePage = nil
+            tutuEdgeTargetPage = nil
+            cancelTutuEdgePan(tutuLeftEdgePan)
+            cancelTutuEdgePan(tutuRightEdgePan)
+        }
+
+        private func cancelTutuEdgePan(_ pan: UIScreenEdgePanGestureRecognizer?) {
+            guard let pan, pan.state == .began || pan.state == .changed else { return }
+            let enabled = pan.isEnabled
+            pan.isEnabled = false
+            pan.isEnabled = enabled
+        }
+    }
+    #endif
 
 /// home indicator 区透明 hit shield 的 UIView 子类。
 ///
@@ -2317,4 +2528,21 @@ final class NextFrame: NSObject {
         work()
     }
 }
+    #if PERSONAL_APPS
+    extension PagingViewController {
+        static func tutuUnlockSnapshotViews(prepare: Bool = false) -> (page: UIView, input: UIView, snapshot: UIView)? {
+            guard let controller = sharedScrollView?.delegate as? PagingViewController,
+                  controller.hostingControllers.indices.contains(1) else { return nil }
+            if prepare {
+                controller.mountPendingPages(only: [1])
+                controller.scrollToPage(1, animated: false)
+                controller.view.layoutIfNeeded()
+            }
+            guard let page = controller.hostingControllers[1].viewIfLoaded,
+                  let input = controller.inputBarHost?.viewIfLoaded,
+                  let snapshot = controller.viewIfLoaded else { return nil }
+            return (page, input, snapshot)
+        }
+    }
+    #endif
 #endif

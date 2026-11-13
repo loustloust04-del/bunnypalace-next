@@ -1,3 +1,4 @@
+import MemoryCore
 #if os(macOS)
 import XCTest
 @testable import 记忆花园

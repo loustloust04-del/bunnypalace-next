@@ -256,7 +256,8 @@ struct StickerCanvasGestureOverlay: UIViewRepresentable {
 
                 // 扭矩：触摸偏离中心时，拖拽产生旋转
                 let off = vm.dragTouchOffset
-                let crossZ = off.x * t.y - off.y * t.x
+                // 手势层跟着画布翻过一次（本地 y 朝上）：叉积取反才是屏幕上的转向（mac 同款，StickerCanvasLayer）
+                let crossZ = -(off.x * t.y - off.y * t.x)
                 let size = vm.stickerSizes[sticker.id] ?? CGSize(width: 80, height: 80)
                 let w = size.width * sticker.scale
                 let h = size.height * sticker.scale

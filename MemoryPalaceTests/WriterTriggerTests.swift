@@ -1,7 +1,7 @@
 import XCTest
 @testable import 记忆花园
 
-/// v5 A8：触发三选一（停 N 分钟 / 每 N 回合 / 只手动），A2 / A3 / A4 各一套；静默默认 12 小时；新建对话先写掉 12 小时内聊过的
+/// A3 默认 24 小时，显式设置不覆盖；新建对话提前写仍按 12 小时。
 final class WriterTriggerTests: XCTestCase {
 
     private let t0 = Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 15, hour: 9))!
@@ -24,16 +24,21 @@ final class WriterTriggerTests: XCTestCase {
     }
 
     func testDefaults() {
-        XCTAssertEqual(SessionCloseout.idleInterval, 12 * 3600, "粟粟 10-15：30 分钟太短 → 12 小时")
+        XCTAssertEqual(SessionCloseout.idleInterval, 24 * 3600)
         XCTAssertEqual(SessionCloseout.recentInterval, 12 * 3600, "Q-b：新建对话先写掉 12 小时内聊过的")
         XCTAssertEqual(MemoryTriggers.mode(.a2, defaults: d), .rounds, "A2 默认每 N 回合（= 今天）")
         XCTAssertEqual(MemoryTriggers.rounds(.a2, defaults: d), 5)
         XCTAssertEqual(MemoryTriggers.mode(.a3, defaults: d), .idle)
-        XCTAssertEqual(MemoryTriggers.idleMinutes(.a3, defaults: d), 720)
+        XCTAssertEqual(MemoryTriggers.idleMinutes(.a3, defaults: d), 1440)
         XCTAssertEqual(MemoryTriggers.idleMinutes(.a4, defaults: d), 720)
         XCTAssertTrue(MemoryTriggers.closesOnNewConversation(.a4, defaults: d))
         d.set(7, forKey: "ctx_compress_interval")
         XCTAssertEqual(MemoryTriggers.rounds(.a2, defaults: d), 7, "A2 的回合数就是 Prompt 页那个键")
+        let defaultTrigger = SessionCloseout.Trigger(mode: .idle, idle: MemoryTriggers.idle(.a3, defaults: d), rounds: 30, onNew: true)
+        XCTAssertEqual(SessionCloseout.writerState(defaultTrigger, pending: 6, updateTime: t0, coveredUntil: nil,
+            lastMessageDate: t0, now: t0.addingTimeInterval(13 * 3600), force: false), .waiting(until: t0.addingTimeInterval(24 * 3600)))
+        d.set(720, forKey: MemoryTriggers.idleKey(.a3))
+        XCTAssertEqual(MemoryTriggers.idleMinutes(.a3, defaults: d), 720, "显式设过的12h不被新默认覆盖")
     }
 
     func testIdleText() {

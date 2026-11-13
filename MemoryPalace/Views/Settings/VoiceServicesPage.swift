@@ -133,15 +133,17 @@ struct VoiceServicesPage: View {
     private func audition(_ service: VoiceService, generation: Int) async {
         let synth = service.makeSynthesizer()
         do {
-            var voice = profileManager?.currentProfile.voiceServiceId == service.id
-                ? profileManager?.currentProfile.voiceId : nil
-            voice = voice ?? floors(using: service).compactMap(\.voiceId).first
+            // 声音和声音效果取同一层：当前层用这个服务就是它，否则第一个用它且选了声音的层；都没有 = 当前层的参数
+            let current = profileManager?.currentProfile
+            let floor = current?.voiceServiceId == service.id && current?.voiceId != nil
+                ? current : floors(using: service).first { $0.voiceId != nil }
+            var voice = floor?.voiceId
             if voice == nil, service.kind != .system, synth.capabilities.canFetchVoices {
                 voice = try await synth.fetchVoices().first?.id
             }
             let clip = try await synth.synthesize(text: "你好，这是一段试听。", voice: voice,
                                                   model: synth.capabilities.resolvedModel(nil),
-                                                  tuning: VoiceTuning.current())
+                                                  tuning: (floor ?? current).map(VoiceTuning.current(for:)) ?? VoiceTuning.defaults)
             guard isCurrentAudition(generation) else { return }
             try player.play(clip) {
                 guard generation == auditionGeneration else { return }

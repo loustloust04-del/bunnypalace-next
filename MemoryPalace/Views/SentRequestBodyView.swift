@@ -14,6 +14,8 @@ struct SentRequestBodyView: View {
     @State private var turn: SentTurn?
     @State private var loaded = false
     @State private var index = 0
+    /// 排版好的显示文本：换请求时算一次，不放 body 里每次重算
+    @State private var display = ""
 
     private var store: SentRequestStore { .shared }
 
@@ -30,18 +32,13 @@ struct SentRequestBodyView: View {
                     }
                     .pickerStyle(.segmented)
                 }
-                ScrollView(.vertical) {
-                    Text(Self.displayText(sent.body))
-                        .font(m.caption.monospaced())
-                        .foregroundColor(Theme.textPrimary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                }
-                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.mainBg))
+                LongTextBox(text: display, fontSize: Theme.F.caption)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.mainBg))
             } else if loaded {
                 Text(conversationId == nil
-                     ? "设置页没有绑定对话——到聊天右栏「Prompt 工具」看"
+                     ? "设置页没有绑定对话——在聊天页输入框左下角的「窗口透视」里看"
                      : "这个对话在这台设备上还没有真实发出的请求。切到「下一轮预览」看现在点发送会发什么。")
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
@@ -54,7 +51,14 @@ struct SentRequestBodyView: View {
             if fresh?.turnId != turn?.turnId { index = 0 }
             turn = fresh
             loaded = true
+            refreshDisplay()
         }
+        .onChange(of: index) { _, _ in refreshDisplay() }
+    }
+
+    private func refreshDisplay() {
+        guard let turn, !turn.requests.isEmpty else { display = ""; return }
+        display = Self.displayText(turn.requests[min(index, turn.requests.count - 1)].body)
     }
 
     private func header(_ sent: SentRequest, total: Int) -> some View {

@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// 工具抽屉（#093 §2.1）给人看的目录：每个工具归哪组、一句话说明、上游是哪道门。
@@ -52,8 +53,8 @@ enum ToolDrawerCatalog {
         let gate: Gate
         var id: String { name }
 
-        /// 元工具只读
-        var canToggle: Bool { gate != .auto }
+        /// 元工具和本轮状态只读，后者只随工具总开关。
+        var canToggle: Bool { !ToolRegistry.drawerExempt.contains(name) }
         /// 服务端搜索 tool_invoke 调不到、元工具本身就是门：不能收起
         var canTuck: Bool { canToggle && name != ToolRegistry.serverWebSearchName }
     }
@@ -96,11 +97,25 @@ enum ToolDrawerCatalog {
             Item(name: ToolRegistry.serverWebSearchName, group: .search, summary: "{char} 联网搜索（Anthropic 卡，服务端执行）", gate: .permission(.webSearch)),
             Item(name: WebSearchToolService.toolName, group: .search, summary: "{char} 联网搜索（OpenAI 系卡，要配搜索服务）", gate: .permission(.webSearch)),
             Item(name: BrowseURLTool.toolName, group: .search, summary: "{char} 打开网页读内容（OpenAI 系卡）", gate: .permission(.webSearch)),
+            Item(name: ChromeBridgeTools.readName, group: .search, summary: "{char} 用{user} Mac 上 Chrome 的登录态读网页（Mac 上开了才有）", gate: .permission(.webSearch)),
+            Item(name: ChromeBridgeTools.queryName, group: .search, summary: "{char} 用{user} Mac 上的 Chrome 查站点：YouTube 字幕、知乎、B 站……只读（Mac 上开了才有）", gate: .permission(.webSearch)),
 
             Item(name: AskUserTool.toolName, group: .other, summary: "{char} 出选择题问{user}", gate: .always),
             Item(name: DiceTool.toolName, group: .other, summary: "{char} 掷骰子、随机抽选", gate: .always),
             Item(name: CardGuideTool.toolName, group: .other, summary: "{char} 发卡片前查写法（关了：系统提示里不再放卡片写法，{char} 不会主动发卡片）", gate: .always),
+            Item(name: TurnStatusTool.toolName, group: .other, summary: "{char} 给顶栏写一句本轮状态，不改资料卡", gate: .always),
         ]
+        #if os(iOS)
+        // AI 在花园浏览器里动手（plan-ai-browser-operate）
+        list += [
+            Item(name: BrowserOperateTools.openName, group: .search, summary: "{char} 在花园浏览器里打开网页（{user}看得见）", gate: .permission(.browserOperate)),
+            Item(name: BrowserOperateTools.lookName, group: .search, summary: "{char} 看花园浏览器里这一页能点能填的", gate: .permission(.browserOperate)),
+            Item(name: BrowserOperateTools.clickName, group: .search, summary: "{char} 在花园浏览器里点按钮 / 链接（发布、购买这类先问{user}）", gate: .permission(.browserOperate)),
+            Item(name: BrowserOperateTools.typeName, group: .search, summary: "{char} 在花园浏览器里填字（密码不填）", gate: .permission(.browserOperate)),
+            Item(name: BrowserOperateTools.scrollName, group: .search, summary: "{char} 在花园浏览器里翻页", gate: .permission(.browserOperate)),
+            Item(name: BrowserOperateTools.backName, group: .search, summary: "{char} 花园浏览器后退", gate: .permission(.browserOperate)),
+        ]
+        #endif
         #if os(macOS)
         list += [
             Item(name: CodingTools.search, group: .other, summary: "{char} 搜这台 Mac 上编程 agent 的会话记录", gate: .permission(.codingSessions)),

@@ -5,13 +5,13 @@ import SwiftUI
 ///
 /// 尺寸全从 `PanelColumnLayout.extents` 拿；**这里是 `groupWeights` 的唯一读者**（热字段），
 /// 组内容只拿冷数据 + 这里给的尺寸——拖缝时组内容的值不变（plan §5）。
-/// 外边距整列扣一次（同 `MacWorkspacePane`），组是没有外边距的卡片（`MacPaneCard`）；只有一个组时和改造前逐像素一样
+/// 外边距整列扣一次（`ShellStyle.paneInset` + 卡片上下缝），组是没有外边距的卡片（`MacPaneCard`）；只有一个组时和改造前逐像素一样
 struct MacDockColumn<Group: View, Empty: View>: View {
     let layout: IPadPanelLayout
     let edge: PanelEdge
     /// 列的外尺寸在分配轴上的长度（左右列 = 工作区高；底列 = 卡槽宽）
     let length: CGFloat
-    /// 列外边距；nil = 左右列的默认（同 `MacWorkspacePane`）。底列传卡的左右外边距 + 下外边距，跟正文卡对齐
+    /// 列外边距；nil = 左右列的默认（`ShellStyle.paneInset` + 卡片上下缝）。底列传卡的左右外边距 + 下外边距，跟正文卡对齐
     var insets: EdgeInsets? = nil
     @ViewBuilder let group: (String) -> Group
     @ViewBuilder let empty: () -> Empty

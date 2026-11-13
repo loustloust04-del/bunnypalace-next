@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 import ObjectiveC
@@ -349,6 +350,7 @@ final class CatalogLiveSmokeTests: XCTestCase {
             let d = try XCTUnwrap(item.change.direction)
             print(CatalogLiveAuthProtocol.redacted("[C3 live seed] 目录 · \(d.kind?.rawValue ?? "") · \(d.path) · \(d.title) · 钩子：\(d.hook) · 原料：\((d.sources ?? []).joined(separator: "、"))"))
         }
+        Self.printNotes(taskId: outline.id, wiki: wiki, tag: "seed", items: outline.items.count)
 
         try await WikiProposalReview.approve(outline.id, store: store, profileId: profileId, context: context)
         let second = await CatalogSession(job: job).resumeSeed(outline.id)
@@ -374,7 +376,7 @@ final class CatalogLiveSmokeTests: XCTestCase {
         MemoryWriteLog.flush()
         let run = try XCTUnwrap(outline.run)
         print("[C3 live seed] .runs：" + wikiRoot.appendingPathComponent(run.path).path)
-        for entry in MemoryWriteLog.entries(profileId: profileId).reversed() where entry.note.hasPrefix("种子 · 第") {
+        for entry in MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId)).reversed() where entry.note.hasPrefix("种子 · 第") {
             XCTAssertEqual(entry.run?.path, run.path, "每轮日志指向同一份记录")
             print(CatalogLiveAuthProtocol.redacted("[C3 live seed] 日志 · \(entry.note.prefix(80)) · anchor \(entry.run?.anchor ?? "无")"))
         }
@@ -422,6 +424,7 @@ final class CatalogLiveSmokeTests: XCTestCase {
             let d = try XCTUnwrap(item.change.direction)
             print(CatalogLiveAuthProtocol.redacted("[C3 live survey] 目录 · \(d.kind?.rawValue ?? "") · \(d.path) · \(d.title) · 钩子：\(d.hook) · 原料：\((d.sources ?? []).joined(separator: "、"))"))
         }
+        Self.printNotes(taskId: taskId, wiki: wiki, tag: "survey", items: outline.items.count)
 
         try await WikiProposalReview.approve(outline.id, store: store, profileId: profileId, context: context)
         let second = await CatalogSession(job: job).resumeSeed(taskId)
@@ -443,15 +446,15 @@ final class CatalogLiveSmokeTests: XCTestCase {
         try? FileManager.default.removeItem(at: FileLibraryStore.memoryRoot(profileId: profileId).deletingLastPathComponent())
     }
 
-    /// 第 8a 段：模型分拣真端点一次（虚构碎片 + 用户新建的一页「楼层/岚舟/手作」），逐条打印模型判断和代码基线判断；分歧只记录，不当门槛
+    /// 第 8a 段：模型分拣真端点一次（虚构碎片 + 用户新建的一页「{{user}}/手作」），逐条打印模型判断和代码基线判断；分歧只记录，不当门槛
     func testModelSorterVersusCodeBaselineLive() async throws {
         let names = MemoryExtractor.Names(userName: "岚舟", assistantName: "星砚")
         let (manager, model) = makeProvider(type: .anthropic)
         let caller = FragmentModelRoute.caller(for: .remote(model), providerManager: manager, conversationId: "", profileId: "", kind: .catalog)
         let pages = [
-            WikiInjectionSnapshot.Page(path: "楼层/人/林栖", title: "林栖", triggers: ["栖栖"], hook: "岚舟提到林栖、陶艺工作室的时候先看这页", now: "岚舟的大学室友，在云桥城开陶艺工作室。"),
-            WikiInjectionSnapshot.Page(path: "楼层/岚舟/身体", title: "身体", triggers: ["偏头痛", "乳糖不耐"], hook: "岚舟说身体不舒服的时候先看这页", now: "换季容易偏头痛。"),
-            WikiInjectionSnapshot.Page(path: "楼层/岚舟/手作", title: "手作", triggers: ["陶艺课"], hook: "岚舟聊到自己动手做东西的时候先看这页", now: ""),
+            WikiInjectionSnapshot.Page(path: "人/林栖", title: "林栖", triggers: ["栖栖"], hook: "岚舟提到林栖、陶艺工作室的时候先看这页", now: "岚舟的大学室友，在云桥城开陶艺工作室。"),
+            WikiInjectionSnapshot.Page(path: "{{user}}/身体", title: "身体", triggers: ["偏头痛", "乳糖不耐"], hook: "岚舟说身体不舒服的时候先看这页", now: "换季容易偏头痛。"),
+            WikiInjectionSnapshot.Page(path: "{{user}}/手作", title: "手作", triggers: ["陶艺课"], hook: "岚舟聊到自己动手做东西的时候先看这页", now: ""),
         ]
         func fragment(_ subject: String, _ tags: [String], _ content: String, day: Int) -> CatalogFragment {
             var f = CatalogFragment(id: UUID(), content: content, category: "fact", day: "2026-10-\(day)")
@@ -503,8 +506,8 @@ final class CatalogLiveSmokeTests: XCTestCase {
         let (manager, model) = makeProvider(type: .anthropic)
         let caller = FragmentModelRoute.caller(for: .remote(model), providerManager: manager, conversationId: "", profileId: "", kind: .catalog)
         let pages = [
-            WikiInjectionSnapshot.Page(path: "楼层/人/豆包", title: "豆包", triggers: ["橘猫"], hook: "岚舟提到豆包、猫的时候先看这页", now: "橘猫，4 岁。"),
-            WikiInjectionSnapshot.Page(path: "楼层/岚舟/手作", title: "手作", triggers: ["陶艺课"], hook: "岚舟聊到自己动手做东西的时候先看这页", now: ""),
+            WikiInjectionSnapshot.Page(path: "人/豆包", title: "豆包", triggers: ["橘猫"], hook: "岚舟提到豆包、猫的时候先看这页", now: "橘猫，4 岁。"),
+            WikiInjectionSnapshot.Page(path: "{{user}}/手作", title: "手作", triggers: ["陶艺课"], hook: "岚舟聊到自己动手做东西的时候先看这页", now: ""),
         ]
         // 全部人工编造：毕设连续两天（该提）、陶艺课连续两天但字面对上「手作」页（不该提）、其余只出现一天
         let days = [
@@ -545,6 +548,88 @@ final class CatalogLiveSmokeTests: XCTestCase {
         print("[C3-TIMELINE-LIVE] \(model.modelId) · 请求 \(rounds) 次 · 模型 \(m.sorted()) · 代码 \(c.sorted())"
             + (m == c ? "" : " · 分歧：只模型 \(m.subtracting(c).sorted())、只代码 \(c.subtracting(m).sorted())"))
         XCTAssertLessThanOrEqual(rounds, 2, "最多一次重写")
+    }
+
+    func testHaikuDailyRejectionFeedbackCorrectsTheatreAttributionLive() async throws {
+        let (manager, model) = makeProvider(type: .anthropic)
+        guard model.modelId.lowercased().contains("haiku") else {
+            throw XCTSkip("本用例只跑 Haiku，请注入 TEST_RUNNER_MP_C3_LIVE_MODEL")
+        }
+        let root = try XCTUnwrap(root).appendingPathComponent("feedback-live", isDirectory: true)
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        let store = WikiProposalStore(wiki: wiki)
+        let profileId = "xctest-c3-feedback-\(UUID().uuidString)"
+        let names = MemoryExtractor.Names(userName: "岚舟", assistantName: "星砚")
+        let schema = ProfileManager.makeFullSchema()
+        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none)])
+        let context = ModelContext(container)
+        let row = Memory(content: "岚舟和星砚驾驶纸舟从云桥城旧码头启航，沿剧场航线穿过了雾桥。", category: "fact", profileId: profileId)
+        context.insert(row)
+        try context.save()
+        var fragment = CatalogFragment(id: row.id, content: row.content, category: "fact", day: "2026-11-01")
+        fragment.subject = "岚舟"
+        fragment.speaker = "用户自述"
+        let topic = CatalogSorter.Topic(path: "主题/云桥城航行", title: "云桥城航行", kind: .topic, existing: false,
+                                        fragmentIds: [fragment.id], hook: "提到云桥城航行时先看这页")
+        let caller = FragmentModelRoute.caller(for: .remote(model), providerManager: manager,
+                                               conversationId: "", profileId: profileId, kind: .catalog)
+        let run = CatalogRunRecord(wiki: wiki, topic: "虚构两轮驳回改归因", kind: "B-2 Haiku live")
+        func material(_ topic: CatalogSorter.Topic, fragments: [CatalogFragment]) async -> CatalogWriter.Material {
+            await CatalogWriter.material(topic, fragments: fragments, floorPrompt: "岚舟与星砚是同行伙伴。", wiki: wiki,
+                                         memoryRoot: root, now: Date())
+        }
+        func write(_ m: CatalogWriter.Material, round: Int) async throws -> CatalogItems.Parsed {
+            let result = try await CatalogWriter.write(m, names: names, wiki: wiki, caller: { system, user in
+                let raw = try await caller(system, user)
+                run.section("第 \(round) 稿 · 实际请求与回复", body: system + "\n\n" + user + "\n\n" + (raw ?? "<nil>"))
+                return raw
+            }, drafts: nil, run: run)
+            return try XCTUnwrap(result, "第 \(round) 轮没有正文")
+        }
+        func page(_ parsed: CatalogItems.Parsed) throws -> (WikiProposal.Item, WikiPage) {
+            let item = try XCTUnwrap(parsed.items.first { $0.change.targetPath == topic.path })
+            guard case .newPage(let page) = item.change else {
+                throw NSError(domain: "CatalogLiveSmoke", code: 2, userInfo: [NSLocalizedDescriptionKey: "应交同主题新页"])
+            }
+            return (item, page)
+        }
+        let firstMaterial = await material(topic, fragments: [fragment])
+        XCTAssertNil(firstMaterial.feedback)
+        let first = try await write(firstMaterial, round: 1)
+        let (item, firstPage) = try page(first)
+        XCTAssertTrue(firstPage.now.contains("岚舟"), "第一稿应展示待纠正的本人归因")
+        XCTAssertFalse(firstPage.now.contains("设定中"), "若第一稿已正确归因，本夹具没有复现误归因，不能算纠正证据")
+        let proposal = WikiProposal(origin: .scheduled, createdAt: Date(), items: [item])
+        try await Task.detached { try store.save(proposal) }.value
+        let reason = "这是剧场背景，只能写成设定"
+        try await WikiProposalReview.reject(proposal.id, itemIds: [item.id], reasons: [item.id: reason],
+                                           store: store, profileId: profileId, context: context)
+        let secondMaterial = await material(topic, fragments: [fragment])
+        let prompt = CatalogWriter.userContent(secondMaterial, names: names)
+        let feedback = try XCTUnwrap(prompt.range(of: "【审核反馈 ·"))
+        let hook = try XCTUnwrap(prompt.range(of: "【定好的钩子】"))
+        let search = try XCTUnwrap(prompt.range(of: "【搜回来的原料】"))
+        XCTAssertLessThan(hook.lowerBound, feedback.lowerBound)
+        XCTAssertLessThan(feedback.lowerBound, search.lowerBound)
+        XCTAssertTrue(prompt.contains(reason))
+        let unrelatedTopic = CatalogSorter.Topic(path: "主题/星砚的画具", title: "星砚的画具", kind: .topic, existing: false)
+        let unrelated = await material(unrelatedTopic, fragments: [])
+        let unrelatedPrompt = CatalogWriter.userContent(unrelated, names: names)
+        XCTAssertFalse(unrelatedPrompt.contains(reason))
+        XCTAssertNil(unrelated.feedback)
+        let second = try await write(secondMaterial, round: 2)
+        let (_, secondPage) = try page(second)
+        let sentences = secondPage.now.components(separatedBy: CharacterSet(charactersIn: "。！？\n"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        XCTAssertFalse(sentences.isEmpty)
+        XCTAssertTrue(sentences.contains { $0.contains("设定中") }, secondPage.now)
+        XCTAssertNotEqual(secondPage.factDomain, .realWorld, "不能标成本人现实域")
+        run.section("B-2 两轮证据 · 全虚构", body: "模型：\(model.modelId)\n第一稿：\n\(firstPage.markdown)\n驳回：\(reason)\n第二稿：\n\(secondPage.markdown)\n不相关主题：\n\(unrelatedPrompt)")
+        await run.flush()
+        let text = try await Task.detached { try String(contentsOf: run.url, encoding: .utf8) }.value
+        print("[C3-RUN-BEGIN] \(run.url.lastPathComponent)")
+        print(Data(CatalogLiveAuthProtocol.redacted(text).utf8).base64EncodedString())
+        print("[C3-RUN-END]")
     }
 
     /// 第 9 段：写作者新稿真端点（全部虚构）。① 普通页、行为模式页各一页；② 同一底图下的语义矩阵一页（增量 / 共存 / 冲突 / {c}观察 / 未兑现承诺）；
@@ -593,13 +678,13 @@ final class CatalogLiveSmokeTests: XCTestCase {
 
         // ① 普通页、行为模式页
         let cases: [(topic: CatalogSorter.Topic, fragments: [CatalogFragment])] = [
-            (CatalogSorter.Topic(path: "楼层/人/豆包", title: "豆包", kind: .person, aliases: ["包包"], existing: false), [
+            (CatalogSorter.Topic(path: "人/豆包", title: "豆包", kind: .person, aliases: ["包包"], existing: false), [
                 fragment("豆包", "豆包是三岁的公橘猫，已经绝育。", day: "2026-10-10"),
                 fragment("豆包", "豆包体检肌酐偏高，兽医让它长期吃肾脏处方粮。", day: "2026-10-12"),
                 fragment("豆包", "豆包一听到吸尘器就钻进床底。", day: "2026-10-13"),
                 fragment("豆包", "搬家那几天豆包一直躲在纸箱里不出来。", day: "2026-10-15"),
             ]),
-            (CatalogSorter.Topic(path: "楼层/岚舟/行为模式/赶稿", title: "赶稿", kind: .user, existing: false), [
+            (CatalogSorter.Topic(path: "{{user}}/行为模式/赶稿", title: "赶稿", kind: .user, existing: false), [
                 fragment("岚舟", "插画稿截稿前三天，岚舟总是先去整理画具、刷视频，说「还来得及」。", day: "2026-09-25"),
                 fragment("岚舟", "岚舟截稿前一晚通宵赶完 9 月的绘本插画，交稿后说「我怎么又这样」。", day: "2026-09-28"),
                 fragment("岚舟", "10 月封面稿又拖到最后两天，岚舟说「来不及了」，星砚陪着把稿子拆成小块才开始画。", day: "2026-10-20"),
@@ -611,7 +696,7 @@ final class CatalogLiveSmokeTests: XCTestCase {
         }
 
         // ② 语义矩阵：同一底图 + 已有页，碎片各占一种情况
-        let path = "楼层/岚舟/日常"
+        let path = "{{user}}/日常"
         try wiki.save(WikiPage(path: path, kind: .user, triggers: ["日常", "住处"], hook: "当岚舟聊住处、作息、养宠时先看这页", title: "日常",
                                now: "住在鹿鸣巷 3 楼（详见人设）。喜欢猫（自 2026-08 起）。", records: ["2026-08-20 收养豆包（出处：碎片 00000000）"]))
         let matrix = [
@@ -675,7 +760,7 @@ final class CatalogLiveSmokeTests: XCTestCase {
         let caller = FragmentModelRoute.caller(for: .remote(model), providerManager: manager, conversationId: "", profileId: "", kind: .catalog)
         let root = try XCTUnwrap(root)
         let wiki = WikiStore(root: root.appendingPathComponent("diagnostics-live-wiki", isDirectory: true))
-        let path = "楼层/人/豆包"
+        let path = "人/豆包"
         try wiki.save(WikiPage(path: path, kind: .person, triggers: ["豆包", "包包"], hook: "当岚舟聊豆包吃饭、看病、躲人时先看这页", title: "豆包",
                                now: "三岁的公橘猫，已绝育（自 2026-08 起）。吃普通成猫粮，一天两顿（自 2026-08 起）。怕吸尘器，一响就钻床底（自 2026-09 起）。",
                                records: ["2026-08-20 被岚舟收养（出处：碎片 00000000）"]))
@@ -803,7 +888,7 @@ final class CatalogLiveSmokeTests: XCTestCase {
                 let first = await CatalogSession(job: job).daily()
                 XCTAssertEqual(first.proposals, 1, first.summary)
             } else {
-                let path = "楼层/主题/电影"
+                let path = "主题/电影"
                 let r = await Task.detached {
                     WikiSuggestTool.execute(inputJSON: "{\"path\":\"\(path)\",\"reason\":\"刚聊到跨片比较诺兰和王家卫\"}",
                                             wiki: WikiStore(root: wikiRoot), profileId: "")
@@ -889,6 +974,23 @@ final class CatalogLiveSmokeTests: XCTestCase {
         }
     }
 
+
+    /// 要点卡流程的中间量：批数 / 卡数 / 对齐合并了哪些 / 目录项数（只打印，不断言）
+    private nonisolated static func printNotes(taskId: String, wiki: WikiStore, tag: String, items: Int) {
+        let tasks = CatalogSeedTaskStore(wiki: wiki)
+        guard let task = tasks.load(taskId) else { return }
+        let batches = task.notes?.batches ?? []
+        print(CatalogLiveAuthProtocol.redacted("[C3 live \(tag)] 要点卡：\(batches.count) 批（没出成 \(batches.filter { !$0.ok }.count)）· 卡 \(task.carded?.count ?? 0) 张 · 请求 \(task.rounds) 次 · 目录 \(items) 项"))
+        if let aligned = tasks.loadNotes(SeedNoteAlignment.self, name: CatalogSeedTaskStore.alignedFileName, id: taskId) {
+            print(CatalogLiveAuthProtocol.redacted("[C3 live \(tag)] 对齐：\(aligned.groups.count) 个实体 · 合进本人 \(aligned.userPaths.count) 份 · 丢掉 \(aligned.dropped.count) 组"))
+            for g in aligned.groups where !g.mergedFrom.isEmpty || g.existingPage != nil {
+                print(CatalogLiveAuthProtocol.redacted("[C3 live \(tag)] 合并 · \(g.display) ← \(g.mergedFrom.joined(separator: "、"))" + (g.existingPage.map { " → 已有页 \($0)" } ?? "")))
+            }
+        }
+        if let clusters = tasks.loadNotes(SeedNoteClusters.self, name: CatalogSeedTaskStore.clusteredFileName, id: taskId) {
+            print(CatalogLiveAuthProtocol.redacted("[C3 live \(tag)] 聚类：本人页 \(clusters.userPages.map(\.path).joined(separator: "、")) · 主题页 \(clusters.topics.map(\.path).joined(separator: "、")) · 没归进目录 \(clusters.unplaced.count) 份"))
+        }
+    }
 
     private nonisolated static func seedCCFiles(root: URL) throws {
         let folder = root.appendingPathComponent("cc", isDirectory: true)
@@ -978,13 +1080,15 @@ final class CatalogLiveSmokeTests: XCTestCase {
 }
 
 // 只替换运行时鉴权，所有请求体和真实 HTTP/SSE 响应原样通过；不生成任何模拟响应。
-private final class CatalogLiveAuthProtocol: URLProtocol, URLSessionDataDelegate {
+final class CatalogLiveAuthProtocol: URLProtocol, URLSessionDataDelegate {
     static let placeholder = "catalog-live-runtime-key"
     nonisolated(unsafe) static var key: String?
     nonisolated(unsafe) static var host: String?
     nonisolated(unsafe) private static var factories: (Method, Method)?
     nonisolated(unsafe) private static var sharedFactories: (Method, Method)?
     nonisolated(unsafe) static var nonStreamingSession: URLSession?
+    /// 真跑取证：每个转发出去的请求体（已换 key 之前的原文，不含请求头）交给它看一眼；只在内存里，别落盘
+    nonisolated(unsafe) static var onOutgoingBody: ((Data) -> Void)?
 
     static func install() throws {
         guard let original = class_getClassMethod(URLSessionConfiguration.self, #selector(getter: URLSessionConfiguration.default)),
@@ -1051,6 +1155,7 @@ private final class CatalogLiveAuthProtocol: URLProtocol, URLSessionDataDelegate
             outgoing.httpBodyStream = nil
             outgoing.httpBody = bytes
         }
+        if let body = outgoing.httpBody { Self.onOutgoingBody?(body) }
         if outgoing.value(forHTTPHeaderField: "x-api-key") != nil { outgoing.setValue(key, forHTTPHeaderField: "x-api-key") }
         if outgoing.value(forHTTPHeaderField: "Authorization") != nil { outgoing.setValue("Bearer " + key, forHTTPHeaderField: "Authorization") }
         let configuration = URLSessionConfiguration.ephemeral

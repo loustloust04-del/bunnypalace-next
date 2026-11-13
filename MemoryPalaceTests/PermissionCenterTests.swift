@@ -48,26 +48,26 @@ final class PermissionCenterTests: XCTestCase {
 
     func testDefaultLevels_tightened() {
         // §4 收紧：健康组全关；基础能力保持开
-        XCTAssertEqual(PermissionCenter.level(.healthWeight), .notAllowed)
-        XCTAssertEqual(PermissionCenter.level(.healthApple), .notAllowed)
-        XCTAssertEqual(PermissionCenter.level(.toolsMaster), .bypass)
-        XCTAssertEqual(PermissionCenter.level(.fileLibrary), .bypass)
-        XCTAssertEqual(PermissionCenter.level(.memory), .bypass)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.healthWeight), .notAllowed)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.healthApple), .notAllowed)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.toolsMaster), .bypass)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.fileLibrary), .bypass)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.memory), .bypass)
     }
 
     func testSetLevel_projectsLegacyKeyAndSyncsSingleton() {
         #if PERSONAL_APPS
-        PermissionCenter.setLevel(.bypass, for: .trading)
+        PermissionCenter.setDefaultLevel(.bypass, for: .trading)
         XCTAssertEqual(UserDefaults.standard.object(forKey: "trading.inject.watchlist") as? Bool, true)
-        PermissionCenter.setLevel(.askOnce, for: .trading)
+        PermissionCenter.setDefaultLevel(.askOnce, for: .trading)
         XCTAssertEqual(UserDefaults.standard.object(forKey: "trading.inject.watchlist") as? Bool, false)
-        XCTAssertEqual(PermissionCenter.level(.trading), .askOnce)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.trading), .askOnce)
 
         #endif
         // 单例缓存域：setLevel 必须踢 HealthService 运行态（verify 挑刺 #2）
-        PermissionCenter.setLevel(.bypass, for: .healthApple)
+        PermissionCenter.setDefaultLevel(.bypass, for: .healthApple)
         XCTAssertTrue(HealthService.shared.injectionEnabled)
-        PermissionCenter.setLevel(.notAllowed, for: .healthApple)
+        PermissionCenter.setDefaultLevel(.notAllowed, for: .healthApple)
         XCTAssertFalse(HealthService.shared.injectionEnabled)
     }
 
@@ -77,8 +77,8 @@ final class PermissionCenterTests: XCTestCase {
         UserDefaults.standard.set(true, forKey: "health.inject.weight")    // 显式开
         UserDefaults.standard.set(false, forKey: "sendToolsEnabled")       // 显式关
         PermissionCenter.migrateIfNeeded(container: container)
-        XCTAssertEqual(PermissionCenter.level(.healthWeight), .bypass)
-        XCTAssertEqual(PermissionCenter.level(.toolsMaster), .notAllowed)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.healthWeight), .bypass)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.toolsMaster), .notAllowed)
     }
 
     func testMigration_existingInstallUnsetKeysGetOldDefaults() {
@@ -87,8 +87,8 @@ final class PermissionCenterTests: XCTestCase {
         context.insert(conv); try! context.save()
         PermissionCenter.migrateIfNeeded(container: container)
         // 体重旧默认开 → bypass（行为不变）；月经旧默认关 → notAllowed
-        XCTAssertEqual(PermissionCenter.level(.healthWeight), .bypass)
-        XCTAssertEqual(PermissionCenter.level(.healthCycle), .notAllowed)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.healthWeight), .bypass)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.healthCycle), .notAllowed)
         // §4 二值域保护：nudge/夜跑无显式值 → 写入旧默认 true
         XCTAssertEqual(UserDefaults.standard.object(forKey: "ccNudgeEnabled") as? Bool, true)
         #if PERSONAL_APPS
@@ -96,12 +96,12 @@ final class PermissionCenterTests: XCTestCase {
         #endif
         // shell 无历史 key：老装机迁移不写档位，新默认 askOnce 生效（plan-离线沙箱-phase1，粟粟拍）
         XCTAssertNil(UserDefaults.standard.object(forKey: PermissionDomain.shell.storageKey))
-        XCTAssertEqual(PermissionCenter.level(.shell), .askOnce)
+        XCTAssertEqual(PermissionCenter.defaultLevel(.shell), .askOnce)
     }
 
     func testMigration_freshInstallGetsTightenedDefaults() {
         PermissionCenter.migrateIfNeeded(container: container)   // 库空 = 新装
-        XCTAssertEqual(PermissionCenter.level(.healthWeight), .notAllowed)   // 新默认生效
+        XCTAssertEqual(PermissionCenter.defaultLevel(.healthWeight), .notAllowed)   // 新默认生效
         XCTAssertNil(UserDefaults.standard.object(forKey: "ccNudgeEnabled")) // 二值域不写 → 声明默认 false
     }
 
@@ -109,7 +109,7 @@ final class PermissionCenterTests: XCTestCase {
         PermissionCenter.migrateIfNeeded(container: container)
         UserDefaults.standard.set(true, forKey: "health.inject.weight")
         PermissionCenter.migrateIfNeeded(container: container)   // 第二次不该重跑
-        XCTAssertEqual(PermissionCenter.level(.healthWeight), .notAllowed)   // 仍是首轮结果
+        XCTAssertEqual(PermissionCenter.defaultLevel(.healthWeight), .notAllowed)   // 仍是首轮结果
     }
 
     // MARK: grants 编解码 + 判定
@@ -138,26 +138,42 @@ final class PermissionCenterTests: XCTestCase {
     func testInjectionAllowed_threeLevels() {
         // 共享域样本：三档都显式设，不依赖默认档位
         var shared = PermissionGrants(raw: nil)
-        PermissionCenter.setLevel(.bypass, for: .healthWeight)
-        XCTAssertTrue(PermissionCenter.injectionAllowed(.healthWeight, grants: shared))
-        PermissionCenter.setLevel(.notAllowed, for: .healthWeight)
-        XCTAssertFalse(PermissionCenter.injectionAllowed(.healthWeight, grants: shared))
-        PermissionCenter.setLevel(.askOnce, for: .healthWeight)
-        XCTAssertFalse(PermissionCenter.injectionAllowed(.healthWeight, grants: shared))   // 未答 = 安全缺省不注入
+        PermissionCenter.setDefaultLevel(.bypass, for: .healthWeight)
+        XCTAssertTrue(PermissionCenter.injectionAllowed(.healthWeight, profileId: nil, grants: shared))
+        PermissionCenter.setDefaultLevel(.notAllowed, for: .healthWeight)
+        XCTAssertFalse(PermissionCenter.injectionAllowed(.healthWeight, profileId: nil, grants: shared))
+        PermissionCenter.setDefaultLevel(.askOnce, for: .healthWeight)
+        XCTAssertFalse(PermissionCenter.injectionAllowed(.healthWeight, profileId: nil, grants: shared))   // 未答 = 安全缺省不注入
         shared.record(.healthWeight, allow: true)
-        XCTAssertTrue(PermissionCenter.injectionAllowed(.healthWeight, grants: shared))
+        XCTAssertTrue(PermissionCenter.injectionAllowed(.healthWeight, profileId: nil, grants: shared))
 
         #if PERSONAL_APPS
         var g = PermissionGrants(raw: nil)
-        PermissionCenter.setLevel(.bypass, for: .trading)
-        XCTAssertTrue(PermissionCenter.injectionAllowed(.trading, grants: g))
-        PermissionCenter.setLevel(.notAllowed, for: .trading)
-        XCTAssertFalse(PermissionCenter.injectionAllowed(.trading, grants: g))
-        PermissionCenter.setLevel(.askOnce, for: .trading)
-        XCTAssertFalse(PermissionCenter.injectionAllowed(.trading, grants: g))   // 未答 = 安全缺省不注入
+        PermissionCenter.setDefaultLevel(.bypass, for: .trading)
+        XCTAssertTrue(PermissionCenter.injectionAllowed(.trading, profileId: nil, grants: g))
+        PermissionCenter.setDefaultLevel(.notAllowed, for: .trading)
+        XCTAssertFalse(PermissionCenter.injectionAllowed(.trading, profileId: nil, grants: g))
+        PermissionCenter.setDefaultLevel(.askOnce, for: .trading)
+        XCTAssertFalse(PermissionCenter.injectionAllowed(.trading, profileId: nil, grants: g))   // 未答 = 安全缺省不注入
         g.record(.trading, allow: true)
-        XCTAssertTrue(PermissionCenter.injectionAllowed(.trading, grants: g))
+        XCTAssertTrue(PermissionCenter.injectionAllowed(.trading, profileId: nil, grants: g))
         #endif
+    }
+
+    /// atrium P3⑤0：带层判定——层 askOnce 看这个对话的授权，B 层跟默认
+    func testInjectionAllowed_followsFloor() {
+        let sandbox = PermissionSandbox()
+        defer { sandbox.leave() }
+        PermissionCenter.setDefaultLevel(.bypass, for: .images)
+        PermissionCenter.setFloorLevel(.askOnce, for: .images, profileId: "xctest-a")
+        var grants = PermissionGrants.empty
+        XCTAssertFalse(PermissionCenter.injectionAllowed(.images, profileId: "xctest-a", grants: grants), "层 askOnce + 对话没答 = 不注入")
+        XCTAssertTrue(PermissionCenter.injectionAllowed(.images, profileId: "xctest-b", grants: grants))
+        XCTAssertTrue(PermissionCenter.injectionAllowed(.images, profileId: nil, grants: grants))
+        grants.record(.images, allow: true)
+        XCTAssertTrue(PermissionCenter.injectionAllowed(.images, profileId: "xctest-a", grants: grants))
+        PermissionCenter.setFloorLevel(.notAllowed, for: .images, profileId: "xctest-a")
+        XCTAssertFalse(PermissionCenter.injectionAllowed(.images, profileId: "xctest-a", grants: grants), "层不允许：对话以前允许过也不注入")
     }
 
     // MARK: 工具域映射
@@ -174,12 +190,12 @@ final class PermissionCenterTests: XCTestCase {
     // MARK: 组合器走 grants（实发路径同源）
 
     func testComposedSummariesRespectGrants() {
-        PermissionCenter.setLevel(.askOnce, for: .trading)
+        PermissionCenter.setDefaultLevel(.askOnce, for: .trading)
         var g = PermissionGrants(raw: nil)
         XCTAssertEqual(TradingStore.composedTradingSummary(context: context, profileId: "p", grants: g), "")
         g.record(.trading, allow: true)
         // 允许后闸开（无数据仍为空串，但不再被闸拦——语义由上面的 injectionAllowed 用例锚定）
-        XCTAssertTrue(PermissionCenter.injectionAllowed(.trading, grants: g))
+        XCTAssertTrue(PermissionCenter.injectionAllowed(.trading, profileId: nil, grants: g))
     }
     #endif
 }

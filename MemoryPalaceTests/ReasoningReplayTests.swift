@@ -244,7 +244,7 @@ final class ReasoningReplayTests: XCTestCase {
 /// 假服务器：400 must be passed back → 记住 + 带字段重发 → 200；下次同端点直接带；没有可回传的思考就不重发、说人话
 @MainActor
 final class ReasoningReplayRouterTests: XCTestCase {
-    typealias Server = OutputTokenCapTests.ScriptedHTTPServer
+    typealias Server = ScriptedHTTPServer
 
     private var cleanups: [() -> Void] = []
 

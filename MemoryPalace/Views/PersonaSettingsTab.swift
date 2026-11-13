@@ -1,5 +1,7 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
 #if os(iOS)
 import UIKit
 #endif
@@ -39,6 +41,35 @@ struct PersonaSettingsTab: View {
         }
     }
     @State private var showPresetImporter = false
+    @State private var showPersonaImporter = false
+    @State private var pendingPersonaImport: PendingPersonaImport?
+    @State private var personaImportNotice: String?
+
+    struct PendingPersonaImport {
+        let profileId: String
+        let text: String
+        let existingCharacterCount: Int
+        let mainSlotOverrides: Bool
+    }
+
+    enum PersonaImportAction {
+        case clearMainSlot
+        case systemPromptOnly
+    }
+
+    enum PersonaImportResult {
+        case needsConfirmation(PendingPersonaImport)
+        case imported(mainSlotOverrides: Bool)
+    }
+
+    enum PersonaImportError: LocalizedError {
+        case profileChanged
+
+        var errorDescription: String? { "当前楼层已切换" }
+    }
+
+    private static let personaImportTypes: [UTType] = [.plainText, .text, .utf8PlainText]
+        + (UTType(filenameExtension: "md").map { [$0] } ?? [])
     /// 修全局卡顿：Prompt 页检查器用的预览（实发同一条组装路径）不再在 body 里同步算——输入变了防抖 0.25 秒后在 task 里算一次
     @State private var promptPreview: TurnPreview? = nil
     @State private var wikiPreviewRevision = 0
@@ -61,10 +92,7 @@ struct PersonaSettingsTab: View {
     @State private var expandedSegmentIndices: Set<Int> = []
     @AppStorage("selectedChatModel") private var selectedChatModelId = ""
     @State private var selectedSlotId: String? = nil
-    @State private var showFullEditor = false
-    @State private var fullEditLabel = ""
-    @State private var fullEditText = ""
-    @State private var fullEditSlotId: String? = nil
+    @State private var editingPromptSlot: PromptSlotEditing.Target?
     @State private var showStyleManagerFromSlots = false
     @State private var isRenamingPreset = false
     @State private var renamingPresetName = ""
@@ -129,6 +157,11 @@ struct PersonaSettingsTab: View {
     var body: some View {
         iOSPromptPage
             .modifier(SaveFailedAlert(message: $iOSSimpleSaveError))
+            #if os(iOS)
+            .fullScreenCover(item: $editingPromptSlot) { PromptSlotEditorSheet(target: $0) }
+            #else
+            .sheet(item: $editingPromptSlot) { PromptSlotEditorSheet(target: $0) }
+            #endif
     }
 
     // MARK: - Preset Export / Import
@@ -247,6 +280,81 @@ struct PersonaSettingsTab: View {
         importPresetData(data)
     }
 
+    private func handlePersonaImport(_ result: Result<URL, Error>) {
+        guard case .success(let url) = result, let pm = profileManager else { return }
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer {
+            if accessed { url.stopAccessingSecurityScopedResource() }
+        }
+        do {
+            let text = try PersonaFileImport.text(from: Data(contentsOf: url))
+            applyPersonaImport(text, profileId: pm.currentProfile.id)
+        } catch {
+            personaImportNotice = "导入失败：\(error.localizedDescription)"
+        }
+    }
+
+    @discardableResult
+    static func applyPersonaFile(_ text: String, to profile: inout Profile, confirmedReplacement: Bool = false) -> Bool {
+        guard profile.systemPrompt.isEmpty || confirmedReplacement else { return false }
+        profile.systemPrompt = text
+        return true
+    }
+
+    static func applyPersonaImport(
+        _ text: String, profileId: String, action: PersonaImportAction? = nil,
+        pm: ProfileManager, psm: PresetManager
+    ) throws -> PersonaImportResult {
+        guard pm.currentProfile.id == profileId else { throw PersonaImportError.profileChanged }
+        try pm.ensureWritable()
+        guard var profile = pm.profiles.first(where: { $0.id == profileId }) else {
+            throw ProfileManager.SaveError.profileMissing
+        }
+        let preset = psm.preset(byId: profile.presetId)
+        let mainSlotOverrides = preset?.prompts.contains {
+            $0.id == PromptSlot.mainId && $0.isEnabled && !$0.content.isEmpty
+        } == true
+        if action == nil, mainSlotOverrides || !profile.systemPrompt.isEmpty {
+            return .needsConfirmation(PendingPersonaImport(
+                profileId: profile.id, text: text, existingCharacterCount: profile.systemPrompt.count,
+                mainSlotOverrides: mainSlotOverrides
+            ))
+        }
+        if action == .clearMainSlot, var preset,
+           let index = preset.prompts.firstIndex(where: { $0.id == PromptSlot.mainId }) {
+            preset.prompts[index].content = ""
+            psm.save(preset)
+        }
+        applyPersonaFile(text, to: &profile, confirmedReplacement: true)
+        pm.updateProfile(profile)
+        return .imported(mainSlotOverrides: mainSlotOverrides && action != .clearMainSlot)
+    }
+
+    private func applyPersonaImport(_ text: String, profileId: String, action: PersonaImportAction? = nil) {
+        guard let pm = profileManager, let psm = presetManager else { return }
+        do {
+            switch try Self.applyPersonaImport(text, profileId: profileId, action: action, pm: pm, psm: psm) {
+            case .needsConfirmation(let pending):
+                pendingPersonaImport = pending
+            case .imported(let mainSlotOverrides):
+                var notice = "已导入 \(text.count) 字到系统提示"
+                if mainSlotOverrides {
+                    notice += "\n当前预设的「系统指令」槽有内容，会盖住系统提示；清空那个槽才生效"
+                }
+                personaImportNotice = notice
+            }
+        } catch {
+            personaImportNotice = "导入失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func confirmPersonaImport(clearMainSlot: Bool = false) {
+        guard let pending = pendingPersonaImport else { return }
+        pendingPersonaImport = nil
+        applyPersonaImport(pending.text, profileId: pending.profileId,
+                           action: clearMainSlot ? .clearMainSlot : .systemPromptOnly)
+    }
+
     // MARK: Persona — 采样参数
 
     private func personaSamplingSection(preset: Preset, profile: Profile, pm: ProfileManager, psm: PresetManager) -> some View {
@@ -291,10 +399,11 @@ struct PersonaSettingsTab: View {
                 psm.save(p)
             }
         )
-        let modelOutputLimit = providerManager?.model(byId: selectedChatModelId).flatMap { OutputTokenCap.modelLimit($0.modelId) }
+        let mainModel = providerManager?.model(byId: profile.preferredModel) ?? providerManager?.model(byId: selectedChatModelId)
+        let modelOutputLimit = mainModel.flatMap { OutputTokenCap.modelLimit($0.modelId) }
         // #094：所有端点都按 ParamCompat 判断（学到的 / models.dev 目录 / 血统），请求里不带（ProviderRouter.adaptedSampling）；
         // 推理档那条不算（只在开着推理强度时才不收）
-        let samplingIgnored = providerManager?.model(byId: selectedChatModelId).flatMap { model -> Bool? in
+        let samplingIgnored = mainModel.flatMap { model -> Bool? in
             guard let provider = providerManager?.provider(for: model),
                   provider.type == .openaiCompatible || provider.type == .anthropic else { return nil }
             return !ParamCompat.resolve(providerType: provider.type, baseURL: provider.baseURL, modelId: model.modelId,
@@ -495,12 +604,18 @@ struct PersonaSettingsTab: View {
     private func personaSimpleMode(preset: Preset, psm: PresetManager) -> some View {
         ForEach(Self.iOSSimplePromptFields) { field in
             let preview = cardFieldPreview(field.slotId)
-            Section(field.label) {
+            Section {
                 personaSlotField(preset: preset, slotId: field.slotId,
                                  placeholder: preview?.text ?? field.placeholder, psm: psm,
                                  height: Self.macSimpleFieldHeights[field.slotId] ?? 40)
                 if let hint = preview?.hint {
                     Text(hint).font(ShellStyle.secondaryFont).foregroundColor(Theme.textMuted)
+                }
+            } header: {
+                HStack {
+                    Text(field.label)
+                    Spacer()
+                    PromptSlotEditorButton(label: field.label) { openPromptSlotEditor(preset: preset, slotId: field.slotId, label: field.label, psm: psm) }
                 }
             }
         }
@@ -631,7 +746,7 @@ struct PersonaSettingsTab: View {
                     if expandedSlotIds.contains(slot.id) {
                         VStack(alignment: .leading, spacing: 6) {
                             if slot.isMarker {
-                                slotMarkerEditor(slot: slot, index: index, preset: preset, psm: psm)
+                                slotMarkerEditor(slot: slot, preset: preset, psm: psm)
                             } else {
                                 slotContentEditor(slot: slot, index: index, preset: preset, psm: psm)
                             }
@@ -712,12 +827,13 @@ struct PersonaSettingsTab: View {
                     .font(ShellStyle.secondaryFont).foregroundColor(Theme.textMuted)
             }
 
-            Text("内容")
-                .font(ShellStyle.bodyFont.weight(.regular)).foregroundColor(Theme.textMuted)
-            TextEditor(text: Binding(
-                get: { slot.content },
-                set: { val in var p = preset; p.prompts[index].content = val; psm.save(p) }
-            ))
+            HStack {
+                Text("内容")
+                    .font(ShellStyle.bodyFont.weight(.regular)).foregroundColor(Theme.textMuted)
+                Spacer()
+                PromptSlotEditorButton(label: slot.name) { openPromptSlotEditor(preset: preset, slotId: slot.id, label: slot.name, psm: psm) }
+            }
+            TextEditor(text: inlineSlotBinding(presetId: preset.id, slotId: slot.id, psm: psm))
             .font(ShellStyle.secondaryFont.monospaced())
             .frame(height: 80).padding(4)
             .background(RoundedRectangle(cornerRadius: 4).fill(Theme.mainBg))
@@ -726,24 +842,25 @@ struct PersonaSettingsTab: View {
     }
 
     /// Marker 插槽编辑器（直接编辑 slot content，和简单模式同步）
-    private func slotMarkerEditor(slot: PromptSlot, index: Int, preset: Preset, psm: PresetManager) -> some View {
+    private func slotMarkerEditor(slot: PromptSlot, preset: Preset, psm: PresetManager) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             if slot.isAutoFilled {
                 Text("此插槽由系统自动填充")
                     .font(ShellStyle.secondaryFont)
                     .foregroundColor(Theme.textMuted)
             } else {
-                Text("内容")
-                    .font(ShellStyle.bodyFont.weight(.regular))
-                    .foregroundColor(Theme.textSecondary)
+                HStack {
+                    Text("内容")
+                        .font(ShellStyle.bodyFont.weight(.regular))
+                        .foregroundColor(Theme.textSecondary)
+                    Spacer()
+                    PromptSlotEditorButton(label: slot.name) { openPromptSlotEditor(preset: preset, slotId: slot.id, label: slot.name, psm: psm) }
+                }
                 Text("留空时由楼层对应字段填充（助手设定/用户描述等）；填了内容则优先用这里的")
                     .font(ShellStyle.secondaryFont)
                     .foregroundColor(Theme.textMuted)
 
-                TextEditor(text: Binding(
-                    get: { slot.content },
-                    set: { val in var p = preset; p.prompts[index].content = val; psm.save(p) }
-                ))
+                TextEditor(text: inlineSlotBinding(presetId: preset.id, slotId: slot.id, psm: psm))
                 .font(ShellStyle.bodyFont.weight(.regular))
                 .frame(height: 60).padding(4)
                 .background(RoundedRectangle(cornerRadius: 4).fill(Theme.mainBg))
@@ -1165,7 +1282,7 @@ struct PersonaSettingsTab: View {
 
     /// ①：设置页入口没有对话——不编数字、不编段落
     private var unboundTurnNotice: some View {
-        Text("设置页没有绑定对话——到聊天右栏「Prompt 工具」看这一轮实发")
+        Text("设置页没有绑定对话——在聊天页输入框左下角的「窗口透视」里看这一轮实发")
             .font(m.caption)
             .foregroundColor(Theme.textMuted)
             .fixedSize(horizontal: false, vertical: true)
@@ -1174,7 +1291,7 @@ struct PersonaSettingsTab: View {
     /// D4：拿上一轮 cacheRead 对照各段累计 token 估算，标缓存覆盖边界（粗估，tool schema 不计入故偏乐观）
     private func cacheCoverageBadges(segments: [TaggedSegment]) -> [Int: String] {
         guard let covered = viewModel?.lastTurnUsage?.cacheReadTokens, covered > 0 else { return [:] }
-        // 线上顺序：所有 system 段并成 system prompt 在前，非 system 消息在后（与 assemble() 一致）
+        // 线上顺序：所有 system 段并成 system prompt 在前，非 system 消息在后（与 PromptMessage.legacyShape 一致）
         let wireOrder = segments.enumerated().filter { $0.element.role == "system" }
             + segments.enumerated().filter { $0.element.role != "system" }
         var badges: [Int: String] = [:]
@@ -1212,7 +1329,16 @@ struct PersonaSettingsTab: View {
             .pickerStyle(.segmented)
             .tint(Theme.branchIndicator)
             if requestSource == "sent" {
+                #if os(macOS)
+                if viewModel == nil, SentRequestStore.shared.lastRecordedConversationId != nil {
+                    Text("设置窗没有绑定对话，下面是这台 Mac 最近一次发出的请求。")
+                        .font(m.caption)
+                        .foregroundColor(Theme.textMuted)
+                }
+                SentRequestBodyView(conversationId: viewModel?.selectedConversation?.id ?? SentRequestStore.shared.lastRecordedConversationId)
+                #else
                 SentRequestBodyView(conversationId: viewModel?.selectedConversation?.id)
+                #endif
             } else {
                 personaRequestNextTurn(turn: turn)
             }
@@ -1258,15 +1384,10 @@ struct PersonaSettingsTab: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            ScrollView(.vertical) {
-                Text(json)
-                    .font(m.caption.monospaced())
-                    .foregroundColor(Theme.textPrimary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-            }
-            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.mainBg))
+            LongTextBox(text: json, fontSize: Theme.F.caption)
+                .padding(.horizontal, 10)
+                .padding(.top, 6)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.mainBg))
         }
     }
 
@@ -1276,7 +1397,7 @@ struct PersonaSettingsTab: View {
             return ("// 无法获取 provider 信息", nil)
         }
         guard let turn else {
-            return ("// 设置页没有绑定对话——到聊天右栏「Prompt 工具」看这一轮实发", nil)
+            return ("// 设置页没有绑定对话——在聊天页输入框左下角的「窗口透视」里看这一轮实发", nil)
         }
         let preview = turn.requestBodyAndPlacementNote(providerManager: pm)
         guard let body = preview.body else {
@@ -1555,7 +1676,8 @@ extension PersonaSettingsTab {
             guard active, let pm = providerManager, let viewModel else { return }
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
-            toolDrawerPreview = viewModel.previewTools(providerManager: pm, globalModelId: selectedChatModelId)
+            toolDrawerPreview = viewModel.previewTools(providerManager: pm, profileModelId: profileManager?.currentProfile.preferredModel,
+                                                       globalModelId: selectedChatModelId)
         }
     }
 
@@ -1734,41 +1856,6 @@ extension PersonaSettingsTab {
         #if os(iOS)
         .navigationTitle("Prompt")   // mac 根页标题由宿主 `MacSettingsPage` 的 toolbar 给（同外观五页口径）
         .navigationBarTitleDisplayMode(.inline)
-        .fullScreenCover(isPresented: $showFullEditor) {
-            VStack(spacing: 0) {
-                HStack {
-                    Button("取消") { showFullEditor = false }
-                        .foregroundColor(Theme.textMuted)
-                    Spacer()
-                    Text(fullEditLabel)
-                        .font(.system(size: Theme.F.label, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                    Spacer()
-                    Button("完成") {
-                        if let slotId = fullEditSlotId,
-                           let psm = presetManager,
-                           let pm = profileManager {
-                            let profile = pm.currentProfile
-                            applyIOSSimpleDraft(slotId: slotId, text: fullEditText, presetId: profile.presetId)
-                            persistIOSSimpleDrafts(presetId: profile.presetId, psm: psm)
-                        }
-                        showFullEditor = false
-                    }
-                    .foregroundColor(Theme.branchIndicator)
-                    .fontWeight(.medium)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-
-                Divider().opacity(0.2)
-
-                TextEditor(text: $fullEditText)
-                    .font(.system(size: Theme.F.body))
-                    .padding(12)
-                    .scrollContentBackground(.hidden)
-            }
-            .background(Theme.sidebarBg)
-        }
         #endif
         // E3：`.fileImporter` 出 iOS 门——mac「导入 Prompt 预设」终于有展示器
         .fileImporter(isPresented: $showPresetImporter, allowedContentTypes: [.json]) { result in
@@ -1777,6 +1864,32 @@ extension PersonaSettingsTab {
         .alert("预设导入提示", isPresented: Binding(get: { presetImportNotice != nil }, set: { if !$0 { presetImportNotice = nil } })) {
             Button("好的") { presetImportNotice = nil }
         } message: { Text(presetImportNotice ?? "") }
+        .fileImporter(isPresented: $showPersonaImporter, allowedContentTypes: Self.personaImportTypes) { result in
+            handlePersonaImport(result)
+        }
+        .alert(
+            pendingPersonaImport?.mainSlotOverrides == true
+                ? "当前预设槽会盖住系统提示"
+                : "会替换现有系统提示（\(pendingPersonaImport?.existingCharacterCount ?? 0) 字）",
+            isPresented: Binding(get: { pendingPersonaImport != nil },
+                                 set: { if !$0 { pendingPersonaImport = nil } })
+        ) {
+            if pendingPersonaImport?.mainSlotOverrides == true {
+                Button("清空预设槽并导入", role: .destructive) { confirmPersonaImport(clearMainSlot: true) }
+                Button("只写系统提示") { confirmPersonaImport() }
+            } else {
+                Button("替换", role: .destructive) { confirmPersonaImport() }
+            }
+            Button("取消", role: .cancel) { pendingPersonaImport = nil }
+        } message: {
+            if pendingPersonaImport?.mainSlotOverrides == true {
+                Text("会替换现有系统提示（\(pendingPersonaImport?.existingCharacterCount ?? 0) 字）。清空当前预设的「系统指令」槽后，导入内容才会生效。")
+            }
+        }
+        .alert("人设导入提示", isPresented: Binding(get: { personaImportNotice != nil },
+                                              set: { if !$0 { personaImportNotice = nil } })) {
+            Button("好的") { personaImportNotice = nil }
+        } message: { Text(personaImportNotice ?? "") }
     }
 
     @ViewBuilder
@@ -2274,6 +2387,25 @@ extension PersonaSettingsTab {
                 }
             }
         }
+
+        Button { showPersonaImporter = true } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 18))
+                    .foregroundColor(Theme.branchIndicator)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("导入人设文件")
+                        .font(m.body)
+                        .foregroundColor(Theme.textPrimary)
+                    Text("md / txt 整份写进这层楼的系统提示")
+                        .font(m.caption)
+                        .foregroundColor(Theme.textMuted)
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     var iOSPromptModePicker: some View {
@@ -2335,17 +2467,7 @@ extension PersonaSettingsTab {
                         .lineLimit(1)
                 }
                 Spacer()
-                Button {
-                    fullEditLabel = label
-                    fullEditText = binding.wrappedValue
-                    fullEditSlotId = slotId
-                    showFullEditor = true
-                } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 14))
-                        .foregroundColor(Theme.textMuted.opacity(0.6))
-                }
-                .buttonStyle(.plain)
+                PromptSlotEditorButton(label: label) { openPromptSlotEditor(preset: preset, slotId: slotId, label: label, psm: psm) }
             }
             .padding(.horizontal, 10)
 
@@ -2360,6 +2482,34 @@ extension PersonaSettingsTab {
         .id(slotId)
     }
     #endif
+
+    func openPromptSlotEditor(preset: Preset, slotId: String, label: String, psm: PresetManager) {
+        guard let pm = profileManager else { return }
+        flushIOSSimpleDraftSave(presetId: preset.id, psm: psm)
+        guard iOSSimpleDirty.isEmpty else { return }
+        do {
+            editingPromptSlot = try PromptSlotEditing.shared.open(
+                profileId: pm.currentProfile.id, presetId: preset.id, slotId: slotId, label: label,
+                profiles: pm, presets: psm)
+        } catch {
+            iOSSimpleSaveError = error.localizedDescription
+        }
+    }
+
+    func inlineSlotBinding(presetId: String, slotId: String, psm: PresetManager) -> Binding<String> {
+        let profileId = profileManager?.currentProfile.id ?? ""
+        return Binding(
+            get: { psm.preset(byId: presetId)?.prompts.first(where: { $0.id == slotId })?.content ?? "" },
+            set: { text in
+                guard let pm = profileManager else { return }
+                do {
+                    try PromptSlotEditing.shared.setInline(text, profileId: profileId, presetId: presetId,
+                                                          slotId: slotId, profiles: pm, presets: psm)
+                } catch {
+                    iOSSimpleSaveError = error.localizedDescription
+                }
+            })
+    }
 
     /// `immediate`：mac 侧「0 防抖」= 每次改动同步 persist（B11 astra R5b-I2 ①：
     /// 不能只把 `scheduleIOSSimpleDraftSave` 的 sleep 常量改 0，那仍是可取消的异步 Task）。iOS 仍是 300ms 防抖。
@@ -2471,6 +2621,13 @@ extension PersonaSettingsTab {
             do { try psm.persistNew(next) } catch {
                 return (dirty, "改动没保存：\(error.localizedDescription)。字还在，稍后会再试。")
             }
+            if let profileId = next.ownerProfileId {
+                for (index, slot) in next.prompts.enumerated()
+                    where dirty.contains(slot.id) && slot.content != preset.prompts[index].content {
+                    PromptSlotEditing.shared.recordInline(profileId: profileId, presetId: presetId,
+                                                          slotId: slot.id, content: slot.content, presets: psm)
+                }
+            }
         }
         return (missing, missing.isEmpty ? nil : "有一栏对应的插槽已不在当前预设里，那一栏的改动没保存。")
     }
@@ -2553,7 +2710,7 @@ struct ParameterRow: View {
 }
 
 /// Prompt 页保存没成：弹原因，字留在页面上
-private struct SaveFailedAlert: ViewModifier {
+struct SaveFailedAlert: ViewModifier {
     @Binding var message: String?
 
     func body(content: Content) -> some View {
@@ -2578,6 +2735,7 @@ struct SlotEditPage: View {
     /// 打开时钉住楼层 + 预设 + 插槽和当时的值（之后删槽 / 重排 / 换预设都写不到别的槽）
     @State private var session: PromptSlotEdit?
     @State private var saveError: String?
+    @State private var editingPromptSlot: PromptSlotEditing.Target?
 
     /// 显示用：按 id 现找；槽没了就显示打开时的样子（保存会报「已不在」）
     private var slot: PromptSlot {
@@ -2593,6 +2751,7 @@ struct SlotEditPage: View {
     /// 有未保存改动 → 保存键亮起。用 @State 而非计算属性：由各字段 onChange 主动刷新，
     /// 强制 toolbar item 重算（TextEditor 直接驱动计算属性时 toolbar 不刷新）。
     @State private var isDirty = false
+    @State private var confirmingDiscard = false
 
     /// D4：删除此插槽的确认。这一页是独立 struct 且删完要 `dismiss()`，pending 只能各存各的；
     /// 删除实现与页内两个入口共用文件级的 `deletePromptSlot`（按 preset id + slot id 重找，取消零写）。
@@ -2610,13 +2769,45 @@ struct SlotEditPage: View {
     private func saveAndExit() {
         guard let session, let profiles = profileManager else { return }
         do {
-            try session.commit(name: editName, role: editRole, content: editContent, depth: Int(editDepth) ?? 0,
-                               profiles: profiles, presets: psm)
+            try saveSlotDraft(session, profiles: profiles)
             dismiss()
         } catch {
             saveError = error.localizedDescription
         }
     }
+    private func saveSlotDraft(_ session: PromptSlotEdit, profiles: ProfileManager) throws {
+        guard profiles.currentProfile.id == session.profileId else { throw PromptSlotEditing.SaveError.profileChanged }
+        try session.commit(name: editName, role: editRole, content: editContent, depth: Int(editDepth) ?? 0,
+                           profiles: profiles, presets: psm)
+        if editContent != session.baseline.content && !slot.isAutoFilled {
+            PromptSlotEditing.shared.recordInline(profileId: session.profileId, presetId: session.presetId,
+                                                  slotId: slotId, content: editContent, presets: psm)
+        }
+    }
+
+    private func openSlotEditor() {
+        guard let session, let profiles = profileManager else { return }
+        do {
+            try saveSlotDraft(session, profiles: profiles)
+            syncSlotDraft()
+            editingPromptSlot = try PromptSlotEditing.shared.open(
+                profileId: session.profileId, presetId: session.presetId, slotId: slotId,
+                label: slot.name, profiles: profiles, presets: psm)
+        } catch {
+            saveError = error.localizedDescription
+        }
+    }
+
+    private func syncSlotDraft() {
+        guard let session, let latest = psm.preset(byId: session.presetId)?.prompts.first(where: { $0.id == slotId }) else { return }
+        self.session = PromptSlotEdit(profileId: session.profileId, presetId: session.presetId, baseline: latest)
+        editName = latest.name
+        editRole = latest.role
+        editContent = latest.content
+        editDepth = "\(latest.injectionDepth)"
+        refreshDirty()
+    }
+
 
     /// 自定义顶栏：复刻聊天页 iOSChatTopBar 的玻璃返回键 + 标题 + 玻璃保存胶囊。
     /// 不走系统导航栏 —— glassEffect 只有在自定义 overlay 里才正确渲染成玻璃圆/胶囊，
@@ -2630,7 +2821,7 @@ struct SlotEditPage: View {
                 .padding(.horizontal, 88)
 
             HStack {
-                GlassBackButton { dismiss() }
+                GlassBackButton { if isDirty { confirmingDiscard = true } else { dismiss() } }
                 Spacer()
                 Button(action: saveAndExit) {
                     Text("保存")
@@ -2686,7 +2877,7 @@ struct SlotEditPage: View {
             }
             .listRowBackground(Theme.mainBg)
 
-            Section("内容") {
+            Section {
                 if slot.isAutoFilled {
                     Text("此插槽由系统自动填充")
                         .font(.system(size: Theme.F.body))
@@ -2701,6 +2892,13 @@ struct SlotEditPage: View {
                         .font(.system(size: Theme.F.body))
                         .frame(minHeight: 300)
                         .scrollContentBackground(.hidden)
+                }
+            }
+            header: {
+                HStack {
+                    Text("内容")
+                    Spacer()
+                    if !slot.isAutoFilled { PromptSlotEditorButton(label: slot.name, action: openSlotEditor) }
                 }
             }
             .listRowBackground(Theme.mainBg)
@@ -2745,6 +2943,7 @@ struct SlotEditPage: View {
             Button("取消", role: .cancel) { pendingDelete = false }
         }
         .modifier(SaveFailedAlert(message: $saveError))
+        .fullScreenCover(item: $editingPromptSlot, onDismiss: syncSlotDraft) { PromptSlotEditorSheet(target: $0) }
         .onAppear {
             guard session == nil else { return }
             let opened = slot
@@ -2759,6 +2958,7 @@ struct SlotEditPage: View {
         .onChange(of: editRole) { _, _ in refreshDirty() }
         .onChange(of: editContent) { _, _ in refreshDirty() }
         .onChange(of: editDepth) { _, _ in refreshDirty() }
+        .discardChangesGuard(isDirty: isDirty, confirming: $confirmingDiscard, onDiscard: { dismiss() })
     }
 }
 
@@ -2849,10 +3049,7 @@ private struct PromptNamesRow: View {
         .buttonStyle(.plain)
         .sheet(isPresented: $editing) {
             NavigationStack {
-                GeneralPage()
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) { Button("完成") { editing = false } }
-                    }
+                GeneralPage(showsNameToolbar: true)
             }
             #if os(macOS)
             .frame(minWidth: 440, minHeight: 480)

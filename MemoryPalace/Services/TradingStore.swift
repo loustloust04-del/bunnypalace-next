@@ -11,8 +11,8 @@ enum TradingStore {
     static let watchlistGateKey = "trading.inject.watchlist"
 
     static var watchlistGateEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: watchlistGateKey) as? Bool ?? false }
-        set { PermissionCenter.setLevel(newValue ? .bypass : .notAllowed, for: .trading) }   // 委托：防失同步
+        get { PermissionCenter.defaultLevel(.trading) == .bypass }   // 只代表默认；请求路径用 PermissionCenter.level(_:profileId:)
+        set { PermissionCenter.setDefaultLevel(newValue ? .bypass : .notAllowed, for: .trading) }   // 委托：防失同步
     }
 
     // MARK: - 研报（axismundi 产物，md + frontmatter）
@@ -67,15 +67,24 @@ enum TradingStore {
 
     /// 去掉 frontmatter 留正文（研报全文渲染用——字段已在列表行展示，正文里裸渲染很丑）。
     static func stripFrontmatter(_ md: String) -> String {
-        guard md.hasPrefix("---\n"),
-              let end = md.range(of: "\n---", range: md.index(md.startIndex, offsetBy: 4)..<md.endIndex) else { return md }
-        let rest = md[end.upperBound...].drop { $0 == "-" }
-        return String(rest).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let end = frontmatterClose(md) else { return md }
+        return String(md[end.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 收尾的 `---` 必须独占一行：头里的 `----` 分隔行、`--- 备注` 之类不算
+    private static func frontmatterClose(_ md: String) -> Range<String.Index>? {
+        guard md.hasPrefix("---\n") else { return nil }
+        var from = md.index(md.startIndex, offsetBy: 4)
+        while let hit = md.range(of: "\n---", range: from..<md.endIndex) {
+            if hit.upperBound == md.endIndex || md[hit.upperBound] == "\n" { return hit }
+            from = hit.upperBound
+        }
+        return nil
     }
 
     /// 最小 frontmatter 解析（--- 包裹的 key: value 行）。非 yaml 全功能，够用即可。
     static func parseFrontmatter(_ md: String) -> [String: String] {
-        guard md.hasPrefix("---\n"), let end = md.range(of: "\n---", range: md.index(md.startIndex, offsetBy: 4)..<md.endIndex) else { return [:] }
+        guard let end = frontmatterClose(md) else { return [:] }
         var out: [String: String] = [:]
         for line in md[md.index(md.startIndex, offsetBy: 4)..<end.lowerBound].split(separator: "\n") {
             guard let colon = line.firstIndex(of: ":") else { continue }
@@ -137,7 +146,7 @@ enum TradingStore {
         let airSpan = AirProbeSections.enabled ? AirProbeSections.enter("TradingStore.composedTradingSummary") : nil
         defer { if let airSpan { AirProbeSections.leave(airSpan) } }
         #endif
-        guard PermissionCenter.injectionAllowed(.trading, grants: grants) else { return "" }
+        guard PermissionCenter.injectionAllowed(.trading, profileId: profileId, grants: grants) else { return "" }
         var parts: [String] = []
 
         var desc = FetchDescriptor<TickerEntry>(

@@ -11,19 +11,125 @@ enum ChatTextRole: String {
     case global
     case user
     case assistant
+    /// 聊天页里的非角色正文（思考过程 sheet 等）：跟聊天主题的 textPrimary，文章模式下等同 global
+    case chatPlain
 
-    var color: Color {
+    var color: Color { color(in: .chat) }
+
+    /// 按取色作用域给角色字色：聊天页用 `Theme.chat`；被非聊天页复用（编程会话、助手面板）时用全局，字色和泡底同源。
+    func color(in scope: ThemeScope) -> Color {
+        let palette = scope.palette
         switch self {
-        case .global: Theme.textPrimary
-        case .user: Theme.userText
-        case .assistant: Theme.assistantText
+        case .global: return Theme.textPrimary
+        case .chatPlain: return palette.textPrimary
+        case .user: return palette.userText
+        case .assistant: return palette.assistantText
         }
     }
 }
 
+/// 聊天组件被复用时的取色作用域。聊天页内默认 `.chat`；非聊天页（编程会话、助手面板）复用聊天组件时
+/// 在根上设 `.environment(\.themeScope, .global)`，组件整套读全局，不被气泡主题染。
+enum ThemeScope: Hashable {
+    case chat
+    case global
+
+    var palette: ThemePalette { self == .chat ? Theme.chat : Theme.global }
+}
+
+private struct ThemeScopeKey: EnvironmentKey { static let defaultValue = ThemeScope.chat }
+
+extension EnvironmentValues {
+    var themeScope: ThemeScope {
+        get { self[ThemeScopeKey.self] }
+        set { self[ThemeScopeKey.self] = newValue }
+    }
+}
+
+/// 聊天里嵌的卡片（ChatCardShell 系列）的外壳色。nil = 经典米白卡（文章模式原样）。
+struct ChatCardStyle {
+    let body: Color
+    let stroke: Color
+    let label: Color
+}
+
+/// 一套 token 的取色视图。`Theme.chat` 用它给聊天页取色，字段名与 `Theme` 的全局取色一一对应。
+struct ThemePalette {
+    let tokens: ThemeTokenSet
+
+    var mainBg: Color { tokens.mainBg.color }
+    var sidebarBg: Color { tokens.sidebarBg.color }
+    var userBubble: Color { tokens.userBubble.color }
+    var userBubbleGradient: Color? { tokens.userBubbleGradient?.color }
+    var assistantBubble: Color { tokens.assistantBubble.color }
+    var accent: Color { tokens.accent.color }
+    var textPrimary: Color { tokens.textPrimary.color }
+    var textSecondary: Color { tokens.textSecondary.color }
+    var textMuted: Color { tokens.textMuted.color }
+    var userText: Color { (tokens.userText ?? tokens.textPrimary).color }
+    var assistantText: Color { (tokens.assistantText ?? tokens.textPrimary).color }
+    var favorite: Color { tokens.favorite.color }
+    var danger: Color { tokens.danger.color }
+    var branchIndicator: Color { tokens.branchIndicator.color }
+    #if os(macOS)
+    var platformMainBackgroundColor: NSColor { tokens.mainBg.platformColor }
+    #else
+    var platformMainBackgroundColor: UIColor { tokens.mainBg.platformColor }
+    #endif
+}
+
 enum Theme {
+    /// 聊天页（消息列表、气泡、聊天顶栏、输入栏、时间分隔、回应徽标、状态行与它的 sheet）取色的唯一入口。
+    /// 兔兔皮肤开着时排第一（聊天页也显示兔兔配色，气泡模式色不生效）；否则用全局同一套主题，
+    /// 气泡模式下由这套主题的 bubbleMode* 色盖住泡底 / 泡字（见 `ThemeManager.currentChatTokenSet`）。
+    /// 侧栏 / 列表 / 设置 / page0 / page2 继续用下面的全局取色，不受气泡模式色影响。
+    static var chat: ThemePalette {
+        ThemePalette(tokens: chatTokens(skin: skinTokens, manager: ThemeManager.shared))
+    }
+
+    /// 全局取色（同下面一组静态色）的 palette 视图，给按作用域取色的组件用。
+    static var global: ThemePalette { ThemePalette(tokens: currentTokens) }
+
+    /// 聊天里嵌的卡片外壳取色（唯一入口）。只有三条同时成立才换成聊天主题色，否则 nil = 经典米白纸壳：
+    /// - 卡片在名单里（`ChatCardShell(themed: true)`）：内部取色全走主题 token / 系统自适应色、深色底下验证过可读的卡——
+    ///   现在只有「进度」两张（TurnActivityCardView、CCPhaseCardView）。图表（ChartInk 固定纸墨）、待办、问答、骰子、
+    ///   单词、计时、时间线、音乐、审批、顶部岛等内部写死浅纸墨色的卡一律不进名单，保持米白纸 + 原墨；
+    /// - 作用域是聊天（文件库预览、编程会话等非聊天入口设 `.global`）；
+    /// - 气泡模式（文章模式照旧米白）。
+    /// 名单卡：卡底 = 聊天 sidebarBg，描边 = textMuted 35%，标签字 = textSecondary（iMessage 浅 / 深都 ≥ 4.5:1）。
+    static func chatCardStyle(themed: Bool, scope: ThemeScope) -> ChatCardStyle? {
+        guard themed, scope == .chat, ThemeManager.shared.isBubbleModeActive else { return nil }
+        let p = chat
+        return ChatCardStyle(body: p.sidebarBg, stroke: p.textMuted.opacity(0.35), label: p.textSecondary)
+    }
+
+    /// 聊天正文 markdown 引用块的颜色：气泡模式下用泡里的正文色（蓝 / 灰泡上都看得清）；
+    /// 文章模式和非聊天调用方返回 nil = 照旧 secondary。
+    static func chatBlockQuoteColor(for role: ChatTextRole) -> Color? {
+        role != .global && ThemeManager.shared.isBubbleModeActive ? role.color : nil
+    }
+
+    /// 聊天配色的优先级：皮肤 > 聊天主题。单独拎出来给测试直接验证顺序。
+    static func chatTokens(skin: ThemeTokenSet?, manager: ThemeManager) -> ThemeTokenSet {
+        skin ?? manager.currentChatTokenSet
+    }
+
+    private static var skinTokens: ThemeTokenSet? {
+        #if PERSONAL_APPS
+        if SkinState.shared.active {
+            return TutuSkinPalette.tokens
+        }
+        #endif
+        return nil
+    }
+
     private static var currentTokens: ThemeTokenSet {
-        ThemeManager.shared.currentTokenSet
+        #if PERSONAL_APPS
+        if SkinState.shared.active {
+            return TutuSkinPalette.tokens
+        }
+        #endif
+        return ThemeManager.shared.currentTokenSet
     }
 
     static var mainBg: Color { currentTokens.mainBg.color }
@@ -42,7 +148,14 @@ enum Theme {
     static var favorite: Color { currentTokens.favorite.color }
     static var danger: Color { currentTokens.danger.color }
     static var branchIndicator: Color { currentTokens.branchIndicator.color }
-    static var activeScheme: ColorScheme { ThemeManager.shared.activeScheme }
+    static var activeScheme: ColorScheme {
+        #if PERSONAL_APPS
+        if SkinState.shared.active {
+            return .dark
+        }
+        #endif
+        return ThemeManager.shared.activeScheme
+    }
 
     #if os(macOS)
     static var platformMainBackgroundColor: NSColor { currentTokens.mainBg.platformColor }
@@ -51,10 +164,6 @@ enum Theme {
     static var platformMainBackgroundColor: UIColor { currentTokens.mainBg.platformColor }
     #endif
 
-    static let bubbleCornerRadius: CGFloat = 16
-    static let bubblePadding: CGFloat = 14
-    static let bubbleSpacing: CGFloat = 6
-    static let bubbleMaxWidthRatio: CGFloat = 0.75
     /// 正文栏 / 输入条的内容最大宽度。`.frame(maxWidth:)` 只夹不撑——iPhone 屏宽远小于它，
     /// 加了等于没加；iPad 与 macOS 宽窗下防止一行文字拉到 1000pt。
     ///
@@ -141,13 +250,6 @@ enum Theme {
     #endif
 
     static var cream: Color { mainBg }
-    static var paleBlue: Color { accent }
-    static var softBlue: Color { branchIndicator }
-    static var userCard: Color { userBubble }
-    static var assistantCard: Color { assistantBubble }
-    static let cardCornerRadius = bubbleCornerRadius
-    static let cardPadding = bubblePadding
-    static let cardSpacing = bubbleSpacing
 }
 
 // MARK: - Hex Color Extension

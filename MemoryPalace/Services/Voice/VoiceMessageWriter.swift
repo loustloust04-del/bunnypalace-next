@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 import AVFoundation
@@ -18,8 +19,8 @@ enum VoiceMessageWriter {
         options: []
     )
 
-    // 测试注入点
-    static var proactiveEnabledProvider: () -> Bool = { UserDefaults.standard.bool(forKey: VoiceTuning.proactiveKey) }
+    // 测试注入点：入参 = 楼层 id；读这一层的主动语音档位（老键 voice_proactive_enabled 只是默认的投影，atrium P3⑤0）
+    static var proactiveEnabledProvider: (String) -> Bool = { PermissionCenter.level(.voiceProactive, profileId: $0) == .bypass }
     /// 无 ProfileManager 引用的调用点（CC 主动消息 / 换一版）用；测试注入假楼层防污染真 UserDefaults
     static var profilesProvider: () -> [Profile] = { ProfileManager.loadProfiles() }
     /// 楼层 `voiceServiceId` → 服务配置
@@ -37,6 +38,7 @@ enum VoiceMessageWriter {
         let model: String?
         let profileID: String
         let effects: VoiceEffectConfiguration
+        let tuning: VoiceTuning.Settings
     }
 
     /// 楼层能发语音条吗：有服务（认得的厂商）+ 要 key 的服务有 key（系统音不要）+ 选了声音。不看主动开关。
@@ -49,7 +51,8 @@ enum VoiceMessageWriter {
         let synth = synthesizerProvider(service)
         return VoiceSetup(service: service, synthesizer: synth, voiceId: voiceId,
                           model: synth.capabilities.resolvedModel(profile.messageModel),
-                          profileID: profile.id, effects: profile.voiceEffects ?? VoiceEffectConfiguration())
+                          profileID: profile.id, effects: profile.voiceEffects ?? VoiceEffectConfiguration(),
+                          tuning: VoiceTuning.current(for: profile))
     }
 
     /// 生成中的 node（占位/换一版共用，防重入）
@@ -80,7 +83,7 @@ enum VoiceMessageWriter {
         let script = firstScript(content: node.content, segments: segs) ?? ""
         let profile = profiles.first { $0.id == node.profileId }
         let setup = voiceSetup(for: profile)
-        let canGenerate = proactiveEnabledProvider() && setup != nil && !script.isEmpty
+        let canGenerate = proactiveEnabledProvider(node.profileId) && setup != nil && !script.isEmpty
 
         // 两容器同步消费（首块 → 占位/降级；多余块 → 脚本文字）
         node.content = consumeVoiceBlocks(in: node.content, canGenerate: canGenerate)
@@ -221,7 +224,7 @@ enum VoiceMessageWriter {
     private static func synthesize(_ script: String, setup: VoiceSetup) async throws -> AudioClip {
         try await VoiceEffectsRenderer.render(script, configuration: setup.effects, profileID: setup.profileID) { text, context in
             try await setup.synthesizer.synthesize(text: text, voice: setup.voiceId, model: setup.model,
-                                                  tuning: VoiceTuning.current(), context: context)
+                                                  tuning: setup.tuning, context: context)
         }
     }
 

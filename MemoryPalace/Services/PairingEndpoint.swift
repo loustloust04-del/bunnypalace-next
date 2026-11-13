@@ -1,12 +1,12 @@
 import Foundation
 
 /// Mac 配对页从哪个 hub 拿二维码（#046 刀 2）。三条路：
-/// - 这台 Mac 已有外部 hub（launchd 装的 / 7890 有人应答）→ 7890 + `HubTokenStore`（粟粟那台走这条，和以前一样）
+/// - 这台 Mac 已有外部 hub（launchd 装的 / 7890 有人应答）→ 7890 + 本机外部 hub 的口令（`externalHubToken`：plist，粟粟那台走这条）
 /// - 没有外部 hub、内嵌 hub 在跑 → 它的端口 + Keychain `cc-bridge-hub-token`
 /// - 都没有 → 提示先打开「启动 CC 桥接」开关
 enum PairingEndpoint: Equatable {
     case ready(port: Int, token: String)
-    /// 外部 hub 在，但口令读不到（Keychain / plist 都没有）
+    /// 外部 hub 在，但口令读不到（plist 没有、主 hub 配的也不是本机 7890）
     case missingToken
     case noHub
 
@@ -20,6 +20,17 @@ enum PairingEndpoint: Equatable {
         guard let port = embeddedPort else { return .noHub }
         guard let token = embeddedToken, !token.isEmpty else { return .missingToken }
         return .ready(port: port, token: token)
+    }
+
+    /// 外部 hub（本机 7890）的 /pair 口令：launchd plist 里的；没有 plist（手动跑的 hub）时，只有主 hub 配对目标就是本机 7890
+    /// 才用主 hub 本机副本。都确认不了 = nil（不发请求）。绝不读 `cc-bridge`（plan-multi-hub recheck1 N1）
+    static func externalHubToken(plistToken: String?, pairedPrimaryToken: String?, primaryURLs: [URL]) -> String? {
+        if let plistToken, !plistToken.isEmpty { return plistToken }
+        let targetsExternal = !primaryURLs.isEmpty && primaryURLs.allSatisfy {
+            CCHubRegistry.isLoopback($0) && $0.port == externalPort
+        }
+        guard targetsExternal, let pairedPrimaryToken, !pairedPrimaryToken.isEmpty else { return nil }
+        return pairedPrimaryToken
     }
 
     /// 二维码出不来时那一句

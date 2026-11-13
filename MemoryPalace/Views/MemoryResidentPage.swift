@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -50,6 +51,8 @@ struct MemoryResidentPage: View {
         let conversationUpdatedAt: Date?
         let settings: [String]
         let slotOn: Bool
+        /// 本窗六项（档案 / 钉住 / B4 / 上窗都跟它走）；改纸条只写 choices 不动 `updateTime`，所以要单独收
+        let choices: MemoryWindowChoices?
         let model: String
         let branchId: String?
         let recentNodes: [MemoryResident.WikiNodeRevision]
@@ -60,8 +63,11 @@ struct MemoryResidentPage: View {
         let conv = viewModel?.selectedConversation
         return RefreshKey(conversationId: conv?.id, conversationMemoryOn: conv?.memoryEnabled ?? true,
                           conversationUpdatedAt: conv?.updateTime, settings: settingsStamp,
-                          slotOn: slotOn, model: (conv?.selectedModelId ?? "") + "|" + selectedChatModelId,
-                          branchId: conv?.currentNodeId, recentNodes: MemoryResident.wikiRevisions(in: viewModel?.currentPath ?? []),
+                          slotOn: slotOn, choices: conv?.memoryWindowChoices,
+                          model: (conv?.selectedModelId ?? "") + "|" + selectedChatModelId,
+                          branchId: conv?.currentNodeId,
+                          // 标量转换：刷新键只观察已驻内存的值，绝不读外置 segmentsData
+                          recentNodes: MemoryResident.wikiRevisions(in: (viewModel?.currentPath ?? []).map { ConversationMessage(scalar: $0) }),
                           identity: MemoryResident.IdentityKey(profile: profile, conversationPersonaId: conv?.personaId,
                                                                personas: personaStore.personas))
     }
@@ -297,16 +303,20 @@ struct MemoryResidentPage: View {
         let key = refreshKey
         let effectiveProfile = SendContextResolver.resolve(profile: profile, conversation: viewModel?.selectedConversation,
                                                             context: modelContext, globalEntries: []).profile
-        let convOn = viewModel?.selectedConversation?.memoryEnabled ?? true
         let container = modelContext.container
-        let slotOn = slotOn
+        let preset = presetManager?.preset(byId: profile.presetId ?? "") ?? Preset.balanced
+        let participation = EffectiveMemoryParticipation.resolve(profileId: profile.id,
+                                                                 conversation: viewModel?.selectedConversation,
+                                                                 preset: preset)
         // 这一轮调得到的工具：同工具抽屉，走实发那一套（没有对话 = nil，尾注原样）
-        let tools = providerManager.flatMap { viewModel?.previewTools(providerManager: $0, globalModelId: selectedChatModelId) }
+        let tools = providerManager.flatMap { viewModel?.previewTools(providerManager: $0, profileModelId: profile.preferredModel,
+                                                                      globalModelId: selectedChatModelId) }
             .map { Set($0.signature.tools).union($0.signature.catalog) }
         let recentNodeIds = key.recentNodes.map(\.id)
+        let path = viewModel?.currentPath ?? []
         Task {
-            let summary = await MemoryResident.loadSummary(profile: effectiveProfile, conversationMemoryEnabled: convOn, container: container,
-                                                           slotOn: slotOn, availableTools: tools, recentNodeIds: recentNodeIds)
+            let summary = await MemoryResident.loadSummary(profile: effectiveProfile, participation: participation, container: container,
+                                                           availableTools: tools, recentNodeIds: recentNodeIds)
             guard ticket.isLatest(n), profile.id == profileId, refreshKey == key else { return }
             let ids = Set(summary.archive.map(\.id))
             let pid = profile.id
@@ -319,7 +329,8 @@ struct MemoryResidentPage: View {
                 return
             }
             snapshot = next
-            lastInjection = MemoryInjectionMeter.load(profileId: pid)
+            lastInjection = MemoryResident.lastInjection(in: path) { viewModel?.cachedRecallReceipt($0) }
+                ?? MemoryInjectionMeter.load(profileId: pid)
             loaded = true
             dataVersion += 1
         }

@@ -13,13 +13,23 @@ struct TerminalPanelRoot: View {
     @AppStorage("terminalHomeSeen") private var homeSeen = false
     /// 扫码配对写的地址。空 = 从没配过对（iOS 上默认的 127.0.0.1 连不到任何东西）
     @AppStorage("ccBridgeBaseURLOverride") private var bridgeOverride = ""
-    private var store: TerminalWindowStore { .shared }
     private var localStore: ISHTerminalSessionStore { .shared }
 
-    private var connected: Bool { CCBridgeWebSocketClient.shared.isConnected }
-    private var paired: Bool { connected || !bridgeOverride.isEmpty }
-    /// 只有 Agent 对话才有（D3：普通对话不再兜底 mp-cc，打开终端也不在电脑上起 claude）
-    private var conversationAgent: String? { viewModel.selectedConversation?.ccBridgeSessionName }
+    /// 首页 / tab 条 / 窗口面板说的那台（R6：不再读 .shared）
+    private var connected: Bool { model.client?.isConnected == true }
+    /// 只有 Agent 对话才有（D3：普通对话不再兜底 mp-cc，打开终端也不在电脑上起 claude）；在这条对话连的那台上，那台删了 / 认不出就没有
+    ///（待配对 / 换了机器还留着，点进去是修复卡，R5.6）
+    private var conversationAgent: TerminalAgentRef? {
+        guard let conversation = viewModel.selectedConversation, let session = conversation.ccBridgeSessionName else { return nil }
+        let hub = CCHubRegistry.hubId(of: conversation)
+        if case .failure(let why) = CCHubRegistry.shared.route(hub), why != .needsPairing, why != .identityChanged { return nil }
+        return TerminalAgentRef(hubId: hub, session: session)
+    }
+
+    /// 配没配过对：主 hub 看扫码写的地址（原逻辑），附加 hub 看自己有没有候选地址
+    private func paired(_ client: CCBridgeWebSocketClient) -> Bool {
+        client.isConnected || (client.isPrimary ? !bridgeOverride.isEmpty : client.hasCandidates)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,19 +40,24 @@ struct TerminalPanelRoot: View {
         .background { TerminalChrome.background.ignoresSafeArea() }
         .background { if appActive { shortcuts } }
         .onAppear(perform: start)
-        .onDisappear { store.stopSyncing() }
+        .onDisappear { for (_, store) in model.hubStores { store.stopSyncing() } }
         .onChange(of: conversationAgent) { _, new in model.pinnedAgent = new }
         // 停着的 Agent 不再是固定项（切了对话 / 换成「最近」里别的）→ 跟着换过去，没有就回首页，别停在 tab 条上找不到的那个
         .onChange(of: model.pinnedAgent) { _, new in
-            if case .agent(let session) = model.current, session != new {
-                model.select(new.map(TerminalTarget.agent) ?? .home)
+            if case .agent(let hub, let session) = model.current, TerminalAgentRef(hubId: hub, session: session) != new {
+                model.select(new?.target ?? .home)
             }
         }
         .onChange(of: navigator?.pendingTarget) { _, _ in consumeDesktopTarget() }
-        .onChange(of: store.windows.map(\.code)) { _, _ in model.ejectIfGone() }
+        .onChange(of: model.hubStores.map { $0.store.windows.map(\.code) }) { _, _ in model.ejectIfGone() }
         .onChange(of: localStore.sessions.map(\.id)) { _, _ in model.ejectIfGone() }
         .onChange(of: profileManager?.currentProfile.id, initial: true) { _, id in model.profileId = id }
-        .onChange(of: store.syncSeq) { _, _ in model.ejectIfGone() }
+        .onChange(of: model.hubStores.map(\.store.syncSeq)) { _, _ in model.ejectIfGone() }
+        // 新加的电脑也要同步窗口表（tab 条放全部电脑的窗口）
+        .onChange(of: model.hubs.map(\.id)) { _, _ in
+            for (_, store) in model.hubStores { store.startSyncing() }
+            model.pruneRemovedHubs()
+        }
         .alert("改名", isPresented: Binding(get: { model.renaming != nil }, set: { if !$0 { model.renaming = nil } })) {
             TextField("标题", text: Binding(get: { model.renaming?.text ?? "" }, set: { model.renaming?.text = $0 }))
             Button("取消", role: .cancel) {}
@@ -70,19 +85,20 @@ struct TerminalPanelRoot: View {
             }
         }
         .sheet(isPresented: $model.showConnect) { TerminalConnectSheet() }
+        .modifier(TerminalHubSheets(model: model))
     }
 
     @ViewBuilder
     private var content: some View {
         switch model.current {
         case .home:
-            TerminalHomeView(model: model, link: link, profileId: profileManager?.currentProfile.id)
-        case .agent(let session):
-            TerminalSessionPane(sessionName: session, windowCode: nil, model: model, paired: paired)
-                .id(session)
-        case .window(let code):
-            TerminalSessionPane(sessionName: "mp-win-\(code)", windowCode: code, model: model, paired: paired)
-                .id("mp-win-\(code)")
+            TerminalHomeView(model: model, links: links, profileId: profileManager?.currentProfile.id)
+        case .agent(let hub, let session):
+            hubPane(hub: hub, sessionName: session, windowCode: nil)
+                .id("\(hub)|\(session)")
+        case .window(let hub, let code):
+            hubPane(hub: hub, sessionName: "mp-win-\(code)", windowCode: code)
+                .id("\(hub)|mp-win-\(code)")
         case .local(let id):
             if let session = localStore.session(id) {
                 TerminalLocalSessionPane(session: session, model: model)
@@ -91,21 +107,49 @@ struct TerminalPanelRoot: View {
         }
     }
 
-    private var link: TerminalLinkState {
-        if connected { return .connected }
-        return paired ? .broken : .unplugged
+    /// session 在哪台就接哪台的 client（显式传，B3.4）；那台用不了 → 不接、回首页，不落到主 hub
+    @ViewBuilder
+    private func hubPane(hub: String, sessionName: String, windowCode: String?) -> some View {
+        switch CCHubRegistry.shared.route(hub) {
+        case .success(let client):
+            if let pending = model.pendingRestore, pending.hubId == hub, pending.code == windowCode {
+                TerminalPendingRestorePane(client: client, model: model, code: pending.code)
+            } else {
+                TerminalSessionPane(sessionName: sessionName, windowCode: windowCode, client: client, model: model, paired: paired(client))
+            }
+        case .failure(let why) where why == .needsPairing || why == .identityChanged:
+            // 那台还在、只是要重新配对：留在修复卡上（带原 hub 的配对入口），不接终端（R5.6）
+            TerminalRepairPane(hubId: hub, reason: why, model: model)
+        case .failure(let why):
+            Color.clear.onAppear {
+                ToastCenter.shared.show(why.message)
+                model.select(.home)
+            }
+        }
+    }
+
+    /// 每台电脑的三态。主 hub 照原逻辑；附加 hub 待配对 / 换了机器 = 配过但用不了，算断了
+    private var links: [String: TerminalLinkState] {
+        Dictionary(uniqueKeysWithValues: model.hubs.map { hub in
+            let link: TerminalLinkState
+            switch CCHubRegistry.shared.route(hub.id) {
+            case .success(let client): link = client.isConnected ? .connected : paired(client) ? .broken : .unplugged
+            case .failure: link = .broken
+            }
+            return (hub.id, link)
+        })
     }
 
     private func start() {
-        // 全局窗口列表：进页面拉一次 + 60s 对账（hub 是真相源，本地只为离线可见）
-        store.startSyncing()
+        // 全局窗口列表：进页面拉一次 + 60s 对账（hub 是真相源，本地只为离线可见）；每台各同步各的
+        for (_, store) in model.hubStores { store.startSyncing() }
         model.pinnedAgent = conversationAgent
         if model.target == nil {
             if !homeSeen {
                 homeSeen = true
                 model.select(.home)
             } else {
-                model.select(conversationAgent.map(TerminalTarget.agent) ?? .home)
+                model.select(conversationAgent?.target ?? .home)
             }
         }
         consumeDesktopTarget()
@@ -120,8 +164,10 @@ struct TerminalPanelRoot: View {
             model.openLocal()
             return
         }
-        if store.windows.contains(where: { $0.code == target.id && !$0.isClosed }) {
-            model.select(.window(target.id))
+        // 窗口目标要说明在哪台（tab 条放全部电脑的窗口，哪台都认）
+        if let hub = target.hubId,
+           CCHubRegistry.shared.windowStore(for: hub)?.windows.contains(where: { $0.code == target.id && !$0.isClosed }) == true {
+            model.select(.window(hub: hub, code: target.id))
         }
         navigator?.pendingTarget = nil
     }
@@ -145,7 +191,7 @@ struct TerminalPanelRoot: View {
             .keyboardShortcut("t", modifiers: .command)
             Button("收起当前窗口") {
                 switch model.current {
-                case .window(let code): model.collapse(code)
+                case .window(let hub, let code): model.collapse(code, hub: hub)
                 case .local(let id): model.endingLocal = id
                 default: break
                 }
@@ -155,6 +201,22 @@ struct TerminalPanelRoot: View {
         .frame(width: 0, height: 0)
         .opacity(0)
         .accessibilityHidden(true)
+    }
+}
+
+/// 再接一台 / 管理这台（B4.3）
+private struct TerminalHubSheets: ViewModifier {
+    @Bindable var model: TerminalPanelModel
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $model.addingHub) { HubPairingSheet(target: nil) }
+            .sheet(isPresented: Binding(get: { model.managingHub != nil }, set: { if !$0 { model.managingHub = nil } })) {
+                if let hub = model.managingHub { HubManageSheet(hubId: hub) }
+            }
+            .sheet(isPresented: Binding(get: { model.rescanningHub != nil }, set: { if !$0 { model.rescanningHub = nil } })) {
+                if let hub = model.rescanningHub { HubPairingSheet(target: hub) }
+            }
     }
 }
 #endif

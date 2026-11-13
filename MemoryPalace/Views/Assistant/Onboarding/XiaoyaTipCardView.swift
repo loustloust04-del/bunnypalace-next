@@ -191,15 +191,18 @@ struct XiaoyaTipIllustration: View {
     /// 这一圈从哪一刻算起：开始播 / 点图重播时归零
     @State private var origin = Date.now
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @Environment(\.page2AppActive) private var appActive
+    /// 前后台听 UIKit 通知，不读环境 scenePhase：page2 子应用宿主拷的是环境快照，后台往返后停在 inactive，
+    /// 插图一直停在示意帧（同 8ef0b21e6 终端 3D / 4214a8b33 桌面长按）
+    @State private var foreground = UIApplication.shared.applicationState == .active
     #else
     private let appActive = true
+    private let foreground = true
     #endif
 
     private var playing: Bool {
-        visibility.visible(gate) && appActive && scenePhase == .active && !reduceMotion
+        visibility.visible(gate) && appActive && foreground && !reduceMotion
     }
 
     /// 帧 = 时间的纯函数，门控只决定 TimelineView 停不停（§12-C）：不再靠插拔 KeyframeAnimator，
@@ -216,6 +219,10 @@ struct XiaoyaTipIllustration: View {
         .onScrollVisibilityChange(threshold: 0.3) { visibility.inViewport = $0 }
         .onAppear { visibility.onScreen = true }
         .onDisappear { visibility.onScreen = false }
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in foreground = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in foreground = false }
+        #endif
         .onChange(of: playing) { _, now in if now { origin = .now } }
         // 点得到 = 一定在屏上：顺手把两路信号对齐，万一哪个回调没来，点一下就能接着播（旧版这时点了也没反应）
         .onChange(of: replay) { _, _ in

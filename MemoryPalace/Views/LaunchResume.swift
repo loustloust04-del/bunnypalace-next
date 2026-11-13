@@ -34,6 +34,9 @@ enum LaunchResumeMarker {
 enum LastLocationResume {
     /// 一个进程只恢复一次：切楼层整树重建（.id(profileId)）不再来
     static var attempted = false
+    /// atrium 点人切层时写目标 profileId：新树按 `ProfileResume` 落回那层上次的页 / 对话。
+    /// 推送 / 来电 / 导入 / 小芽这些切层路径不写，走现状（page1 托底草稿）
+    static var pendingProfileSwitch: String?
     /// 恢复到列表页时，挡掉「列表页上选中对话就翻回聊天页」那一次（只认恢复的那条对话）
     private static var holdListPage: String?
     /// 托底草稿要填回的字。输入条在分页子 HC 里拿不到 SceneStorage，装载这个草稿时取走
@@ -45,6 +48,12 @@ enum LastLocationResume {
     static func takeListPageHold(for conversationId: String?) -> Bool {
         defer { holdListPage = nil }
         return holdListPage != nil && holdListPage == conversationId
+    }
+
+    /// 不管对不对得上都清掉：只吃一次
+    static func takeProfileSwitch(to profileId: String) -> Bool {
+        defer { pendingProfileSwitch = nil }
+        return pendingProfileSwitch == profileId
     }
 
     static func putNewChatText(_ text: String, for conversationId: String) {
@@ -84,20 +93,36 @@ extension LaunchResumeMarker {
     }
 }
 
-/// 挂在 ContentView 上：页号 / 当前对话变了就写 SceneStorage（草稿对话记空）。
+/// 挂在 ContentView 上：页号 / 当前对话变了就写 SceneStorage（草稿对话记空），同时按楼层写一份 `ProfileResume`。
 /// 订阅放在这个 modifier 里，翻页不会让 ContentView.body 重算（iOSPage 只由 PageSync 读）。
 struct LastLocationPersistence: ViewModifier {
     @Binding var page: Int
     @Binding var savedPage: Int
     @Binding var savedConversationId: String
     let viewModel: ConversationViewModel
+    let profileId: String
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
 
     func body(content: Content) -> some View {
         content
-            .onChange(of: page) { _, newPage in savedPage = newPage }
-            .onChange(of: viewModel.isDraftConversation ? "" : viewModel.selectedConversation?.id ?? "") { _, id in
-                savedConversationId = id
+            .onChange(of: page) { _, newPage in
+                savedPage = newPage
+                recordForProfile(page: newPage, conversationId: currentConversationId)
             }
+            .onChange(of: currentConversationId) { _, id in
+                savedConversationId = id
+                recordForProfile(page: page, conversationId: id)
+            }
+    }
+
+    private var currentConversationId: String {
+        viewModel.isDraftConversation ? "" : viewModel.selectedConversation?.id ?? ""
+    }
+
+    /// 切层时旧 VM 先被清空选中对话：那时 currentProfile 已是新层，旧树这次变化不能盖掉旧层的记录
+    private func recordForProfile(page: Int, conversationId: String) {
+        guard !profileId.isEmpty, profileManager?.currentProfile.id == profileId else { return }
+        ProfileResume().save(.init(page: page, conversationId: conversationId), for: profileId)
     }
 }
 #endif

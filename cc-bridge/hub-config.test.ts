@@ -1,9 +1,9 @@
 import { test, expect } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
-  BindPrefsCache, parseBindPrefs, tryParseBindPrefs, buildHelloPayload, buildMcpConfig, detectTools, listDirs, loadHubConfig, parseProductName, pickMcpConfig,
+  BindPrefsCache, parseBindPrefs, tryParseBindPrefs, buildHelloPayload, buildMcpConfig, detectTools, listDirs, loadHubConfig, loadOrCreateHubId, parseProductName, pickMcpConfig,
   resolveAgentWorkdir, sameDir, saveHubConfig, validateWorkdir,
 } from "./hub-config.ts"
 
@@ -19,6 +19,10 @@ test("hub-config：坏文件 / 缺文件 / 非法字段都当空；写出来 060
   expect(loadHubConfig(path)).toEqual({})
   saveHubConfig(path, { agent_workdir: "/x", port: 51234 })
   expect(loadHubConfig(path)).toEqual({ agent_workdir: "/x", port: 51234 })
+  writeFileSync(path, JSON.stringify({ opencli_enabled: "yes" }))
+  expect(loadHubConfig(path)).toEqual({})
+  saveHubConfig(path, { opencli_enabled: true })
+  expect(loadHubConfig(path)).toEqual({ opencli_enabled: true })
   expect(statSync(path).mode & 0o777).toBe(0o600)
 })
 
@@ -104,18 +108,46 @@ test.skipIf(process.platform !== "darwin")("readMachineInfo：launchd 的 PATH �
 
 test("hello 帧：字段齐全；机型拿不到就不带那两个键", () => {
   const base = {
-    hubVersion: "t3", claudeHome: "/h/cc-rp", codexHome: "/h/gpt-rp", agentWorkdir: null,
+    hubVersion: "t3", hubId: "6f1c2c1e-0d7b-4c39-9a51-0b1f6c9e2a77", claudeHome: "/h/cc-rp", codexHome: "/h/gpt-rp", agentWorkdir: null,
     tools: { tmux: true, claude: true, codex: null }, capabilities: ["hello"],
   }
   const full = JSON.parse(buildHelloPayload({ ...base, machine: { host_name: "mimiair", host_model_id: "Mac17,4", host_model_name: "MacBook Air (15-inch, M5)" } }))
   expect(full).toEqual({
-    type: "hello", hub_version: "t3", host_name: "mimiair", host_model_id: "Mac17,4", host_model_name: "MacBook Air (15-inch, M5)",
+    type: "hello", hub_version: "t3", hub_id: "6f1c2c1e-0d7b-4c39-9a51-0b1f6c9e2a77", host_name: "mimiair", host_model_id: "Mac17,4", host_model_name: "MacBook Air (15-inch, M5)",
     dirs: { claude_home: "/h/cc-rp", codex_home: "/h/gpt-rp", agent_workdir: null },
     tools: { tmux: true, claude: true, codex: null }, capabilities: ["hello"],
   })
   const bare = JSON.parse(buildHelloPayload({ ...base, machine: { host_name: "x", host_model_id: null, host_model_name: null } }))
   expect("host_model_id" in bare).toBe(false)
   expect("host_model_name" in bare).toBe(false)
+})
+
+test("hub-id（B0.1）：缺文件生成 UUID 落盘 0600；再读不变；大写照认按小写给；坏 / 空 / 是目录都重建", () => {
+  const dir = tmp("hubid-")
+  const path = join(dir, "hub-id")
+  const id = loadOrCreateHubId(path)
+  expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  expect(readFileSync(path, "utf-8").trim()).toBe(id)
+  expect(statSync(path).mode & 0o777).toBe(0o600)
+  expect(loadOrCreateHubId(path)).toBe(id)
+  expect(readdirSync(dir)).toEqual(["hub-id"])   // 临时文件不留
+
+  writeFileSync(path, ` ${id.toUpperCase()}\n`)
+  expect(loadOrCreateHubId(path)).toBe(id)
+
+  for (const bad of ["not-a-uuid", "", "\n"]) {
+    writeFileSync(path, bad)
+    const fresh = loadOrCreateHubId(path)
+    expect(fresh).not.toBe(id)
+    expect(readFileSync(path, "utf-8").trim()).toBe(fresh)
+    expect(loadOrCreateHubId(path)).toBe(fresh)
+  }
+
+  const asDir = join(dir, "dir-id")
+  mkdirSync(asDir)
+  const a = loadOrCreateHubId(asDir), b = loadOrCreateHubId(asDir)
+  expect(a).toMatch(/^[0-9a-f-]{36}$/)
+  expect(a).not.toBe(b)   // 写不进去：每次现生成，不抛
 })
 
 test("MCP 配置：生成的连本 hub 真实端口；cwd 的 .mcp.json 优先，都没有给 null", () => {

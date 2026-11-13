@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -49,11 +50,47 @@ struct Profile: Identifiable, Hashable, Codable {
     /// 本机音效按楼层选；原数据 nil = 关闭，不改变旧语音条。
     var voiceEffects: VoiceEffectConfiguration? = nil
 
-    // 角色时区（可选 = 老数据 decode 自动 nil，零迁移）。开关是全局的：设置-Agent「作息感知」
+    /// 声音效果（表演感 / 风格强度 / 语速）按楼层（atrium P3③）。存成可选 = 老数据 decode 自动 nil（默认值），读写走下面三个
+    private var storedVoiceStability: Double? = nil
+    private var storedVoiceStyle: Double? = nil
+    private var storedVoiceSpeed: Double? = nil
+    var voiceStability: Double {
+        get { storedVoiceStability ?? VoiceTuning.defaultStability }
+        set { storedVoiceStability = newValue }
+    }
+    var voiceStyle: Double {
+        get { storedVoiceStyle ?? VoiceTuning.defaultStyle }
+        set { storedVoiceStyle = newValue }
+    }
+    var voiceSpeed: Double {
+        get { storedVoiceSpeed ?? VoiceTuning.defaultSpeed }
+        set { storedVoiceSpeed = newValue }
+    }
+
+    // 角色时区（可选 = 老数据 decode 自动 nil，零迁移）。开关按楼层：`timeAwarenessEnabled`（人页 › 时区）
     var characterTimeZone: String? = nil
+
+    /// 「作息感知」按楼层（atrium P3②）。存成可选 = 老数据 decode 自动 nil（关），读写走 `timeAwarenessEnabled`
+    private var storedTimeAwareness: Bool? = nil
+    var timeAwarenessEnabled: Bool {
+        get { storedTimeAwareness ?? false }
+        set { storedTimeAwareness = newValue }
+    }
 
     /// 卡库 ③-4：楼层默认身份（UserPersonaStore id）。nil = 用楼层原有身份文本；对话自己的 personaId 优先
     var personaId: String? = nil
+
+    /// 「聊天时的样子」按楼层（atrium P3④）。老数据无键 decode = nil（聊天主题跟随界面主题），零迁移
+    var chatAppearance: ChatAppearance? = nil
+
+    /// 新建楼层从当前这个人带过来的设置（atrium P3①②③④）：模型、作息感知、声音三参、聊天外观。
+    /// 只给楼层编辑页「新建」用；远端领养 / 卡建 / 酒馆 / 整包导入不复制
+    mutating func copyInheritedSettings(from source: Profile) {
+        preferredModel = source.preferredModel
+        timeAwarenessEnabled = source.timeAwarenessEnabled
+        VoiceTuning.set(VoiceTuning.current(for: source), on: &self)
+        chatAppearance = source.chatAppearance
+    }
 
     /// 正则脚本列表
     var regexScripts: [RegexScript] {
@@ -66,7 +103,7 @@ struct Profile: Identifiable, Hashable, Codable {
         }
     }
 
-    init(id: String = UUID().uuidString, name: String, emoji: String, description: String, userName: String, assistantName: String, systemPrompt: String = "", preferredModel: String = "anthropic/claude-sonnet-4", createdAt: Date = Date(), presetId: String = "built-in-balanced", userPersona: String = "", characterDescription: String = "", characterPersonality: String = "", scenario: String = "", chatExamples: String = "", postInstructions: String = "", characterCardID: String? = nil, linkedWorldBookIDs: [String] = [], coverImageData: Data? = nil, regexScriptsData: Data? = nil) {
+    init(id: String = UUID().uuidString, name: String, emoji: String, description: String, userName: String, assistantName: String, systemPrompt: String = "", preferredModel: String = "", createdAt: Date = Date(), presetId: String = "built-in-balanced", userPersona: String = "", characterDescription: String = "", characterPersonality: String = "", scenario: String = "", chatExamples: String = "", postInstructions: String = "", characterCardID: String? = nil, linkedWorldBookIDs: [String] = [], coverImageData: Data? = nil, regexScriptsData: Data? = nil) {
         self.id = id
         self.name = name
         self.emoji = emoji
@@ -139,6 +176,12 @@ final class ProfileManager {
     var currentProfile: Profile
     weak var characterCardManager: CharacterCardManager?
     private let defaults: UserDefaults
+    /// 聊天主题镜像写这里（视图都读 `.shared`，测试传自建实例别污染单例）
+    private let themeManager: ThemeManager
+    /// 工具抽屉（删层清 / 新建复制，atrium P3⑤a）；nil = `.shared`（它是 MainActor 的，用到时再取），测试传自建 store
+    private let toolDrawer: ToolDrawerStore?
+    /// page2 装了哪些 App 的生效值跟着当前层（atrium P3⑥0）；nil = 测试 / 没接，跳过
+    private let toolManager: RightPanelToolManager?
     /// ⑧c-4：楼层列表存 BlobStore（root 可注入，测试 / 临时库不碰真实目录）
     private let root: URL?
     private let sideEffectsEnabled: Bool
@@ -150,6 +193,18 @@ final class ProfileManager {
         var errorDescription: String? { "楼层列表读取失败，为防覆盖本次只读，重启 app 再试" }
     }
 
+    enum SaveError: LocalizedError {
+        case profileMissing
+        case writeFailed(Error)
+
+        var errorDescription: String? {
+            switch self {
+            case .profileMissing: return "当前楼层不在楼层列表里，请重启 app 再试"
+            case .writeFailed: return "楼层保存失败，请检查存储空间和访问权限后重试"
+            }
+        }
+    }
+
     func ensureWritable() throws {
         if isReadOnly { throw ReadOnlyError() }
     }
@@ -159,14 +214,20 @@ final class ProfileManager {
     let container: ModelContainer
 
     /// loadError 必传：来自 `loadProfilesChecked`，同一次读的成败（#037：不再自己复读，两次读结果不一致会拿 seed 覆盖真列表）
-    init(container: ModelContainer, profiles: [Profile], currentProfile: Profile, loadError: Error?, root: URL? = nil, defaults: UserDefaults = .standard, sideEffectsEnabled: Bool = true) {
+    init(container: ModelContainer, profiles: [Profile], currentProfile: Profile, loadError: Error?, root: URL? = nil, defaults: UserDefaults = .standard, sideEffectsEnabled: Bool = true, themeManager: ThemeManager = .shared, toolDrawer: ToolDrawerStore? = nil, toolManager: RightPanelToolManager? = nil) {
         self.defaults = defaults
+        self.themeManager = themeManager
+        self.toolDrawer = toolDrawer
+        self.toolManager = toolManager
         self.root = BlobStore.resolvedRoot(root, defaults: defaults)
         self.sideEffectsEnabled = sideEffectsEnabled
         self.container = container
         self.profiles = profiles
         self.currentProfile = currentProfile
         self.storageLoadError = loadError
+        if loadError == nil {
+            mirrorCurrent(currentProfile)
+        }
         #if os(iOS)
         // App Group 索引：启动期把所有楼层全量同步给 NSE
         // （老用户首次升级到带 NSE 版本时也走这条路 → App Group 立即就绪）
@@ -185,7 +246,12 @@ final class ProfileManager {
     /// 目前没有可验证证据，但 staging-store 数据漂移 bug 暂未坐实根因
     /// 详见 docs/research-staging-data-leak.md）
     static func makeFullSchema() -> Schema {
-        Schema([
+        Schema(fullModelTypes)
+    }
+
+    /// makeFullSchema 的模型表；PreUpgradeSnapshot 判「这次会不会迁移」也用它建 NSManagedObjectModel
+    ///（`makeManagedObjectModel(for: Schema)` 静态版要 macOS 26，mac 部署目标是 15）
+    static let fullModelTypes: [any PersistentModel.Type] = [
             Conversation.self,
             MessageNode.self,
             UserCard.self,
@@ -198,6 +264,8 @@ final class ProfileManager {
             WorldBook.self,
             StickerAsset.self,
             PlacedSticker.self,
+            // 表情包（plan-bubble-sticker-send）：纯新增，轻量迁移
+            ChatMeme.self,
             BookEntry.self,
             AudiobookItem.self,
             AudiobookBookmark.self,
@@ -217,8 +285,7 @@ final class ProfileManager {
             TwitterFollow.self,
             TwitterLike.self,
             TwitterDraft.self,
-        ])
-    }
+    ]
 
     /// 旧 API 兼容（短期内还有别处 `ProfileManager.fullSchema` 引用）。
     /// **长期方向**：所有 caller 改调 `makeFullSchema()`，最终删除这个 static let。
@@ -280,8 +347,8 @@ final class ProfileManager {
         if sideEffectsEnabled { NotificationCenter.default.post(name: .profileWillSwitch, object: nil) }
         if sideEffectsEnabled { BreadcrumbLog.shared.add("🏠", "切楼层 \(currentProfile.name) → \(profile.name)") }
         defaults.set(profile.id, forKey: "lastProfileId")
-        defaults.set(profile.userName, forKey: "userName")
-        defaults.set(profile.assistantName, forKey: "assistantName")
+        // 镜像必须在 currentProfile 赋值之前：整树按新 id 重建的那一帧就是新层的称呼和聊天主题
+        mirrorCurrent(profile)
         // 路线 B：container 不动，只翻 currentProfile。@Observable 触发 SwiftUI
         // view rebuild（ContentView 的 .id(currentProfile.id) 识别变化后重建整棵
         // subtree，@Query 用新 profileId predicate refetch）。无 race。
@@ -349,11 +416,11 @@ final class ProfileManager {
             return false
         }
         profiles = remaining
+        clearDeviceFloorSettings(Profile.xiaoyaId)
         if currentProfile.id == Profile.xiaoyaId {
+            defaults.set(remaining[0].id, forKey: "lastProfileId")
+            mirrorCurrent(remaining[0])
             currentProfile = remaining[0]
-            defaults.set(currentProfile.id, forKey: "lastProfileId")
-            defaults.set(currentProfile.userName, forKey: "userName")
-            defaults.set(currentProfile.assistantName, forKey: "assistantName")
         }
         if sideEffectsEnabled {
             if kept.isEmpty { FileLibraryStore.prepareProfiles(remaining) }
@@ -380,37 +447,54 @@ final class ProfileManager {
     /// 先落盘、写成了才改内存；写不下抛错（文件库「Prompt/楼层字段」保存不假报成功）
     func updateProfileChecked(_ profile: Profile) throws {
         try ensureWritable()
-        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { throw CocoaError(.fileNoSuchFile) }
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { throw SaveError.profileMissing }
         var next = profiles
         next[index] = profile
-        try writeProfiles(next)
+        do { try writeProfiles(next) }
+        catch { throw SaveError.writeFailed(error) }
         profiles = next
         publishUpdated(profile)
+    }
+
+    /// 当前楼层的称呼镜像进全局 key（各处 @AppStorage 读它）。名字空就删 key，让各处的默认值（「助手」/「你」）生效，
+    /// 不写成空串（L-B11：空 AI 名镜像成 "" 后界面出现空称呼）
+    static func mirrorNames(_ profile: Profile, into defaults: UserDefaults) {
+        for (key, value) in [("userName", profile.userName), ("assistantName", profile.assistantName)] {
+            if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { defaults.removeObject(forKey: key) } else { defaults.set(value, forKey: key) }
+        }
+    }
+
+    /// 当前层的镜像（称呼 + 聊天外观）收在这一处。只镜像当前层；调用方要在 `currentProfile` 赋值**之前**调
+    func mirrorCurrent(_ profile: Profile) {
+        Self.mirrorNames(profile, into: defaults)
+        ChatAppearance.mirror(profile.chatAppearance, into: defaults, theme: themeManager)
+        toolManager?.activeProfileId = profile.id
+        // 主屏摆法按层（atrium P3⑥b）：整树按新 id 重建那一帧 `@State home = .shared` 拿到的就是这一层；测试 / 临时库不碰真目录
+        if sideEffectsEnabled { MainActor.assumeIsolated { Page2HomeStore.activate(profileId: profile.id) } }
     }
 
     private func publishUpdated(_ profile: Profile) {
         if sideEffectsEnabled { FileLibraryStore.prepareProfile(profile) }
         if currentProfile.id == profile.id {
+            mirrorCurrent(profile)
             currentProfile = profile
-            defaults.set(profile.userName, forKey: "userName")
-            defaults.set(profile.assistantName, forKey: "assistantName")
         }
         #if os(iOS)
         if sideEffectsEnabled { PushIdentityWriter.upsertProfile(profile) }
         #endif
     }
 
-    /// 设置 › 通用「我的名字 / AI 的名字」：写当前楼层（`{{user}}` / `{{char}}` 读的是楼层，`userName` / `assistantName` 两个键只是它的镜像，
-    /// 由 updateProfile 跟着写），你的名字同时记成默认称呼（H9）。空 = 不改。同页「你的头像 / AI 头像」也是写当前楼层
-    func renameCurrent(userName: String, assistantName: String) {
+    /// 当前楼层改名：先落盘再发布名字和镜像，成功后记默认称呼。空名不改，失败抛给设置页。
+    func renameCurrent(userName: String, assistantName: String) throws {
         let user = userName.trimmingCharacters(in: .whitespacesAndNewlines)
         let assistant = assistantName.trimmingCharacters(in: .whitespacesAndNewlines)
-        DefaultUserName.set(user, defaults: defaults)
+        guard !user.isEmpty || !assistant.isEmpty else { return }
+        try ensureWritable()
         var profile = currentProfile
         if !user.isEmpty { profile.userName = user }
         if !assistant.isEmpty { profile.assistantName = assistant }
-        guard profile != currentProfile else { return }
-        updateProfile(profile)
+        try updateProfileChecked(profile)
+        DefaultUserName.set(user, defaults: defaults)
     }
 
     /// 批量改楼层并同步落盘；落盘失败返回 false（语音服务迁移靠它决定是否落完成标记）
@@ -430,6 +514,47 @@ final class ProfileManager {
         }
     }
 
+    // MARK: - 聊天主题（atrium P3④a）
+
+    /// 改某一层的聊天主题（nil = 跟随界面主题）。先落盘；改的是当前层就经 `publishUpdated` 镜像 + touch。非当前层只写楼层不镜像
+    func setChatTheme(_ id: String?, profileId: String) throws {
+        guard var profile = profiles.first(where: { $0.id == profileId }) else { throw SaveError.profileMissing }
+        guard profile.chatAppearance?.themeId != id else { return }
+        var appearance = profile.chatAppearance ?? ChatAppearance()
+        appearance.themeId = id
+        profile.chatAppearance = appearance
+        try updateProfileChecked(profile)
+    }
+
+    /// 改某一层的字体字号 / 气泡几何 / 行距段距（atrium P3④b）。没变不写；先落盘，当前层经 `publishUpdated` 镜像进老键，非当前层只写楼层
+    func updateChatAppearance(profileId: String, _ change: (inout ChatAppearance) -> Void) throws {
+        guard var profile = profiles.first(where: { $0.id == profileId }) else { throw SaveError.profileMissing }
+        let before = profile.chatAppearance ?? ChatAppearance()
+        var appearance = before
+        change(&appearance)
+        guard appearance != before else { return }
+        profile.chatAppearance = appearance
+        try updateProfileChecked(profile)
+    }
+
+    /// 实际在用这套主题聊天的层：nil 跟随 / 指向已删主题的层算在界面主题名下
+    func profiles(usingChatTheme id: String) -> [Profile] {
+        profiles.filter { themeManager.chatTheme(for: $0.chatAppearance?.themeId).id == id }
+    }
+
+    /// 删主题后：指向它的层清成 nil（回到界面主题）、落盘，当前层补一次镜像
+    func forgetChatTheme(_ id: String) {
+        let changed = profiles.compactMap { p -> Profile? in
+            guard p.chatAppearance?.themeId == id else { return nil }
+            var p = p
+            p.chatAppearance?.themeId = nil
+            return p
+        }
+        guard !changed.isEmpty, !isReadOnly else { return }
+        updateProfilesPersisting(changed)
+        mirrorCurrent(currentProfile)
+    }
+
     /// 删楼层：从 profiles list 移除 + 可选地清 unified container 里该 profile 的所有数据
     /// （靠 #Predicate { $0.profileId == deletedId } batch delete）。legacy store 文件不动
     /// （留 .backup 兜底，这是粟粟批注：永久保留）。
@@ -443,10 +568,15 @@ final class ProfileManager {
         }
         profiles.removeAll(where: { $0.id == deletedId })
         saveProfiles()
+        ProfileResume(defaults: defaults).clear(deletedId)
+        clearDeviceFloorSettings(deletedId)
         if sideEffectsEnabled { FileLibraryStore.prepareProfiles(profiles) }
 
         if deleteData {
             let ctx = ModelContext(container)
+            let sources = (try? ctx.fetch(FetchDescriptor<Conversation>(
+                predicate: #Predicate { $0.profileId == deletedId }))) ?? []
+            PreviousWindowPicker.invalidateCopies(of: Set(sources.lazy.map(\.id)), context: ctx)
             // 按 profileId 批量删 unified store 里的所有数据
             try? ctx.delete(model: Conversation.self, where: #Predicate { $0.profileId == deletedId })
             try? ctx.delete(model: MessageNode.self, where: #Predicate { $0.profileId == deletedId })
@@ -469,7 +599,10 @@ final class ProfileManager {
             try? ctx.delete(model: TradeEntry.self, where: #Predicate { $0.profileId == deletedId })
             try? ctx.save()
             // 批删不发 didSave（S5 探针），索引得显式删
-            if sideEffectsEnabled { SearchIndexer.shared.profileDeleted(deletedId) }
+            if sideEffectsEnabled {
+                SearchIndexer.shared.profileDeleted(deletedId)
+                CatalogRecallIndexer.shared.deleteProfile(deletedId)
+            }
         }
 
         if currentProfile.id == deletedId {
@@ -478,6 +611,29 @@ final class ProfileManager {
         #if os(iOS)
         if sideEffectsEnabled { PushIdentityWriter.removeProfile(id: deletedId) }
         #endif
+    }
+
+    // MARK: - 本机按层设置（权限档位 perm.floors.v1 + 工具抽屉 toolDrawer.v1，atrium P3⑤a §3.6；page2 App 装卸 page2.apps.floors.v1，P3⑥）
+
+    /// 删层：这个人在本机单独设的权限 / 抽屉 / App 装卸 / 主屏摆法（P3⑥b）一起清（权限只经 PermissionCenter、App 只经 Page2Apps 写；没设过不写）。删层 / 移除小芽层都在主线程
+    private func clearDeviceFloorSettings(_ profileId: String) {
+        if PermissionCenter.floors().floors[profileId] != nil { PermissionCenter.clearAll(profileId: profileId) }
+        if Page2Apps.floors().floors[profileId] != nil { Page2Apps.clearAll(profileId: profileId) }
+        MainActor.assumeIsolated {
+            (toolDrawer ?? .shared).update { $0.floors[profileId] = nil }
+            Page2HomeStore.removeFloor(profileId)
+        }
+    }
+
+    /// 新建复制（只给楼层编辑页「新建」用，同 `Profile.copyInheritedSettings`）：只抄来源单独设过的；
+    /// 来源跟默认 / 跟全局 → 新层也空（主屏摆法：来源有自己的文件才复制，P3⑥b）。卡建 / 酒馆 / 领养 / 整包导入不调
+    func copyDeviceFloorSettings(from source: String, to target: String) {
+        if PermissionCenter.floors().floors[source] != nil { PermissionCenter.copyFloor(from: source, to: target) }
+        if Page2Apps.floors().floors[source] != nil { Page2Apps.copyFloor(from: source, to: target) }
+        MainActor.assumeIsolated {
+            (toolDrawer ?? .shared).update { $0.floors[target] = $0.floors[source] }
+            Page2HomeStore.copyFloor(from: source, to: target)
+        }
     }
 
     // MARK: - Persistence
@@ -746,6 +902,16 @@ enum ProtectedDataGate {
 @main
 enum AppEntry {
     static func main() {
+        MemoryLogging.shared = CacheDiagLog.shared
+        MemoryEvents.shared.setRelay { event in
+            switch event {
+            case .memoryDidChange: NotificationCenter.default.post(name: .memoryDidChange, object: nil)
+            case .fileLibraryDidChange: NotificationCenter.default.post(name: .fileLibraryDidChange, object: nil)
+            case .wikiInjectionDidChange(let page):
+                WikiInjectionCache.shared.invalidate()
+                if let page { CatalogRecallIndexer.shared.changed(at: page) }
+            }
+        }
         #if (DEBUG || PERF_BENCH) && os(macOS)
         BenchIsolation.installIfRequested()
         #endif
@@ -846,6 +1012,7 @@ struct MemoryPalaceApp: App {
     #else
     @State private var mcpProvider = MCPProvider.shared
     #endif
+    @State private var atriumPresenter = AtriumPresenter()
 
     init() {
         LaunchMarks.mark("initBegin")
@@ -909,6 +1076,12 @@ struct MemoryPalaceApp: App {
         #else
         PendingImportApplier.pruneOldArchives()
         #endif
+        // 新包首启、开库前克隆库四件套（research-backup-while-open 段 B）；空间不够只提示不挡
+        #if (DEBUG || PERF_BENCH) && os(iOS)
+        LaunchTrace.measure("preUpgrade.clone") { PreUpgradeSnapshot.runAtLaunch() }
+        #else
+        PreUpgradeSnapshot.runAtLaunch()
+        #endif
 
         // 路线 B: 1 个 unified container. app lifetime 内不换.
         #if (DEBUG || PERF_BENCH) && os(iOS)
@@ -917,6 +1090,10 @@ struct MemoryPalaceApp: App {
         let container = ProfileManager.makeUnifiedContainer()
         #endif
         LaunchMarks.mark("container")
+        #if DEBUG && os(iOS)
+        // air-backup.py 要快照时 app 在后台做（段 A）。放 init 不放 scenePhase：后台被拉起的实例也是写者，也得能响应
+        AirSnapshotResponder.shared.start()
+        #endif
         // 卡库 ⑧c：酒馆整包导入留下未完成批次 → 先按完整清单恢复，再让各管理器读存储（plan §6.2-3）
         if SillyTavernImportCommitter.recoverAtLaunch(container: container) != .none {
             LaunchMarks.note("rec:stRecover")
@@ -980,9 +1157,12 @@ struct MemoryPalaceApp: App {
 
         #if (DEBUG || PERF_BENCH) && os(iOS)
         LaunchTrace.end("legacyMigration", legacySpan)
-        let pm = LaunchTrace.measure("profileManager") { ProfileManager(container: container, profiles: profiles, currentProfile: current, loadError: loaded.error) }
+        // atrium P3⑥0：toolManager 是属性默认值，这时已经建好（也早于上面的待导入恢复），init 里的 mirrorCurrent 就把当前层设上
+        let tools = _toolManager.wrappedValue
+        let pm = LaunchTrace.measure("profileManager") { ProfileManager(container: container, profiles: profiles, currentProfile: current, loadError: loaded.error, toolManager: tools) }
         #else
-        let pm = ProfileManager(container: container, profiles: profiles, currentProfile: current, loadError: loaded.error)
+        let tools = _toolManager.wrappedValue
+        let pm = ProfileManager(container: container, profiles: profiles, currentProfile: current, loadError: loaded.error, toolManager: tools)
         #endif
         #if (DEBUG || PERF_BENCH) && os(macOS)
         Self.prepareBenchProfile(pm)
@@ -1003,6 +1183,18 @@ struct MemoryPalaceApp: App {
         PerfHarness.prepare(pm: pm)
         #endif
         if profilesTrusted { VoiceServiceMigration.runAtLaunch(profileManager: pm) }
+        // atrium P3：老的全局设置一次性下沉到每层（测试宿主不跑，别动真数据）
+        if profilesTrusted, ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            CharacterTimeContext.migrateGlobalSwitch(profiles: pm.profiles, defaults: .standard,
+                                                     persist: { pm.updateProfilesPersisting($0) })
+            VoiceTuning.migrateGlobalToFloors(profiles: pm.profiles, defaults: .standard,
+                                              persist: { pm.updateProfilesPersisting($0) })
+            // ④b 字体字号 / 气泡几何：迁移前镜像不碰这 9 个键；迁完补一次镜像（值同老键，不会真写）
+            if ChatAppearance.migrateGlobalToFloors(profiles: pm.profiles, defaults: .standard,
+                                                    persist: { pm.updateProfilesPersisting($0) }) {
+                pm.mirrorCurrent(pm.currentProfile)
+            }
+        }
         let tProfile = CFAbsoluteTimeGetCurrent()
         self._profileManager = State(initialValue: pm)
         // 修全局卡顿：当前楼层的文件清单启动就后台预热（主线程只读缓存）
@@ -1083,6 +1275,7 @@ struct MemoryPalaceApp: App {
 
         #if DEBUG && os(iOS)
         ProbeStickerSeed.resetLogFile()
+        ParagraphTailBreadcrumb.install()
         #endif
         #if (DEBUG || PERF_BENCH) && os(iOS)
         ProbeStickerSeed.injectIfNeeded(container: pm.container, profileId: pm.currentProfile.id)
@@ -1413,6 +1606,16 @@ struct MemoryPalaceApp: App {
         UserDefaults.standard.set(true, forKey: key)
     }
 
+    #if os(macOS)
+    /// ⌘+ / ⌘- / ⌘0：改当前层的 `fontScale`（nil = 回到读侧默认 1.2）
+    private func setCurrentFontScale(_ next: (Double) -> Double?) {
+        let pm = profileManager
+        let current = (pm.currentProfile.chatAppearance ?? ChatAppearance()).value(ChatAppearance.fontScaleMetric)
+        do { try pm.updateChatAppearance(profileId: pm.currentProfile.id) { $0.fontScale = next(current) } }
+        catch { NSLog("字号保存失败：%@", error.localizedDescription) }
+    }
+    #endif
+
     var body: some Scene {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         let _ = LaunchTrace.event("appSceneBody")
@@ -1437,7 +1640,11 @@ struct MemoryPalaceApp: App {
                 ContentView()
                 #endif
             }
+                #if PERSONAL_APPS
+                .preferredColorScheme(SkinState.shared.active ? .dark : themeManager.preferredColorScheme)
+                #else
                 .preferredColorScheme(themeManager.preferredColorScheme)
+                #endif
                 // askOnce 权限弹卡的宿主（T6c ②）：**挂在根上，两端都挂**。
                 // 原来挂在 CardFlowView 上（:1427），跟 AskUserQuestionSheet / 预算 alert /
                 // fileImporter 抢同一个 view 的 present 名额——别的挡着时这张弹不出来，
@@ -1449,6 +1656,8 @@ struct MemoryPalaceApp: App {
                 // 离线沙箱（SBX-T1）：首启解压 / boot / 失败时顶部露一条状态提示，就绪即消失
                 #if os(iOS)
                 .sandboxStatusOverlay()
+                // 聊天正文 / 外链卡等 openURL 链接：http(s) 进花园浏览器（plan-inapp-browser-modern）
+                .gardenBrowserLinkRouting()
                 #endif
                 #if os(macOS)
                 // plan-mac-shape ⧫a：对话面板最小 240 + 工具道 412 + 正文 320 = 972 取整（以前 800/500 + 全屏观察者硬提 900 两处打架）
@@ -1464,6 +1673,7 @@ struct MemoryPalaceApp: App {
                 .environment(globalWorldBookManager)
                 .environment(rightPanelNavigator)
                 .environment(mcpProvider)
+                .environment(atriumPresenter)
                 .regexHygieneCheck(presetManager: presetManager)   // 🔴破限事故迁移：详见 docs/plan-fix-regex-markdownonly-trap.md
                 .modelContainer(profileManager.container)
                 .id(profileManager.currentProfile.id)
@@ -1582,7 +1792,31 @@ struct MemoryPalaceApp: App {
                             container: profileManager.container, profileId: newPid
                         )
                     }
+                    #if os(iOS)
+                    // atrium P3⑥a：iPad 面板里开着、新的人没装的 App 关掉。放这里不放 ContentView：它在 .id 根里，切层整个重建、onChange 收不到；
+                    // manager 已在 mirrorCurrent 换好层（早于 currentProfile 赋值），生效值就是新的人的
+                    for id in IPadPanelLayout.shared.openTools where toolManager.tool(byId: id)?.isEnabled == false {
+                        IPadPanelLayout.shared.close(id)
+                    }
+                    #endif
                 }
+                #if os(iOS)
+                // atrium（plan-atrium P1）：挂在 .id 之外，切层整树重建时不跟着没；环境得重新注入一遍（cover 不继承 .id 里面那层）
+                .fullScreenCover(isPresented: $atriumPresenter.isPresented, onDismiss: atriumPresenter.didDismiss) {
+                    AtriumView()
+                        .environment(themeManager)
+                        .environment(profileManager)
+                        .environment(providerManager)
+                        .environment(presetManager)
+                        .environment(cardManager)
+                        .environment(toolManager)
+                        .environment(globalWorldBookManager)
+                        .environment(rightPanelNavigator)
+                        .environment(mcpProvider)
+                        .environment(atriumPresenter)
+                        .modelContainer(profileManager.container)
+                }
+                #endif
             }
         }
         #if os(macOS)
@@ -1606,6 +1840,12 @@ struct MemoryPalaceApp: App {
                     NotificationCenter.default.post(name: .newConversationRequested, object: nil)
                 }
                 .keyboardShortcut("n", modifiers: .command)
+                // 共存第二步：⌘N 是文章，气泡走这一项（⇧⌘N 应用里没别人占）
+                Button("新建气泡对话") {
+                    NotificationCenter.default.post(name: .newConversationRequested,
+                                                    object: ConversationDisplayMode.bubble.rawValue)
+                }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
             }
             CommandGroup(after: .sidebar) {
                 // ⌘K 全局搜索（⇧⌘F 别名挂在 ContentView 的隐藏钮上）；code 组里侧栏搜索钮先吃 ⌘K，预选编程会话
@@ -1640,25 +1880,15 @@ struct MemoryPalaceApp: App {
             // 命名工作区（plan-panel-ps 阶段 1）：存 / 切 / 重置 / 恢复默认
             CommandMenu("工作区") { PanelWorkspaceMenu() }
             CommandGroup(after: .toolbar) {
-                // 缺值默认与设置页 / FontManager 的 @AppStorage 默认一致（1.2）；以前菜单按 1.0 两个默认打架（⧫i）
-                Button("放大") {
-                    let current = UserDefaults.standard.double(forKey: "fontScale")
-                    let scale = current > 0 ? current : 1.2
-                    UserDefaults.standard.set(min(scale + 0.1, 2.0), forKey: "fontScale")
-                }
-                .keyboardShortcut("+", modifiers: .command)
+                // atrium P3④b：改的是当前层的字号（经 publishUpdated 镜像进 fontScale 老键）；缺值默认 1.2 同读侧
+                Button("放大") { setCurrentFontScale { min($0 + 0.1, 2.0) } }
+                    .keyboardShortcut("+", modifiers: .command)
 
-                Button("缩小") {
-                    let current = UserDefaults.standard.double(forKey: "fontScale")
-                    let scale = current > 0 ? current : 1.2
-                    UserDefaults.standard.set(max(scale - 0.1, 0.5), forKey: "fontScale")
-                }
-                .keyboardShortcut("-", modifiers: .command)
+                Button("缩小") { setCurrentFontScale { max($0 - 0.1, 0.5) } }
+                    .keyboardShortcut("-", modifiers: .command)
 
-                Button("重置缩放") {
-                    UserDefaults.standard.set(1.2, forKey: "fontScale")
-                }
-                .keyboardShortcut("0", modifiers: .command)
+                Button("重置缩放") { setCurrentFontScale { _ in nil } }
+                    .keyboardShortcut("0", modifiers: .command)
 
                 Divider()
 
@@ -1701,6 +1931,8 @@ struct MemoryPalaceApp: App {
         // 只复用实例，不复制主窗的启动 task 链；切楼层跟主窗一样整棵重建
         Settings {
             SettingsView()
+                // 设置窗是独立窗口，主窗口根上的 toast 层盖不到这里
+                .overlay(alignment: .top) { GlobalToastOverlay() }
                 .preferredColorScheme(themeManager.preferredColorScheme)
                 .environment(themeManager)
                 .environment(profileManager)
@@ -1724,7 +1956,6 @@ struct MemoryPalaceApp: App {
 
 struct ProfileSwitcher: View {
     @Bindable var profileManager: ProfileManager
-    @Environment(PresetManager.self) private var presetManager: PresetManager?
     @State private var isHovered = false
     @State private var showCreateSheet = false
     @State private var editingProfile: Profile? = nil
@@ -1796,22 +2027,27 @@ struct ProfileSwitcher: View {
                 }
             }
             #else
-            Menu {
-                ForEach(profileManager.profiles) { profile in
-                    Button {
-                        profileManager.switchTo(profile)
-                    } label: {
-                        HStack {
-                            Text("\(profile.emoji) \(profile.name)")
-                            if profile.id == profileManager.currentProfile.id {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
+            // 换人走 atrium（plan-atrium P1）；下面菜单只剩新建 / 编辑 / 删除
+            Button {
+                NotificationCenter.default.post(name: .atriumRequestedFromSettings, object: nil)
+            } label: {
+                HStack {
+                    Text("换人：去 atrium")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(Theme.textPrimary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(Theme.textMuted)
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("settings-go-atrium")
 
-                Divider()
-
+            Menu {
                 Button {
                     showCreateSheet = true
                 } label: {
@@ -1874,34 +2110,7 @@ struct ProfileSwitcher: View {
                 onRequestImport: { profile in profileToImport = profile }
             )
         }
-        .confirmationDialog(
-            "删除楼层",
-            isPresented: Binding(
-                get: { profileToDelete != nil },
-                set: { if !$0 { profileToDelete = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("仅移除（保留数据）", role: .destructive) {
-                if let p = profileToDelete {
-                    profileManager.deleteProfile(p, deleteData: false)
-                    presetManager?.deleteInstances(ownerProfileId: p.id)   // 实例跟楼层走
-                }
-                profileToDelete = nil
-            }
-            Button("删除楼层和所有数据", role: .destructive) {
-                if let p = profileToDelete {
-                    profileManager.deleteProfile(p, deleteData: true)
-                    presetManager?.deleteInstances(ownerProfileId: p.id)
-                }
-                profileToDelete = nil
-            }
-            Button("取消", role: .cancel) { profileToDelete = nil }
-        } message: {
-            if let p = profileToDelete {
-                Text("确定要删除「\(p.emoji) \(p.name)」吗？")
-            }
-        }
+        .profileDeleteConfirmation($profileToDelete, profileManager: profileManager)
     }
 
     /// ProfileEditorSheet dismiss 后，如果用户点了「导入聊天记录」，切到目标楼层再发请求导入的 notification
@@ -1915,6 +2124,50 @@ struct ProfileSwitcher: View {
             }
             NotificationCenter.default.post(name: .memoryPalaceRequestImport, object: nil)
         }
+    }
+}
+
+/// 删除楼层确认（「仅移除（保留数据）」/「删除楼层和所有数据」）：`ProfileSwitcher` 和 atrium 长按共用（plan-atrium P3 附 c）
+private struct ProfileDeleteConfirmation: ViewModifier {
+    @Binding var target: Profile?
+    let profileManager: ProfileManager?
+    @Environment(PresetManager.self) private var presetManager: PresetManager?
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            "删除楼层",
+            isPresented: Binding(
+                get: { target != nil },
+                set: { if !$0 { target = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("仅移除（保留数据）", role: .destructive) {
+                if let p = target {
+                    profileManager?.deleteProfile(p, deleteData: false)
+                    presetManager?.deleteInstances(ownerProfileId: p.id)   // 实例跟楼层走
+                }
+                target = nil
+            }
+            Button("删除楼层和所有数据", role: .destructive) {
+                if let p = target {
+                    profileManager?.deleteProfile(p, deleteData: true)
+                    presetManager?.deleteInstances(ownerProfileId: p.id)
+                }
+                target = nil
+            }
+            Button("取消", role: .cancel) { target = nil }
+        } message: {
+            if let p = target {
+                Text("确定要删除「\(p.emoji) \(p.name)」吗？")
+            }
+        }
+    }
+}
+
+extension View {
+    func profileDeleteConfirmation(_ target: Binding<Profile?>, profileManager: ProfileManager?) -> some View {
+        modifier(ProfileDeleteConfirmation(target: target, profileManager: profileManager))
     }
 }
 
@@ -1941,6 +2194,7 @@ extension Notification.Name {
     static let conversationNavigationRequested = Notification.Name("MemoryPalaceConversationNavigationRequested")
 
     /// ⌘N 新建对话（S1-4）。菜单「文件 › 新建对话」发，ContentView 订阅 → 起一条草稿。
+    /// object 不带 = 文章；带 `ConversationDisplayMode.bubble.rawValue` = 气泡（⇧⌘N「新建气泡对话」）。
     /// 走通知是因为 `commands` 在 scene 层，拿不到 ContentView 的 viewModel（`.memoryPalaceRequestImport` 同款）。
     static let newConversationRequested = Notification.Name("MemoryPalaceNewConversationRequested")
 
@@ -2005,7 +2259,9 @@ struct ProfileEditorSheet: View {
     @State private var userName = "你"
     @State private var assistantName = ""
     @State private var systemPrompt = ""
-    @State private var preferredModel = "anthropic/claude-sonnet-4"
+    @State private var preferredModel = ""
+    /// 新建时从哪一层带设置（开页那一刻的当前层，保存时 `copyInheritedSettings`）；编辑页不用，existing 原样带回
+    @State private var inheritFrom: Profile?
 
     // 角色卡导入
     @State private var characterDescription = ""
@@ -2016,6 +2272,7 @@ struct ProfileEditorSheet: View {
     @State private var characterTimeZone = ""
     @State private var showFileImporter = false
     @State private var importError: String?
+    @State private var saveError: String?
     @State private var cardImportSummary: String?
     /// 打开时表单的样子；和现在不一样 = 有没保存的改动（A3 防误关）
     @State private var baseline: [String]?
@@ -2096,6 +2353,14 @@ struct ProfileEditorSheet: View {
         } message: {
             Text(importError ?? "")
         }
+        .alert("保存失败", isPresented: Binding(
+            get: { saveError != nil },
+            set: { if !$0 { saveError = nil } }
+        )) {
+            Button("好的") { saveError = nil }
+        } message: {
+            Text(saveError ?? "")
+        }
         .onAppear {
             switch mode {
             case .create:
@@ -2104,6 +2369,8 @@ struct ProfileEditorSheet: View {
                 }
                 // 默认称呼（H9，plan-onboarding-xiaoya-impl §4.4）：新楼层预填，空才「你」
                 if !DefaultUserName.value().isEmpty { userName = DefaultUserName.value() }
+                // 模型 / 作息 / 声音 / 聊天外观跟当前这个人（atrium P3）；当前层没选模型 = 新层也跟随全局默认
+                inheritFrom = profileManager.currentProfile
             case .edit(let profile):
                 name = profile.name
                 emoji = profile.emoji
@@ -2191,7 +2458,7 @@ struct ProfileEditorSheet: View {
                             .font(.system(size: Theme.F.caption))
                             .foregroundColor(Theme.danger)
                     } else {
-                        Text("填了之后，问候和作息（深夜/清晨/工作时间）按角色的本地时间算。总开关在 设置 → Agent → 作息感知。")
+                        Text("填了之后，问候和作息（深夜/清晨/工作时间）按角色的本地时间算。要在这个人的「作息感知」打开时才生效（iPhone 在人页 › 时区，Mac 在 设置 › Agent）。")
                             .font(.system(size: Theme.F.caption))
                             .foregroundColor(Theme.textMuted)
                     }
@@ -2206,8 +2473,7 @@ struct ProfileEditorSheet: View {
                 .listRowBackground(Theme.mainBg)
                 .listRowSeparator(.hidden)
 
-                // 「默认模型」一节已撤（#092 / 粟粟 10-14 拍 K4）：profile.preferredModel 从来没有地方读，
-                // 选项还是内置预设不是用户的卡。字段留着保兼容，保存时原样写回。
+                // 「默认模型」一节已撤（#092 / 粟粟 10-14 拍 K4）；atrium P3① 起 profile.preferredModel 在人页「模型」改，这里原样写回。
                 Section("系统指令") {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("这个楼层的系统指令，和 设置 → Prompt 里的「系统指令」是同一份。")
@@ -2363,7 +2629,6 @@ struct ProfileEditorSheet: View {
                 userName: userName.isEmpty ? "你" : userName,
                 assistantName: assistantName.trimmingCharacters(in: .whitespaces),
                 systemPrompt: systemPrompt,
-                preferredModel: preferredModel,
                 characterDescription: characterDescription,
                 characterPersonality: characterPersonality,
                 scenario: scenario,
@@ -2371,9 +2636,14 @@ struct ProfileEditorSheet: View {
                 postInstructions: postInstructions
             )
             profile.characterTimeZone = normalizedTimeZone
+            if let inheritFrom { profile.copyInheritedSettings(from: inheritFrom) }
             // 默认头像（§11-7）：同默认称呼，新楼层带上
             profile.userAvatarData = DefaultUserAvatar.live.load()
             profileManager.addProfile(profile)
+            // 本机按层设置（权限档位 + 工具抽屉）也抄当前这个人单独设的（atrium P3⑤a）；楼层没存成就不抄
+            if let inheritFrom, profileManager.profiles.contains(where: { $0.id == profile.id }) {
+                profileManager.copyDeviceFloorSettings(from: inheritFrom.id, to: profile.id)
+            }
             instantiatePreset(for: &profile)
 
             if importAfterSave { onRequestImport?(profile) }
@@ -2388,19 +2658,27 @@ struct ProfileEditorSheet: View {
             updated.systemPrompt = systemPrompt
             updated.preferredModel = preferredModel
             updated.characterTimeZone = normalizedTimeZone
-            profileManager.updateProfile(updated)
-            // 系统提示词单一来源 = 楼层实例 main 槽（组装链读这里，profile.systemPrompt 只是暂存）
-            if let psm = presetManager,
-               var inst = psm.preset(byId: updated.presetId), inst.ownerProfileId == updated.id,
-               let idx = inst.prompts.firstIndex(where: { $0.id == PromptSlot.mainId }) {
-                inst.prompts[idx].content = systemPrompt
-                psm.save(inst)
+            do {
+                try Self.commitEdits(updated, profileManager: profileManager, presetManager: presetManager)
+            } catch {
+                saveError = error.localizedDescription
+                return
             }
 
             if importAfterSave { onRequestImport?(updated) }
         }
 
         dismiss()
+    }
+
+    static func commitEdits(_ updated: Profile, profileManager: ProfileManager, presetManager: PresetManager?) throws {
+        try profileManager.updateProfileChecked(updated)
+        if let presetManager,
+           var inst = presetManager.preset(byId: updated.presetId), inst.ownerProfileId == updated.id,
+           let idx = inst.prompts.firstIndex(where: { $0.id == PromptSlot.mainId }) {
+            inst.prompts[idx].content = updated.systemPrompt
+            presetManager.save(inst)
+        }
     }
 
     /// 新楼层：从其 presetId 模板 deep copy 实例，并把表单系统提示词/卡的后置指令写进槽位

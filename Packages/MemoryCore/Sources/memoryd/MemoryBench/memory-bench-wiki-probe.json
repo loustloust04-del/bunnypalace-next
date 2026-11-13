@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "id": "wiki-probe",
+  "name": "wiki 探针 · 虚构 4 题",
+  "writer": "wiki",
+  "source": "builtin",
+  "note": "memoryd 离线题：用例只有 {\"query\": \"…\"}，跑挂载副本上的 app 召回管线（RecallFullText.terms → queryWeights → query → search → ranked → verified）。问句用 NLTokenizer 能切出的双字词（潮汐 / 船舱 / 罗盘 / 借给 / 安排）：虚构专名（云桥城 / 星砚 / 雾岛）不在系统词典里，会被切成单字，单字不算检索词。岚舟 / 星砚 / 云桥城 / 琥珀风铃 / 雾岛均为虚构，只用于 Tests/MemoryCoreTests/Fixtures/memoryd-floor。",
+  "cases": [
+    {
+      "id": "wiki-hit-cloudcity",
+      "title": "潮汐 + 船舱 命中云桥城页",
+      "input": {
+        "query": "潮汐 船舱"
+      },
+      "labels": [
+        {
+          "id": "w1-m",
+          "kind": "必须带",
+          "text": "云桥城页",
+          "keys": [
+            "page:地点/云桥城"
+          ],
+          "from": "fixture"
+        }
+      ]
+    },
+    {
+      "id": "wiki-hit-two-pages",
+      "title": "罗盘 + 借给 命中星砚页（云桥城页可带）",
+      "input": {
+        "query": "罗盘 借给"
+      },
+      "labels": [
+        {
+          "id": "w2-m",
+          "kind": "必须带",
+          "text": "星砚页",
+          "keys": [
+            "page:人/星砚"
+          ],
+          "from": "fixture"
+        },
+        {
+          "id": "w2-a",
+          "kind": "允许带",
+          "text": "云桥城页",
+          "keys": [
+            "page:地点/云桥城"
+          ],
+          "from": "fixture"
+        }
+      ]
+    },
+    {
+      "id": "wiki-private-never",
+      "title": "私密页不进索引",
+      "input": {
+        "query": "安排 潮汐"
+      },
+      "labels": [
+        {
+          "id": "w3-off",
+          "kind": "禁止带",
+          "text": "私密页",
+          "keys": [
+            "page:人/private_雾岛"
+          ],
+          "from": "fixture"
+        },
+        {
+          "id": "w3-skip",
+          "kind": "应跳过",
+          "text": "公开索引里没有雾岛",
+          "keys": [],
+          "from": "fixture"
+        }
+      ]
+    },
+    {
+      "id": "wiki-skip-emoji",
+      "title": "纯表情不搜",
+      "input": {
+        "query": "嗯🙂"
+      },
+      "labels": [
+        {
+          "id": "w4-skip",
+          "kind": "应跳过",
+          "text": "没有检索词",
+          "keys": [],
+          "from": "fixture"
+        }
+      ]
+    }
+  ]
+}

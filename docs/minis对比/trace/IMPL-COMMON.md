@@ -25,7 +25,7 @@
 ## 工作树与跑道
 
 - 你在自己的 worktree 里工作（车头或 Agent 工具已建好，你 `pwd` 确认自己在 `.claude/worktrees/` 下而不是主仓）。**不要碰主仓工作树。**
-- 第一件事：`bash scripts/la-bootstrap-worktree.sh "$(pwd)"`——拷 deps、init submodule、bun install、build cc-bridge、xcodegen。**deps/libs 和 deps/include 是拷贝不是软链**（并行 lane 软链会互打）。
+- 第一件事：`zone enter <工位>`（会跑 `scripts/lib/worktree-prep.sh`：拷 deps、init submodule、bun install、build cc-bridge、xcodegen；旧 `la-bootstrap-worktree.sh` 11-06 已删）。**deps/libs 和 deps/include 是拷贝不是软链**（并行 lane 软链会互打）。
 - **只跑 macOS**。build：`xcodebuild -scheme MemoryPalace -destination 'platform=macOS' build`。测试：`xcodebuild test -scheme MemoryPalaceTests -destination 'platform=macOS'`（**`MemoryPalace` scheme 没 test action**，别撞）。可用 `-only-testing:MemoryPalaceTests/<Class>` 缩范围加速迭代，但收口前跑一次全套。
 - **不跑 iOS build、不装机、不开模拟器**。洞 7 的模拟器实证归收口 QA，不归你。
 - `xcodebuild` 走 `~/.local/bin` 的互斥 shim：全机同一时刻只跑一个，其余排队（每 30s 报一次谁持锁）。排队是正常的，等。**禁 `-derivedDataPath`**（shim 会拒，09-01 两个私有目录并行构建把 24G 打爆）。**禁 `xcrun xcodebuild`**（绕过 shim）。

@@ -11,7 +11,6 @@ enum JournalTheme {
     // 纸色阶
     static let desk = Color(hex: 0xF6F0E7)         // 桌面底（比纸深一档，纸才浮得起）
     static let paper = Color(hex: 0xFFFDF9)        // 纸面
-    static let paperUnder = Color(hex: 0xF8F3EA)   // 底下露出的第二张纸
     static let tabIdle = Color(hex: 0xEFE8DC)      // 未选中标签
     static let ink = Color(hex: 0x46413A)          // 墨水字
     static let pencil = Color(hex: 0x8A8378)       // 铅笔灰

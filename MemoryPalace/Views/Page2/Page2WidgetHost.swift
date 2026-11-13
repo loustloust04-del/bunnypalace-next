@@ -27,6 +27,10 @@ struct Page2WidgetHost: View {
                 case "garden": GardenWidgetView(size: size)
                 case "contacts": ContactsWidgetView(size: size)
                 case "vocab": VocabWidgetView(size: size)
+                case "status": StatusWidgetView(size: size) { strand in
+                    navigator?.pendingTarget = .init(tool: StatusPanelRoute.toolId, id: strand)
+                    onOpen(StatusPanelRoute.toolId)
+                }
                 #if PERSONAL_APPS
                 #if DEBUG
                 case "topicBox": TopicWidgetView(size: size)
@@ -327,7 +331,8 @@ struct Page2SummaryWidget: View {
             return
         }
         guard loadedProfileID == profileID, let tool = item.toolID else { return }
-        if let target { navigator?.pendingTarget = .init(tool: tool, id: target) }
+        // 终端组件读的是主 hub 的窗口表（全局入口，显式主 hub）
+        if let target { navigator?.pendingTarget = .init(tool: tool, id: target, hubId: kind == "ccTerminal" ? CCHubRegistry.primaryId : nil) }
         onOpen(tool)
     }
 }

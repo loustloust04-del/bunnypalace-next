@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 #if os(iOS)
 import UIKit

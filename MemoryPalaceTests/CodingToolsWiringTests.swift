@@ -23,7 +23,7 @@ final class CodingToolsWiringTests: XCTestCase {
     func testRegistryFollowsLevel() {
         XCTAssertTrue(CodingTools.names.isSubset(of: Set(ToolRegistry.all.map(\.definition.name))), "注册表里恒有四条，门控在 enabledIf")
         let names = Set(ToolRegistry.enabledDefinitions(ToolGateContext(family: .anthropic, deferMCP: false)).map(\.name))
-        if PermissionCenter.level(.codingSessions) == .notAllowed {
+        if PermissionCenter.defaultLevel(.codingSessions) == .notAllowed {
             XCTAssertTrue(names.isDisjoint(with: CodingTools.names), "不允许 = 不下发")
         } else {
             XCTAssertTrue(CodingTools.names.isSubset(of: names), "每次询问 / 自动允许 = 下发")

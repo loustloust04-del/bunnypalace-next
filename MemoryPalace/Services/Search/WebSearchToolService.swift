@@ -126,8 +126,13 @@ enum WebSearchToolService {
             let data = try JSONSerialization.data(withJSONObject: dict, options: [])
             return ExecResult(text: String(data: data, encoding: .utf8) ?? "{}", isError: false)
         } catch {
-            return ExecResult(text: errorJSON("搜索失败: \(error.localizedDescription)"), isError: true)
+            return ExecResult(text: errorJSON(failureText(error, apiKey: WebSearchSettings.shared.apiKey(for: options))), isError: true)
         }
+    }
+
+    /// 上游报错正文会进工具结果（发给模型、也显示出来）：回显的 key、带 query 的地址、认证头先隐去
+    static func failureText(_ error: Error, apiKey: String?) -> String {
+        "搜索失败: " + ParamErrorClassifier.redacted(error.localizedDescription, secrets: [apiKey].compactMap { $0 }.filter { !$0.isEmpty })
     }
 
     // MARK: - helpers

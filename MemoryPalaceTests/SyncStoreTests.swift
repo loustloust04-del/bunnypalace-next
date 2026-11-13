@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -31,13 +32,10 @@ final class SyncStoreTests: XCTestCase {
         Self.wipeLocalSyncState(pid: floorB)
     }
 
-    /// 导出/导入指纹落在宿主沙盒真实目录（localStateDir 不随 overrideRoot 隔离）且 pid 固定，
-    /// 上一次运行的残留戳 ≥ 本次 updateTime(now-50s) 时 exportChanged 静默跳过 → 两次运行间隔
-    /// < 50s 必挂（2026-07-16 agora 合并验证时钉死的 flaky 根因）。setUp 清干净。
+    /// 账本跟 overrideRoot 一起隔离，所有测试清理只触碰该次合成临时目录。
     static func wipeLocalSyncState(pid: String) {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("MemoryPalace/sync-state", isDirectory: true)
-        for kind in ["export", "import"] {
+        let dir = SyncStore.localStateDir()
+        for kind in ["export", "export-hub", "import"] {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(pid).\(kind).json"))
         }
     }
@@ -132,11 +130,149 @@ final class SyncStoreTests: XCTestCase {
         _ = conv
     }
 
+    /// 10-29 返工 #9：表情触发那轮的触发事件（assistant 节点的 cardEventsData）跟着同步走，
+    /// 不然 B 端历史里两条 assistant 连在一起、中间缺那条合成的 user；已经同步过的节点也要能补进来
+    @MainActor
+    func testCardEventsDataSyncsAndMergesIntoExistingNode() throws {
+        _ = makeConversation(in: contextA, id: "conv-ev", title: "表情事件")
+        XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 1)
+        XCTAssertEqual(SyncStore.importAll(profileId: pid, context: contextB).nodesInserted, 3)
+        XCTAssertNil(nodes(contextB, "conv-ev").first { $0.id == "conv-ev-a1" }?.cardEventsData, "老文档没有字段：保持 nil")
+
+        // A 端：a1 是表情触发的那轮（事件挂在它上面），再长出一条也带事件的新回复
+        let events = [ChatCardEvent(id: "ev-1", key: "reaction:x:❤️", text: "对你那条「c-a1」回了 ❤️")]
+        let a1A = try XCTUnwrap(nodes(contextA, "conv-ev").first { $0.id == "conv-ev-a1" })
+        a1A.cardEvents = events
+        let a2 = MessageNode(id: "conv-ev-a2", role: "assistant", content: "收到", contentType: "text", createTime: Date(),
+                             parentId: "conv-ev-a1", childrenIds: [], conversationId: "conv-ev", profileId: pid)
+        a2.cardEvents = events
+        contextA.insert(a2)
+        a1A.childrenIds.append(a2.id)
+        let convA = try XCTUnwrap(try contextA.fetch(FetchDescriptor<Conversation>()).first)
+        convA.updateTime = Date()
+        try contextA.save()
+        XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 1)
+        XCTAssertEqual(SyncStore.importAll(profileId: pid, context: contextB).nodesInserted, 1)
+
+        let nodesB = nodes(contextB, "conv-ev")
+        XCTAssertEqual(nodesB.first { $0.id == "conv-ev-a2" }?.cardEvents, events, "新节点带过来")
+        XCTAssertEqual(nodesB.first { $0.id == "conv-ev-a1" }?.cardEvents, events, "已有节点补进来")
+    }
+
     @MainActor
     func testExportFingerprintSkipsUnchanged() throws {
         _ = makeConversation(in: contextA, id: "conv-2", title: "指纹测试")
         XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 1)
         XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 0, "无变化不重复导出")
+    }
+
+    @MainActor
+    func testRecallSnapshotsMergeWithoutChangingChatAndThenStayIdle() throws {
+        let conv = makeConversation(in: contextA, id: "recall-sync", title: "岚舟与星砚")
+        var state = RecallConversationState()
+        state.effectiveTurn = 4
+        state.branchAnchor = "recall-sync-u1"
+        conv.recallState = state
+        var tuning = RecallTestTuning.make()
+        tuning.cooldownTurns = 8
+        tuning.maximumRecallCalls = 11
+        let decision = RecallTurnDecision(
+            turnId: "recall-sync-u1", branchAnchor: "recall-sync-u1", origin: .user,
+            gateReason: .search, tuning: tuning, topicAnchor: "林栖 云桥城",
+            selected: [], candidates: [], suppressions: [], ignored: [], thawed: [],
+            stateAfterResponse: state
+        )
+        var receipt = RecallTurnReceipt(decision: decision)
+        let sourceNode = try XCTUnwrap(nodes(contextA, conv.id).first { $0.role == "user" })
+        sourceNode.recallReceipt = receipt
+        try contextA.save()
+        XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 1)
+        let first = SyncStore.importAll(profileId: pid, context: contextB)
+        XCTAssertEqual(first.conversationsCreated, 1)
+        XCTAssertEqual(first.nodesInserted, 3)
+        let destination = try XCTUnwrap(contextB.fetch(FetchDescriptor<Conversation>()).first)
+        let destinationNode = try XCTUnwrap(nodes(contextB, conv.id).first { $0.id == sourceNode.id })
+        XCTAssertEqual(destination.recallStateData, conv.recallStateData)
+        XCTAssertEqual(destinationNode.recallReceiptData, sourceNode.recallReceiptData)
+        XCTAssertEqual(destinationNode.recallReceipt?.decision.tuning, tuning)
+        XCTAssertEqual(destinationNode.content, sourceNode.content)
+
+        // 新版既有节点只合并回执，不覆盖本地正文；历史 tuning 保持原快照。
+        destinationNode.content = "星砚的本地正文"
+        try contextB.save()
+        _ = receipt.beginAttempt(id: "fictional-second-attempt")
+        sourceNode.recallReceipt = receipt
+        state.effectiveTurn += 1
+        conv.recallState = state
+        conv.updateTime = Date(timeIntervalSinceNow: 10)
+        try contextA.save()
+        XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 1)
+        XCTAssertEqual(SyncStore.importAll(profileId: pid, context: contextB).conversationsUpdated, 1)
+        XCTAssertEqual(destination.recallStateData, conv.recallStateData)
+        XCTAssertEqual(destinationNode.recallReceipt, receipt)
+        XCTAssertEqual(destinationNode.recallReceipt?.decision.tuning, tuning)
+        XCTAssertEqual(destinationNode.content, "星砚的本地正文")
+        XCTAssertEqual(nodes(contextB, conv.id).count, 3)
+
+        let idle = SyncStore.importAll(profileId: pid, context: contextB)
+        XCTAssertEqual(idle.documentsScanned, 0)
+        XCTAssertEqual(idle.conversationsUpdated, 0)
+        XCTAssertEqual(idle.nodesInserted, 0)
+        XCTAssertFalse(contextB.hasChanges)
+    }
+
+    @MainActor
+    func testTerminalRecallUpdatesExportWithoutNewMessagesAndConverge() throws {
+        let conversation = makeConversation(in: contextA, id: "terminal-recall", title: "岚舟与星砚")
+        let user = try XCTUnwrap(nodes(contextA, conversation.id).first { $0.role == "user" })
+        var state = RecallConversationState()
+        state.branchAnchor = user.id
+        var respondedState = state
+        respondedState.effectiveTurn = 1
+        respondedState.lastAppliedTurnId = user.id
+        let decision = RecallTurnDecision(
+            turnId: user.id, branchAnchor: user.id, origin: .user,
+            gateReason: .search, tuning: RecallTestTuning.make(), topicAnchor: "林栖 云桥城",
+            selected: [], candidates: [], suppressions: [], ignored: [], thawed: [],
+            stateAfterResponse: respondedState
+        )
+        var receipt = RecallTurnReceipt(decision: decision)
+        let attempt = receipt.beginAttempt(id: "terminal-attempt")
+        receipt.markAttempt(attempt, status: .submitted)
+        user.recallReceipt = receipt
+        conversation.recallState = state
+        try contextA.save()
+        XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 1)
+        XCTAssertEqual(SyncStore.importAll(profileId: pid, context: contextB).nodesInserted, 3)
+        let destination = try XCTUnwrap(contextB.fetch(FetchDescriptor<Conversation>()).first)
+        let destinationUser = try XCTUnwrap(nodes(contextB, conversation.id).first { $0.id == user.id })
+        destinationUser.content = "星砚保留的本地正文"
+        try contextB.save()
+
+        // 客户端写端契约：回执 / 回态跟同次严格递增的对话时钟一起保存，无需新消息搭车。
+        XCTAssertTrue(receipt.recordResponse(attemptId: attempt, state: &state,
+                                             currentTurnId: user.id, currentBranchAnchor: user.id))
+        for status in [RecallAttemptStatus.responded, .interrupted] {
+            if status == .interrupted { receipt.finishAttempt(id: attempt, status: .cancelled) }
+            user.recallReceipt = receipt
+            conversation.recallState = state
+            conversation.updateTime = Date(timeIntervalSince1970: max(
+                Date().timeIntervalSince1970, conversation.updateTime.timeIntervalSince1970.nextUp))
+            try contextA.save()
+            XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 1)
+            XCTAssertEqual(SyncStore.importAll(profileId: pid, context: contextB).conversationsUpdated, 1)
+            XCTAssertEqual(destinationUser.recallReceipt?.attempts.last?.status, status)
+            XCTAssertTrue(destinationUser.recallReceipt?.hasEffectiveResponse == true)
+            XCTAssertEqual(destination.recallState, respondedState)
+            XCTAssertEqual(destinationUser.content, "星砚保留的本地正文")
+            XCTAssertEqual(nodes(contextA, conversation.id).count, 3)
+            XCTAssertEqual(nodes(contextB, conversation.id).count, 3)
+            XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 0)
+            let idle = SyncStore.importAll(profileId: pid, context: contextB)
+            XCTAssertEqual(idle.documentsScanned, 0)
+            XCTAssertEqual(idle.nodesInserted, 0)
+            XCTAssertFalse(contextB.hasChanges)
+        }
     }
 
     #if os(macOS)
@@ -145,14 +281,17 @@ final class SyncStoreTests: XCTestCase {
         let conv = makeConversation(in: contextA, id: "state-noop", title: "before")
         XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 1)
         XCTAssertEqual(SyncStore.importAll(profileId: pid, context: contextB).nodesInserted, 3)
-        let stateRoot = URL.applicationSupportDirectory.appendingPathComponent("MemoryPalace/sync-state")
+        let stateRoot = SyncStore.localStateDir()
         let urls = ["export", "import"].map { stateRoot.appendingPathComponent("\(pid).\($0).json") }
         let marker = Date(timeIntervalSince1970: 946684800)
         for url in urls {
             try FileManager.default.setAttributes([.modificationDate: marker], ofItemAtPath: url.path)
         }
         XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 0)
-        XCTAssertEqual(SyncStore.importAll(profileId: pid, context: contextB).documentsScanned, 0)
+        let idle = SyncStore.importAll(profileId: pid, context: contextB)
+        XCTAssertEqual(idle.documentsScanned, 0)
+        XCTAssertEqual(idle.conversationsUpdated, 0)
+        XCTAssertFalse(contextB.hasChanges, "nil 召回字段的空转不产生 SwiftData 变更")
         for url in urls {
             let modified = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
             XCTAssertEqual(modified, marker, "空转不重写本机账本")
@@ -172,6 +311,79 @@ final class SyncStoreTests: XCTestCase {
     #endif
 
     // MARK: - S4 删除传播
+
+    /// 共存第二步返工①：只换模式也导出（不推进 updateTime），对端拿模式更旧、内容更新的文档导入不会把气泡盖回文章
+    @MainActor
+    func testDisplayModeChangeSyncsAndSurvivesNewerContentWithOlderMode() throws {
+        let convA = makeConversation(in: contextA, id: "conv-mode", title: "模式同步")
+        _ = SyncStore.exportChanged(profileId: pid, context: contextA)
+        _ = SyncStore.importAll(profileId: pid, context: contextB)
+        let convB = try XCTUnwrap(contextB.fetch(FetchDescriptor<Conversation>()).first)
+        XCTAssertEqual(convB.mode, .article)
+        let staleDoc = try XCTUnwrap(SyncStore.syncRoot(profileId: pid)).appendingPathComponent("conv-mode.json")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        var stale = try decoder.decode(SyncStore.ConversationDocument.self, from: Data(contentsOf: staleDoc))
+
+        // A 换成气泡：updateTime 不动，导出照样带上
+        let updateTime = convA.updateTime
+        ConversationViewModel().setDisplayMode(.bubble, for: convA, context: contextA)
+        XCTAssertEqual(convA.updateTime, updateTime)
+        let exported = SyncStore.exportChanged(profileId: pid, context: contextA)
+        XCTAssertEqual(exported.exported, 1, "只换模式也要导出")
+        let doc = try decoder.decode(SyncStore.ConversationDocument.self, from: Data(contentsOf: staleDoc))
+        XCTAssertEqual(doc.displayMode, "bubble")
+        XCTAssertNotNil(doc.displayModeUpdatedAt)
+        XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 0, "导出后不重复写")
+
+        _ = SyncStore.importAll(profileId: pid, context: contextB)
+        XCTAssertEqual(convB.mode, .bubble, "对端收到气泡")
+        XCTAssertEqual(try XCTUnwrap(convB.displayModeUpdatedAt).timeIntervalSince1970,
+                       try XCTUnwrap(convA.displayModeUpdatedAt).timeIntervalSince1970, accuracy: 0.001)
+        XCTAssertFalse(SyncStore.isNewerModeStamp(try XCTUnwrap(convA.displayModeUpdatedAt), than: doc.displayModeUpdatedAt),
+                       "A 读回自己导出的文档（JSON 往返差亚微秒）不算本地更新，不来回写")
+
+        // 对端那份旧文档（换模式之前的文章、没有模式时间）内容更新了：再导入，内容跟上，模式不被盖回
+        stale.title = "对端改了标题"
+        stale.updateTime = Date(timeIntervalSinceNow: 60)
+        try encoder.encode(stale).write(to: staleDoc, options: .atomic)
+        _ = SyncStore.importAll(profileId: pid, context: contextB)
+        XCTAssertEqual(convB.title, "对端改了标题", "内容照常按 updateTime 合并")
+        XCTAssertEqual(convB.mode, .bubble, "模式更旧的文档盖不回文章")
+
+        // 带了模式时间、但比本地旧：同样不收
+        stale.displayModeUpdatedAt = Date(timeIntervalSinceNow: -3600)
+        stale.updateTime = Date(timeIntervalSinceNow: 120)
+        try encoder.encode(stale).write(to: staleDoc, options: .atomic)
+        _ = SyncStore.importAll(profileId: pid, context: contextA)
+        XCTAssertEqual(convA.mode, .bubble, "A 本地也不被盖回")
+        // A 的模式比这份文档新：账本清掉，下一轮把气泡写回去
+        XCTAssertEqual(SyncStore.exportChanged(profileId: pid, context: contextA).exported, 1)
+        let rewritten = try decoder.decode(SyncStore.ConversationDocument.self, from: Data(contentsOf: staleDoc))
+        XCTAssertEqual(rewritten.displayMode, "bubble")
+    }
+
+    @MainActor
+    func testOldDocumentWithoutModeStampStillFollowsContentWhenNeverSwitched() throws {
+        _ = makeConversation(in: contextA, id: "conv-old", title: "老文档")
+        _ = SyncStore.exportChanged(profileId: pid, context: contextA)
+        _ = SyncStore.importAll(profileId: pid, context: contextB)
+        let url = try XCTUnwrap(SyncStore.syncRoot(profileId: pid)).appendingPathComponent("conv-old.json")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        var doc = try decoder.decode(SyncStore.ConversationDocument.self, from: Data(contentsOf: url))
+        doc.displayMode = "bubble"
+        doc.displayModeUpdatedAt = nil
+        doc.updateTime = Date(timeIntervalSinceNow: 60)
+        try encoder.encode(doc).write(to: url, options: .atomic)
+        _ = SyncStore.importAll(profileId: pid, context: contextB)
+        let convB = try XCTUnwrap(contextB.fetch(FetchDescriptor<Conversation>()).first)
+        XCTAssertEqual(convB.mode, .bubble, "两边都没换过：照旧跟内容更新走")
+    }
 
     @MainActor
     func testSoftDeletePropagatesAsLWW() throws {

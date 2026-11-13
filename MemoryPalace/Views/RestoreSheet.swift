@@ -53,6 +53,7 @@ struct RestoreSheet: View {
                     .font(.title2.bold())
                 Spacer()
                 Button("关闭") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
             }
             .padding()
             Divider()

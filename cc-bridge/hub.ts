@@ -1,11 +1,13 @@
 import { VoiceCalls } from "./voice-calls.ts"
-import { WebSocketServer, WebSocket } from "ws"
+import { applyCCConfigFrame, ccConfigFrame, loadCCConfig, saveCCConfig, type CCConfigState } from "./cc-config.ts"
+import { WebSocketServer, WebSocket, type RawData } from "ws"
 import { createServer, IncomingMessage, ServerResponse } from "node:http"
 import { spawn } from "node:child_process"
 import { mkdir, readdir, readFile, stat, unlink } from "node:fs/promises"
 import { DirtyDirScanner } from "./dir-watch"
 import { blockLedger, describeLagVitals, procSample, timedExecFileSync, timedSyncFs, timeHandler, wsSite } from "./block-ledger.ts"
 import { networkInterfaces, homedir, hostname, loadavg } from "node:os"
+import { isIP } from "node:net"
 import { join, basename, extname } from "node:path"
 import { LaPayloadTooLargeError, type APNsResult, type LaEvent, sendAPNs, sendLiveActivityAPNs, sendVoIPAPNs } from "./apns.ts"
 import { type CCActivityState, validateContentState } from "./activity-state.ts"
@@ -25,6 +27,8 @@ import {
 import { shouldRemoteStart, buildStartEvent } from "./live-activity-start.ts"
 import { agentDir, loadConfig as loadAgentConfig } from "./agent-runner.ts"
 import { setBookNoteBroadcaster, pendingBookNotes, ackBookNote, deliverBookNote } from "./book-notes.ts"
+import { ingestStatusReport, isValidHHmm, isValidTimeZone, saveQuiet, statusResultFrame, StatusRunner, STATUS_BODY_MAX_BYTES, takeDuePushes, type StatusPush } from "./status-reports.ts"
+import { ackStatusAlert, deliverStatusAlert, pendingStatusAlerts, setStatusAlertBroadcaster, statusAlertFrame } from "./status-alerts.ts"
 import {
   initAskUser, handleHookEvent as handleAskUserHook, resolveOnReply as askUserResolveOnReply,
   clearForSession as askUserClearForSession, getPending as askUserPending, pendingList as askUserPendingList,
@@ -38,8 +42,9 @@ import { parseReaderOutput, buildBookNotePayload } from "./reader-daemon.ts"
 import { ccWorkdir, codexWorkdir, ccProjectSlug } from "./cc-workdir.ts"
 import {
   BindPrefsCache, type HubConfig, type MachineInfo, type ToolAvailability, buildHelloPayload, buildMcpConfig, detectTools, listDirs,
-  loadHubConfig, pickMcpConfig, readMachineInfo, resolveAgentWorkdir, sameDir, saveHubConfig, saveJsonPrivate, validateWorkdir,
+  loadHubConfig, loadOrCreateHubId, pickMcpConfig, readMachineInfo, resolveAgentWorkdir, sameDir, saveHubConfig, saveJsonPrivate, validateWorkdir,
 } from "./hub-config.ts"
+import { OpencliBridge, parseOpencliReq } from "./opencli-bridge.ts"
 import { CC_MEMORY_DIR, ccMemorySnapshots, fetchFrames, manifest as ccMemoryManifest, MemoryReplies, watchMemoryDir } from "./cc-memory-sync.ts"
 import { buildTerminalUsagePayload, readTranscriptUsage, readRateLimits, contextWindowFor } from "./terminal-usage.ts"
 import { buildTerminalInitPayload, parseMouseAnyFlag } from "./terminal-init.ts"
@@ -58,6 +63,10 @@ import {
   openAgoraProtocol,
   type AgoraOwnerMentionNotification,
 } from "./agora-protocol.ts"
+import {
+  BAD_PROOF_DELAY_MS, DeviceAuth, DeviceStore, LegacySeen, authFailFrame, duplicateAuthQuery, loadOrCreateHubKey, pairCodeFields, parseV2Query, validDeviceName,
+  type AuthFailReason, type AuthKind, type AuthPath, type V2Query,
+} from "./device-auth.ts"
 import { AgoraCCExecutor } from "./agora-cc-executor.ts"
 import { AgoraStoreError } from "./agora-types.ts"
 import { StreamRunner, type ControlRequest, type ControlVerdict, type Respond } from "./stream-runner.ts"
@@ -66,6 +75,7 @@ import { extractLastChannelTurnFromFile, readTailAsync, parseRows, undeliveredRo
 import { ModelPrefs, cliModelFor, parseModelCommand, pickLaunchModel, planModelRecovery, readModelEventWithin, shellQuote, DEFAULT_MODEL_MARK, type LaunchModel } from "./cc-model"
 import { buildSessionModelFrame, carryContextSuffix, CodexRolloutIndex, SessionModelTracker } from "./session-model"
 import { correctChatId } from "./chat-id-guard.ts"
+import { stripReactBlocks } from "./react-blocks.ts"
 import { planReap, reapLogLine, reapThresholdMs, reapUnknownLogLine } from "./session-reap"
 import { effortArg, effortChange, normalizeEffort } from "./effort.ts"
 import { buildSessionPhaseFrame, phaseFrameChanged, sendPhaseAfter, sessionPhaseSnapshotFrames } from "./session-phase.ts"
@@ -439,6 +449,35 @@ export function replyViaTextFor(session: string | undefined): boolean {
 }
 const REPLY_VIA_TEXT_HINT = " 直接用文字回答即可，不要调用 reply 工具（要发文件、引用某条、或没人问你时主动开口才用 reply）。"
 const HUB_HOST = process.env.MP_CC_HUB_HOST ?? "127.0.0.1"
+// MP_CC_HUB_EXTRA_HOSTS：在 loopback / LAN / Tailscale（或手动 HOST）之外再多听的具体地址，逗号分隔。
+// 给 VPS「梯子服务端拨本机网卡地址」那条国内连法用（deploy/VPS.md）：来源不是 loopback → 照常要口令。
+// 只收具体 IP：0.0.0.0 / :: 这类「全接口」和非 IP 一律拒（打日志跳过，不让 hub 起不来）。
+export function parseExtraHosts(raw: string | undefined): { hosts: string[]; rejected: string[] } {
+  const hosts: string[] = [], rejected: string[] = []
+  for (const part of (raw ?? "").split(",")) {
+    const h = part.trim()
+    if (!h) continue
+    const v = isIP(h)
+    const unspecified = (v === 4 && h === "0.0.0.0") || (v === 6 && /^(?:[0:]+|[0:]*ffff:0\.0\.0\.0)$/i.test(h))
+    if (v === 0 || unspecified) rejected.push(h)
+    else if (!hosts.includes(h)) hosts.push(h)
+  }
+  return { hosts, rejected }
+}
+const EXTRA_HOSTS = parseExtraHosts(process.env.MP_CC_HUB_EXTRA_HOSTS)
+/// /pair 的 u / u2，只给实际在听的地址：u = LAN（没有退 Tailscale），u2 = 有 LAN 时的 Tailscale。
+/// 没有 Tailscale 时退回第一个在听、且不跟 u 重复的 MP_CC_HUB_EXTRA_HOSTS 地址（VPS 梯子那条，plan-multi-hub B0.3）：
+/// 有 LAN 就作 u2；LAN 也没有就作 u（app 的 CCPairPayload.parse 要求 u 是 ws 地址，u 为空的码会被拒）。
+export function pairURLs(o: { lan?: string; tailscale?: string; extraHosts: string[]; listening: (host: string) => boolean; port: number }): { u: string | null; u2: string | null } {
+  const url = (h: string) => `ws://${isIP(h) === 6 ? `[${h}]` : h}:${o.port}/cc`
+  const lanU = o.lan && o.listening(o.lan) ? url(o.lan) : null
+  const tsU = o.tailscale && o.listening(o.tailscale) ? url(o.tailscale) : null
+  const u = lanU ?? tsU
+  if (tsU) return { u, u2: lanU ? tsU : null }
+  const extra = o.extraHosts.find((h) => o.listening(h) && url(h) !== u)
+  const extraU = extra ? url(extra) : null
+  return u ? { u, u2: extraU } : { u: extraU, u2: null }
+}
 // Token 来源优先级：MP_CC_HUB_TOKEN 直接值 > MP_CC_HUB_TOKEN_FILE 读文件
 // systemd / Docker secrets / 一般 "把 token 写文件" 部署模式靠后者。
 let HUB_TOKEN = process.env.MP_CC_HUB_TOKEN
@@ -463,7 +502,14 @@ const generatedMcpConfigPath = join(SECRETS_DIR, "mcp.json")
 const HUB_VERSION = "t3"
 const HUB_CAPABILITIES = ["hello", "dirs", "list_dirs", "end_window", "terminal_seen", "terminal_active", "terminal_paste"]
 let machineInfo: MachineInfo | null = null
+/// secrets/hub-id（plan-multi-hub B0）：startHub 里读 / 生成，hello 帧带上
+let hubId = ""
+/// 设备密钥对鉴权（plan-hub-keypair-auth K1）：hub-key.pem 可用才有；loadHubState 里建
+let deviceAuth: DeviceAuth | null = null
+let legacySeen: LegacySeen | null = null
 let toolAvailability: ToolAvailability = { tmux: null, claude: null, codex: null }
+/// plan-opencli-in-app：chrome_read / site_query 的唯一执行点（开关 hubConfig.opencli_enabled）
+const opencliBridge = new OpencliBridge({ logPath: join(SECRETS_DIR, "opencli-log.jsonl") })
 
 function agentWorkdirSetting(): string | null {
   return hubConfig.agent_workdir ?? null
@@ -504,6 +550,93 @@ export function isTrustedLocal(req: Pick<IncomingMessage, "socket" | "headers">)
   if (FORWARDING_HEADERS.some((k) => k in h)) return false
   if ("origin" in h || Object.keys(h).some((k) => k.startsWith("sec-fetch-"))) return false
   return LOCAL_HOST_NAMES.has((h.host ?? "").toLowerCase().replace(/:\d+$/, ""))
+}
+
+/// 鉴权结果随连接走：local = 本机信任，legacy = 口令原文，key / token / code = 新协议（deviceId 有值）
+export interface ConnAuth { via: "local" | "legacy" | AuthKind; deviceId: string | null }
+
+/// 日志 / devices.json last_from / legacy-seen 用的来源标签（不记 IP）
+export function fromLabel(remote: string | undefined): string {
+  if (remote === "relay") return "relay"
+  if (isLoopback(remote)) return "proxy"   // loopback 但不是本机信任 = 隧道 / 代理转进来的
+  const o = (remote ?? "").replace(/^::ffff:/, "").split(".").map(Number)
+  if (o.length === 4 && o[0] === 100 && o[1] >= 64 && o[1] <= 127) return "tailscale"
+  return "lan"
+}
+
+/// 每个鉴权失败都先发 auth_fail 再 close(1008,"auth")（老 app 只认 1008 "auth"）
+function rejectAuth(ws: WebSocket, reason: AuthFailReason): void {
+  try { ws.send(authFailFrame(reason)) } catch {}
+  ws.close(1008, "auth")
+}
+
+/// 管理接口 / K3 管理帧共用：吊销的不列
+function adminDeviceList(): { available: boolean; devices: object[]; legacy_last: { at: number; from: string } | null } {
+  const store = deviceAuth?.store
+  const devices = store?.available ? store.list().map((d) => ({
+    id: d.id, name: d.name, platform: d.platform, added_at: d.added_at, added_via: d.added_via,
+    ...(d.invited_by ? { invited_by: d.invited_by } : {}), last_used_at: d.last_used_at, last_from: d.last_from,
+  })) : []
+  return { available: !!store?.available, devices, legacy_last: legacySeen?.get() ?? null }
+}
+
+function renameDevice(did: string, rawName: unknown): { ok: true } | { ok: false; reason: "unavailable" | "bad_name" | "not_found" | "write_failed" } {
+  if (!deviceAuth || !deviceAuth.store.available) return { ok: false, reason: "unavailable" }
+  const name = validDeviceName(rawName)
+  if (!name) return { ok: false, reason: "bad_name" }
+  try {
+    return deviceAuth.store.rename(did, name) ? { ok: true } : { ok: false, reason: "not_found" }
+  } catch (e) {
+    console.error(`[hub] 改名 did=${did.slice(0, 8)} 写盘失败（${(e as Error).message}）`)
+    return { ok: false, reason: "write_failed" }
+  }
+}
+
+/// /pair 和邀请码里的 v2 字段（§0.6）：现出一条配对码；新协议不可用 → 空（只剩 v1）
+function pairV2Fields(issuer: string | null): Record<string, string | number> {
+  if (!deviceAuth) return {}
+  const code = deviceAuth.codes.issue({ issuer: issuer ?? undefined, now: Date.now() })
+  return { v: 2, hid: hubId, hk: deviceAuth.key.hk, n: machineInfo?.host_name ?? "", ...pairCodeFields(code) }
+}
+
+/// 日志里只放受控标签，不原样打远端给的值（路径 / close reason / Origin / bundle 都可能被塞秘密，astra K1 审）
+const KNOWN_WS_PATHS = new Set(["/cc", "/agora", "/mcp"])
+export function pathLabel(pathname: string): string {
+  return KNOWN_WS_PATHS.has(pathname) ? pathname : "other"
+}
+export function remoteValueLabel(v: string | Buffer | null | undefined): string {
+  const n = v === null || v === undefined ? 0 : v.length
+  return n === 0 ? "(empty)" : `(${n}B)`
+}
+
+/// 新协议会话鉴权完成后再来 auth 帧 → bad_request 并关（§0.3）。挂在 emit 上，业务监听（/cc、/agora 各自的）一个都不会收到这帧；
+/// 只对 v2 会话装，口令原文 / 本机会话的业务路径不变。先粗筛（长度 + 子串）再解析，别的业务帧不多花 JSON.parse
+function looksLikeAuthFrame(raw: RawData): boolean {
+  if (rawDataLength(raw) > AUTH_GUARD_MAX) return false
+  const text = raw.toString()
+  if (!text.includes('"auth"')) return false
+  try {
+    const o: unknown = JSON.parse(text)
+    return !!o && typeof o === "object" && (o as { type?: unknown }).type === "auth"
+  } catch { return false }
+}
+const AUTH_GUARD_MAX = 8 * 1024
+function guardRepeatAuth(ws: WebSocket, did: string): void {
+  const emit = ws.emit.bind(ws)
+  ws.emit = ((event: string | symbol, ...args: RawData[]) => {
+    if (event === "message" && args[0] !== undefined && looksLikeAuthFrame(args[0])) {
+      console.warn(`[hub] auth_fail reason=bad_request (repeat auth) did=${did.slice(0, 8)}`)
+      ws.removeAllListeners("message")
+      rejectAuth(ws, "bad_request")
+      return true
+    }
+    return emit(event, ...args)
+  }) as typeof ws.emit
+}
+
+function rawDataLength(raw: RawData): number {
+  if (Array.isArray(raw)) return raw.reduce((n, b) => n + b.length, 0)
+  return raw instanceof ArrayBuffer ? raw.byteLength : raw.length
 }
 
 // 探测本机网卡，按 IP 段分类：Tailscale(100.64-127)/LAN(192,10,172.16-31)/loopback。
@@ -2130,12 +2263,13 @@ function memoryRepliesFor(ws: WebSocket): MemoryReplies {
 function helloPayload(): string {
   return buildHelloPayload({
     hubVersion: HUB_VERSION,
+    hubId,
     machine: machineInfo ?? { host_name: "", host_model_id: null, host_model_name: null },
     claudeHome: ccWorkdir(),
     codexHome: codexWorkdir(),
     agentWorkdir: agentWorkdirSetting(),
     tools: toolAvailability,
-    capabilities: ccMcpConfig() ? [...HUB_CAPABILITIES, "mcp"] : HUB_CAPABILITIES,
+    capabilities: [...HUB_CAPABILITIES, ...(ccMcpConfig() ? ["mcp"] : []), ...(deviceAuth ? ["device_auth"] : []), ...(hubConfig.opencli_enabled ? ["opencli"] : [])],
   })
 }
 
@@ -2162,6 +2296,7 @@ function hubConfigPayload(requestIdValue?: string): string {
     agent_workdir: agentWorkdirSetting(),
     claude_home: ccWorkdir(),
     codex_home: codexWorkdir(),
+    opencli_enabled: hubConfig.opencli_enabled === true,
     ...(requestIdValue ? { request_id: requestIdValue } : {}),
   })
 }
@@ -2232,6 +2367,28 @@ setBookNoteBroadcaster((frame) => {
     try { c.send(frame) } catch {}
   }
 })
+// 状态面板（plan-status-panel §7）：小芽提醒广播 + status_result 广播 + 立即检修
+setStatusAlertBroadcaster((frame) => {
+  for (const c of mpClients) {
+    try { c.send(frame) } catch {}
+  }
+})
+function broadcastStatusResult(): void {
+  let frame: string
+  try { frame = JSON.stringify(statusResultFrame((id) => statusRunner.isRunning(id))) }
+  catch (e) { console.warn(`[hub] status_result 组帧失败: ${e}`); return }
+  for (const c of mpClients) {
+    try { c.send(frame) } catch {}
+  }
+}
+const statusRunner = new StatusRunner(broadcastStatusResult)
+function sendStatusPush(p: StatusPush): void {
+  sendRegisteredPushes("小芽", p.text, "小芽找你", "", { route: "status", alert_id: p.alertId })
+}
+function flushDueStatusPushes(): void {
+  try { for (const p of takeDuePushes()) sendStatusPush(p) }
+  catch (e) { console.warn(`[hub] 小芽补推巡检失败: ${e}`) }
+}
 // 问问题 CC 桥：pending 记账 + 帧广播出口（同款）
 /// hook 的 claude session_id → tmux session 名（sessionMap 反查，驱动键序要用）
 function askUserSessionNameOf(sessionId: string): string | undefined {
@@ -2648,6 +2805,16 @@ const pocketPending = new Map<string, { resolve: (v: any) => void; timer: Return
 const replyLogPath = join(SECRETS_DIR, "reply-log.json")
 const MAX_REPLY_LOG = 500   // 持久保留最近 N 条 reply，用于重连补发（换 WiFi/断网/hub 重启都不丢）
 const recentReplies: RecentReply[] = []
+/// 每个对话最近一次 app 发起的时间（thinking 没带正文时，用来判断「哪条回复属于这一轮」，plan-cc-reactions 2a.1 第 6 条）
+export const lastAppSendAt = new Map<string, number>()
+
+/// 推送预览：先剥 ```react 块（表情由 app 那边贴，推送里不能露协议）。
+/// 只有块 → null 不推；带文件时正文空也照推（文件才是要叫你的东西）。
+export function pushPreviewFor(content: string, hasFile: boolean): string | null {
+  const text = stripReactBlocks(content)
+  if (!text.trim() && !hasFile) return null
+  return text.replace(/\s+/g, " ").slice(0, 80)
+}
 /// reply 幂等（mcp-server 重试帧带同 mp_msg_id）——Set 插入序即最老在前，超上限剔一批。
 /// 导出供测试；生产只经 markReplySeen 使用。
 export const seenMpMsgIds = new Set<string>()
@@ -2745,9 +2912,13 @@ function deliverReply(msg: any, guardSession: string | undefined, source: "mcp" 
     const shouldPush = source !== "terminal" && !focusedHere && pushTokens.size > 0
     console.log(`[hub] push decision: chat=${msg.chat_id.slice(0, 8)} focusedHere=${focusedHere} source=${source} → ${shouldPush ? "PUSH" : "skip"}`)
     if (shouldPush) {
-      const fullPreview = msg.content.replace(/\s+/g, " ").slice(0, 80)
-      const chatId = msg.chat_id
-      sendRegisteredPushes(ccConfig.pushName, fullPreview, "找你了", chatId)
+      const preview = pushPreviewFor(String(msg.content ?? ""), Boolean(staged))
+      if (preview === null) {
+        console.log(`[hub] push skip: react only chat=${msg.chat_id.slice(0, 8)}`)
+      } else {
+        const chatId = msg.chat_id
+        sendRegisteredPushes(ccConfig.pushName, preview, "找你了", chatId)
+      }
     }
   return true
 }
@@ -2808,6 +2979,24 @@ function saveThinkingLog(): void {
   try { writeFileSync(thinkingLogPath, JSON.stringify(recentThinkings)) }
   catch (e: any) { console.warn(`[hub] saveThinkingLog failed: ${e.message}`) }
 }
+/// 只有 thinking 的轮挂到哪（plan-cc-reactions 2a.1 第 6 条）：
+/// 本轮 app 消息的 message_id → 它对应的那条回复（CC 照抄 <channel> 的 message_id）；
+/// CC 用 reply 工具却漏传 message_id → 这条对话「最近一次 app 发送之后、没带 message_id」的最近一条。
+/// 都对不上 = 不挂（以前会错挂到上一条）。
+function thinkingAnchorFor(chatId: string, messageId: string): string | undefined {
+  for (let i = recentReplies.length - 1; i >= 0; i--) {
+    const r = recentReplies[i]
+    if (r.chat_id === chatId && r.message_id === messageId && r.mpMsgId) return r.mpMsgId
+  }
+  const sentAt = lastAppSendAt.get(chatId)
+  if (sentAt === undefined) return undefined
+  for (let i = recentReplies.length - 1; i >= 0; i--) {
+    const r = recentReplies[i]
+    if (r.chat_id === chatId && !r.message_id && r.mpMsgId && r.ts > sentAt) return r.mpMsgId
+  }
+  return undefined
+}
+
 /// Stop hook 投来的当轮 thinking / 正文。HTTP 入口和待投目录补发共用（09-19：hub 卡住 3 秒 hook 超时放弃，正文丢了）。
 function processThinkingPost(o: any): [number, Record<string, unknown>] {
   const chatId = typeof o.chat_id === "string" ? o.chat_id : ""
@@ -2882,9 +3071,16 @@ function processThinkingPost(o: any): [number, Record<string, unknown>] {
   }
   let anchor: string | undefined
   if (typeof o.turn_uuid === "string") anchor = streamedTurnNode.get(o.turn_uuid)   // 流式建的节点优先
-  for (let i = recentReplies.length - 1; i >= 0; i--) {
-    const r = recentReplies[i]
-    if (r.chat_id === chatId && r.mpMsgId) { anchor = r.mpMsgId; break }
+  // 这一帧同时投了正文 → 刚落的 reply 就是这一轮的锚；没带 message_id（老 hook）→ 照旧挂最近一条。
+  // 只有 thinking、又带了 message_id → 严格按本轮消息认，认不出就不挂（以前会错挂到上一条）
+  const carriedBody = Boolean(rows || replyText)
+  const msgId = typeof o.message_id === "string" ? o.message_id : ""
+  if (!anchor && !carriedBody && msgId) anchor = thinkingAnchorFor(chatId, msgId)
+  if (!anchor && (carriedBody || !msgId)) {
+    for (let i = recentReplies.length - 1; i >= 0; i--) {
+      const r = recentReplies[i]
+      if (r.chat_id === chatId && r.mpMsgId) { anchor = r.mpMsgId; break }
+    }
   }
   if (!anchor) {
     console.log(`[hub] thinking dropped (no_anchor) chat=${chatId.slice(0, 8)} len=${thinking.length}`)
@@ -3159,10 +3355,27 @@ export function agoraMentionPushContent(notification: AgoraOwnerMentionNotificat
   }
 }
 
+/// hub 身份钥坏 / 缺且写不进 → 这次不开新协议（capabilities 不报 device_auth），口令照常；设备表坏了不当空表，原文件不动
+function loadDeviceAuth(): void {
+  legacySeen = new LegacySeen(join(SECRETS_DIR, "legacy-seen.json"))
+  const store = new DeviceStore(join(SECRETS_DIR, "devices.json"))
+  store.load()
+  if (!store.available) console.error(`[hub] ${store.unavailableReason}：设备钥 / 配对码登录先回 unavailable，口令照常（原文件没动；修好、从备份恢复，或停 hub 后挪走它 = 设备表清空）`)
+  const hk = loadOrCreateHubKey(join(SECRETS_DIR, "hub-key.pem"))
+  if (!hk.ok) {
+    console.error(`[hub] ${hk.reason}：这次不开设备钥鉴权，口令照常。恢复：从备份放回 secrets/hub-key.pem；或停 hub 后挪走它（下次启动生成新身份钥，记着口令的设备会自动重新确认，只靠配对码配的要重扫）`)
+    return
+  }
+  deviceAuth = new DeviceAuth(hubId, hk.key, store, HUB_TOKEN)
+  console.log(`[hub] 设备钥鉴权开 hk=${hk.key.hk.slice(0, 8)}${hk.created ? "（新生成）" : ""} 设备 ${store.available ? store.list().length : "表不可用"}`)
+}
+
 /// 状态加载 + 常驻钩子只在 startHub() 里做：import 本文件（hub.test.ts / 脚本）必须是惰性的——
 /// 不读生产 secrets、不装定时器、不装 process.exit 的崩溃钩子（09-02 e2e 脚本被定时器拖住 3 分钟；
 /// 测试进程装了 unhandledRejection→exit(1) 会把无关异步错误变成整个 runner 退出）。
 function loadHubState(): void {
+  hubId = loadOrCreateHubId(join(SECRETS_DIR, "hub-id"))
+  loadDeviceAuth()
   voiceCalls.load()
   const callTimer = setInterval(() => { for (const c of voiceCalls.expire()) broadcastCall(c) }, 1000)
   callTimer.unref()
@@ -3181,6 +3394,7 @@ function loadHubState(): void {
   loadConversationTitles()
   loadKeepalivePolicies()
   loadTransportPolicies()
+  loadCCConfigState()
 }
 
 const NUDGE = {
@@ -3200,7 +3414,7 @@ const NUDGE = {
 const TAG_INJECTION_RE = /<\/?[a-zA-Z!]/
 function hasTagInjection(s: string): boolean { return TAG_INJECTION_RE.test(s) }
 
-// 运行时 config（app 经 set_cc_config 覆盖；没收到时用 NUDGE 默认 + 写死默认）。不持久化，app 重连重发。
+// 运行时 config（app 经 set_cc_config 按字段改；没收到时用 NUDGE 默认 + 写死默认）。落盘 cc-config.json，改完回推所有 app（刀 5 D-B1）
 const DEFAULT_NUDGE_TEMPLATE = "[系统] {name} 已经 {idle} 分钟没说话了。如果你想，可以主动找 {name} 说点什么——用 reply 工具回复（chat_id 见本 channel）。也可以选择不打扰。"
 const ccConfig = {
   // 默认 "助手"：app 启动后会发 set_cc_config 覆盖成 UserDefaults.assistantName 全局值；
@@ -3216,6 +3430,15 @@ const ccConfig = {
   nudgeTemplate: DEFAULT_NUDGE_TEMPLATE,
   // 新建 claude 会话的传输：tmux（有终端镜像）/ stream（无终端，stdio 直连）。只影响新建，已有会话按绑定
   newSessionTransport: (TRANSPORT_LOCK === "stream" ? "stream" : "tmux") as "tmux" | "stream",
+}
+const ccConfigPath = join(SECRETS_DIR, "cc-config.json")
+const ccConfigState: CCConfigState = { config: ccConfig, updatedAt: {}, seeded: false }
+function loadCCConfigState(): void {
+  const loaded = loadCCConfig(ccConfigPath, { ...ccConfig })
+  Object.assign(ccConfig, loaded.config)
+  if (TRANSPORT_LOCK) ccConfig.newSessionTransport = TRANSPORT_LOCK === "stream" ? "stream" : "tmux"
+  ccConfigState.updatedAt = loaded.updatedAt
+  ccConfigState.seeded = loaded.seeded
 }
 
 function rollNudgeThreshold(): number {
@@ -3503,6 +3726,8 @@ export function startHub(): WebSocketServer {
   machineInfo = readMachineInfo()
   refreshToolAvailability()
   setInterval(refreshToolAvailability, 5 * 60_000)
+  flushDueStatusPushes()
+  setInterval(flushDueStatusPushes, 5 * 60_000).unref()
   process.on("uncaughtException", (e) => {
     console.error(`[hub] FATAL uncaughtException: ${e?.stack ?? e}`)
     exitAfterFlush(1)
@@ -3613,6 +3838,12 @@ export function startHub(): WebSocketServer {
   const manualHost = (HUB_HOST && HUB_HOST !== "auto" && HUB_HOST !== "0.0.0.0") ? HUB_HOST : null
   const listeners = new Map<string, ReturnType<typeof createServer>>()
 
+  /// /pair 和邀请码共用的地址：u / u2 = 在听的 LAN / Tailscale；中继入口开着才给 u3（手机连中继的 wss 地址）和 p3（自签证书的 SPKI pin，#068）
+  const pairAddresses = (): { u: string | null; u2: string | null; u3?: string | null; p3?: string | null } => {
+    const { u, u2 } = pairURLs({ lan: detected.lan, tailscale: detected.tailscale, extraHosts: EXTRA_HOSTS.hosts, listening: (h) => listeners.has(h), port: PORT })
+    const relayCfg = relayIngressOpen ? loadRelayConfig(relayConfigPath) : null
+    return relayCfg && typeof relayCfg === "object" ? { u, u2, u3: relayPhoneURL(relayCfg), p3: relayCfg.pinSpkiSha256 ?? null } : { u, u2 }
+  }
   // GET /health（看门狗探活）+ GET /pair（Mac app 取配对信息）——两者仅 loopback（/pair 含 token）。
   // /pair 只返回**当前实际绑了**的 LAN / Tailscale 地址（关掉的不广播），手机都存自动 fallback。
   const httpHandler = (req: IncomingMessage, res: ServerResponse) => {
@@ -3778,8 +4009,39 @@ export function startHub(): WebSocketServer {
       return
     }
     // #endif
+    // K1-D 本机管理接口（devices.ts CLI 用；跟 K3 的 WS 管理帧走同一套函数）：loopback + ?token=，同 /warroom 的守卫
+    if (path?.startsWith("/admin/")) {
+      if (!isTrustedLocal(req)) { res.writeHead(403); res.end("forbidden"); return }
+      if (new URL(req.url ?? "", "http://localhost").searchParams.get("token") !== HUB_TOKEN) { res.writeHead(401); res.end("unauthorized"); return }
+      const respond = (code: number, obj: object) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)) }
+      if (req.method === "GET" && path === "/admin/devices") return respond(200, adminDeviceList())
+      if (req.method !== "POST" || !["/admin/devices/revoke", "/admin/devices/rename", "/admin/pair-code"].includes(path)) return respond(404, { error: "not found" })
+      let body = ""
+      req.on("data", (c) => { body += c; if (body.length > 10_000) { res.writeHead(413); res.end(); req.destroy() } })
+      req.on("end", () => {
+        let p: unknown = {}
+        if (body) { try { p = JSON.parse(body) } catch { return respond(400, { ok: false, reason: "bad_json" }) } }
+        const r = p && typeof p === "object" ? p as Record<string, unknown> : {}
+        if (path === "/admin/pair-code") {
+          if (!deviceAuth) return respond(503, { ok: false, reason: "unavailable" })
+          const v2 = pairV2Fields(null)
+          // 邀请格式（§0.6）：不含口令、mpcc:2
+          return respond(200, { ok: true, pc: v2.pc, mc: v2.mc, exp: v2.exp, qr: JSON.stringify({ mpcc: 2, ...pairAddresses(), ...v2 }) })
+        }
+        const did = typeof r.device_id === "string" ? r.device_id : ""
+        if (path === "/admin/devices/revoke") {
+          const out = revokeDevice(did)
+          return respond(out.ok ? 200 : out.reason === "not_found" ? 404 : out.reason === "unavailable" ? 503 : 500, out)
+        }
+        const out = renameDevice(did, r.name)
+        return respond(out.ok ? 200 : out.reason === "not_found" ? 404 : out.reason === "bad_name" ? 400 : out.reason === "unavailable" ? 503 : 500, out)
+      })
+      return
+    }
     // /pair：Phase 2 主体收紧——loopback 也强制 ?token= 校验，堵本机原生进程免鉴权拿 token
     if (req.method === "GET" && path === "/pair") {
+      // K1-A：口令校验前先挡非本机（含中继入口 / 带转发头 / LAN 直连），跟上面「仅 loopback」对齐
+      if (!isTrustedLocal(req)) { res.writeHead(403); res.end("forbidden"); return }
       const provided = new URL(req.url ?? "", "http://localhost").searchParams.get("token")
       if (provided !== HUB_TOKEN) {
         console.warn(`[hub] /pair auth failed from ${req.socket.remoteAddress}`)
@@ -3787,12 +4049,9 @@ export function startHub(): WebSocketServer {
         return
       }
       res.writeHead(200, { "content-type": "application/json" })
-      const lanU = detected.lan && listeners.has(detected.lan) ? `ws://${detected.lan}:${PORT}/cc` : null
-      const tsU = detected.tailscale && listeners.has(detected.tailscale) ? `ws://${detected.tailscale}:${PORT}/cc` : null
-      // #068：中继入口开着才给 u3（手机连中继的 wss 地址）和 p3（自签证书的 SPKI pin）
-      const relayCfg = relayIngressOpen ? loadRelayConfig(relayConfigPath) : null
-      const relay = relayCfg && typeof relayCfg === "object" ? { u3: relayPhoneURL(relayCfg), p3: relayCfg.pinSpkiSha256 ?? null } : {}
-      res.end(JSON.stringify({ mpcc: 1, u: lanU ?? tsU, u2: lanU ? tsU : null, t: HUB_TOKEN ?? "", ...relay }))
+      // K1-C.6：v1 + v2 合一（老 app 只认 mpcc/u/t，多出的字段忽略）；新协议不可用时只给 v1。每次请求出一条新配对码
+      const { u, u2, ...relay } = pairAddresses()
+      res.end(JSON.stringify({ mpcc: 1, u, u2, t: HUB_TOKEN ?? "", ...relay, ...pairV2Fields(null) }))
       return
     }
     // POST /thinking（仅 loopback）：Stop hook 回传当轮思考链。
@@ -3987,6 +4246,39 @@ export function startHub(): WebSocketServer {
       })
       return
     }
+    // POST /agent/status/:id（loopback-only）：外部检修源报告 → 存 → 判定 → 小芽提醒（plan-status-panel §7.1）
+    if (req.method === "POST" && path?.startsWith("/agent/status/")) {
+      if (!isTrustedLocal(req)) { res.writeHead(403); res.end("forbidden"); return }
+      const id = path.slice("/agent/status/".length)
+      const chunks: Buffer[] = []
+      let size = 0
+      let overflow = false
+      req.on("data", (chunk: Buffer) => {
+        if (overflow) return
+        size += chunk.length
+        if (size > STATUS_BODY_MAX_BYTES) { overflow = true; res.writeHead(413); res.end(); req.destroy(); return }
+        chunks.push(chunk)
+      })
+      req.on("end", () => {
+        if (overflow) return
+        let r: ReturnType<typeof ingestStatusReport>
+        try { r = ingestStatusReport(id, Buffer.concat(chunks).toString("utf8"), (a) => deliverStatusAlert(a)) }
+        catch (e) { r = { ok: false, reason: `存不下来：${(e as Error).message}` } }
+        if (!r.ok) {
+          res.writeHead(400, { "content-type": "application/json" })
+          res.end(JSON.stringify({ ok: false, reason: r.reason }))
+          return
+        }
+        if (r.alert) {
+          console.log(`[hub] status ${id} → 小芽 ${r.alert.kind}${r.push ? " +推送" : ""}`)
+        }
+        if (r.push) sendStatusPush(r.push)
+        broadcastStatusResult()
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ ok: true, alert: r.alert?.kind ?? null }))
+      })
+      return
+    }
     // POST /agent/book-note（loopback-only）：CC 的共读批注 → daemon 同款投递链。
     // 开关 coRead.cc（默认关）；书籍坐标由 reading-context 补全，CC 只管 quote+comment。
     if (req.method === "POST" && path === "/agent/book-note") {
@@ -4089,7 +4381,7 @@ export function startHub(): WebSocketServer {
     // Origin 头拦截：浏览器 WebSocket 强制发 Origin，原生 client（URLSession/Bun）不发。堵浏览器 drive-by。
     const origin = req.headers.origin
     if (origin) {
-      console.warn(`[hub] upgrade rejected origin=${origin} ip=${req.socket.remoteAddress}`)
+      console.warn(`[hub] upgrade rejected origin=${remoteValueLabel(origin)} ip=${req.socket.remoteAddress}`)
       socket.destroy()
       return
     }
@@ -4099,7 +4391,8 @@ export function startHub(): WebSocketServer {
       socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
       return
     }
-    if (upgradeUrl.pathname === "/agora" && !hasValidAgoraToken(req.url ?? "", hubToken)) {
+    // K1-C.5：没口令且不是合法 v=2 query 才 401（v=2 的到 connection 里走挑战）
+    if (upgradeUrl.pathname === "/agora" && !hasValidAgoraToken(req.url ?? "", hubToken) && !parseV2Query(upgradeUrl.searchParams)) {
       console.warn(`[hub] Agora auth failed from ${req.socket.remoteAddress}`)
       socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
       socket.destroy()
@@ -4139,6 +4432,1123 @@ export function startHub(): WebSocketServer {
     s.close(); listeners.delete(host); console.log(`[hub] unbound ${host}:${PORT}`)
   }
 
+  // K1-C.2 搬家（零行为变化）：鉴权通过之后各路径的接线。attach* 里同步挂 ws.on("message") 的约束不变
+  function attachAgora(ws: WebSocket, remote: string | undefined): void {
+    agoraProtocol.attach(ws)
+    console.log(`[hub] Agora owner connected from ${remote}`)
+  }
+
+  function attachCC(ws: WebSocket, reqUrl: URL, remote: string | undefined, trustedLocal: boolean): void {
+    mpClients.add(ws)
+    try { ws.send(helloPayload()) } catch {}   // #046：主机名 / 机型 / 家 / 干活目录 / 工具，排在所有 replay 前
+    const probeConnectedAt = Date.now()   // 桥探针：连接时长，对 app 端 Documents/bridge-probe.log
+    console.log(`[hub] ${probeTs()} MP connected (total ${mpClients.size}) from ${remote}`)
+    // L4 P0b: 这个 handler 是 async 的，让内部 terminal_attach 路径能 await
+    // sleep(80ms) 给 CC SIGWINCH 重排时间，capture-pane 拿到的 snapshot 跟
+    // 新 pane size 对齐
+
+    // replay 持久缓冲里全部 reply（最近 MAX_REPLY_LOG 条）给新 client，补发断连期间漏的 reply。
+    // ⚠️ client 去重保留条数必须 ≥ MAX_REPLY_LOG，否则 replay 到尾部时去重已被剔 → 重复/错位（见 CCBridgeWebSocketClient.replyDedupKeepCount）。
+    // 考古结果补投（app 离线期间完成的，重连即达；幂等）
+    for (const [, r] of corpusResults) {
+      try { ws.send(r.frame) } catch {}
+    }
+    // since=：app 收到过的最大 ts（已减安全余量）→ 只补那之后的；老 app 不带就全量（plan-hub-instant-connect）
+    const since = replaySince(reqUrl.searchParams.get("since"))
+    const replies = since === undefined ? recentReplies : recentReplies.filter(r => r.ts > since)
+    console.log(`[hub] connect: replay ${replies.length}/${recentReplies.length} since=${since ?? "-"}`)
+    if (replies.length > 0) {
+      for (const r of replies) {
+        try {
+          // C2：有 filePath 就重读 base64（文件没了就只发文字）
+          const file = r.filePath ? readFileB64(r.filePath) : null
+          ws.send(JSON.stringify({
+            type: "reply",
+            ts: r.ts,
+            chat_id: r.chat_id,
+            message_id: r.message_id,
+            content: r.content,
+            reply_id: r.reply_id,
+            file,
+            mp_msg_id: r.mpMsgId,
+            reply_to: r.replyTo,
+          }))
+          const ageMs = Date.now() - r.ts
+          console.log(`[hub] replay → ${remote}: chat_id=${r.chat_id.slice(0,8)} age=${ageMs}ms reply_id=${r.reply_id.slice(0,8)}`)
+        } catch (e: any) {
+          console.warn(`[hub] replay failed: ${e?.message}`)
+        }
+      }
+      // A4：补发会话内 edits（在 messages 之后，让 app 先有原消息再应用编辑）
+      for (const e of recentEdits) {
+        if (since !== undefined && e.ts <= since) continue
+        try { ws.send(JSON.stringify({ type: "edit", chat_id: e.chat_id, mp_msg_id: e.mp_msg_id, content: e.content })) } catch {}
+      }
+    }
+    // 思考链 replay：在 replies/edits 之后（先有消息节点再挂思考）。app 端按 thinking_id 去重。
+    for (const t of recentThinkings) {
+      if (since !== undefined && t.ts <= since) continue
+      try { ws.send(thinkingFramePayload(t)) } catch {}
+    }
+
+    // CR-4 P1：补投未 ack 的 agent 读书产物（app 端 uuid 去重，重复无害）
+    for (const p of pendingBookNotes()) {
+      try { ws.send(JSON.stringify({ type: "agent_book_note", ...p })) } catch {}
+    }
+    // 状态面板：补投未 ack 的小芽提醒（App 按 alert id 去重）
+    for (const a of pendingStatusAlerts()) {
+      try { ws.send(statusAlertFrame(a)) } catch {}
+    }
+
+    // #if PERSONAL_APPS
+    // 交易 T0.5：补投未 ack 的研报（app 端 uuid 去重，重复无害）
+    for (const p of pendingTradingReports()) {
+      try { ws.send(JSON.stringify({ type: "trading_report_result", ...p })) } catch {}
+    }
+    // #endif
+
+    if (transportPolicies.size) { try { ws.send(transportPoliciesFrame()) } catch {} }   // 传输策略以 hub 为准，连上就对齐
+    // 问问题 CC 桥：pending 问题重发（先验 TUI 还挂着；死了/无 session 按 declined 收账）
+    // 异步验活放后台跑，下面的 ws.on("message") 必须同步挂上，不能等 capture
+    void (async () => {
+      for (const p of askUserPendingList()) {
+        // stream 会话没有 tmux 画面可抓：看 control_request 还挂没挂（09-19 app 重连把 stream 的题判成拒答，
+        // 卡片收了但 CC 还在等答案，整条会话卡死）
+        const streamAlive = !!p.sessionName && streamRunner.has(p.sessionName) && (
+          streamAskPending.get(p.sessionName)?.toolUseId === p.toolUseId || streamPermPending.has(p.toolUseId))
+        if (streamAlive || (p.sessionName && !streamRunner.has(p.sessionName) && askUiAlive(await askUserIO.capturePane(p.sessionName), p.questions))) {
+          try { ws.send(askUserQuestionFrame(p)) } catch {}
+        } else {
+          resolveAskUserDeclined(p.toolUseId, "revalidate")
+        }
+      }
+      // resolved 帧补发（收帧瞬间 app 可能离线，Q/A 泡不能丢；app 端 ccMessageId 去重）
+      for (const f of askUserResolvedFrames()) {
+        try { ws.send(f) } catch {}
+      }
+    })()
+
+    let wsType: unknown
+    ws.on("message", (raw) => timeHandler(() => wsSite("ws", wsType), async () => {
+      wsType = undefined
+      let msg: any
+      try {
+        msg = JSON.parse(raw.toString())
+      } catch {
+        ws.send(JSON.stringify({ type: "error", reason: "invalid_json" }))
+        return
+      }
+      wsType = msg?.type
+      const seen = clientInfoByWS.get(ws) ?? { lastSeen: 0 }
+      seen.lastSeen = Date.now()
+      if (msg.type === "client_info" && typeof msg.platform === "string") {
+        const firstHello = seen.platform === undefined
+        seen.platform = msg.platform
+        // 进度卡 B：app 报到时补一份还在动的 CC 会话现状（断线期间的跳变）
+        if (firstHello) for (const f of sessionPhaseSnapshotFrames(laPhaseBySession, sessionCanStop, sessionChatId, n => toolActivityBySession.get(n))) { try { ws.send(f) } catch {} }
+        // K1 第 4b 步 · 审查 R1-10：送达状态快照（核对中 / 重发中的一个不漏，failed 带 retryable；断线期间错过的终态靠它补）
+        if (firstHello) { try { ws.send(JSON.stringify({ type: "send_status_snapshot", statuses: sendStatusBook.snapshot() })) } catch {} }
+        // 底部胶囊「cc-模型名」：已知的补发，没算过的挨个算（算出来走广播）
+        if (firstHello) { for (const f of sessionModelSnapshotFrames()) { try { ws.send(f) } catch {} } warmSessionModels() }
+      }
+      clientInfoByWS.set(ws, seen)
+
+      if (msg.type === "client_info") {
+        console.log(`[hub] client_info ← ${msg.platform}`)
+      } else if (msg.type === "connect_report") {
+        // 秒连账本：每次连上都记，慢的（>1s）贴理由
+        const report = parseConnectReport(msg)
+        if (report) {
+          report.platform = seen.platform
+          const reasons = classifyConnect(report, { lags: lagLog.list(), hubStartedAt })
+          appendLedger(connectLedgerPath, { at: Date.now(), from: remote, fast: report.totalMs <= FAST_MS, reasons, ...report })
+          if (reasons.length) console.warn(`[hub] ${probeTs()} SLOW connect ${report.totalMs}ms ${report.trigger} from ${remote}: ${reasons.join("；")}`)
+        }
+      } else if (msg.type === "terminal_report") {
+        // 终端出字账本（plan §六）：点开终端 → 第一屏画出来，慢的（>1s）贴理由
+        const report = parseTerminalReport(msg)
+        if (report) {
+          report.platform = seen.platform
+          const reasons = classifyTerminalOpen(report, { lags: lagLog.list() })
+          appendLedger(connectLedgerPath, { at: Date.now(), from: remote, fast: report.totalMs <= FAST_MS, reasons, ...report })
+          if (reasons.length) console.warn(`[hub] ${probeTs()} SLOW terminal ${report.totalMs}ms ${report.session} from ${remote}: ${reasons.join("；")}`)
+        }
+      } else if (msg.type === "send") {
+        // 准入 / 组帧 / 登记（admitAppSend）：重发不接受、预处理失败都已经回过话
+        const reply = (f: object) => ws.send(JSON.stringify(f))
+        const admitted = admitAppSend(msg, reply)
+        if (!admitted) return
+        const targetSession = admitted.session
+        try {
+          // 思考强度（effort.ts）：记下想要的档位；会话跑着且档位不同 → claude 先发 /effort，codex 用同一 id 重启
+          const restarting = sendWithEffort(targetSession, admitted.tag, msg.chat_id, (msg as any).effort, admitted.sc)
+          if (restarting) await restarting
+          recordUserActivity(targetSession, msg.chat_id)   // nudge：记 susu 活跃，重置静默计时
+          lastAppSendAt.set(msg.chat_id, Date.now())       // thinking 没带 message_id 时靠它认「这一轮的回复」
+          streamLastInbound.set(targetSession, { chatId: msg.chat_id, messageId: msg.message_id })
+          onLaPhaseEvent(targetSession, { kind: "send" })   // M4a：新一轮 → working（新 run_id / since_unix）
+          console.log(`[hub] send → tmux:${targetSession} chat_id=${msg.chat_id?.slice(0, 8)} ${msg.content?.slice(0, 50)}`)
+          ws.send(JSON.stringify(sendAckFrame(msg.message_id, admitted.sc.appAttempt)))
+        } catch (err: any) {
+          failAppSend(msg, admitted, err, reply)   // 被接受的重发每条出口都写回终态（审查 R1-8）
+        }
+      } else if (msg.type === "spawn_cc") {
+        const sessionName = typeof msg.session_name === "string" ? msg.session_name : ""
+        // 校验：只允许 alphanum + _-. ，长度 1-32
+        if (!/^[A-Za-z0-9_.-]{1,32}$/.test(sessionName)) {
+          ws.send(JSON.stringify({ type: "spawn_cc_err", session_name: sessionName, reason: "invalid_name" }))
+          return
+        }
+        if (tmux.hasSession(sessionName)) {
+          ws.send(JSON.stringify({ type: "spawn_cc_err", session_name: sessionName, reason: "session_exists" }))
+          return
+        }
+        const transport = msg.transport === "stream" || msg.transport === "tmux" ? msg.transport : undefined
+        const engine = sessionEngine(sessionName)
+        // stream 传输不起 tmux（判法同 spawnSession），缺 tmux 不该拦它
+        const wantStream = engine === "claude" && (transport ?? transportOf(sessionName)) === "stream"
+        const missing = missingToolReason(engine, !wantStream)
+        if (missing) {
+          ws.send(JSON.stringify({ type: "spawn_cc_err", session_name: sessionName, reason: missing }))
+          return
+        }
+        try {
+          await spawnSession(sessionName, undefined, false, transport)   // spawn + 安排 boot 完就绪（与 send 自动 spawn 同一套）
+          ws.send(JSON.stringify({ type: "spawn_cc_ok", session_name: sessionName }))
+        } catch (err: any) {
+          ws.send(JSON.stringify({
+            type: "spawn_cc_err",
+            session_name: sessionName,
+            reason: err?.message ?? "spawn failed",
+          }))
+        }
+      } else if (msg.type === "list_sessions") {
+        // 只返回 mp-cc 前缀的 session（避免暴露用户其它 tmux 工作）
+        // ⚠️ 这条给 CC 会话选择器用，**故意不含全局窗口** —— 那是给对话绑 CC 的选择器，
+        // shell 窗口混进去没意义。全局窗口走下面的 list_windows。
+        const sessions = listSessions()
+        ws.send(JSON.stringify({ type: "list_sessions_result", sessions, stream_sessions: streamRunner.list() }))
+
+      // ── 全局终端窗口（跟对话无关）──
+      } else if (msg.type === "list_windows") {
+        const includeClosed = msg.include_closed === true
+        ws.send(JSON.stringify({
+          type: "list_windows_result",
+          windows: windowListPayload(includeClosed),
+        }))
+
+      // ── #046 T3：[+] 窗口的干活目录（手机「我的电脑」页 / Mac 页）──
+      } else if (msg.type === "get_hub_config") {
+        ws.send(hubConfigPayload(requestId(msg)))
+      } else if (msg.type === "set_agent_workdir") {
+        const raw = typeof msg.path === "string" ? msg.path : ""
+        let next: HubConfig
+        if (raw.trim() === "") {
+          const { agent_workdir: _cleared, ...rest } = hubConfig
+          next = rest
+        } else {
+          const checked = validateWorkdir(raw, homedir())
+          if (!checked.ok) {
+            ws.send(JSON.stringify({ type: "hub_config_error", reason: checked.reason, ...requestIdField(msg) }))
+            return
+          }
+          next = { ...hubConfig, agent_workdir: checked.path }
+        }
+        try {
+          saveHubConfig(hubConfigPath, next)
+        } catch (e: any) {
+          console.warn(`[hub] hub-config save fail: ${e?.message}`)
+          ws.send(JSON.stringify({ type: "hub_config_error", reason: "配置写不进去", ...requestIdField(msg) }))
+          return
+        }
+        hubConfig = next
+        console.log(`[hub] agent workdir → ${next.agent_workdir ?? "(家)"}`)
+        ws.send(hubConfigPayload(requestId(msg)))
+        broadcastHello()
+      } else if (msg.type === "list_dirs") {
+        const listing = listDirs(typeof msg.path === "string" ? msg.path : undefined, homedir())
+        ws.send(JSON.stringify({ type: "dir_list", ...listing, ...requestIdField(msg) }))
+      } else if (msg.type === "set_opencli_enabled") {
+        // 总开关只认本机 Mac app：手机（哪怕配对过）改不了（plan-opencli-in-app 2 节）
+        if (!trustedLocal) {
+          ws.send(JSON.stringify({ type: "hub_config_error", reason: "这个开关只能在 Mac 上改", ...requestIdField(msg) }))
+          return
+        }
+        const { opencli_enabled: _old, ...rest } = hubConfig
+        const next: HubConfig = msg.enabled === true ? { ...rest, opencli_enabled: true } : rest
+        try {
+          saveHubConfig(hubConfigPath, next)
+        } catch (e: any) {
+          console.warn(`[hub] hub-config save fail: ${e?.message}`)
+          ws.send(JSON.stringify({ type: "hub_config_error", reason: "配置写不进去", ...requestIdField(msg) }))
+          return
+        }
+        hubConfig = next
+        console.log(`[hub] opencli → ${next.opencli_enabled ? "开" : "关"}`)
+        ws.send(hubConfigPayload(requestId(msg)))
+        broadcastHello()
+      } else if (msg.type === "opencli_req") {
+        const id = requestIdField(msg)
+        const reply = (body: Record<string, unknown>) => { try { ws.send(JSON.stringify({ type: "opencli_result", ...body, ...id })) } catch {} }
+        if (!hubConfig.opencli_enabled) { reply({ ok: false, error: "Mac 上没开「让 AI 用 Chrome 登录态」" }); return }
+        const req = parseOpencliReq(msg)
+        if (typeof req === "string") { reply({ ok: false, error: req }); return }
+        void opencliBridge.handle(req, remote ?? "local").then(reply)
+      } else if (msg.type === "open_window") {
+        const engine: TerminalEngine = msg.engine === "claude" || msg.engine === "codex"
+          ? msg.engine
+          : "shell"
+        // 起不来就回 ok:false + 原因、不带 code（老 App 按「hub 没给 code」走失败分支），注册表不留这条（#046 审计 H：
+        // 以前没装 tmux 时这里抛出 → unhandledRejection → hub 整个退出）
+        const code = newWindowCode([...terminalWindows.map(w => w.code), ...openingWindowCodes])
+        openingWindowCodes.add(code)
+        const failure = missingToolReason(engine) ?? await spawnTerminalWindowSafely(code, engine)
+        openingWindowCodes.delete(code)
+        if (failure) {
+          console.warn(`[hub] window open failed engine=${engine}: ${failure}`)
+          ws.send(JSON.stringify({ type: "window_opened", ok: false, reason: failure }))
+          return
+        }
+        terminalWindows = addWindow(terminalWindows, code, new Date().toISOString(), engine)
+        persistTerminalWindows()
+        console.log(`[hub] window opened ${code} engine=${engine} (${openWindows(terminalWindows).length} open)`)
+        ws.send(JSON.stringify({
+          type: "window_opened",
+          ok: true,
+          code,
+          session_name: sessionNameFor(code),
+        }))
+      } else if (msg.type === "rename_window") {
+        const requestedCode = typeof msg.code === "string" ? msg.code : ""
+        const title = typeof msg.title === "string" ? msg.title : ""
+        const globalCode = codeFromSession(requestedCode) ?? requestedCode
+        if (terminalWindows.some(window => window.code === globalCode)) {
+          terminalWindows = setWindowCustomTitle(terminalWindows, globalCode, title)
+          persistTerminalWindows()
+        } else {
+          const binding = sessionMap.get(requestedCode)
+          if (!binding) return
+          const customTitle = resolveTerminalTitle(title, undefined, "shell") ?? undefined
+          if (customTitle) conversationCustomTitles.set(requestedCode, customTitle)
+          else conversationCustomTitles.delete(requestedCode)
+          saveConversationTitles()
+        }
+        broadcastTerminalState()
+      } else if (msg.type === "close_window") {
+        // 关 = 只打 closedAt 标记。**tmux session 不动** —— 里面跑的东西不能死，
+        // 长按 [+] 的菜单还能把它恢复回来（粟粟明确要求）。
+        const code = typeof msg.code === "string" ? msg.code : ""
+        if (code) {
+          terminalWindows = markWindowClosed(terminalWindows, code, new Date().toISOString())
+          persistTerminalWindows()
+          console.log(`[hub] window closed ${code} (tmux 保留)`)
+        }
+        ws.send(JSON.stringify({ type: "window_closed", code }))
+      } else if (msg.type === "restore_window") {
+        const code = typeof msg.code === "string" ? msg.code : ""
+        const window = code ? terminalWindows.find(item => item.code === code && !item.endedAt) : undefined
+        let reason: string | null = window ? null : "这个窗口已经结束了"
+        if (window) {
+          // tmux session 可能在关闭期间被外部杀了（重启 Mac 等）→ 补起一个（开在当时的干活目录）；起不来就别标恢复
+          const engine: TerminalEngine = window.engine === "claude" || window.engine === "codex" ? window.engine : "shell"
+          if (!tmux.hasSession(sessionNameFor(code))) reason = missingToolReason(engine) ?? await spawnTerminalWindowSafely(code, engine)
+        }
+        if (!reason) {
+          terminalWindows = restoreWindow(terminalWindows, code)
+          persistTerminalWindows()
+          console.log(`[hub] window restored ${code}`)
+        } else if (window) {
+          console.warn(`[hub] window restore failed ${code}: ${reason}`)
+        }
+        ws.send(JSON.stringify({
+          type: "window_restored",
+          code,
+          session_name: sessionNameFor(code),
+          ok: !reason,
+          ...(reason ? { reason } : {}),
+        }))
+      } else if (msg.type === "end_window") {
+        // 结束 = 真 kill tmux（跟 close 的「只收起」相反），注册表标 ended，之后哪个列表都不再有它。
+        const requestedCode = typeof msg.code === "string" ? msg.code : ""
+        const code = codeFromSession(requestedCode) ?? requestedCode
+        const now = new Date().toISOString()
+        const ended = await endWindowAfterKill(terminalWindows, code, tmux)
+        if (ended) {
+          terminalWindows = endWindow(terminalWindows, code, now)
+          persistTerminalWindows()
+          broadcastTerminalState()
+          console.log(`[hub] window ended ${code} (tmux killed)`)
+        } else if (code) {
+          console.warn(`[hub] window end failed ${code}`)
+        }
+        ws.send(JSON.stringify({ type: "window_ended", code, ok: ended }))
+      } else if (msg.type === "terminal_seen") {
+        // T21：App 真把这个窗口显示在前台了 = 「跑完了」已读，绿点只留给没看过的（attach 本身不算，重连重订阅也会 attach）
+        const sessionName = typeof msg.session_name === "string" ? msg.session_name : ""
+        if (sessionName && laPhaseBySession.get(sessionName)?.phase === "done") onLaPhaseEvent(sessionName, { kind: "seen" })
+      } else if (msg.type === "feedback") {
+        // MP 三指双击反馈回传（plan-shake-feedback 方案B）：iOS 端反馈落盘 Mac 的
+        // 统一收件箱（和 macOS 端 FeedbackStore 同一目录），小克直接读。
+        try {
+          const dir = join(homedir(), "Library", "Application Support", "MemoryPalace", "feedback")
+          mkdirSync(dir, { recursive: true })
+          // stem 消毒：只留安全字符，防路径注入；空则用时间戳
+          const rawStem = typeof msg.stem === "string" ? msg.stem : ""
+          const stem = rawStem.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40)
+            || new Date().toISOString().replace(/[:.]/g, "-")
+          if (typeof msg.md === "string" && msg.md.length > 0) {
+            writeFileSync(join(dir, `${stem}.md`), msg.md)
+          }
+          if (typeof msg.image_b64 === "string" && msg.image_b64.length > 0) {
+            writeFileSync(join(dir, `${stem}.jpg`), Buffer.from(msg.image_b64, "base64"))
+          }
+          // 相册补图（stem-2.jpg 起，与 iOS FeedbackStore 命名一致）；上限防滥发
+          if (Array.isArray(msg.extra_images_b64)) {
+            msg.extra_images_b64.slice(0, 12).forEach((b64: unknown, i: number) => {
+              if (typeof b64 === "string" && b64.length > 0) {
+                writeFileSync(join(dir, `${stem}-${i + 2}.jpg`), Buffer.from(b64, "base64"))
+              }
+            })
+          }
+          console.log(`[hub] feedback saved: ${stem}`)
+          ws.send(JSON.stringify({ type: "feedback_ack", stem }))
+        } catch (err: any) {
+          ws.send(JSON.stringify({ type: "feedback_err", reason: err?.message ?? "save failed" }))
+        }
+      } else if (msg.type === "terminal_attach") {
+        // L4: 订阅某 session 的 tmux pane 流（pipe-pane stream + 当前 snapshot）
+        const sessionName = typeof msg.session_name === "string" && msg.session_name
+          ? msg.session_name
+          : TMUX_SESSION
+        if (streamRunner.has(sessionName)) {
+          ws.send(JSON.stringify({ type: "terminal_error", session_name: sessionName, reason: "stream_session" }))
+          return
+        }
+        if (!tmux.hasSession(sessionName)) {
+          ws.send(JSON.stringify({
+            type: "terminal_error",
+            session_name: sessionName,
+            reason: "session_not_found",
+          }))
+          return
+        }
+        // 终端出字账本（plan §六）：分步计时随 terminal_init 带回 app
+        const attachStart = performance.now()
+        let stepAt = attachStart
+        const steps: string[] = []
+        const step = (name: string) => { const now = performance.now(); steps.push(`${name}=${Math.round(now - stepAt)}`); stepAt = now }
+        // 中途有 detach / 再次 attach / 断开 → 这次作废（读 tmux 改成了异步，期间会插进别的帧）
+        const seq = bumpTerminalAttachSeq(ws, sessionName)
+        const stale = () => ws.readyState !== ws.OPEN || terminalAttachSeq.get(ws)?.get(sessionName) !== seq
+        // 🟡 关键：先 resize 让 tmux pane 跟 MP viewport 匹配，再 capture snapshot
+        // 否则 snapshot 的 cursor 用 80x24 坐标，iPhone 小 viewport 渲染就溢出叠字符
+        const cols = Number(msg.cols) || 0
+        const rows = Number(msg.rows) || 0
+        if (cols >= 10 && cols <= 500 && rows >= 5 && rows <= 200) {
+          try {
+            // 只在 pane 尺寸真要变时才 resize + 等 CC 重绘（已是目标尺寸则 capture 本就正确，
+            // 跳过避免无谓延迟）。首次 attach 常把 window 从旧宽度(如 80)缩到 iPhone 的 52，
+            // CC 这种复杂 TUI SIGWINCH 后全屏重绘 > 80ms；旧的 80ms 太短 → capture 抓到没绘完
+            // 的旧宽度画面 → 横向错位「第一次诡异」。idle CC 不自发重绘，错位会挂到下次 resize。
+            // 改：变化时等 250ms 让 CC 绘完再 capture。
+            // T51：目标 = 正在看的前台设备里最小的（只有这一台时就是它自己）
+            terminalSizes.set(sessionName, ws, { cols, rows })
+            const othersWatching = [...(terminalAttachments.get(sessionName)?.mpClients ?? [])].some(c => c !== ws)
+            const resized = await syncTerminalSize(sessionName)   // 看的都在后台（含它自己）：不动窗口
+            step("size")
+            if (stale()) return
+            if (resized) {
+              await sleep(250)
+              step("resize")
+              if (stale()) return
+              if (othersWatching) scheduleTerminalReissue(sessionName)   // 别的设备上的画面也按新尺寸对齐
+            }
+          } catch (err: any) {
+            console.warn(`[hub] resize on attach failed: ${err.message}`)
+          }
+        }
+        // 开流是异步的：等的这段时间这套可能被别人关掉（同一套的另一个等待者 detach 了），那就再开一次
+        let att: TerminalAttachment | undefined
+        for (let tries = 0; !att && tries < 2; tries++) {
+          let opened: TerminalAttachment
+          try {
+            opened = await openTerminalAttachment(sessionName)
+          } catch (err: any) {
+            ws.send(JSON.stringify({
+              type: "terminal_error",
+              session_name: sessionName,
+              reason: `attach failed: ${err.message}`,
+            }))
+            return
+          }
+          if (stale()) {
+            // 开流期间 detach / 断开了（那时它还没进表，detach 摘不到）：没人看就关掉
+            if (!terminalWatched(opened) && terminalAttachments.get(sessionName) === opened) void closeTerminalAttachment(sessionName)
+            return
+          }
+          if (terminalAttachments.get(sessionName) === opened) att = opened
+        }
+        if (!att) {
+          ws.send(JSON.stringify({ type: "terminal_error", session_name: sessionName, reason: "attach failed: stream closed" }))
+          return
+        }
+        const joined = att
+        joined.joining.add(ws)
+        step("pipe")
+        // 给这个 client 发当前 snapshot（带 ANSI escape + CRLF 归一 + 光标复位，见 formatSnapshot 注释）。
+        // #087：快照在流里的位置发、发完才进观众：快照之前的增量它一个不收（都在快照里），之后的一个不漏
+        try {
+          await captureAtBoundary(joined, (snapshot, mouseAny) => {
+            joined.joining.delete(ws)
+            if (stale()) return
+            joined.mpClients.add(ws)
+            step("capture")
+            const hubMs = Math.round(performance.now() - attachStart)
+            ws.send(buildTerminalInitPayload(sessionName, snapshot, mouseAny, { ms: hubMs, steps: steps.join(" ") }))
+            console.log(`[hub] terminal_attach ${sessionName} ${cols}x${rows} (clients=${joined.mpClients.size}) ${hubMs}ms [${steps.join(" ")}]`)
+          })
+          if (stale()) return
+          // 立刻推一帧用量，不然顶卡要等到下一个 30s 心跳才从 `--` 变成数字
+          sendTerminalUsage(sessionName, [ws])
+          sendTerminalState([ws])
+        } catch (err: any) {
+          joined.joining.delete(ws)
+          if (!terminalWatched(joined) && terminalAttachments.get(sessionName) === joined) void closeTerminalAttachment(sessionName)
+          if (stale()) return
+          ws.send(JSON.stringify({
+            type: "terminal_error",
+            session_name: sessionName,
+            reason: `capture failed: ${err.message}`,
+          }))
+        }
+      } else if (msg.type === "terminal_detach") {
+        const sessionName = typeof msg.session_name === "string" ? msg.session_name : ""
+        bumpTerminalAttachSeq(ws, sessionName)   // 在途的 attach 作废
+        const att = terminalAttachments.get(sessionName)
+        if (att) {
+          att.mpClients.delete(ws)
+          att.joining.delete(ws)
+          if (!terminalWatched(att)) {
+            void closeTerminalAttachment(sessionName)
+            console.log(`[hub] terminal stream closed: ${sessionName}`)
+          }
+        }
+        terminalSizes.remove(sessionName, ws)
+        void applyEffectiveSize(sessionName)   // T51：剩下的设备恢复自己的尺寸
+      } else if (msg.type === "terminal_active") {
+        // T51：App 退后台 false / 回前台 true；后台的设备不参与定尺寸
+        for (const sessionName of terminalSizes.setActive(ws, msg.active !== false)) void applyEffectiveSize(sessionName)
+      } else if (msg.type === "terminal_input") {
+        // MP keystroke bytes → tmux send-keys -H hex 序列
+        // 支持任意 ANSI escape（如 ↑ = ESC [ A = 0x1b 0x5b 0x41）
+        const sessionName = typeof msg.session_name === "string" && msg.session_name
+          ? msg.session_name
+          : TMUX_SESSION
+        const bytesB64 = typeof msg.bytes === "string" ? msg.bytes : ""
+        if (!tmux.hasSession(sessionName) || !bytesB64) return
+        const bytes = Buffer.from(bytesB64, "base64")
+        if (bytes.length === 0) return
+        if (bytes.length > 4096) {
+          // 新客户端已按 4096 分片（#053 T26），撞到这条 = 老客户端；至少留个痕
+          console.warn(`[hub] terminal_input dropped: ${bytes.length} bytes > 4096 (${sessionName})`)
+          return
+        }
+        try {
+          await sendTerminalBytes(sessionName, bytes)
+        } catch (err: any) {
+          ws.send(JSON.stringify({
+            type: "terminal_error",
+            session_name: sessionName,
+            reason: `send-keys: ${err.message}`,
+          }))
+        }
+      } else if (msg.type === "terminal_paste") {
+        // 粘贴走 tmux paste-buffer -p：pane 开了 bracketed paste 才包 ESC[200~（#053 T27），
+        // 走 stdin 没有 4096 的线（T26）。回 terminal_paste_result，客户端据此决定清不清草稿。
+        // 不回 terminal_error：客户端把那个当 OFFLINE。
+        const sessionName = typeof msg.session_name === "string" && msg.session_name
+          ? msg.session_name
+          : TMUX_SESSION
+        const requestId = typeof msg.request_id === "string" ? msg.request_id : undefined
+        const text = typeof msg.text === "string" ? msg.text : ""
+        const result: PasteResult = tmux.hasSession(sessionName)
+          ? await tmux.paste(sessionName, text)
+          : { ok: false, reason: "终端会话不存在" }
+        ws.send(buildPasteResultPayload(sessionName, requestId, result))
+      } else if (msg.type === "terminal_resize") {
+        const sessionName = typeof msg.session_name === "string" && msg.session_name
+          ? msg.session_name
+          : TMUX_SESSION
+        const cols = Number(msg.cols) || 80
+        const rows = Number(msg.rows) || 24
+        if (cols < 10 || cols > 500 || rows < 5 || rows > 200) return
+        if (streamRunner.has(sessionName)) return   // 无终端会话没有 pane（此前打到 tmux 报 can't find window）
+        if (!tmux.hasSession(sessionName)) return
+        // T51：只认还在看这个窗口的设备（detach 之后迟到的 resize 不能把它重新算进来压窄别人）
+        if (!terminalSizes.has(sessionName, ws)) return
+        terminalSizes.set(sessionName, ws, { cols, rows })
+        try {
+          // 看的都在后台：不动窗口。真改了才记一行（#087：键盘起落会不会改行数，看这行就知道）
+          if (await syncTerminalSize(sessionName)) console.log(`[hub] terminal_resize ${sessionName} → ${cols}x${rows}`)
+        } catch (err: any) {
+          console.warn(`[hub] resize-window failed for ${sessionName}: ${err.message}`)
+        }
+        // 07-09 恢复 resize 后快照愈合（粟粟报「字/光标经常飘到输入框外」）：
+        // 键盘弹起等 viewport 变化窗口期，SwiftTerm 已按新尺寸 reflow 而 CC 输出
+        // 还是旧尺寸坐标（或反向）——错位内容 CC 增量重绘不补，必须重发快照对齐。
+        // 06-02 砍 reissue 的根因（client 端 ESC c 复位不彻底 → 快照层层叠加）已在
+        // client 侧拆除（terminal_init 改 resetToInitialState API 完整复位），重发安全。
+        // debounce 400ms：连发 resize 只在末次后重发一次，同时给 CC SIGWINCH 重绘
+        // 留时间（attach 路径实测 250ms 内绘完）。
+        scheduleTerminalReissue(sessionName)
+      } else if (msg.type === "command") {
+        // L3：斜杠命令 raw 直发，不包 channel tag —— CC 看到裸 /clear 触发命令系统
+        const content = typeof msg.content === "string" ? msg.content : ""
+        if (!content.startsWith("/")) {
+          ws.send(JSON.stringify({ type: "error", reason: "command must start with /" }))
+          return
+        }
+        const targetSession = typeof msg.session_name === "string" && msg.session_name
+          ? msg.session_name
+          : TMUX_SESSION
+        if (!tmux.hasSession(targetSession)) {
+          ws.send(JSON.stringify({
+            type: "error",
+            reason: `session_not_found: ${targetSession}`,
+          }))
+          return
+        }
+        const sent = await sendSlashCommand(targetSession, content)
+        ws.send(JSON.stringify(sent.ok ? { type: "command_ack", content } : { type: "error", reason: sent.reason }))
+      } else if (msg.type === "register_call_client") {
+        try {
+          voiceCalls.register(msg)
+          callInstallByWS.set(ws, msg.install_id)
+          ws.send(JSON.stringify({ type: "voice_call_snapshot", calls: voiceCalls.forDevice(msg.install_id) }))
+        } catch (e: any) { ws.send(JSON.stringify({ type: "voice_call_error", reason: e.message })) }
+      } else if (msg.type === "voice_call_action") {
+        try {
+          const install_id = callInstallByWS.get(ws)
+          if (!install_id || !["accept", "decline", "hangup", "fail"].includes(msg.action)) throw new Error("call client not registered")
+          broadcastCall(voiceCalls.transition(msg.call_id, msg.action, { install_id }))
+        } catch (e: any) { ws.send(JSON.stringify({ type: "voice_call_error", call_id: msg.call_id, reason: e.message })) }
+      } else if (msg.type === "register_push_token") {
+        // app 注册 APNs device token（hub 在「无人在看」时推主动消息/nudge）。
+        if (typeof msg.token === "string" && msg.token.length > 0) {
+          const isNew = !pushTokens.has(msg.token)
+          const info = normalizePushInfo(msg)
+          pushTokens.set(msg.token, info)
+          savePushTokens()
+          console.log(`[hub] push token registered (total ${pushTokens.size}, new=${isNew}) …${msg.token.slice(-8)} env=${info.env} topic=${info.topic ?? "-"} preview=${info.preview}`)
+        }
+      } else if (msg.type === "unregister_push_token") {
+        // app 删掉这台 hub 时注销（plan-multi-hub B0）。不在表里也当成功（幂等）；跟 register 一样不回帧。
+        if (typeof msg.token === "string" && msg.token.length > 0) {
+          const existed = pushTokens.delete(msg.token)
+          if (existed) savePushTokens()
+          console.log(`[hub] push token unregistered (total ${pushTokens.size}, existed=${existed}) …${msg.token.slice(-8)}`)
+        }
+      } else if (msg.type === "register_la_token") {
+        // app 注册 Live Activity 的 update / push-to-start token（D6）。
+        // 跟 register_push_token 是两条独立的链，别互相借值。
+        const res = registerLaToken(laTokens, msg)
+        if (res.ok) {
+          saveLaTokens(laTokensPath, laTokens)
+          const who = msg.kind === "start"
+            ? `install=${msg.install_id}`
+            : `activity=${msg.activity_id} session=${msg.session_name}`
+          console.log(`[hub] la token ${msg.kind} ← ${who} env=${msg.env} topic=${normalizeTopic(msg.topic) ?? "-"} preview=${msg.preview === "full" ? "full" : "hidden"} token=${tokenTail(msg.token)} replaced=${tokenTail(res.replaced)}`)
+        } else {
+          // 必须回帧：不回的话 app 的 didOpen 全量补报会静默死循环。
+          const nak: Record<string, unknown> = { type: "la_token_nak", kind: msg.kind, reason: res.reason }
+          if (typeof msg.activity_id === "string") nak.activity_id = msg.activity_id
+          if (typeof msg.install_id === "string") nak.install_id = msg.install_id
+          ws.send(JSON.stringify(nak))
+          console.warn(`[hub] la token rejected: ${res.reason}`)
+        }
+      } else if (msg.type === "unregister_la_token") {
+        if (unregisterLaToken(laTokens, msg).ok) {
+          saveLaTokens(laTokensPath, laTokens)
+          console.log(`[hub] la token unregister ${msg.kind} ← ${msg.kind === "start" ? `install=${msg.install_id}` : `activity=${msg.activity_id}`}`)
+        }
+      } else if (msg.type === "la_query") {
+        // M4b2 ③：app 冷启动对账。iPhone 上 app 被杀是**正常工作模式**（数据源在 Mac 的 hub），
+        // 所以冷启动发现的岛不能无条件 end —— 先问 hub「那一轮还活着吗」。
+        // 活 = LA store 里有该 update 记录，就活。phase 表缺这个 session 时按 idle 报
+        // —— 08-30 真机 checkpoint 实撞：原来还要求「session 在 phase 表里」，而 phase 表
+        // 只在 app send/askuser/reply 事件时才有条目，DEBUG 起的岛 + hub 重启后的岛都没有
+        // → hub 误报死亡 → app 把粟粟刚起的岛 end 掉了。token 记录本身就是「hub 认识它」的证据。
+        // 没连上 / 不回帧的分支由 app 侧兜（保留，不猜），hub 这边只负责有问必答。
+        const ids: string[] = (Array.isArray(msg.activity_ids) ? msg.activity_ids : [])
+          .filter((v: unknown): v is string => typeof v === "string" && v.length > 0)
+          .slice(0, 32)
+        const alive: Record<string, { phase: string; run_id?: string; session_name: string } | null> = {}
+        for (const id of ids) {
+          const record = laTokens.update[id]
+          const snap = record ? laPhaseBySession.get(record.session_name) : undefined
+          alive[id] = record
+            ? { phase: snap?.phase ?? "idle", ...(snap?.run_id ? { run_id: snap.run_id } : {}), session_name: record.session_name }
+            : null
+        }
+        try { ws.send(JSON.stringify({ type: "la_query_result", alive })) } catch {}
+        console.log(`[hub] la query ← ${ids.length} ids → alive=${Object.values(alive).filter((v) => v !== null).length}`)
+      } else if (msg.type === "focus") {
+        // app 上报「当前在看哪个会话」。空串/非串 = 没在看（后台/列表页/终端页）。
+        const c = (typeof msg.chat_id === "string" && msg.chat_id.length > 0) ? msg.chat_id : null
+        focusByClient.set(ws, c)
+        console.log(`[hub] focus ← ${c ? c.slice(0, 8) : "none"}`)
+      } else if (msg.type === "cc_memory_manifest_req") {
+        // 只回清单（名字 + 哈希 + 大小）；排除规则在 buildSnapshot 里，被排除的不进清单。同一目录的构建合并、全进程读盘 ≤8（ccMemorySnapshots）。
+        // 读盘异步（原来同步逐个读，10-11 现场一次卡主循环 2.4s）；同一连接的清单 / 取文件回包按请求顺序发（审查 R1-3）
+        void memoryRepliesFor(ws).push(() => ccMemorySnapshots.fresh().then(
+          (snap) => [JSON.stringify({ type: "cc_memory_manifest", ok: true, files: ccMemoryManifest(snap) })],
+          (e) => [JSON.stringify({ type: "cc_memory_manifest", ok: false, reason: (e as Error)?.message ?? "read failed", files: [] })],
+        ))
+      } else if (msg.type === "cc_memory_fetch") {
+        // 按名字分批取（每次 ≤20 个、每帧 ≤256KB）；只认快照里有的名字。读盘异步，读失败与原来一样不回帧（只记一行）
+        const names = msg.names
+        void memoryRepliesFor(ws).push(() => ccMemorySnapshots.recent().then(
+          (snap) => fetchFrames(snap, names),
+          (e) => { console.warn(`[hub] cc_memory_fetch 读失败：${(e as Error)?.message ?? e}`); return [] },
+        ))
+      } else if (msg.type === "vocab_archeology") {
+        // R3-3 考古按钮（fire-and-forget，结果广播回投）
+        if (typeof msg.word === "string" && msg.word.trim() && msg.word.length <= 64) {
+          void runVocabArcheology(msg.word.trim().toLowerCase())
+        }
+      } else if (msg.type === "pocket_result" || msg.type === "twitter_result") {
+        const pid = typeof msg.id === "string" ? msg.id : ""
+        const p = pocketPending.get(pid)
+        if (p) p.resolve({ id: msg.id, ok: msg.ok, result: msg.result, error: msg.error })
+      } else if (msg.type === "reading_status") {
+        // CR-2 阅读在场信号：app 60s tick 上报快照 → 落 agent/reading-status.json
+        // （AUTONOMY 触发时机的输入面；消费在 CR-4）。原样落盘，只做形状校验。
+        if (msg.status && typeof msg.status === "object") {
+          writeReadingStatus(msg.status as Record<string, unknown>)
+        }
+      } else if (msg.type === "vocab_status") {
+        // L2 单词在场信号：开关 coRead.vocab（缺省关），关 = 静默丢弃（best-effort 信号）
+        if (msg.status && typeof msg.status === "object" && loadAgentConfig().coRead.vocab === true) {
+          writeVocabStatus(msg.status as Record<string, unknown>)
+        }
+      } else if (msg.type === "voice_note") {
+        // 发语音条：生成成功的语音条记进 cc-rp（小克能翻到"自己说过的话"）
+        if (msg.note && typeof msg.note === "object") {
+          appendVoiceNote(msg.note as Record<string, unknown>)
+        }
+      } else if (msg.type === "set_voice_instructions") {
+        // 楼层语音设置 → CLAUDE.md 标记块（app 发送前/设置改动时按内容去重同步）
+        const r = writeVoiceInstructions(msg.content)
+        try { ws.send(JSON.stringify({ type: "voice_instructions_result", ...r })) } catch {}
+        // #if PERSONAL_APPS
+      } else if (msg.type === "warroom_board") {
+        // M3：iOS 军机处看板拉取（快照式——最近奏折 + 普查统计）
+        try { ws.send(JSON.stringify({ type: "warroom_board_result", ...warroomBoardSnapshot() })) } catch {}
+      } else if (msg.type === "warroom_request") {
+        // M5：粟粟在 app 看板上一句话派单 → 存档原文 → 注入中枢拆 EPIC
+        const text = typeof msg.text === "string" ? msg.text.trim() : ""
+        if (!text || !warroomLedger) {
+          try { ws.send(JSON.stringify({ type: "warroom_request_result", ok: false, error: !text ? "empty" : "not ready" })) } catch {}
+        } else {
+          // K2 审查 R1-1：撞锁异步重试；最终失败回 WS 错误（原来同步抛 → 这个 async 回调 reject → unhandledRejection → hub 退出）
+          const ledger = warroomLedger
+          void retryBusy(() => ledger.createRequest(text.slice(0, 4000))).then((req) => {
+            const desk = process.env.MP_WARROOM_DESK ?? "mp-cc-2521523d"
+            const tag = `<channel source="warroom-request" request_id="${req.request_id}">【御笔亲批的新需求 ${req.request_id}】${text.replace(/\n/g, " ")} —— 中枢流程：拆粗颗粒 roadmap → warroom_dispatch 子奏折（epic 一律填 "${req.request_id}"，能并行的并行、有先后的用 depends_on 串；工单正文里要求执行者按 research→plan→执行→review 循环干活）→ 全部终态后 hub 会叫你终审。先用 bridge 回粟粟你拆出的 roadmap。</channel>`
+            void ensureSessionAndSendAsync(desk, tag).catch((e: any) => console.warn(`[warroom] request inject fail: ${e?.message}`))
+            try { ws.send(JSON.stringify({ type: "warroom_request_result", ok: true, request_id: req.request_id })) } catch {}
+            console.log(`[warroom] request ${req.request_id} → desk (${text.slice(0, 60)})`)
+          }).catch((e: any) => {
+            console.warn(`[warroom] request 存档失败：${e?.message}`)
+            try { ws.send(JSON.stringify({ type: "warroom_request_result", ok: false, error: String(e?.message ?? e) })) } catch {}
+          })
+        }
+      } else if (PM_FRAMES.has(msg.type)) {
+        // 手机「开发」子应用：只转发给本机 session 看板服务 4793（pm-relay.ts，异步 + 超时，不阻塞消息循环）
+        void pmRelay(msg).then((r) => { try { ws.send(JSON.stringify(r)) } catch {} })
+        // #endif
+      } else if (msg.type === "agent_status") {
+        // R5：iOS 拉 agent 状态（config/用量/活动）
+        try { ws.send(JSON.stringify({ type: "agent_status_result", ...agentStatusSnapshot() })) } catch {}
+      } else if (msg.type === "agent_config_set") {
+        // R5：iOS 写 agent 配置（读-改-写保未知键），回最新快照
+        if (msg.patch && typeof msg.patch === "object") {
+          applyAgentConfigPatch(msg.patch as Record<string, unknown>)
+          try { ws.send(JSON.stringify({ type: "agent_status_result", ...agentStatusSnapshot() })) } catch {}
+        }
+      } else if (msg.type === "ask_user_answer") {
+        // 问问题 CC 桥：app 答案 → TUI 键序驱动（per-session 串行链；快照校验失败不盲发键）。
+        // 答完的权威收账走 PostToolUse hook；skip=Esc 无 hook，驱动成功后立即 declined 收账。
+        const toolUseId = typeof msg.tool_use_id === "string" ? msg.tool_use_id : ""
+        const p = toolUseId ? askUserPending(toolUseId) : undefined
+        if (!p) {
+          try { ws.send(JSON.stringify({ type: "ask_user_stale", tool_use_id: toolUseId })) } catch {}
+          return
+        }
+        const skip = msg.skip === true
+        const answers: AskAnswer[] | null = Array.isArray(msg.answers) ? msg.answers : null
+        if (streamAnswer(p, toolUseId, answers, skip)) return   // stream 会话：control_response 已回
+        chainSessionSend(p.sessionName ?? "", async () => {
+          const r = await askUserDrive(p, answers, skip, askUserIO)
+          if (r.ok) {
+            if (skip) {
+              resolveAskUserDeclined(toolUseId, "app_skip")
+            } else if (answers) {
+              askUserMarkDriven(toolUseId, askUserFormatAnswers(p.questions, answers))
+            }
+            console.log(`[hub] askuser drive ok tool_use=${toolUseId.slice(0, 12)} skip=${skip}`)
+          } else {
+            console.warn(`[hub] askuser drive fail (${r.reason}) tool_use=${toolUseId.slice(0, 12)}`)
+            try { ws.send(JSON.stringify({ type: "ask_user_stale", tool_use_id: toolUseId, reason: r.reason })) } catch {}
+          }
+        })
+      } else if (msg.type === "agent_book_note_ack") {
+        // CR-4 P1：app 处理成功回执 → 删 pending（投递闭环）
+        if (typeof msg.uuid === "string") {
+          ackBookNote(msg.uuid)
+          console.log(`[hub] book_note ack ← ${msg.uuid.slice(0, 8)}`)
+        }
+      } else if (msg.type === "status_get") {
+        try { ws.send(JSON.stringify(statusResultFrame((id) => statusRunner.isRunning(id)))) } catch {}
+      } else if (msg.type === "status_run") {
+        if (typeof msg.id === "string") statusRunner.run(msg.id)
+      } else if (msg.type === "status_quiet_set") {
+        if (isValidHHmm(msg.start) && isValidHHmm(msg.end) && isValidTimeZone(msg.tz)) {
+          try { saveQuiet({ start: msg.start, end: msg.end, tz: msg.tz }) } catch (e) { console.warn(`[hub] status-quiet 存盘失败: ${e}`) }
+          broadcastStatusResult()
+        }
+      } else if (msg.type === "status_alert_ack") {
+        if (typeof msg.id === "string") ackStatusAlert(msg.id)
+        // #if PERSONAL_APPS
+      } else if (msg.type === "ticker_research") {
+        // 交易 T0.5：档案页「跑研究」→ headless axismundi（mode: full=按钮全量 / auto=夜跑增量优先）
+        if (typeof msg.symbol === "string" && /^[A-Z]{1,5}$/.test(msg.symbol)) {
+          const mode = typeof msg.mode === "string" ? msg.mode : "full"
+          void runTickerResearch(msg.symbol, typeof msg.request_id === "string" ? msg.request_id : "", mode)
+        }
+      } else if (msg.type === "trading_report_ack") {
+        if (typeof msg.uuid === "string") {
+          ackTradingReport(msg.uuid)
+          console.log(`[hub] trading_report ack ← ${msg.uuid.slice(0, 8)}`)
+        }
+      } else if (msg.type === "trading_watchlist") {
+        // 交易夜跑：app 关注列表 + 夜跑参数全量上报 → 落盘给 trading-daily 读
+        saveWatchlist(msg.symbols, msg.nightly ?? null)
+        // #endif
+      } else if (msg.type === "reading_context") {
+        // CR-4 P1：她读到哪，章文本缓存到哪（ReaderDaemon 的阅读材料）
+        if (typeof msg.safeName === "string" && typeof msg.text === "string" && Number.isFinite(msg.chapter)) {
+          const ok = writeReadingContext({
+            floorId: typeof msg.floorId === "string" ? msg.floorId : "",
+            userName: typeof msg.userName === "string" ? msg.userName.slice(0, 100) : "",
+            safeName: msg.safeName,
+            bookName: typeof msg.bookName === "string" ? msg.bookName : msg.safeName,
+            chapter: msg.chapter,
+            totalChapters: Number.isFinite(msg.totalChapters) ? msg.totalChapters : 0,
+            chapterTitle: typeof msg.chapterTitle === "string" ? msg.chapterTitle : "",
+            text: String(msg.text).slice(0, 200_000),
+            userNotes: Array.isArray(msg.userNotes) ? msg.userNotes.slice(0, 50) : [],
+            // R1：楼层人格+记忆快照（daemon 的 system prompt）
+            persona: typeof msg.persona === "string" ? msg.persona.slice(0, 30_000) : "",
+            updatedAt: new Date().toISOString(),
+          })
+          if (ok) console.log(`[hub] reading_context ← 《${msg.bookName ?? msg.safeName}》第 ${msg.chapter} 章（${String(msg.text).length} 字）`)
+        }
+      } else if (msg.type === "set_cc_config") {
+        // app 同步 CC 设置（推送名 / nudge 参数 / 系统提示模板）：按字段合并、落盘，改完回推所有 app（cc-config.ts）
+        applyCCConfigFrame(ccConfigState, msg, { now: Date.now(), transportLocked: !!TRANSPORT_LOCK,
+                                                 defaultTemplate: DEFAULT_NUDGE_TEMPLATE, rejects: hasTagInjection })
+        saveCCConfig(ccConfigPath, ccConfigState)
+        // 保暖策略表：{session: "always"|"auto"|"never"}。整表替换（app 是唯一真相源），
+        // 但只有 app 显式带了这个字段才动——老版本 app 不带，不该把她钉的常驻清空。
+        if (msg.keepalivePolicies && typeof msg.keepalivePolicies === "object") {
+          keepalivePolicies.clear()
+          for (const [session, p] of Object.entries(msg.keepalivePolicies as Record<string, unknown>)) {
+            if (typeof session !== "string" || !session || session.length > 100) continue
+            if (p === "always" || p === "never") keepalivePolicies.set(session, p)   // auto 不存
+          }
+          saveKeepalivePolicies()
+          const pinned = [...keepalivePolicies].filter(([, p]) => p === "always").map(([s]) => s)
+          if (pinned.length > KEEPALIVE_PIN_WARN)
+            console.warn(`[hub] ⚠️ 钉了 ${pinned.length} 个常驻保暖（${pinned.join(", ")}）——它们全都不参与单选，各烧各的`)
+        }
+        // 传输策略不再跟 set_cc_config 走（09-19：两台设备各存一份，旧的那台每次重连都把刚设的改回去，
+        // 会话来回收编、正说到一半被掐）。只认 set_transport_policy（她点菜单那一下），hub 是唯一真相，改完推给所有设备。
+        const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`
+        const policySummary = (keepalivePolicies.size ? ` keepalive=${[...keepalivePolicies].map(([s, p]) => `${s}:${p}`).join(",")}` : "")
+          + (transportPolicies.size ? ` transport=${[...transportPolicies].map(([s, p]) => `${s}:${p}`).join(",")}` : "")
+        console.log(`[hub] set_cc_config: push="${ccConfig.pushName}" transport=${ccConfig.newSessionTransport} nudge=${ccConfig.nudgeEnabled} idle=${ccConfig.idleMinMs / 60000}-${ccConfig.idleMaxMs / 60000}min quiet=${hhmm(ccConfig.quietStartMin)}-${hhmm(ccConfig.quietEndMin)} cd=${ccConfig.cooldownMs / 60000}min${policySummary}`)
+        broadcastFrame(ccConfigFrame(ccConfigState, DEFAULT_NUDGE_TEMPLATE))
+        reconcileStreamTransport()
+      } else if (msg.type === "set_transport_policy" && typeof msg.session === "string" && msg.session && msg.session.length <= 100) {
+        const p = msg.policy
+        const before = transportPolicies.get(msg.session) ?? ""
+        if (p === "tmux" || p === "stream") transportPolicies.set(msg.session, p)
+        else transportPolicies.delete(msg.session)
+        const after = transportPolicies.get(msg.session) ?? ""
+        if (before !== after) {
+          saveTransportPolicies()
+          console.log(`[hub] transport policy ${msg.session}: ${before || "全局"} → ${after || "全局"}`)
+          reconcileStreamTransport()
+        }
+        broadcastFrame(transportPoliciesFrame())
+      } else if (msg.type === "set_bind") {
+        // 绑定开关：只允许本机（hub 所在的 Mac）改——决定 hub 实绑 LAN/Tailscale，关掉=真不监听。
+        if (!trustedLocal) { console.warn(`[hub] set_bind 被拒（非本机直连 ${remote}）`); return }
+        if (manualHost) { ws.send(JSON.stringify({ type: "bind_state", manual: manualHost })); return }  // 手动绑定模式不受开关控制
+        detected = detectInterfaces()   // 重扫网卡：拨开关瞬间若 Tailscale 刚起来也立刻发现
+        const lan = msg.lan !== false, ts = msg.tailscale !== false
+        bindPrefs.save({ lan, tailscale: ts })
+        // MP_CC_HUB_EXTRA_HOSTS 里点名的地址不跟开关走（开关关 LAN 不能把它一起拆了）
+        if (detected.lan && !EXTRA_HOSTS.hosts.includes(detected.lan)) { lan ? bindHost(detected.lan) : unbindHost(detected.lan) }
+        if (detected.tailscale && !EXTRA_HOSTS.hosts.includes(detected.tailscale)) { ts ? bindHost(detected.tailscale) : unbindHost(detected.tailscale) }
+        console.log(`[hub] set_bind: lan=${lan} tailscale=${ts} → bound ${[...listeners.keys()].join(",")}`)
+        ws.send(JSON.stringify({ type: "bind_state", lan: detected.lan ? listeners.has(detected.lan) : false, tailscale: detected.tailscale ? listeners.has(detected.tailscale) : false, hasLan: !!detected.lan, hasTailscale: !!detected.tailscale }))
+      }
+    }))
+
+    ws.on("close", (code, reason) => {
+      mpClients.delete(ws)
+      focusByClient.delete(ws)   // 连接断 = 不聚焦任何会话
+      clientInfoByWS.delete(ws)
+      callInstallByWS.delete(ws)
+      // L4: 兜底清理 terminal 订阅（用户切走 / app 后台 / 网络断 不会显式发 detach）
+      for (const att of Array.from(terminalAttachments.values())) {
+        if (att.mpClients.has(ws) || att.joining.has(ws)) {
+          att.mpClients.delete(ws)
+          att.joining.delete(ws)
+          if (!terminalWatched(att)) {
+            void closeTerminalAttachment(att.sessionName)
+          }
+        }
+      }
+      for (const sessionName of terminalSizes.removeClient(ws)) void applyEffectiveSize(sessionName)   // T51
+      // pocket: MP 断开 → 所有等它回复的 pending 立即失败（单 client 场景全清）
+      for (const [pid, p] of pocketPending) {
+        clearTimeout(p.timer); p.resolve({ ok: false, error: "phone disconnected" }); pocketPending.delete(pid)
+      }
+      console.log(`[hub] ${probeTs()} MP disconnected (total ${mpClients.size}) from ${remote} up=${Math.round((Date.now() - probeConnectedAt) / 1000)}s code=${code} reason=${remoteValueLabel(reason)}`)
+    })
+  }
+
+  function attachMcp(ws: WebSocket): void {
+    mcpClients.add(ws)
+    console.log(`[hub] MCP connected (total ${mcpClients.size})`)
+
+    let mcpType: unknown
+    ws.on("message", (raw) => timeHandler(() => wsSite("mcp", mcpType), () => {
+      let msg: any
+      mcpType = undefined
+      try { msg = JSON.parse(raw.toString()) } catch { return }
+      mcpType = msg?.type
+      if (msg.type === "mcp_hello" && typeof msg.session_name === "string") {
+        // socket ↔ 宿主 session 关联（reply 守卫的钥匙）
+        mcpSessionByWS.set(ws, msg.session_name)
+        console.log(`[hub] MCP hello ← ${msg.session_name}`)
+        return
+      }
+      if (msg.type === "voice_call_request") {
+        const session = mcpSessionByWS.get(ws)
+        void (async () => {
+          try {
+            if (!session || agoraExecutorRef?.hasActiveClaim(session)) throw new Error("call requires bound private session without pending Agora claim")
+            let call
+            if (msg.action === "ring") {
+              const created = voiceCalls.create(msg.call_id, msg.chat_id, msg.install_id, session, sessionActivity.get(session)?.lastChatId ?? sessionMap.get(session)?.chatId, typeof msg.caller === "string" ? msg.caller : session)
+              call = created.call
+              if (created.fresh) {
+                const device = voiceCalls.device(msg.install_id)!
+                const pushed = await sendVoIPAPNs(device, call)
+                if (!pushed.ok) {
+                  call = voiceCalls.transition(call.call_id, "fail", { session })
+                  broadcastCall(call)
+                  throw new Error(`VoIP push failed: ${pushed.reason ?? pushed.status}`)
+                }
+                call = voiceCalls.get(call.call_id)!
+                broadcastCall(call)
+              }
+            } else {
+              const existing = voiceCalls.get(msg.call_id)
+              if (!existing || existing.session !== session) throw new Error("call not owned by session")
+              if (msg.action === "cancel") { call = voiceCalls.transition(msg.call_id, "cancel", { session }); broadcastCall(call) }
+              else if (msg.action === "status") call = existing
+              else throw new Error("invalid call action")
+            }
+            ws.send(JSON.stringify({ type: "voice_call_result", request_id: msg.request_id, ok: true, call }))
+          } catch (e: any) { ws.send(JSON.stringify({ type: "voice_call_result", request_id: msg.request_id, ok: false, error: e.message })) }
+        })()
+        return
+      }
+      if (msg.type === "agora_complete") {
+        const requestId = typeof msg.request_id === "string" ? msg.request_id : ""
+        const isPass = msg.pass === true
+        // pass = observe 沉默，content 可缺省；正常完成 content 必填。
+        if (
+          !requestId
+          || typeof msg.mention_id !== "string"
+          || typeof msg.claim_token !== "string"
+          || (!isPass && typeof msg.content !== "string")
+        ) {
+          ws.send(JSON.stringify({
+            type: "agora_complete_result",
+            request_id: requestId,
+            ok: false,
+            error: { code: "invalid_payload", message: "agora_complete requires request_id, mention_id, claim_token, and content (or pass: true)" },
+          }))
+          return
+        }
+        try {
+          if (isPass) {
+            const result = agoraProtocol.passMention(msg.mention_id, msg.claim_token)
+            ws.send(JSON.stringify({
+              type: "agora_complete_result",
+              request_id: requestId,
+              ok: true,
+              passed: true,
+              idempotent: result.idempotent,
+            }))
+          } else {
+            const result = agoraProtocol.completeMention(msg.mention_id, msg.claim_token, msg.content)
+            ws.send(JSON.stringify({
+              type: "agora_complete_result",
+              request_id: requestId,
+              ok: true,
+              message_id: result.message.id,
+              idempotent: result.idempotent,
+            }))
+          }
+          agoraExecutor.onMentionSettled(msg.mention_id)
+        } catch (error) {
+          const code = error instanceof AgoraStoreError ? error.code : "internal_error"
+          const message = error instanceof AgoraStoreError ? error.message : "Agora completion failed"
+          ws.send(JSON.stringify({
+            type: "agora_complete_result",
+            request_id: requestId,
+            ok: false,
+            error: { code, message },
+          }))
+        }
+      } else if (msg.type === "reply" && typeof msg.chat_id === "string" && typeof msg.content === "string") {
+        // 守卫（audit P2-6，07-20 粟粟真机踩中变体）：session 正被房间 @（claim 未答）时
+        // 拦下 reply——老 session 的日常习惯是 reply，会把房间回答误发进私聊对话。
+        // 拒绝并教路：完成 agora_complete 后 reply 恢复可用。
+        const guardSession = mcpSessionByWS.get(ws)
+        if (guardSession && agoraExecutorRef?.hasActiveClaim(guardSession)) {
+          try {
+            ws.send(JSON.stringify({
+              type: "reply_err",
+              mp_msg_id: typeof msg.mp_msg_id === "string" ? msg.mp_msg_id : undefined,
+              reason: "agora_claim_pending",
+              message: "你正被中庭房间 @（有未完成的 mention）：这条回答请用 agora_complete 工具发回房间（带 claim_token），不要用 reply。房间任务完成后 reply 恢复可用。",
+            }))
+          } catch {}
+          console.log(`[hub] reply 被拦（${guardSession} 有未答房间 mention）→ 引导 agora_complete`)
+          return
+        }
+        deliverReply(msg, guardSession, "mcp")
+      } else if (msg.type === "edit" && typeof msg.chat_id === "string" && typeof msg.message_id === "string" && typeof msg.content === "string") {
+        // A4：编辑发过的消息 → broadcast + 进会话内 edit 缓存（重连补）。app 按 mp_msg_id 找节点改 content。
+        recentEdits.push({ chat_id: msg.chat_id, mp_msg_id: msg.message_id, content: msg.content, ts: Date.now() })
+        while (recentEdits.length > MAX_REPLY_LOG) recentEdits.shift()
+        const editPayload = JSON.stringify({ type: "edit", chat_id: msg.chat_id, mp_msg_id: msg.message_id, content: msg.content })
+        let n = 0
+        for (const mp of mpClients) { if (mp.readyState === mp.OPEN) { try { mp.send(editPayload); n++ } catch {} } }
+        console.log(`[hub] edit ← mcp → ${msg.message_id} broadcast to ${n}/${mpClients.size}`)
+      }
+    }))
+
+    ws.on("close", () => {
+      mcpClients.delete(ws)
+      mcpSessionByWS.delete(ws)
+      console.log(`[hub] MCP disconnected (total ${mcpClients.size})`)
+    })
+  }
+
+  // ── K1-C 设备密钥对鉴权：挑战流程 / 吊销踢线 / aud 诊断 ──
+  /// 新协议登录的在线连接（/cc + /agora）→ did，吊销时踢
+  const deviceSockets = new Map<WebSocket, string>()
+  function trackDeviceSocket(ws: WebSocket, did: string): void {
+    deviceSockets.set(ws, did)
+    ws.on("close", () => deviceSockets.delete(ws))
+  }
+  /// 先摘掉 message 监听（断开过程中不再分派它的业务帧），再 auth_fail revoked + 1008
+  function kickDevice(did: string): number {
+    let n = 0
+    for (const [ws, d] of deviceSockets) {
+      if (d !== did) continue
+      ws.removeAllListeners("message")
+      deviceSockets.delete(ws)
+      rejectAuth(ws, "revoked")
+      n++
+    }
+    return n
+  }
+  /// 同步落盘成功才算吊销成功；顺带撤它发的未用邀请、踢在线连接
+  function revokeDevice(did: string): { ok: true; kicked: number } | { ok: false; reason: "unavailable" | "not_found" | "write_failed" } {
+    if (!deviceAuth || !deviceAuth.store.available) return { ok: false, reason: "unavailable" }
+    try {
+      if (!deviceAuth.store.revoke(did, Date.now())) return { ok: false, reason: "not_found" }
+    } catch (e) {
+      console.error(`[hub] 吊销 did=${did.slice(0, 8)} 写盘失败（${(e as Error).message}），没吊销`)
+      return { ok: false, reason: "write_failed" }
+    }
+    deviceAuth.codes.revokeIssuedBy(did)
+    const kicked = kickDevice(did)
+    console.log(`[hub] device revoked did=${did.slice(0, 8)} kicked=${kicked}`)
+    return { ok: true, kicked }
+  }
+  const PUBLIC_HOSTS = (process.env.MP_CC_HUB_PUBLIC_HOSTS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
+  /// aud 在不在「我的地址」里：只打诊断日志，永不拒（§0.2）
+  function audKnown(aud: string): boolean {
+    const i = aud.lastIndexOf(":")
+    const host = aud.slice(0, i).toLowerCase(), port = Number(aud.slice(i + 1))
+    const bare = host.replace(/^\[(.*)\]$/, "$1")
+    if (PUBLIC_HOSTS.includes(bare) || PUBLIC_HOSTS.includes(host) || PUBLIC_HOSTS.includes(aud.toLowerCase())) return true
+    if (port === PORT && (["127.0.0.1", "localhost", "::1"].includes(bare) || listeners.has(bare) || EXTRA_HOSTS.hosts.includes(bare))) return true
+    const relay = relayIngressOpen ? loadRelayConfig(relayConfigPath) : null
+    return !!relay && typeof relay === "object" && relay.host.toLowerCase() === bare && relay.port === port
+  }
+  const AUTH_TIMEOUT_MS = Number(process.env.MP_CC_AUTH_TIMEOUT_MS) || 10_000   // env 只给测试缩短
+  const AUTH_FRAME_MAX = 8 * 1024
+  /// 挑战流程（K1-C.4）：监听先装上再发挑战；只收一帧 auth；10 秒超时；settled 保证只 attach 一次。
+  /// 验签只用这里存的 ctx（sn / cn / did / aud / path），不用对方回显的。鉴权等待期间不进 mpClients、不进心跳集合。
+  /// 登记写盘是同步的：handle 返回时已落盘，attach 同步挂上业务监听，中间没有无人监听的窗口
+  function startChallenge(ws: WebSocket, da: DeviceAuth, path: AuthPath, q: V2Query, remote: string | undefined, attach: (auth: ConnAuth) => void): void {
+    const from = fromLabel(remote)
+    const { ctx, frame } = da.newChallenge({ path, ...q })
+    let settled = false
+    const finish = () => {
+      settled = true
+      clearTimeout(timer)
+      ws.off("message", onMessage)
+      ws.off("close", onClose)
+    }
+    const fail = (reason: AuthFailReason) => {
+      finish()
+      console.warn(`[hub] auth_fail reason=${reason} did=${q.did.slice(0, 8)} path=${path} from=${from}`)
+      // 证明不对：这条连接拖一会儿再回（§0.4 r1，不设全局闸）；期间来的帧没人听，也不会 attach
+      if (reason === "bad_proof") setTimeout(() => rejectAuth(ws, reason), BAD_PROOF_DELAY_MS)
+      else rejectAuth(ws, reason)
+    }
+    const onMessage = (raw: RawData, isBinary?: boolean) => {
+      if (settled) return
+      if (isBinary || rawDataLength(raw) > AUTH_FRAME_MAX) { fail("bad_request"); return }
+      const out = timeHandler(() => "ws auth verify", () => da.handle(ctx, raw.toString(), { from, now: Date.now() }))
+      if (!out.ok) { fail(out.reason); return }
+      finish()
+      try { ws.send(JSON.stringify(out.frame)) } catch {}
+      console.log(`[hub] auth ok did=${q.did.slice(0, 8)} kind=${out.via} path=${path} from=${from} enrolled=${out.enrolled ? 1 : 0} aud_known=${audKnown(q.aud) ? "yes" : "no"}`)
+      guardRepeatAuth(ws, out.deviceId)
+      timeHandler(() => wsSite("ws attach", path), () => attach({ via: out.via, deviceId: out.deviceId }))
+    }
+    // 鉴权中断开：上下文作废
+    const onClose = () => finish()
+    const timer = setTimeout(() => { if (!settled) fail("expired") }, AUTH_TIMEOUT_MS)
+    ws.on("message", onMessage)
+    ws.on("close", onClose)
+    try { ws.send(frame) } catch {}
+  }
+
   wss.on("connection", (ws, req) => timeHandler(() => wsSite("ws connect", (req.url ?? "").split("?")[0]), () => {
     // 解析 URL（带 query）
     let reqUrl: URL
@@ -4151,1020 +5561,53 @@ export function startHub(): WebSocketServer {
     //    手动写 keychain，Phase 2.6 补做。
     const remote = relayIngressRequests.has(req) ? "relay" : req.socket.remoteAddress
     const trustedLocal = isTrustedLocal(req)   // 口令 / bundle / set_bind 共用这一个结果
-    if (pathname === "/agora") {
-      if (!hasValidAgoraToken(req.url ?? "", hubToken)) {
-        ws.close(1008, "auth")
-        return
-      }
-    } else if (!trustedLocal) {
-      const provided = reqUrl.searchParams.get("token")
-      if (provided !== HUB_TOKEN) {
-        console.warn(`[hub] auth failed from ${remote} (path=${pathname})`)
-        ws.close(1008, "auth")
-        return
-      }
+    const params = reqUrl.searchParams
+    // 鉴权相关 query 重复出现（两端可能各取一个）→ bad_request。本机 /cc /mcp 免鉴权不查；本机 /agora 要鉴权（含 v=2 挑战）照查。
+    // 放在 bundle 前面：重复 bundle 也是 bad_request，不是 bundle
+    const dup = trustedLocal && pathname !== "/agora" ? null : duplicateAuthQuery(params)
+    if (dup) {
+      console.warn(`[hub] auth_fail reason=bad_request dup_query=${dup} from=${fromLabel(remote)}`)
+      rejectAuth(ws, "bad_request")
+      return
     }
     // 只认自己的包（MP_CC_ALLOWED_BUNDLES）：口令对了也不行，别人的 app 一律断开。本机豁免同口令规则。
-    if (!trustedLocal && !bundleAllowed(ALLOWED_BUNDLES, reqUrl.searchParams.get("bundle"))) {
-      console.warn(`[hub] bundle rejected from ${remote} (path=${pathname} bundle=${reqUrl.searchParams.get("bundle") ?? "-"})`)
+    // K1-C.3：挪到鉴权前，别人的 app 连挑战都拿不到
+    if (!trustedLocal && !bundleAllowed(ALLOWED_BUNDLES, params.get("bundle"))) {
+      console.warn(`[hub] bundle rejected from ${remote} (path=${pathLabel(pathname)} bundle=${remoteValueLabel(params.get("bundle"))})`)
       ws.close(1008, "bundle")
       return
     }
-
-    if (pathname === "/agora") {
-      agoraProtocol.attach(ws)
-      console.log(`[hub] Agora owner connected from ${remote}`)
-    } else if (pathname === "/cc") {
-      mpClients.add(ws)
-      try { ws.send(helloPayload()) } catch {}   // #046：主机名 / 机型 / 家 / 干活目录 / 工具，排在所有 replay 前
-      const probeConnectedAt = Date.now()   // 桥探针：连接时长，对 app 端 Documents/bridge-probe.log
-      console.log(`[hub] ${probeTs()} MP connected (total ${mpClients.size}) from ${remote}`)
-      // L4 P0b: 这个 handler 是 async 的，让内部 terminal_attach 路径能 await
-      // sleep(80ms) 给 CC SIGWINCH 重排时间，capture-pane 拿到的 snapshot 跟
-      // 新 pane size 对齐
-
-      // replay 持久缓冲里全部 reply（最近 MAX_REPLY_LOG 条）给新 client，补发断连期间漏的 reply。
-      // ⚠️ client 去重保留条数必须 ≥ MAX_REPLY_LOG，否则 replay 到尾部时去重已被剔 → 重复/错位（见 CCBridgeWebSocketClient.replyDedupKeepCount）。
-      // 考古结果补投（app 离线期间完成的，重连即达；幂等）
-      for (const [, r] of corpusResults) {
-        try { ws.send(r.frame) } catch {}
-      }
-      // since=：app 收到过的最大 ts（已减安全余量）→ 只补那之后的；老 app 不带就全量（plan-hub-instant-connect）
-      const since = replaySince(reqUrl.searchParams.get("since"))
-      const replies = since === undefined ? recentReplies : recentReplies.filter(r => r.ts > since)
-      console.log(`[hub] connect: replay ${replies.length}/${recentReplies.length} since=${since ?? "-"}`)
-      if (replies.length > 0) {
-        for (const r of replies) {
-          try {
-            // C2：有 filePath 就重读 base64（文件没了就只发文字）
-            const file = r.filePath ? readFileB64(r.filePath) : null
-            ws.send(JSON.stringify({
-              type: "reply",
-              ts: r.ts,
-              chat_id: r.chat_id,
-              message_id: r.message_id,
-              content: r.content,
-              reply_id: r.reply_id,
-              file,
-              mp_msg_id: r.mpMsgId,
-              reply_to: r.replyTo,
-            }))
-            const ageMs = Date.now() - r.ts
-            console.log(`[hub] replay → ${remote}: chat_id=${r.chat_id.slice(0,8)} age=${ageMs}ms reply_id=${r.reply_id.slice(0,8)}`)
-          } catch (e: any) {
-            console.warn(`[hub] replay failed: ${e?.message}`)
-          }
-        }
-        // A4：补发会话内 edits（在 messages 之后，让 app 先有原消息再应用编辑）
-        for (const e of recentEdits) {
-          if (since !== undefined && e.ts <= since) continue
-          try { ws.send(JSON.stringify({ type: "edit", chat_id: e.chat_id, mp_msg_id: e.mp_msg_id, content: e.content })) } catch {}
-        }
-      }
-      // 思考链 replay：在 replies/edits 之后（先有消息节点再挂思考）。app 端按 thinking_id 去重。
-      for (const t of recentThinkings) {
-        if (since !== undefined && t.ts <= since) continue
-        try { ws.send(thinkingFramePayload(t)) } catch {}
-      }
-
-      // CR-4 P1：补投未 ack 的 agent 读书产物（app 端 uuid 去重，重复无害）
-      for (const p of pendingBookNotes()) {
-        try { ws.send(JSON.stringify({ type: "agent_book_note", ...p })) } catch {}
-      }
-
-      // #if PERSONAL_APPS
-      // 交易 T0.5：补投未 ack 的研报（app 端 uuid 去重，重复无害）
-      for (const p of pendingTradingReports()) {
-        try { ws.send(JSON.stringify({ type: "trading_report_result", ...p })) } catch {}
-      }
-      // #endif
-
-      if (transportPolicies.size) { try { ws.send(transportPoliciesFrame()) } catch {} }   // 传输策略以 hub 为准，连上就对齐
-      // 问问题 CC 桥：pending 问题重发（先验 TUI 还挂着；死了/无 session 按 declined 收账）
-      // 异步验活放后台跑，下面的 ws.on("message") 必须同步挂上，不能等 capture
-      void (async () => {
-        for (const p of askUserPendingList()) {
-          // stream 会话没有 tmux 画面可抓：看 control_request 还挂没挂（09-19 app 重连把 stream 的题判成拒答，
-          // 卡片收了但 CC 还在等答案，整条会话卡死）
-          const streamAlive = !!p.sessionName && streamRunner.has(p.sessionName) && (
-            streamAskPending.get(p.sessionName)?.toolUseId === p.toolUseId || streamPermPending.has(p.toolUseId))
-          if (streamAlive || (p.sessionName && !streamRunner.has(p.sessionName) && askUiAlive(await askUserIO.capturePane(p.sessionName), p.questions))) {
-            try { ws.send(askUserQuestionFrame(p)) } catch {}
-          } else {
-            resolveAskUserDeclined(p.toolUseId, "revalidate")
-          }
-        }
-        // resolved 帧补发（收帧瞬间 app 可能离线，Q/A 泡不能丢；app 端 ccMessageId 去重）
-        for (const f of askUserResolvedFrames()) {
-          try { ws.send(f) } catch {}
-        }
-      })()
-
-      let wsType: unknown
-      ws.on("message", (raw) => timeHandler(() => wsSite("ws", wsType), async () => {
-        wsType = undefined
-        let msg: any
-        try {
-          msg = JSON.parse(raw.toString())
-        } catch {
-          ws.send(JSON.stringify({ type: "error", reason: "invalid_json" }))
-          return
-        }
-        wsType = msg?.type
-        const seen = clientInfoByWS.get(ws) ?? { lastSeen: 0 }
-        seen.lastSeen = Date.now()
-        if (msg.type === "client_info" && typeof msg.platform === "string") {
-          const firstHello = seen.platform === undefined
-          seen.platform = msg.platform
-          // 进度卡 B：app 报到时补一份还在动的 CC 会话现状（断线期间的跳变）
-          if (firstHello) for (const f of sessionPhaseSnapshotFrames(laPhaseBySession, sessionCanStop, sessionChatId, n => toolActivityBySession.get(n))) { try { ws.send(f) } catch {} }
-          // K1 第 4b 步 · 审查 R1-10：送达状态快照（核对中 / 重发中的一个不漏，failed 带 retryable；断线期间错过的终态靠它补）
-          if (firstHello) { try { ws.send(JSON.stringify({ type: "send_status_snapshot", statuses: sendStatusBook.snapshot() })) } catch {} }
-          // 底部胶囊「cc-模型名」：已知的补发，没算过的挨个算（算出来走广播）
-          if (firstHello) { for (const f of sessionModelSnapshotFrames()) { try { ws.send(f) } catch {} } warmSessionModels() }
-        }
-        clientInfoByWS.set(ws, seen)
-
-        if (msg.type === "client_info") {
-          console.log(`[hub] client_info ← ${msg.platform}`)
-        } else if (msg.type === "connect_report") {
-          // 秒连账本：每次连上都记，慢的（>1s）贴理由
-          const report = parseConnectReport(msg)
-          if (report) {
-            report.platform = seen.platform
-            const reasons = classifyConnect(report, { lags: lagLog.list(), hubStartedAt })
-            appendLedger(connectLedgerPath, { at: Date.now(), from: remote, fast: report.totalMs <= FAST_MS, reasons, ...report })
-            if (reasons.length) console.warn(`[hub] ${probeTs()} SLOW connect ${report.totalMs}ms ${report.trigger} from ${remote}: ${reasons.join("；")}`)
-          }
-        } else if (msg.type === "terminal_report") {
-          // 终端出字账本（plan §六）：点开终端 → 第一屏画出来，慢的（>1s）贴理由
-          const report = parseTerminalReport(msg)
-          if (report) {
-            report.platform = seen.platform
-            const reasons = classifyTerminalOpen(report, { lags: lagLog.list() })
-            appendLedger(connectLedgerPath, { at: Date.now(), from: remote, fast: report.totalMs <= FAST_MS, reasons, ...report })
-            if (reasons.length) console.warn(`[hub] ${probeTs()} SLOW terminal ${report.totalMs}ms ${report.session} from ${remote}: ${reasons.join("；")}`)
-          }
-        } else if (msg.type === "send") {
-          // 准入 / 组帧 / 登记（admitAppSend）：重发不接受、预处理失败都已经回过话
-          const reply = (f: object) => ws.send(JSON.stringify(f))
-          const admitted = admitAppSend(msg, reply)
-          if (!admitted) return
-          const targetSession = admitted.session
-          try {
-            // 思考强度（effort.ts）：记下想要的档位；会话跑着且档位不同 → claude 先发 /effort，codex 用同一 id 重启
-            const restarting = sendWithEffort(targetSession, admitted.tag, msg.chat_id, (msg as any).effort, admitted.sc)
-            if (restarting) await restarting
-            recordUserActivity(targetSession, msg.chat_id)   // nudge：记 susu 活跃，重置静默计时
-            streamLastInbound.set(targetSession, { chatId: msg.chat_id, messageId: msg.message_id })
-            onLaPhaseEvent(targetSession, { kind: "send" })   // M4a：新一轮 → working（新 run_id / since_unix）
-            console.log(`[hub] send → tmux:${targetSession} chat_id=${msg.chat_id?.slice(0, 8)} ${msg.content?.slice(0, 50)}`)
-            ws.send(JSON.stringify(sendAckFrame(msg.message_id, admitted.sc.appAttempt)))
-          } catch (err: any) {
-            failAppSend(msg, admitted, err, reply)   // 被接受的重发每条出口都写回终态（审查 R1-8）
-          }
-        } else if (msg.type === "spawn_cc") {
-          const sessionName = typeof msg.session_name === "string" ? msg.session_name : ""
-          // 校验：只允许 alphanum + _-. ，长度 1-32
-          if (!/^[A-Za-z0-9_.-]{1,32}$/.test(sessionName)) {
-            ws.send(JSON.stringify({ type: "spawn_cc_err", session_name: sessionName, reason: "invalid_name" }))
-            return
-          }
-          if (tmux.hasSession(sessionName)) {
-            ws.send(JSON.stringify({ type: "spawn_cc_err", session_name: sessionName, reason: "session_exists" }))
-            return
-          }
-          const transport = msg.transport === "stream" || msg.transport === "tmux" ? msg.transport : undefined
-          const engine = sessionEngine(sessionName)
-          // stream 传输不起 tmux（判法同 spawnSession），缺 tmux 不该拦它
-          const wantStream = engine === "claude" && (transport ?? transportOf(sessionName)) === "stream"
-          const missing = missingToolReason(engine, !wantStream)
-          if (missing) {
-            ws.send(JSON.stringify({ type: "spawn_cc_err", session_name: sessionName, reason: missing }))
-            return
-          }
-          try {
-            await spawnSession(sessionName, undefined, false, transport)   // spawn + 安排 boot 完就绪（与 send 自动 spawn 同一套）
-            ws.send(JSON.stringify({ type: "spawn_cc_ok", session_name: sessionName }))
-          } catch (err: any) {
-            ws.send(JSON.stringify({
-              type: "spawn_cc_err",
-              session_name: sessionName,
-              reason: err?.message ?? "spawn failed",
-            }))
-          }
-        } else if (msg.type === "list_sessions") {
-          // 只返回 mp-cc 前缀的 session（避免暴露用户其它 tmux 工作）
-          // ⚠️ 这条给 CC 会话选择器用，**故意不含全局窗口** —— 那是给对话绑 CC 的选择器，
-          // shell 窗口混进去没意义。全局窗口走下面的 list_windows。
-          const sessions = listSessions()
-          ws.send(JSON.stringify({ type: "list_sessions_result", sessions, stream_sessions: streamRunner.list() }))
-
-        // ── 全局终端窗口（跟对话无关）──
-        } else if (msg.type === "list_windows") {
-          const includeClosed = msg.include_closed === true
-          ws.send(JSON.stringify({
-            type: "list_windows_result",
-            windows: windowListPayload(includeClosed),
-          }))
-
-        // ── #046 T3：[+] 窗口的干活目录（手机「我的电脑」页 / Mac 页）──
-        } else if (msg.type === "get_hub_config") {
-          ws.send(hubConfigPayload(requestId(msg)))
-        } else if (msg.type === "set_agent_workdir") {
-          const raw = typeof msg.path === "string" ? msg.path : ""
-          let next: HubConfig
-          if (raw.trim() === "") {
-            const { agent_workdir: _cleared, ...rest } = hubConfig
-            next = rest
-          } else {
-            const checked = validateWorkdir(raw, homedir())
-            if (!checked.ok) {
-              ws.send(JSON.stringify({ type: "hub_config_error", reason: checked.reason, ...requestIdField(msg) }))
-              return
-            }
-            next = { ...hubConfig, agent_workdir: checked.path }
-          }
-          try {
-            saveHubConfig(hubConfigPath, next)
-          } catch (e: any) {
-            console.warn(`[hub] hub-config save fail: ${e?.message}`)
-            ws.send(JSON.stringify({ type: "hub_config_error", reason: "配置写不进去", ...requestIdField(msg) }))
-            return
-          }
-          hubConfig = next
-          console.log(`[hub] agent workdir → ${next.agent_workdir ?? "(家)"}`)
-          ws.send(hubConfigPayload(requestId(msg)))
-          broadcastHello()
-        } else if (msg.type === "list_dirs") {
-          const listing = listDirs(typeof msg.path === "string" ? msg.path : undefined, homedir())
-          ws.send(JSON.stringify({ type: "dir_list", ...listing, ...requestIdField(msg) }))
-        } else if (msg.type === "open_window") {
-          const engine: TerminalEngine = msg.engine === "claude" || msg.engine === "codex"
-            ? msg.engine
-            : "shell"
-          // 起不来就回 ok:false + 原因、不带 code（老 App 按「hub 没给 code」走失败分支），注册表不留这条（#046 审计 H：
-          // 以前没装 tmux 时这里抛出 → unhandledRejection → hub 整个退出）
-          const code = newWindowCode([...terminalWindows.map(w => w.code), ...openingWindowCodes])
-          openingWindowCodes.add(code)
-          const failure = missingToolReason(engine) ?? await spawnTerminalWindowSafely(code, engine)
-          openingWindowCodes.delete(code)
-          if (failure) {
-            console.warn(`[hub] window open failed engine=${engine}: ${failure}`)
-            ws.send(JSON.stringify({ type: "window_opened", ok: false, reason: failure }))
-            return
-          }
-          terminalWindows = addWindow(terminalWindows, code, new Date().toISOString(), engine)
-          persistTerminalWindows()
-          console.log(`[hub] window opened ${code} engine=${engine} (${openWindows(terminalWindows).length} open)`)
-          ws.send(JSON.stringify({
-            type: "window_opened",
-            ok: true,
-            code,
-            session_name: sessionNameFor(code),
-          }))
-        } else if (msg.type === "rename_window") {
-          const requestedCode = typeof msg.code === "string" ? msg.code : ""
-          const title = typeof msg.title === "string" ? msg.title : ""
-          const globalCode = codeFromSession(requestedCode) ?? requestedCode
-          if (terminalWindows.some(window => window.code === globalCode)) {
-            terminalWindows = setWindowCustomTitle(terminalWindows, globalCode, title)
-            persistTerminalWindows()
-          } else {
-            const binding = sessionMap.get(requestedCode)
-            if (!binding) return
-            const customTitle = resolveTerminalTitle(title, undefined, "shell") ?? undefined
-            if (customTitle) conversationCustomTitles.set(requestedCode, customTitle)
-            else conversationCustomTitles.delete(requestedCode)
-            saveConversationTitles()
-          }
-          broadcastTerminalState()
-        } else if (msg.type === "close_window") {
-          // 关 = 只打 closedAt 标记。**tmux session 不动** —— 里面跑的东西不能死，
-          // 长按 [+] 的菜单还能把它恢复回来（粟粟明确要求）。
-          const code = typeof msg.code === "string" ? msg.code : ""
-          if (code) {
-            terminalWindows = markWindowClosed(terminalWindows, code, new Date().toISOString())
-            persistTerminalWindows()
-            console.log(`[hub] window closed ${code} (tmux 保留)`)
-          }
-          ws.send(JSON.stringify({ type: "window_closed", code }))
-        } else if (msg.type === "restore_window") {
-          const code = typeof msg.code === "string" ? msg.code : ""
-          const window = code ? terminalWindows.find(item => item.code === code && !item.endedAt) : undefined
-          let reason: string | null = window ? null : "这个窗口已经结束了"
-          if (window) {
-            // tmux session 可能在关闭期间被外部杀了（重启 Mac 等）→ 补起一个（开在当时的干活目录）；起不来就别标恢复
-            const engine: TerminalEngine = window.engine === "claude" || window.engine === "codex" ? window.engine : "shell"
-            if (!tmux.hasSession(sessionNameFor(code))) reason = missingToolReason(engine) ?? await spawnTerminalWindowSafely(code, engine)
-          }
-          if (!reason) {
-            terminalWindows = restoreWindow(terminalWindows, code)
-            persistTerminalWindows()
-            console.log(`[hub] window restored ${code}`)
-          } else if (window) {
-            console.warn(`[hub] window restore failed ${code}: ${reason}`)
-          }
-          ws.send(JSON.stringify({
-            type: "window_restored",
-            code,
-            session_name: sessionNameFor(code),
-            ok: !reason,
-            ...(reason ? { reason } : {}),
-          }))
-        } else if (msg.type === "end_window") {
-          // 结束 = 真 kill tmux（跟 close 的「只收起」相反），注册表标 ended，之后哪个列表都不再有它。
-          const requestedCode = typeof msg.code === "string" ? msg.code : ""
-          const code = codeFromSession(requestedCode) ?? requestedCode
-          const now = new Date().toISOString()
-          const ended = await endWindowAfterKill(terminalWindows, code, tmux)
-          if (ended) {
-            terminalWindows = endWindow(terminalWindows, code, now)
-            persistTerminalWindows()
-            broadcastTerminalState()
-            console.log(`[hub] window ended ${code} (tmux killed)`)
-          } else if (code) {
-            console.warn(`[hub] window end failed ${code}`)
-          }
-          ws.send(JSON.stringify({ type: "window_ended", code, ok: ended }))
-        } else if (msg.type === "terminal_seen") {
-          // T21：App 真把这个窗口显示在前台了 = 「跑完了」已读，绿点只留给没看过的（attach 本身不算，重连重订阅也会 attach）
-          const sessionName = typeof msg.session_name === "string" ? msg.session_name : ""
-          if (sessionName && laPhaseBySession.get(sessionName)?.phase === "done") onLaPhaseEvent(sessionName, { kind: "seen" })
-        } else if (msg.type === "feedback") {
-          // MP 三指双击反馈回传（plan-shake-feedback 方案B）：iOS 端反馈落盘 Mac 的
-          // 统一收件箱（和 macOS 端 FeedbackStore 同一目录），小克直接读。
-          try {
-            const dir = join(homedir(), "Library", "Application Support", "MemoryPalace", "feedback")
-            mkdirSync(dir, { recursive: true })
-            // stem 消毒：只留安全字符，防路径注入；空则用时间戳
-            const rawStem = typeof msg.stem === "string" ? msg.stem : ""
-            const stem = rawStem.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40)
-              || new Date().toISOString().replace(/[:.]/g, "-")
-            if (typeof msg.md === "string" && msg.md.length > 0) {
-              writeFileSync(join(dir, `${stem}.md`), msg.md)
-            }
-            if (typeof msg.image_b64 === "string" && msg.image_b64.length > 0) {
-              writeFileSync(join(dir, `${stem}.jpg`), Buffer.from(msg.image_b64, "base64"))
-            }
-            // 相册补图（stem-2.jpg 起，与 iOS FeedbackStore 命名一致）；上限防滥发
-            if (Array.isArray(msg.extra_images_b64)) {
-              msg.extra_images_b64.slice(0, 12).forEach((b64: unknown, i: number) => {
-                if (typeof b64 === "string" && b64.length > 0) {
-                  writeFileSync(join(dir, `${stem}-${i + 2}.jpg`), Buffer.from(b64, "base64"))
-                }
-              })
-            }
-            console.log(`[hub] feedback saved: ${stem}`)
-            ws.send(JSON.stringify({ type: "feedback_ack", stem }))
-          } catch (err: any) {
-            ws.send(JSON.stringify({ type: "feedback_err", reason: err?.message ?? "save failed" }))
-          }
-        } else if (msg.type === "terminal_attach") {
-          // L4: 订阅某 session 的 tmux pane 流（pipe-pane stream + 当前 snapshot）
-          const sessionName = typeof msg.session_name === "string" && msg.session_name
-            ? msg.session_name
-            : TMUX_SESSION
-          if (streamRunner.has(sessionName)) {
-            ws.send(JSON.stringify({ type: "terminal_error", session_name: sessionName, reason: "stream_session" }))
-            return
-          }
-          if (!tmux.hasSession(sessionName)) {
-            ws.send(JSON.stringify({
-              type: "terminal_error",
-              session_name: sessionName,
-              reason: "session_not_found",
-            }))
-            return
-          }
-          // 终端出字账本（plan §六）：分步计时随 terminal_init 带回 app
-          const attachStart = performance.now()
-          let stepAt = attachStart
-          const steps: string[] = []
-          const step = (name: string) => { const now = performance.now(); steps.push(`${name}=${Math.round(now - stepAt)}`); stepAt = now }
-          // 中途有 detach / 再次 attach / 断开 → 这次作废（读 tmux 改成了异步，期间会插进别的帧）
-          const seq = bumpTerminalAttachSeq(ws, sessionName)
-          const stale = () => ws.readyState !== ws.OPEN || terminalAttachSeq.get(ws)?.get(sessionName) !== seq
-          // 🟡 关键：先 resize 让 tmux pane 跟 MP viewport 匹配，再 capture snapshot
-          // 否则 snapshot 的 cursor 用 80x24 坐标，iPhone 小 viewport 渲染就溢出叠字符
-          const cols = Number(msg.cols) || 0
-          const rows = Number(msg.rows) || 0
-          if (cols >= 10 && cols <= 500 && rows >= 5 && rows <= 200) {
-            try {
-              // 只在 pane 尺寸真要变时才 resize + 等 CC 重绘（已是目标尺寸则 capture 本就正确，
-              // 跳过避免无谓延迟）。首次 attach 常把 window 从旧宽度(如 80)缩到 iPhone 的 52，
-              // CC 这种复杂 TUI SIGWINCH 后全屏重绘 > 80ms；旧的 80ms 太短 → capture 抓到没绘完
-              // 的旧宽度画面 → 横向错位「第一次诡异」。idle CC 不自发重绘，错位会挂到下次 resize。
-              // 改：变化时等 250ms 让 CC 绘完再 capture。
-              // T51：目标 = 正在看的前台设备里最小的（只有这一台时就是它自己）
-              terminalSizes.set(sessionName, ws, { cols, rows })
-              const othersWatching = [...(terminalAttachments.get(sessionName)?.mpClients ?? [])].some(c => c !== ws)
-              const resized = await syncTerminalSize(sessionName)   // 看的都在后台（含它自己）：不动窗口
-              step("size")
-              if (stale()) return
-              if (resized) {
-                await sleep(250)
-                step("resize")
-                if (stale()) return
-                if (othersWatching) scheduleTerminalReissue(sessionName)   // 别的设备上的画面也按新尺寸对齐
-              }
-            } catch (err: any) {
-              console.warn(`[hub] resize on attach failed: ${err.message}`)
-            }
-          }
-          // 开流是异步的：等的这段时间这套可能被别人关掉（同一套的另一个等待者 detach 了），那就再开一次
-          let att: TerminalAttachment | undefined
-          for (let tries = 0; !att && tries < 2; tries++) {
-            let opened: TerminalAttachment
-            try {
-              opened = await openTerminalAttachment(sessionName)
-            } catch (err: any) {
-              ws.send(JSON.stringify({
-                type: "terminal_error",
-                session_name: sessionName,
-                reason: `attach failed: ${err.message}`,
-              }))
-              return
-            }
-            if (stale()) {
-              // 开流期间 detach / 断开了（那时它还没进表，detach 摘不到）：没人看就关掉
-              if (!terminalWatched(opened) && terminalAttachments.get(sessionName) === opened) void closeTerminalAttachment(sessionName)
-              return
-            }
-            if (terminalAttachments.get(sessionName) === opened) att = opened
-          }
-          if (!att) {
-            ws.send(JSON.stringify({ type: "terminal_error", session_name: sessionName, reason: "attach failed: stream closed" }))
-            return
-          }
-          const joined = att
-          joined.joining.add(ws)
-          step("pipe")
-          // 给这个 client 发当前 snapshot（带 ANSI escape + CRLF 归一 + 光标复位，见 formatSnapshot 注释）。
-          // #087：快照在流里的位置发、发完才进观众：快照之前的增量它一个不收（都在快照里），之后的一个不漏
-          try {
-            await captureAtBoundary(joined, (snapshot, mouseAny) => {
-              joined.joining.delete(ws)
-              if (stale()) return
-              joined.mpClients.add(ws)
-              step("capture")
-              const hubMs = Math.round(performance.now() - attachStart)
-              ws.send(buildTerminalInitPayload(sessionName, snapshot, mouseAny, { ms: hubMs, steps: steps.join(" ") }))
-              console.log(`[hub] terminal_attach ${sessionName} ${cols}x${rows} (clients=${joined.mpClients.size}) ${hubMs}ms [${steps.join(" ")}]`)
-            })
-            if (stale()) return
-            // 立刻推一帧用量，不然顶卡要等到下一个 30s 心跳才从 `--` 变成数字
-            sendTerminalUsage(sessionName, [ws])
-            sendTerminalState([ws])
-          } catch (err: any) {
-            joined.joining.delete(ws)
-            if (!terminalWatched(joined) && terminalAttachments.get(sessionName) === joined) void closeTerminalAttachment(sessionName)
-            if (stale()) return
-            ws.send(JSON.stringify({
-              type: "terminal_error",
-              session_name: sessionName,
-              reason: `capture failed: ${err.message}`,
-            }))
-          }
-        } else if (msg.type === "terminal_detach") {
-          const sessionName = typeof msg.session_name === "string" ? msg.session_name : ""
-          bumpTerminalAttachSeq(ws, sessionName)   // 在途的 attach 作废
-          const att = terminalAttachments.get(sessionName)
-          if (att) {
-            att.mpClients.delete(ws)
-            att.joining.delete(ws)
-            if (!terminalWatched(att)) {
-              void closeTerminalAttachment(sessionName)
-              console.log(`[hub] terminal stream closed: ${sessionName}`)
-            }
-          }
-          terminalSizes.remove(sessionName, ws)
-          void applyEffectiveSize(sessionName)   // T51：剩下的设备恢复自己的尺寸
-        } else if (msg.type === "terminal_active") {
-          // T51：App 退后台 false / 回前台 true；后台的设备不参与定尺寸
-          for (const sessionName of terminalSizes.setActive(ws, msg.active !== false)) void applyEffectiveSize(sessionName)
-        } else if (msg.type === "terminal_input") {
-          // MP keystroke bytes → tmux send-keys -H hex 序列
-          // 支持任意 ANSI escape（如 ↑ = ESC [ A = 0x1b 0x5b 0x41）
-          const sessionName = typeof msg.session_name === "string" && msg.session_name
-            ? msg.session_name
-            : TMUX_SESSION
-          const bytesB64 = typeof msg.bytes === "string" ? msg.bytes : ""
-          if (!tmux.hasSession(sessionName) || !bytesB64) return
-          const bytes = Buffer.from(bytesB64, "base64")
-          if (bytes.length === 0) return
-          if (bytes.length > 4096) {
-            // 新客户端已按 4096 分片（#053 T26），撞到这条 = 老客户端；至少留个痕
-            console.warn(`[hub] terminal_input dropped: ${bytes.length} bytes > 4096 (${sessionName})`)
-            return
-          }
-          try {
-            await sendTerminalBytes(sessionName, bytes)
-          } catch (err: any) {
-            ws.send(JSON.stringify({
-              type: "terminal_error",
-              session_name: sessionName,
-              reason: `send-keys: ${err.message}`,
-            }))
-          }
-        } else if (msg.type === "terminal_paste") {
-          // 粘贴走 tmux paste-buffer -p：pane 开了 bracketed paste 才包 ESC[200~（#053 T27），
-          // 走 stdin 没有 4096 的线（T26）。回 terminal_paste_result，客户端据此决定清不清草稿。
-          // 不回 terminal_error：客户端把那个当 OFFLINE。
-          const sessionName = typeof msg.session_name === "string" && msg.session_name
-            ? msg.session_name
-            : TMUX_SESSION
-          const requestId = typeof msg.request_id === "string" ? msg.request_id : undefined
-          const text = typeof msg.text === "string" ? msg.text : ""
-          const result: PasteResult = tmux.hasSession(sessionName)
-            ? await tmux.paste(sessionName, text)
-            : { ok: false, reason: "终端会话不存在" }
-          ws.send(buildPasteResultPayload(sessionName, requestId, result))
-        } else if (msg.type === "terminal_resize") {
-          const sessionName = typeof msg.session_name === "string" && msg.session_name
-            ? msg.session_name
-            : TMUX_SESSION
-          const cols = Number(msg.cols) || 80
-          const rows = Number(msg.rows) || 24
-          if (cols < 10 || cols > 500 || rows < 5 || rows > 200) return
-          if (streamRunner.has(sessionName)) return   // 无终端会话没有 pane（此前打到 tmux 报 can't find window）
-          if (!tmux.hasSession(sessionName)) return
-          // T51：只认还在看这个窗口的设备（detach 之后迟到的 resize 不能把它重新算进来压窄别人）
-          if (!terminalSizes.has(sessionName, ws)) return
-          terminalSizes.set(sessionName, ws, { cols, rows })
-          try {
-            // 看的都在后台：不动窗口。真改了才记一行（#087：键盘起落会不会改行数，看这行就知道）
-            if (await syncTerminalSize(sessionName)) console.log(`[hub] terminal_resize ${sessionName} → ${cols}x${rows}`)
-          } catch (err: any) {
-            console.warn(`[hub] resize-window failed for ${sessionName}: ${err.message}`)
-          }
-          // 07-09 恢复 resize 后快照愈合（粟粟报「字/光标经常飘到输入框外」）：
-          // 键盘弹起等 viewport 变化窗口期，SwiftTerm 已按新尺寸 reflow 而 CC 输出
-          // 还是旧尺寸坐标（或反向）——错位内容 CC 增量重绘不补，必须重发快照对齐。
-          // 06-02 砍 reissue 的根因（client 端 ESC c 复位不彻底 → 快照层层叠加）已在
-          // client 侧拆除（terminal_init 改 resetToInitialState API 完整复位），重发安全。
-          // debounce 400ms：连发 resize 只在末次后重发一次，同时给 CC SIGWINCH 重绘
-          // 留时间（attach 路径实测 250ms 内绘完）。
-          scheduleTerminalReissue(sessionName)
-        } else if (msg.type === "command") {
-          // L3：斜杠命令 raw 直发，不包 channel tag —— CC 看到裸 /clear 触发命令系统
-          const content = typeof msg.content === "string" ? msg.content : ""
-          if (!content.startsWith("/")) {
-            ws.send(JSON.stringify({ type: "error", reason: "command must start with /" }))
-            return
-          }
-          const targetSession = typeof msg.session_name === "string" && msg.session_name
-            ? msg.session_name
-            : TMUX_SESSION
-          if (!tmux.hasSession(targetSession)) {
-            ws.send(JSON.stringify({
-              type: "error",
-              reason: `session_not_found: ${targetSession}`,
-            }))
-            return
-          }
-          const sent = await sendSlashCommand(targetSession, content)
-          ws.send(JSON.stringify(sent.ok ? { type: "command_ack", content } : { type: "error", reason: sent.reason }))
-        } else if (msg.type === "register_call_client") {
-          try {
-            voiceCalls.register(msg)
-            callInstallByWS.set(ws, msg.install_id)
-            ws.send(JSON.stringify({ type: "voice_call_snapshot", calls: voiceCalls.forDevice(msg.install_id) }))
-          } catch (e: any) { ws.send(JSON.stringify({ type: "voice_call_error", reason: e.message })) }
-        } else if (msg.type === "voice_call_action") {
-          try {
-            const install_id = callInstallByWS.get(ws)
-            if (!install_id || !["accept", "decline", "hangup", "fail"].includes(msg.action)) throw new Error("call client not registered")
-            broadcastCall(voiceCalls.transition(msg.call_id, msg.action, { install_id }))
-          } catch (e: any) { ws.send(JSON.stringify({ type: "voice_call_error", call_id: msg.call_id, reason: e.message })) }
-        } else if (msg.type === "register_push_token") {
-          // app 注册 APNs device token（hub 在「无人在看」时推主动消息/nudge）。
-          if (typeof msg.token === "string" && msg.token.length > 0) {
-            const isNew = !pushTokens.has(msg.token)
-            const info = normalizePushInfo(msg)
-            pushTokens.set(msg.token, info)
-            savePushTokens()
-            console.log(`[hub] push token registered (total ${pushTokens.size}, new=${isNew}) …${msg.token.slice(-8)} env=${info.env} topic=${info.topic ?? "-"} preview=${info.preview}`)
-          }
-        } else if (msg.type === "register_la_token") {
-          // app 注册 Live Activity 的 update / push-to-start token（D6）。
-          // 跟 register_push_token 是两条独立的链，别互相借值。
-          const res = registerLaToken(laTokens, msg)
-          if (res.ok) {
-            saveLaTokens(laTokensPath, laTokens)
-            const who = msg.kind === "start"
-              ? `install=${msg.install_id}`
-              : `activity=${msg.activity_id} session=${msg.session_name}`
-            console.log(`[hub] la token ${msg.kind} ← ${who} env=${msg.env} topic=${normalizeTopic(msg.topic) ?? "-"} preview=${msg.preview === "full" ? "full" : "hidden"} token=${tokenTail(msg.token)} replaced=${tokenTail(res.replaced)}`)
-          } else {
-            // 必须回帧：不回的话 app 的 didOpen 全量补报会静默死循环。
-            const nak: Record<string, unknown> = { type: "la_token_nak", kind: msg.kind, reason: res.reason }
-            if (typeof msg.activity_id === "string") nak.activity_id = msg.activity_id
-            if (typeof msg.install_id === "string") nak.install_id = msg.install_id
-            ws.send(JSON.stringify(nak))
-            console.warn(`[hub] la token rejected: ${res.reason}`)
-          }
-        } else if (msg.type === "unregister_la_token") {
-          if (unregisterLaToken(laTokens, msg).ok) {
-            saveLaTokens(laTokensPath, laTokens)
-            console.log(`[hub] la token unregister ${msg.kind} ← ${msg.kind === "start" ? `install=${msg.install_id}` : `activity=${msg.activity_id}`}`)
-          }
-        } else if (msg.type === "la_query") {
-          // M4b2 ③：app 冷启动对账。iPhone 上 app 被杀是**正常工作模式**（数据源在 Mac 的 hub），
-          // 所以冷启动发现的岛不能无条件 end —— 先问 hub「那一轮还活着吗」。
-          // 活 = LA store 里有该 update 记录，就活。phase 表缺这个 session 时按 idle 报
-          // —— 08-30 真机 checkpoint 实撞：原来还要求「session 在 phase 表里」，而 phase 表
-          // 只在 app send/askuser/reply 事件时才有条目，DEBUG 起的岛 + hub 重启后的岛都没有
-          // → hub 误报死亡 → app 把粟粟刚起的岛 end 掉了。token 记录本身就是「hub 认识它」的证据。
-          // 没连上 / 不回帧的分支由 app 侧兜（保留，不猜），hub 这边只负责有问必答。
-          const ids: string[] = (Array.isArray(msg.activity_ids) ? msg.activity_ids : [])
-            .filter((v: unknown): v is string => typeof v === "string" && v.length > 0)
-            .slice(0, 32)
-          const alive: Record<string, { phase: string; run_id?: string; session_name: string } | null> = {}
-          for (const id of ids) {
-            const record = laTokens.update[id]
-            const snap = record ? laPhaseBySession.get(record.session_name) : undefined
-            alive[id] = record
-              ? { phase: snap?.phase ?? "idle", ...(snap?.run_id ? { run_id: snap.run_id } : {}), session_name: record.session_name }
-              : null
-          }
-          try { ws.send(JSON.stringify({ type: "la_query_result", alive })) } catch {}
-          console.log(`[hub] la query ← ${ids.length} ids → alive=${Object.values(alive).filter((v) => v !== null).length}`)
-        } else if (msg.type === "focus") {
-          // app 上报「当前在看哪个会话」。空串/非串 = 没在看（后台/列表页/终端页）。
-          const c = (typeof msg.chat_id === "string" && msg.chat_id.length > 0) ? msg.chat_id : null
-          focusByClient.set(ws, c)
-          console.log(`[hub] focus ← ${c ? c.slice(0, 8) : "none"}`)
-        } else if (msg.type === "cc_memory_manifest_req") {
-          // 只回清单（名字 + 哈希 + 大小）；排除规则在 buildSnapshot 里，被排除的不进清单。同一目录的构建合并、全进程读盘 ≤8（ccMemorySnapshots）。
-          // 读盘异步（原来同步逐个读，10-11 现场一次卡主循环 2.4s）；同一连接的清单 / 取文件回包按请求顺序发（审查 R1-3）
-          void memoryRepliesFor(ws).push(() => ccMemorySnapshots.fresh().then(
-            (snap) => [JSON.stringify({ type: "cc_memory_manifest", ok: true, files: ccMemoryManifest(snap) })],
-            (e) => [JSON.stringify({ type: "cc_memory_manifest", ok: false, reason: (e as Error)?.message ?? "read failed", files: [] })],
-          ))
-        } else if (msg.type === "cc_memory_fetch") {
-          // 按名字分批取（每次 ≤20 个、每帧 ≤256KB）；只认快照里有的名字。读盘异步，读失败与原来一样不回帧（只记一行）
-          const names = msg.names
-          void memoryRepliesFor(ws).push(() => ccMemorySnapshots.recent().then(
-            (snap) => fetchFrames(snap, names),
-            (e) => { console.warn(`[hub] cc_memory_fetch 读失败：${(e as Error)?.message ?? e}`); return [] },
-          ))
-        } else if (msg.type === "vocab_archeology") {
-          // R3-3 考古按钮（fire-and-forget，结果广播回投）
-          if (typeof msg.word === "string" && msg.word.trim() && msg.word.length <= 64) {
-            void runVocabArcheology(msg.word.trim().toLowerCase())
-          }
-        } else if (msg.type === "pocket_result" || msg.type === "twitter_result") {
-          const pid = typeof msg.id === "string" ? msg.id : ""
-          const p = pocketPending.get(pid)
-          if (p) p.resolve({ id: msg.id, ok: msg.ok, result: msg.result, error: msg.error })
-        } else if (msg.type === "reading_status") {
-          // CR-2 阅读在场信号：app 60s tick 上报快照 → 落 agent/reading-status.json
-          // （AUTONOMY 触发时机的输入面；消费在 CR-4）。原样落盘，只做形状校验。
-          if (msg.status && typeof msg.status === "object") {
-            writeReadingStatus(msg.status as Record<string, unknown>)
-          }
-        } else if (msg.type === "vocab_status") {
-          // L2 单词在场信号：开关 coRead.vocab（缺省关），关 = 静默丢弃（best-effort 信号）
-          if (msg.status && typeof msg.status === "object" && loadAgentConfig().coRead.vocab === true) {
-            writeVocabStatus(msg.status as Record<string, unknown>)
-          }
-        } else if (msg.type === "voice_note") {
-          // 发语音条：生成成功的语音条记进 cc-rp（小克能翻到"自己说过的话"）
-          if (msg.note && typeof msg.note === "object") {
-            appendVoiceNote(msg.note as Record<string, unknown>)
-          }
-        } else if (msg.type === "set_voice_instructions") {
-          // 楼层语音设置 → CLAUDE.md 标记块（app 发送前/设置改动时按内容去重同步）
-          const r = writeVoiceInstructions(msg.content)
-          try { ws.send(JSON.stringify({ type: "voice_instructions_result", ...r })) } catch {}
-          // #if PERSONAL_APPS
-        } else if (msg.type === "warroom_board") {
-          // M3：iOS 军机处看板拉取（快照式——最近奏折 + 普查统计）
-          try { ws.send(JSON.stringify({ type: "warroom_board_result", ...warroomBoardSnapshot() })) } catch {}
-        } else if (msg.type === "warroom_request") {
-          // M5：粟粟在 app 看板上一句话派单 → 存档原文 → 注入中枢拆 EPIC
-          const text = typeof msg.text === "string" ? msg.text.trim() : ""
-          if (!text || !warroomLedger) {
-            try { ws.send(JSON.stringify({ type: "warroom_request_result", ok: false, error: !text ? "empty" : "not ready" })) } catch {}
-          } else {
-            // K2 审查 R1-1：撞锁异步重试；最终失败回 WS 错误（原来同步抛 → 这个 async 回调 reject → unhandledRejection → hub 退出）
-            const ledger = warroomLedger
-            void retryBusy(() => ledger.createRequest(text.slice(0, 4000))).then((req) => {
-              const desk = process.env.MP_WARROOM_DESK ?? "mp-cc-2521523d"
-              const tag = `<channel source="warroom-request" request_id="${req.request_id}">【御笔亲批的新需求 ${req.request_id}】${text.replace(/\n/g, " ")} —— 中枢流程：拆粗颗粒 roadmap → warroom_dispatch 子奏折（epic 一律填 "${req.request_id}"，能并行的并行、有先后的用 depends_on 串；工单正文里要求执行者按 research→plan→执行→review 循环干活）→ 全部终态后 hub 会叫你终审。先用 bridge 回粟粟你拆出的 roadmap。</channel>`
-              void ensureSessionAndSendAsync(desk, tag).catch((e: any) => console.warn(`[warroom] request inject fail: ${e?.message}`))
-              try { ws.send(JSON.stringify({ type: "warroom_request_result", ok: true, request_id: req.request_id })) } catch {}
-              console.log(`[warroom] request ${req.request_id} → desk (${text.slice(0, 60)})`)
-            }).catch((e: any) => {
-              console.warn(`[warroom] request 存档失败：${e?.message}`)
-              try { ws.send(JSON.stringify({ type: "warroom_request_result", ok: false, error: String(e?.message ?? e) })) } catch {}
-            })
-          }
-        } else if (PM_FRAMES.has(msg.type)) {
-          // 手机「开发」子应用：只转发给本机 session 看板服务 4793（pm-relay.ts，异步 + 超时，不阻塞消息循环）
-          void pmRelay(msg).then((r) => { try { ws.send(JSON.stringify(r)) } catch {} })
-          // #endif
-        } else if (msg.type === "agent_status") {
-          // R5：iOS 拉 agent 状态（config/用量/活动）
-          try { ws.send(JSON.stringify({ type: "agent_status_result", ...agentStatusSnapshot() })) } catch {}
-        } else if (msg.type === "agent_config_set") {
-          // R5：iOS 写 agent 配置（读-改-写保未知键），回最新快照
-          if (msg.patch && typeof msg.patch === "object") {
-            applyAgentConfigPatch(msg.patch as Record<string, unknown>)
-            try { ws.send(JSON.stringify({ type: "agent_status_result", ...agentStatusSnapshot() })) } catch {}
-          }
-        } else if (msg.type === "ask_user_answer") {
-          // 问问题 CC 桥：app 答案 → TUI 键序驱动（per-session 串行链；快照校验失败不盲发键）。
-          // 答完的权威收账走 PostToolUse hook；skip=Esc 无 hook，驱动成功后立即 declined 收账。
-          const toolUseId = typeof msg.tool_use_id === "string" ? msg.tool_use_id : ""
-          const p = toolUseId ? askUserPending(toolUseId) : undefined
-          if (!p) {
-            try { ws.send(JSON.stringify({ type: "ask_user_stale", tool_use_id: toolUseId })) } catch {}
-            return
-          }
-          const skip = msg.skip === true
-          const answers: AskAnswer[] | null = Array.isArray(msg.answers) ? msg.answers : null
-          if (streamAnswer(p, toolUseId, answers, skip)) return   // stream 会话：control_response 已回
-          chainSessionSend(p.sessionName ?? "", async () => {
-            const r = await askUserDrive(p, answers, skip, askUserIO)
-            if (r.ok) {
-              if (skip) {
-                resolveAskUserDeclined(toolUseId, "app_skip")
-              } else if (answers) {
-                askUserMarkDriven(toolUseId, askUserFormatAnswers(p.questions, answers))
-              }
-              console.log(`[hub] askuser drive ok tool_use=${toolUseId.slice(0, 12)} skip=${skip}`)
-            } else {
-              console.warn(`[hub] askuser drive fail (${r.reason}) tool_use=${toolUseId.slice(0, 12)}`)
-              try { ws.send(JSON.stringify({ type: "ask_user_stale", tool_use_id: toolUseId, reason: r.reason })) } catch {}
-            }
-          })
-        } else if (msg.type === "agent_book_note_ack") {
-          // CR-4 P1：app 处理成功回执 → 删 pending（投递闭环）
-          if (typeof msg.uuid === "string") {
-            ackBookNote(msg.uuid)
-            console.log(`[hub] book_note ack ← ${msg.uuid.slice(0, 8)}`)
-          }
-          // #if PERSONAL_APPS
-        } else if (msg.type === "ticker_research") {
-          // 交易 T0.5：档案页「跑研究」→ headless axismundi（mode: full=按钮全量 / auto=夜跑增量优先）
-          if (typeof msg.symbol === "string" && /^[A-Z]{1,5}$/.test(msg.symbol)) {
-            const mode = typeof msg.mode === "string" ? msg.mode : "full"
-            void runTickerResearch(msg.symbol, typeof msg.request_id === "string" ? msg.request_id : "", mode)
-          }
-        } else if (msg.type === "trading_report_ack") {
-          if (typeof msg.uuid === "string") {
-            ackTradingReport(msg.uuid)
-            console.log(`[hub] trading_report ack ← ${msg.uuid.slice(0, 8)}`)
-          }
-        } else if (msg.type === "trading_watchlist") {
-          // 交易夜跑：app 关注列表 + 夜跑参数全量上报 → 落盘给 trading-daily 读
-          saveWatchlist(msg.symbols, msg.nightly ?? null)
-          // #endif
-        } else if (msg.type === "reading_context") {
-          // CR-4 P1：她读到哪，章文本缓存到哪（ReaderDaemon 的阅读材料）
-          if (typeof msg.safeName === "string" && typeof msg.text === "string" && Number.isFinite(msg.chapter)) {
-            const ok = writeReadingContext({
-              floorId: typeof msg.floorId === "string" ? msg.floorId : "",
-              userName: typeof msg.userName === "string" ? msg.userName.slice(0, 100) : "",
-              safeName: msg.safeName,
-              bookName: typeof msg.bookName === "string" ? msg.bookName : msg.safeName,
-              chapter: msg.chapter,
-              totalChapters: Number.isFinite(msg.totalChapters) ? msg.totalChapters : 0,
-              chapterTitle: typeof msg.chapterTitle === "string" ? msg.chapterTitle : "",
-              text: String(msg.text).slice(0, 200_000),
-              userNotes: Array.isArray(msg.userNotes) ? msg.userNotes.slice(0, 50) : [],
-              // R1：楼层人格+记忆快照（daemon 的 system prompt）
-              persona: typeof msg.persona === "string" ? msg.persona.slice(0, 30_000) : "",
-              updatedAt: new Date().toISOString(),
-            })
-            if (ok) console.log(`[hub] reading_context ← 《${msg.bookName ?? msg.safeName}》第 ${msg.chapter} 章（${String(msg.text).length} 字）`)
-          }
-        } else if (msg.type === "set_cc_config") {
-          // app 同步 CC 设置（推送名 / nudge 参数 / 系统提示模板）。覆盖 ccConfig，内存不持久化。
-          if (typeof msg.pushName === "string" && msg.pushName.trim()) ccConfig.pushName = msg.pushName.trim().slice(0, 100)
-          // userName 会替换进 nudge channel body 喂给 claude → 拒绝标签注入
-          if (typeof msg.userName === "string" && msg.userName.trim()) {
-            const u = msg.userName.trim().slice(0, 100)
-            if (hasTagInjection(u)) console.warn(`[hub] set_cc_config: userName 含标签，拒绝（防注入）`)
-            else ccConfig.userName = u
-          }
-          if (typeof msg.nudgeEnabled === "boolean") ccConfig.nudgeEnabled = msg.nudgeEnabled
-          if (!TRANSPORT_LOCK && (msg.newSessionTransport === "tmux" || msg.newSessionTransport === "stream")) ccConfig.newSessionTransport = msg.newSessionTransport
-          if (Number.isFinite(msg.idleMinMin) && msg.idleMinMin > 0) ccConfig.idleMinMs = msg.idleMinMin * 60_000
-          if (Number.isFinite(msg.idleMaxMin) && msg.idleMaxMin > 0) ccConfig.idleMaxMs = Math.max(msg.idleMaxMin * 60_000, ccConfig.idleMinMs)
-          const clampMin = (v: any, d: number) => (Number.isFinite(v) && v >= 0 && v < 1440 ? Math.floor(v) : d)
-          if (msg.quietStartMin !== undefined) ccConfig.quietStartMin = clampMin(msg.quietStartMin, ccConfig.quietStartMin)
-          if (msg.quietEndMin !== undefined) ccConfig.quietEndMin = clampMin(msg.quietEndMin, ccConfig.quietEndMin)
-          if (Number.isFinite(msg.cooldownMin) && msg.cooldownMin >= 0) ccConfig.cooldownMs = msg.cooldownMin * 60_000
-          if (typeof msg.nudgeTemplate === "string" && msg.nudgeTemplate.trim()) {
-            const t = msg.nudgeTemplate.trim().slice(0, 1000)
-            if (hasTagInjection(t)) console.warn(`[hub] set_cc_config: nudgeTemplate 含标签，拒绝（防注入），保留原值`)
-            else ccConfig.nudgeTemplate = t
-          }
-          // 保暖策略表：{session: "always"|"auto"|"never"}。整表替换（app 是唯一真相源），
-          // 但只有 app 显式带了这个字段才动——老版本 app 不带，不该把她钉的常驻清空。
-          if (msg.keepalivePolicies && typeof msg.keepalivePolicies === "object") {
-            keepalivePolicies.clear()
-            for (const [session, p] of Object.entries(msg.keepalivePolicies as Record<string, unknown>)) {
-              if (typeof session !== "string" || !session || session.length > 100) continue
-              if (p === "always" || p === "never") keepalivePolicies.set(session, p)   // auto 不存
-            }
-            saveKeepalivePolicies()
-            const pinned = [...keepalivePolicies].filter(([, p]) => p === "always").map(([s]) => s)
-            if (pinned.length > KEEPALIVE_PIN_WARN)
-              console.warn(`[hub] ⚠️ 钉了 ${pinned.length} 个常驻保暖（${pinned.join(", ")}）——它们全都不参与单选，各烧各的`)
-          }
-          // 传输策略不再跟 set_cc_config 走（09-19：两台设备各存一份，旧的那台每次重连都把刚设的改回去，
-          // 会话来回收编、正说到一半被掐）。只认 set_transport_policy（她点菜单那一下），hub 是唯一真相，改完推给所有设备。
-          const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`
-          const policySummary = (keepalivePolicies.size ? ` keepalive=${[...keepalivePolicies].map(([s, p]) => `${s}:${p}`).join(",")}` : "")
-            + (transportPolicies.size ? ` transport=${[...transportPolicies].map(([s, p]) => `${s}:${p}`).join(",")}` : "")
-          console.log(`[hub] set_cc_config: push="${ccConfig.pushName}" transport=${ccConfig.newSessionTransport} nudge=${ccConfig.nudgeEnabled} idle=${ccConfig.idleMinMs / 60000}-${ccConfig.idleMaxMs / 60000}min quiet=${hhmm(ccConfig.quietStartMin)}-${hhmm(ccConfig.quietEndMin)} cd=${ccConfig.cooldownMs / 60000}min${policySummary}`)
-          reconcileStreamTransport()
-        } else if (msg.type === "set_transport_policy" && typeof msg.session === "string" && msg.session && msg.session.length <= 100) {
-          const p = msg.policy
-          const before = transportPolicies.get(msg.session) ?? ""
-          if (p === "tmux" || p === "stream") transportPolicies.set(msg.session, p)
-          else transportPolicies.delete(msg.session)
-          const after = transportPolicies.get(msg.session) ?? ""
-          if (before !== after) {
-            saveTransportPolicies()
-            console.log(`[hub] transport policy ${msg.session}: ${before || "全局"} → ${after || "全局"}`)
-            reconcileStreamTransport()
-          }
-          broadcastFrame(transportPoliciesFrame())
-        } else if (msg.type === "set_bind") {
-          // 绑定开关：只允许本机（hub 所在的 Mac）改——决定 hub 实绑 LAN/Tailscale，关掉=真不监听。
-          if (!trustedLocal) { console.warn(`[hub] set_bind 被拒（非本机直连 ${remote}）`); return }
-          if (manualHost) { ws.send(JSON.stringify({ type: "bind_state", manual: manualHost })); return }  // 手动绑定模式不受开关控制
-          detected = detectInterfaces()   // 重扫网卡：拨开关瞬间若 Tailscale 刚起来也立刻发现
-          const lan = msg.lan !== false, ts = msg.tailscale !== false
-          bindPrefs.save({ lan, tailscale: ts })
-          if (detected.lan) { lan ? bindHost(detected.lan) : unbindHost(detected.lan) }
-          if (detected.tailscale) { ts ? bindHost(detected.tailscale) : unbindHost(detected.tailscale) }
-          console.log(`[hub] set_bind: lan=${lan} tailscale=${ts} → bound ${[...listeners.keys()].join(",")}`)
-          ws.send(JSON.stringify({ type: "bind_state", lan: detected.lan ? listeners.has(detected.lan) : false, tailscale: detected.tailscale ? listeners.has(detected.tailscale) : false, hasLan: !!detected.lan, hasTailscale: !!detected.tailscale }))
-        }
-      }))
-
-      ws.on("close", (code, reason) => {
-        mpClients.delete(ws)
-        focusByClient.delete(ws)   // 连接断 = 不聚焦任何会话
-        clientInfoByWS.delete(ws)
-        callInstallByWS.delete(ws)
-        // L4: 兜底清理 terminal 订阅（用户切走 / app 后台 / 网络断 不会显式发 detach）
-        for (const att of Array.from(terminalAttachments.values())) {
-          if (att.mpClients.has(ws) || att.joining.has(ws)) {
-            att.mpClients.delete(ws)
-            att.joining.delete(ws)
-            if (!terminalWatched(att)) {
-              void closeTerminalAttachment(att.sessionName)
-            }
-          }
-        }
-        for (const sessionName of terminalSizes.removeClient(ws)) void applyEffectiveSize(sessionName)   // T51
-        // pocket: MP 断开 → 所有等它回复的 pending 立即失败（单 client 场景全清）
-        for (const [pid, p] of pocketPending) {
-          clearTimeout(p.timer); p.resolve({ ok: false, error: "phone disconnected" }); pocketPending.delete(pid)
-        }
-        console.log(`[hub] ${probeTs()} MP disconnected (total ${mpClients.size}) from ${remote} up=${Math.round((Date.now() - probeConnectedAt) / 1000)}s code=${code} reason=${reason?.toString() || "(empty)"}`)
-      })
-    } else if (pathname === "/mcp") {
-      mcpClients.add(ws)
-      console.log(`[hub] MCP connected (total ${mcpClients.size})`)
-
-      let mcpType: unknown
-      ws.on("message", (raw) => timeHandler(() => wsSite("mcp", mcpType), () => {
-        let msg: any
-        mcpType = undefined
-        try { msg = JSON.parse(raw.toString()) } catch { return }
-        mcpType = msg?.type
-        if (msg.type === "mcp_hello" && typeof msg.session_name === "string") {
-          // socket ↔ 宿主 session 关联（reply 守卫的钥匙）
-          mcpSessionByWS.set(ws, msg.session_name)
-          console.log(`[hub] MCP hello ← ${msg.session_name}`)
-          return
-        }
-        if (msg.type === "voice_call_request") {
-          const session = mcpSessionByWS.get(ws)
-          void (async () => {
-            try {
-              if (!session || agoraExecutorRef?.hasActiveClaim(session)) throw new Error("call requires bound private session without pending Agora claim")
-              let call
-              if (msg.action === "ring") {
-                const created = voiceCalls.create(msg.call_id, msg.chat_id, msg.install_id, session, sessionActivity.get(session)?.lastChatId ?? sessionMap.get(session)?.chatId, typeof msg.caller === "string" ? msg.caller : session)
-                call = created.call
-                if (created.fresh) {
-                  const device = voiceCalls.device(msg.install_id)!
-                  const pushed = await sendVoIPAPNs(device, call)
-                  if (!pushed.ok) {
-                    call = voiceCalls.transition(call.call_id, "fail", { session })
-                    broadcastCall(call)
-                    throw new Error(`VoIP push failed: ${pushed.reason ?? pushed.status}`)
-                  }
-                  call = voiceCalls.get(call.call_id)!
-                  broadcastCall(call)
-                }
-              } else {
-                const existing = voiceCalls.get(msg.call_id)
-                if (!existing || existing.session !== session) throw new Error("call not owned by session")
-                if (msg.action === "cancel") { call = voiceCalls.transition(msg.call_id, "cancel", { session }); broadcastCall(call) }
-                else if (msg.action === "status") call = existing
-                else throw new Error("invalid call action")
-              }
-              ws.send(JSON.stringify({ type: "voice_call_result", request_id: msg.request_id, ok: true, call }))
-            } catch (e: any) { ws.send(JSON.stringify({ type: "voice_call_result", request_id: msg.request_id, ok: false, error: e.message })) }
-          })()
-          return
-        }
-        if (msg.type === "agora_complete") {
-          const requestId = typeof msg.request_id === "string" ? msg.request_id : ""
-          const isPass = msg.pass === true
-          // pass = observe 沉默，content 可缺省；正常完成 content 必填。
-          if (
-            !requestId
-            || typeof msg.mention_id !== "string"
-            || typeof msg.claim_token !== "string"
-            || (!isPass && typeof msg.content !== "string")
-          ) {
-            ws.send(JSON.stringify({
-              type: "agora_complete_result",
-              request_id: requestId,
-              ok: false,
-              error: { code: "invalid_payload", message: "agora_complete requires request_id, mention_id, claim_token, and content (or pass: true)" },
-            }))
-            return
-          }
-          try {
-            if (isPass) {
-              const result = agoraProtocol.passMention(msg.mention_id, msg.claim_token)
-              ws.send(JSON.stringify({
-                type: "agora_complete_result",
-                request_id: requestId,
-                ok: true,
-                passed: true,
-                idempotent: result.idempotent,
-              }))
-            } else {
-              const result = agoraProtocol.completeMention(msg.mention_id, msg.claim_token, msg.content)
-              ws.send(JSON.stringify({
-                type: "agora_complete_result",
-                request_id: requestId,
-                ok: true,
-                message_id: result.message.id,
-                idempotent: result.idempotent,
-              }))
-            }
-            agoraExecutor.onMentionSettled(msg.mention_id)
-          } catch (error) {
-            const code = error instanceof AgoraStoreError ? error.code : "internal_error"
-            const message = error instanceof AgoraStoreError ? error.message : "Agora completion failed"
-            ws.send(JSON.stringify({
-              type: "agora_complete_result",
-              request_id: requestId,
-              ok: false,
-              error: { code, message },
-            }))
-          }
-        } else if (msg.type === "reply" && typeof msg.chat_id === "string" && typeof msg.content === "string") {
-          // 守卫（audit P2-6，07-20 粟粟真机踩中变体）：session 正被房间 @（claim 未答）时
-          // 拦下 reply——老 session 的日常习惯是 reply，会把房间回答误发进私聊对话。
-          // 拒绝并教路：完成 agora_complete 后 reply 恢复可用。
-          const guardSession = mcpSessionByWS.get(ws)
-          if (guardSession && agoraExecutorRef?.hasActiveClaim(guardSession)) {
-            try {
-              ws.send(JSON.stringify({
-                type: "reply_err",
-                mp_msg_id: typeof msg.mp_msg_id === "string" ? msg.mp_msg_id : undefined,
-                reason: "agora_claim_pending",
-                message: "你正被中庭房间 @（有未完成的 mention）：这条回答请用 agora_complete 工具发回房间（带 claim_token），不要用 reply。房间任务完成后 reply 恢复可用。",
-              }))
-            } catch {}
-            console.log(`[hub] reply 被拦（${guardSession} 有未答房间 mention）→ 引导 agora_complete`)
-            return
-          }
-          deliverReply(msg, guardSession, "mcp")
-        } else if (msg.type === "edit" && typeof msg.chat_id === "string" && typeof msg.message_id === "string" && typeof msg.content === "string") {
-          // A4：编辑发过的消息 → broadcast + 进会话内 edit 缓存（重连补）。app 按 mp_msg_id 找节点改 content。
-          recentEdits.push({ chat_id: msg.chat_id, mp_msg_id: msg.message_id, content: msg.content, ts: Date.now() })
-          while (recentEdits.length > MAX_REPLY_LOG) recentEdits.shift()
-          const editPayload = JSON.stringify({ type: "edit", chat_id: msg.chat_id, mp_msg_id: msg.message_id, content: msg.content })
-          let n = 0
-          for (const mp of mpClients) { if (mp.readyState === mp.OPEN) { try { mp.send(editPayload); n++ } catch {} } }
-          console.log(`[hub] edit ← mcp → ${msg.message_id} broadcast to ${n}/${mpClients.size}`)
-        }
-      }))
-
-      ws.on("close", () => {
-        mcpClients.delete(ws)
-        mcpSessionByWS.delete(ws)
-        console.log(`[hub] MCP disconnected (total ${mcpClients.size})`)
-      })
-    } else {
-      ws.close(1008, "unknown path")
+    const attach = (auth: ConnAuth) => {
+      if (pathname === "/agora") attachAgora(ws, remote)
+      else if (pathname === "/cc") attachCC(ws, reqUrl, remote, trustedLocal)
+      else if (pathname === "/mcp") attachMcp(ws)
+      else { ws.close(1008, "unknown path"); return }
+      if (auth.deviceId) trackDeviceSocket(ws, auth.deviceId)
     }
+    // 本机直连照现状免鉴权，不看 v=2（/agora 照旧要口令）
+    if (trustedLocal && pathname !== "/agora") { attach({ via: "local", deviceId: null }); return }
+    // 口令原文（老 app / mcp / 脚本）照旧；远程 /mcp 只认这条
+    const token = params.get("token")
+    if (token !== null || pathname === "/mcp" || (pathname !== "/cc" && pathname !== "/agora")) {
+      const ok = pathname === "/agora" ? hasValidAgoraToken(req.url ?? "", hubToken) : token === HUB_TOKEN
+      if (!ok) {
+        console.warn(`[hub] auth failed from ${remote} (path=${pathLabel(pathname)})`)
+        ws.close(1008, "auth")
+        return
+      }
+      if (!trustedLocal) legacySeen?.touch(fromLabel(remote), Date.now())
+      attach({ via: "legacy", deviceId: null })
+      return
+    }
+    if (params.get("v") === "2") {
+      const q = parseV2Query(params)
+      if (!q) { console.warn(`[hub] auth_fail reason=bad_request (v2 query) from=${fromLabel(remote)}`); rejectAuth(ws, "bad_request"); return }
+      if (!deviceAuth) { console.warn(`[hub] auth_fail reason=unavailable did=${q.did.slice(0, 8)} from=${fromLabel(remote)}`); rejectAuth(ws, "unavailable"); return }
+      startChallenge(ws, deviceAuth, pathname === "/agora" ? "/agora" : "/cc", q, remote, attach)
+      return
+    }
+    console.warn(`[hub] auth failed from ${remote} (path=${pathLabel(pathname)})`)
+    ws.close(1008, "auth")
   }))
   wss.on("close", () => {
     clearInterval(agoraRecoveryTimer)
@@ -5524,6 +5967,9 @@ export function startHub(): WebSocketServer {
       if (prefs.tailscale && detected.tailscale) bindHost(detected.tailscale)
       console.log(`[hub] bind prefs: lan=${prefs.lan}(${detected.lan ?? "无网卡"}) tailscale=${prefs.tailscale}(${detected.tailscale ?? "无网卡"})`)
     }
+    // 额外地址：auto / 手动两种模式都绑；绑不上（地址不在本机网卡上）bindHost 自己打 error 日志
+    if (EXTRA_HOSTS.rejected.length) console.warn(`[hub] MP_CC_HUB_EXTRA_HOSTS 里这些不是具体 IP，跳过：${EXTRA_HOSTS.rejected.join(", ")}`)
+    for (const h of EXTRA_HOSTS.hosts) bindHost(h)
     console.log(`[hub] bound: ${[...listeners.keys()].join(", ")}（/health /pair 仅 loopback）`)
   }
   // #068 中继：有 secrets/relay.json 才开 Unix socket 入口（按远程处理，只放 /health 和 /cc）

@@ -3,6 +3,19 @@ import SceneKit
 import SwiftUI
 import UIKit
 
+/// 一台电脑（外机）建好以后要摸的节点：机身 / 屏幕 / 吉祥物座位 + 从手机拉过来的那根珠串
+struct TerminalSceneRemote {
+    let node: SCNNode
+    let screen: SCNNode
+    let screenMaterial: SCNMaterial
+    let led: SCNMaterial?
+    let claudeSeat: SCNNode
+    let codexSeat: SCNNode
+    let beads: [SCNNode]
+    let threadElement: SCNGeometryElement
+    let threadMaterial: SCNMaterial
+}
+
 /// 首页 3D 小场景建好以后，动画和聚焦要摸的那些节点
 struct TerminalSceneParts {
     let scene: SCNScene
@@ -13,19 +26,13 @@ struct TerminalSceneParts {
     let penguin: SCNNode
     /// 企鹅右边那只翅膀（接线时挥一下）
     let flipper: SCNNode
-    let remote: SCNNode
-    let remoteScreen: SCNNode
-    let remoteScreenMaterial: SCNMaterial
-    let led: SCNMaterial?
-    let claudeSeat: SCNNode
-    let codexSeat: SCNNode
-    let beads: [SCNNode]
-    let threadElement: SCNGeometryElement
-    let threadMaterial: SCNMaterial
+    /// 每台电脑一份，主电脑第一（plan-multi-hub B4.1）
+    let remotes: [TerminalSceneRemote]
     let ghost: SCNNode
 }
 
-/// 首页 3D 小场景的程序化建模。尺寸、颜色、位置照 design-terminal-home.html v8 的 three.js 参数，单位直接沿用。
+/// 首页 3D 小场景的程序化建模。尺寸、颜色、位置照 design-terminal-home.html v8 的 three.js 参数，单位直接沿用；
+/// 多台电脑的站位照 design-multi-hub.html 第 1 屏
 final class TerminalSceneBuilder {
     enum C {
         static let cream: UInt = 0xEFE8DA, creamMid: UInt = 0xE2D9C7, creamDark: UInt = 0xCBC1AD, seam: UInt = 0xB9AE98
@@ -49,7 +56,8 @@ final class TerminalSceneBuilder {
     private lazy var inkLensM = Self.std(0x080707, roughness: 0.08, metalness: 0.6)
     private lazy var dockM = Self.std(C.creamMid, roughness: 0.55)
 
-    func build(local: TerminalDeviceClass, remote: TerminalDeviceClass, remoteScreen: SCNMaterial) -> TerminalSceneParts {
+    /// remotes：每台电脑的机型 + 屏幕材质，主电脑第一
+    func build(local: TerminalDeviceClass, remotes: [(TerminalDeviceClass, SCNMaterial)]) -> TerminalSceneParts {
         let scene = SCNScene()
         let root = scene.rootNode
         addLights(to: root)
@@ -80,20 +88,80 @@ final class TerminalSceneBuilder {
         penguin.eulerAngles.y = 0.12
         localGroup.addChildNode(penguin)
 
-        // 外机（奶白）
-        let remoteNode = SCNNode()
-        remoteNode.simdPosition = [1.4, 0, -0.25]
-        remoteNode.eulerAngles.y = -0.4
-        root.addChildNode(remoteNode)
-        let built = buildRemote(remote, in: remoteNode, screen: remoteScreen)
-
-        // 珠串：手机 → 电脑侧后接口
+        // 外机（奶白）：主电脑原位，附加的依次站后排（小一号），珠串各连各的
         let phPort = localNode.simdConvertPosition(localPort, to: nil)
-        let pcPort = remoteNode.simdConvertPosition(built.port, to: nil)
-        let curve: [SIMD3<Float>] = [
-            phPort, [phPort.x + 0.3, 0.04, phPort.z - 0.05], [-0.45, 0.04, -0.3],
-            [0.15, 0.04, -0.75], [pcPort.x - 0.3, 0.05, pcPort.z + 0.05], pcPort,
-        ]
+        var builtRemotes: [TerminalSceneRemote] = []
+        for (index, (kind, screen)) in remotes.enumerated() {
+            let slot = Self.slot(index)
+            let remoteNode = SCNNode()
+            remoteNode.simdPosition = slot.position
+            remoteNode.eulerAngles.y = slot.yaw
+            remoteNode.simdScale = SIMD3(repeating: slot.scale)
+            root.addChildNode(remoteNode)
+            let built = buildRemote(kind, in: remoteNode, screen: screen)
+            let pcPort = remoteNode.simdConvertPosition(built.port, to: nil)
+            let string = addString(Self.beadCurve(slot: index, from: phPort, to: pcPort), to: root)
+            builtRemotes.append(TerminalSceneRemote(
+                node: remoteNode, screen: built.screen, screenMaterial: screen, led: built.led,
+                claudeSeat: built.claudeSeat, codexSeat: built.codexSeat,
+                beads: string.beads, threadElement: string.element, threadMaterial: string.material
+            ))
+        }
+
+        // 再接一台（虚线空位）：永远站最后一格
+        let ghost = buildGhost()
+        let ghostSlot = Self.slot(remotes.count)
+        ghost.simdPosition = ghostSlot.position
+        ghost.eulerAngles.y = ghostSlot.yaw
+        ghost.simdScale = SIMD3(repeating: ghostSlot.scale)
+        root.addChildNode(ghost)
+
+        let camera = SCNNode()
+        let cam = SCNCamera()
+        cam.fieldOfView = 30
+        cam.zNear = 0.1
+        cam.zFar = 100
+        camera.camera = cam
+        root.addChildNode(camera)
+
+        return TerminalSceneParts(
+            scene: scene, camera: camera, local: localGroup, localScreen: localScreen,
+            penguin: penguin, flipper: flipper, remotes: builtRemotes, ghost: ghost
+        )
+    }
+
+    /// 第 index 台电脑站哪（index = 台数时就是虚线空位）：0 主电脑原位；1 原虚线位；2 虚线往后挪的那一格；再往后左右交替排远
+    private static func slot(_ index: Int) -> (position: SIMD3<Float>, yaw: Float, scale: Float) {
+        switch index {
+        case 0: return ([1.4, 0, -0.25], -0.4, 1)
+        case 1: return ([-1.3, 0, -4.2], 0.15, 0.85)
+        case 2: return ([1.75, 0, -4.9], -0.12, 0.8)
+        default:
+            let row = Float((index - 1) / 2)
+            return index % 2 == 1
+                ? ([-1.3 - 0.2 * row, 0, -4.2 - 2 * row], 0.15, max(0.65, 0.85 - 0.06 * row))
+                : ([1.75 + 0.2 * row, 0, -4.9 - 2 * row], -0.12, max(0.65, 0.8 - 0.06 * row))
+        }
+    }
+
+    /// 珠串走线：主电脑 = 手机 → 地上绕一下 → 电脑侧面接口；后排 = 手机 → 往后绕过去 → 那台侧后的接口
+    private static func beadCurve(slot: Int, from ph: SIMD3<Float>, to pc: SIMD3<Float>) -> [SIMD3<Float>] {
+        if slot == 0 {
+            return [ph, [ph.x + 0.3, 0.04, ph.z - 0.05], [-0.45, 0.04, -0.3], [0.15, 0.04, -0.75], [pc.x - 0.3, 0.05, pc.z + 0.05], pc]
+        }
+        let start: SIMD3<Float> = [-0.85, 0.04, -1.2]
+        let end: SIMD3<Float> = [pc.x - 0.12, 0.05, pc.z + 0.12]
+        let middle: [SIMD3<Float>] = slot == 1
+            ? [[-1.75, 0.04, -2.6], [-2.35, 0.04, -3.9]]
+            : [Float(0.4), 0.75].map { t in
+                var p = start + (end - start) * t
+                p.y = 0.04
+                return p
+            }
+        return [ph, [ph.x + 0.15, 0.04, ph.z - 0.35], start] + middle + [end, pc]
+    }
+
+    private func addString(_ curve: [SIMD3<Float>], to root: SCNNode) -> (beads: [SCNNode], element: SCNGeometryElement, material: SCNMaterial) {
         var beads: [SCNNode] = []
         let n = Self.beadCount
         for i in 0..<n {
@@ -115,31 +183,10 @@ final class TerminalSceneBuilder {
         let thread = SCNNode(geometry: threadGeometry)
         root.addChildNode(thread)
         let plug = rbox(0.09, 0.06, 0.14, 0.02, Self.std(C.creamDark))
-        plug.simdPosition = pcPort
+        plug.simdPosition = curve[curve.count - 1]
         root.addChildNode(plug)
         plug.simdLook(at: Self.catmullRom(curve, 0.97), up: [0, 1, 0], localFront: [0, 0, 1])
-
-        // 再接一台（虚线空位）
-        let ghost = buildGhost()
-        ghost.simdPosition = [-1.3, 0, -4.2]
-        ghost.eulerAngles.y = 0.15
-        ghost.simdScale = SIMD3(repeating: 0.85)
-        root.addChildNode(ghost)
-
-        let camera = SCNNode()
-        let cam = SCNCamera()
-        cam.fieldOfView = 30
-        cam.zNear = 0.1
-        cam.zFar = 100
-        camera.camera = cam
-        root.addChildNode(camera)
-
-        return TerminalSceneParts(
-            scene: scene, camera: camera, local: localGroup, localScreen: localScreen,
-            penguin: penguin, flipper: flipper, remote: remoteNode, remoteScreen: built.screen,
-            remoteScreenMaterial: remoteScreen, led: built.led, claudeSeat: built.claudeSeat, codexSeat: built.codexSeat,
-            beads: beads, threadElement: threadElement, threadMaterial: threadMaterial, ghost: ghost
-        )
+        return (beads, threadElement, threadMaterial)
     }
 
     // MARK: 灯 / 地面

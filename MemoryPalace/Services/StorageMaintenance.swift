@@ -27,10 +27,12 @@ enum StorageMaintenance {
         freed += URLCache.shared.currentDiskUsage + URLCache.shared.currentMemoryUsage
         URLCache.shared.removeAllCachedResponses()
 
-        WKWebsiteDataStore.default().removeData(
-            ofTypes: [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache],
-            modifiedSince: .distantPast
-        ) {}
+        // 浏览器每个身份一份数据仓：都只清缓存，不动登录（plan-garden-browser-identities §4）
+        let stores = [WKWebsiteDataStore.default()]
+            + BrowserIdentityStore.load().filter { !$0.isMain }.map { WKWebsiteDataStore(forIdentifier: $0.id) }
+        for store in stores {
+            store.removeData(ofTypes: [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache], modifiedSince: .distantPast) {}
+        }
 
         return freed
     }

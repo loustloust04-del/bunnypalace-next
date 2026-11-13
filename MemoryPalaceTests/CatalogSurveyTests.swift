@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -48,8 +49,8 @@ final class CatalogSurveyTests: XCTestCase {
         return (id, outcome)
     }
 
-    private func entry(_ path: String, _ kind: String, _ title: String, _ sources: [String]) -> [String: Any] {
-        ["path": path, "kind": kind, "title": title, "hook": "提到\(title)的时候先看这页", "sources": sources]
+    private func card(_ title: String, _ gist: String, _ mentions: [(String, String)] = [], aboutUser: Bool = true, group: String = "{{user}}") -> [String: Any] {
+        ["title": title, "gist": gist, "mentions": mentions.map { ["name": $0.0, "group": $0.1] }, "about_user": aboutUser, "group": group]
     }
 
     private func newPage(_ path: String, _ kind: String, _ title: String, _ text: String, _ sources: [String]) -> [[String: Any]] {
@@ -63,32 +64,39 @@ final class CatalogSurveyTests: XCTestCase {
         store.list().filter { $0.directionRef?.proposalId == id && $0.id != id }
     }
 
-    private func item(_ outline: WikiProposal, _ title: String) -> WikiProposal.Item {
-        outline.items.first { $0.change.direction?.title == title }!
+    private func item(_ outline: WikiProposal, _ title: String) throws -> WikiProposal.Item {
+        try XCTUnwrap(outline.items.first { $0.change.direction?.title == title })
     }
 
     private func approve(_ id: String, _ items: Set<String>? = nil) async throws {
         try await WikiProposalReview.approve(id, itemIds: items, store: store, profileId: pid, context: ModelContext(container))
     }
 
-    private func reject(_ id: String, _ items: Set<String>? = nil) async throws {
-        try await WikiProposalReview.reject(id, itemIds: items, store: store, context: ModelContext(container))
-    }
-
     private func sent(_ model: SeedModel) -> String {
         model.backend.requests.map { r in ([r.system] + r.history.map(\.content) + r.toolTurns.flatMap(\.results).map(\.text)).joined() }.joined()
     }
 
+    /// 假模型照真模型那样写名字（它看到的就是名字）：落盘应当回到 {{user}}/…
+    /// 三份本人答案：首轮两张薄页卡和漏掉的「称呼」补问后仍没归好，统一进待归类；单份纸舟不开实体页，也不折入触发词。
     private func standard(_ model: SeedModel) {
-        model.outline = [
-            entry("楼层/\(me)/在做的事", "用户", "在做的事", ["问卷/在做什么"]),
-            entry("工程/项目/纸舟", "项目", "纸舟", ["问卷/在做什么"]),
-            entry("楼层/\(me)/作息", "用户", "作息", ["问卷/应该知道的"]),
+        model.userName = me
+        model.cards = [
+            "问卷/称呼": card("想让我叫阿青", "想让我叫阿青"),
+            "问卷/在做什么": card("在做离线阅读工具纸舟", "自己在做离线阅读工具纸舟，算创业", [("纸舟", "项目")]),
+            "问卷/应该知道的": card("晚上十点后别催", "晚上十点以后别催"),
         ]
+        for path in Array(model.cards.keys) { model.cards[path]?["when"] = [day] }
+        model.userPages = [("在做的事", "{{user}}/在做的事", ["问卷/在做什么"]), ("作息", "{{user}}/作息", ["问卷/应该知道的"])]
         model.pages = [
-            "楼层/\(me)/在做的事": newPage("楼层/\(me)/在做的事", "用户", "在做的事", "自己在做离线阅读工具纸舟", ["问卷/在做什么"]),
-            "工程/项目/纸舟": newPage("工程/项目/纸舟", "项目", "纸舟", "纸舟是离线阅读工具", ["问卷/在做什么"]),
-            "楼层/\(me)/作息": newPage("楼层/\(me)/作息", "用户", "作息", "晚上十点以后不想被催", ["问卷/应该知道的"]),
+            "{{user}}/待归类": [[
+                "type": "new_page", "path": "\(me)/待归类", "kind": "用户", "title": "还没归类的",
+                "now": "想让我叫阿青；在做离线阅读工具纸舟；晚上十点以后不想被催。",
+                "records": [
+                    ["text": "\(day) 想让我叫阿青", "sources": ["问卷/称呼"]],
+                    ["text": "\(day) 自己在做离线阅读工具纸舟", "sources": ["问卷/在做什么"]],
+                    ["text": "\(day) 晚上十点以后不想被催", "sources": ["问卷/应该知道的"]],
+                ],
+            ]],
         ]
     }
 
@@ -111,43 +119,49 @@ final class CatalogSurveyTests: XCTestCase {
         XCTAssertEqual(first.failures, [], first.summary)
         let saved = try XCTUnwrap(outline(created.id))
         XCTAssertEqual(saved.title, "种子目录 · 新用户三问")
-        XCTAssertEqual(saved.items.count, 3)
+        XCTAssertEqual(saved.items.compactMap { $0.change.direction?.path }, ["{{user}}/待归类"], "薄页和漏卡统一落待归类，不新开单份纸舟实体页")
         XCTAssertTrue(saved.items.allSatisfy { $0.state == .pending && $0.change.direction?.mode == .seed })
-        XCTAssertEqual(Set(saved.items.flatMap { $0.change.direction?.sources ?? [] }), ["问卷/在做什么", "问卷/应该知道的"])
-        XCTAssertEqual(item(saved, "在做的事").change.direction?.kind, .user)
+        let pending = try XCTUnwrap(saved.items.first)
+        XCTAssertEqual(Set(pending.change.direction?.sources ?? []), Set(answers.map(\.path)), "三份答案全部落页，称呼不再漏掉")
+        XCTAssertEqual(pending.change.direction?.kind, .user)
+        XCTAssertEqual(pending.change.direction?.aliases, [], "取消折入后，低门槛项目名不挂到待归类页")
         XCTAssertEqual(store.list().count, 1, "答完问卷不等于批了目录：批之前没有正文提案")
         XCTAssertTrue(wiki.pagePaths().isEmpty, "目录没批不写")
         XCTAssertEqual(tasks.load(created.id)?.modelKey, "remote:test-credential/fake-model", "头一回真跑才绑模型")
         XCTAssertFalse(sent(model).contains("PROMPT_ONLY_MARKER"), "三问只读这次的答案，不读 Prompt")
         let opening = try XCTUnwrap(model.backend.requests.first?.history.first?.content)
-        XCTAssertTrue(opening.contains("问卷/称呼") && opening.contains("问卷/在做什么") && opening.contains("问卷/应该知道的"))
-        XCTAssertTrue(opening.contains(day), "开场写明答题日期")
-        let receipts = model.backend.requests.flatMap(\.toolTurns).flatMap(\.results).map(\.text)
-        XCTAssertTrue(receipts.contains { $0.contains("答题日期：\(day)") && $0.contains("答：自己在做离线阅读工具「纸舟」，算创业") }, "每份答案带答题日期交给模型")
+        XCTAssertTrue(opening.hasPrefix("【这一批 3 份】"), opening.prefix(80).description)
+        for question in CatalogSurvey.questions { XCTAssertTrue(opening.contains(" · 问卷 · \(question.title) · "), question.title) }
+        XCTAssertTrue(opening.contains("答题日期：\(day)") && opening.contains("答：自己在做离线阅读工具「纸舟」，算创业"), "每份答案带答题日期交给模型")
+        XCTAssertEqual(saved.seedSkipped?.filter { $0.hasPrefix("没归进目录") } ?? [], [])
 
-        try await approve(created.id, [item(saved, "在做的事").id, item(saved, "纸舟").id])
-        try await reject(created.id, [item(saved, "作息").id])
+        try await approve(created.id, [pending.id])
         let before = model.backend.requests.count
         let second = await CatalogSession(job: job(model)).resumeSeed(created.id)
         XCTAssertEqual(second.failures, [], second.summary)
         let pageRequests = Array(model.backend.requests[before...])
-        XCTAssertEqual(pageRequests.count, 2, "两页各单开一段对话")
+        XCTAssertEqual(pageRequests.count, 1, "三份答案归入同一获批页，不另写单份纸舟实体页")
         for request in pageRequests {
-            XCTAssertTrue(request.system.contains("这一次只写其中一页") && request.system.contains("这些答案都是 \(day) 答的"), "三问写页 system 照旧带答题日期规则")
             XCTAssertEqual(request.history.count, 1)
             XCTAssertTrue(request.toolTurns.isEmpty, "出目录那段不回灌")
             let opening = request.history[0].content
-            XCTAssertTrue(opening.contains("答：自己在做离线阅读工具「纸舟」，算创业"), "这一项列的答案全文（read 回执那一版）")
-            XCTAssertFalse(opening.contains("晚上十点以后别催我"), "别的答案不进这一页")
+            for answer in answers { XCTAssertFalse(opening.contains("答：\(answer.text)"), "已有卡时不发送答案全文：\(answer.key)") }
         }
         let pages = contents(created.id)
-        XCTAssertEqual(Set(pages.compactMap(\.title)), ["在做的事", "纸舟"], "驳回的不写")
+        XCTAssertEqual(Set(pages.compactMap(\.title)), ["还没归类的"])
         XCTAssertTrue(wiki.pagePaths().isEmpty, "正文没批不落 wiki")
-        let doing = try XCTUnwrap(pages.first { $0.title == "在做的事" })
+        let doing = try XCTUnwrap(pages.first { $0.directionRef?.itemId == pending.id })
         guard case .newPage(let page) = doing.items[0].change else { return XCTFail() }
-        let label = "问卷「在做什么」\(day)#\(created.id.prefix(8))"
-        XCTAssertEqual(page.records, ["\(day) 自己在做离线阅读工具纸舟（出处：\(label)）"])
-        let cite = try XCTUnwrap(doing.items[0].cites.first)
+        let suffix = "\(day)#\(created.id.prefix(8))"
+        let label = "问卷「在做什么」\(suffix)"
+        XCTAssertEqual(page.records.count, answers.count)
+        for answer in answers {
+            XCTAssertTrue(page.records.contains { $0.hasPrefix(day + " · ") && $0.hasSuffix("（问卷/\(answer.key)）") })
+        }
+        // CatalogItems 原有「空 triggers 回退页标题」不属于折入；这里只核对额外折入词为空。
+        XCTAssertEqual(page.triggers.filter { $0 != page.title }, [], "低门槛项目名不再补入正文提案触发词")
+        XCTAssertEqual(Set(doing.items[0].cites.compactMap(\.name)), Set(answers.map(\.key)), "每条答案都有对应出处，不因合入待归类而丢失")
+        let cite = try XCTUnwrap(doing.items[0].cites.first { $0.name == "在做什么" })
         XCTAssertEqual(cite.layer, CatalogSurvey.layer)
         XCTAssertEqual(cite.filePath, CatalogSurvey.sourcePath(created.id), "出处指向这次问卷的原答案文件")
         XCTAssertEqual(cite.day, day)
@@ -155,7 +169,11 @@ final class CatalogSurveyTests: XCTestCase {
         XCTAssertEqual(WikiProposalDisplay.citeText(cite, titles: [:]), "问卷 · \(day) · 在做什么")
 
         for content in pages { try await approve(content.id) }
-        XCTAssertEqual(Set(wiki.pagePaths()), ["楼层/\(me)/在做的事", "工程/项目/纸舟"], "正文批了才进 wiki")
+        XCTAssertEqual(Set(wiki.pagePaths()), ["{{user}}/待归类"], "只落获批待归类页；名字路径落回 {{user}}")
+        let stored = try XCTUnwrap(wiki.read("{{user}}/待归类"))
+        XCTAssertEqual(stored.triggers.filter { $0 != stored.title }, [], "批准后的页头也没有额外折入词")
+        XCTAssertFalse(sent(model).contains("{{user}}"), "发给模型的路径一律是名字")
+        XCTAssertTrue(sent(model).contains("\(me)/待归类"))
         XCTAssertEqual(tasks.load(created.id)?.state, .complete)
         XCTAssertNil(CatalogSeed.completion(wiki: wiki), "三问不写种子完成标记")
 
@@ -164,59 +182,79 @@ final class CatalogSurveyTests: XCTestCase {
         XCTAssertTrue(text.contains("问卷答案") && text.contains("晚上十点以后别催我"), "整理记录里看得到这次的答案")
     }
 
-    func testOutlineMayOnlyCiteTheAnswers() async throws {
-        try wiki.save(WikiPage(path: "楼层/地点/云桥城", kind: .place, hook: "提到云桥城", title: "云桥城", now: "云桥城有座旧码头。"))
+    /// wiki 已有页只能当更新目标（对齐合进锚），出处仍只能是这次的答案；页正文不进出卡的批
+    func testExistingWikiPageIsOnlyAnUpdateTargetCitingTheAnswers() async throws {
+        // C-3 数据合同：已有页带「事实域」才能当更新目标（旧 nil 域页按设计不更新，见 review-seed-polish-C.md）
+        try wiki.save(WikiPage(path: "地点/云桥城", kind: .place, hook: "提到云桥城", title: "云桥城", now: "云桥城有座旧码头。", factDomain: .realWorld))
         let model = SeedModel()
-        model.outline = [
-            entry("楼层/\(me)/在做的事", "用户", "在做的事", ["问卷/在做什么"]),
-            entry("楼层/地点/云桥城", "地点", "云桥城", ["memory/wiki/楼层/地点/云桥城.md"]),
-        ]
+        model.cards = ["问卷/在做什么": card("在云桥城做纸舟", "在云桥城做离线阅读工具纸舟", [("云桥城", "地点")])]
+        model.merge = [["into": "wiki:地点/云桥城", "names": ["云桥城"]]]
         let created = try await create()
         let report = await CatalogSession(job: job(model)).resumeSeed(created.id)
         XCTAssertEqual(report.failures, [])
         let saved = try XCTUnwrap(outline(created.id))
-        XCTAssertEqual(saved.items.compactMap(\.change.direction?.title), ["在做的事"], "wiki 页只能看、不能当出处")
-        let receipts = (tasks.load(created.id)?.turns ?? []).flatMap(\.results).map(\.text).joined()
-        XCTAssertTrue(receipts.contains("原料只能是这次的答案"), receipts)
+        let cloud = try XCTUnwrap(item(saved, "云桥城").change.direction)
+        XCTAssertEqual(cloud.action, .update)
+        XCTAssertEqual(cloud.path, "地点/云桥城")
+        XCTAssertEqual(cloud.sources, ["问卷/在做什么"], "出处只能是答案")
+        XCTAssertFalse(sent(model).contains("云桥城有座旧码头"), "wiki 页正文不进出卡的批")
     }
 
     // MARK: - 已有同名页：只交更新提案，不覆盖
 
     func testExistingSamePageOnlyGetsAnUpdateProposal() async throws {
-        let path = "楼层/\(me)/在做的事"
-        let old = WikiPage(path: path, kind: .user, hook: "提到工作", title: "在做的事", now: "在一家书店上班。", records: ["2026-09-01 在书店上班（出处：用户编辑）"])
+        let path = "{{user}}/在做的事"
+        let old = WikiPage(path: path, kind: .user, hook: "提到工作", title: "在做的事", now: "在一家书店上班。", records: ["2026-09-01 在书店上班（出处：用户编辑）"], factDomain: .realWorld)
         try wiki.save(old)
         let before = try String(contentsOf: wiki.root.appendingPathComponent(path + ".md"), encoding: .utf8)
         let model = SeedModel()
-        model.outline = [entry(path, "用户", "在做的事", ["问卷/在做什么"])]
-        model.pages = [path: newPage(path, "用户", "在做的事", "自己在做纸舟", ["问卷/在做什么"])
-            + [["type": "append", "path": path, "records": [["text": "\(day) 自己在做离线阅读工具纸舟", "sources": ["问卷/在做什么"]]]]]]
+        model.cards = ["问卷/在做什么": card("在做纸舟", "自己在做纸舟")]
+        model.userPages = [("在做的事", path, ["问卷/在做什么"])]
+        model.pages = [
+            path: newPage(path, "用户", "在做的事", "自己在做纸舟", ["问卷/在做什么"])
+                + [["type": "append", "path": path, "records": [["text": "\(day) 自己在做离线阅读工具纸舟", "sources": ["问卷/在做什么"]]]]],
+            "主题/待归类": newPage("主题/待归类", "主题", "还没归类的", "想让我叫阿青；晚上十点以后别催我", ["问卷/称呼", "问卷/应该知道的"]),
+        ]
         let created = try await create()
-        _ = await CatalogSession(job: job(model)).resumeSeed(created.id)
+        let first = await CatalogSession(job: job(model)).resumeSeed(created.id)
+        XCTAssertEqual(first.failures, [])
         let saved = try XCTUnwrap(outline(created.id))
-        XCTAssertEqual(saved.items.first?.change.direction?.action, .update, "同名页按更新列")
+        // 目录按正式来源份数降序：两份漏卡的待归类在前，一份原料的已有页更新在后，不再假定 first 是更新。
+        XCTAssertEqual(saved.items.compactMap { $0.change.direction?.path }, ["主题/待归类", path])
+        let fallback = try XCTUnwrap(saved.items.first?.change.direction)
+        XCTAssertEqual(fallback.action, .newPage)
+        XCTAssertEqual(Set(fallback.sources ?? []), ["问卷/称呼", "问卷/应该知道的"])
+        let target = try XCTUnwrap(saved.items.first { $0.change.direction?.path == path })
+        XCTAssertEqual(target.change.direction?.action, .update, "同名已有页即使只有一份更新原料也保留")
+        XCTAssertEqual(target.change.direction?.sources, ["问卷/在做什么"])
         try await approve(created.id)
-        _ = await CatalogSession(job: job(model)).resumeSeed(created.id)
-        let content = try XCTUnwrap(contents(created.id).first)
-        XCTAssertEqual(content.items.map(\.change.kindLabel), ["追加记录", "改钩子 / 触发词"], "整页新开被扔，只剩更新")
+        let written = await CatalogSession(job: job(model)).resumeSeed(created.id)
+        XCTAssertEqual(written.failures, [])
+        let proposals = contents(created.id)
+        XCTAssertEqual(proposals.count, 2, "待归类和已有页更新均有正文提案")
+        let content = try XCTUnwrap(proposals.first { $0.directionRef?.itemId == target.id })
+        XCTAssertEqual(content.items.map(\.change.kindLabel), ["追加记录"], "已有页的整页新开被扔，只剩更新")
         XCTAssertEqual(content.items[0].baseVersion, tasks.load(created.id)?.read[CatalogSeedMaterials.wikiPath(path)])
         XCTAssertEqual(try String(contentsOf: wiki.root.appendingPathComponent(path + ".md"), encoding: .utf8), before, "批之前一个字不动")
 
         try await approve(content.id)
         let after = try XCTUnwrap(wiki.read(path))
         XCTAssertEqual(after.now, "在一家书店上班。", "不覆盖已有的「现在」")
-        XCTAssertEqual(after.records, old.records + ["\(day) 自己在做离线阅读工具纸舟（出处：问卷「在做什么」\(day)#\(created.id.prefix(8))）"])
+        XCTAssertEqual(Array(after.records.prefix(old.records.count)), old.records)
+        XCTAssertEqual(after.records.count, old.records.count + 1)
+        XCTAssertTrue(after.records.last?.hasSuffix("（问卷/在做什么）") == true)
+        XCTAssertEqual(after.triggers, [], "已有页没有被强加折入触发词")
     }
 
     func testExistingPageNotReadCannotBeListed() throws {
-        let path = "楼层/\(me)/在做的事"
+        let path = "{{user}}/在做的事"
         try wiki.save(WikiPage(path: path, kind: .user, hook: "", title: "在做的事", now: "在书店上班。"))
         var task = CatalogSeedTask(id: UUID().uuidString, profileId: pid, entry: .survey, modelName: "", createdAt: Date(), run: .init(path: ".runs/x.md"))
         task.materials = [.init(path: "问卷/在做什么", name: "平时在做什么", layer: CatalogSurvey.layer, version: "v1")]
         task.read = ["问卷/在做什么": "v1"]
         let d = WikiProposal.Direction(path: path, title: "在做的事", hook: "", kind: .user, action: .newPage, reason: "种子目录", mode: .seed, sources: ["问卷/在做什么"])
-        guard case .failure(let error) = CatalogSeedTools.checkDirection(d, task: task, wiki: wiki) else { return XCTFail("没读过的已有页不能列") }
-        XCTAssertTrue(error.localizedDescription.contains("先 read"), error.localizedDescription)
+        guard case .failure(let error) = CatalogSeedTools.checkDirection(d, task: task, wiki: wiki) else { return XCTFail("不在快照里的已有页不能列") }
+        XCTAssertTrue(error.localizedDescription.contains("原料快照里没有它"), error.localizedDescription)
         task.read[CatalogSeedMaterials.wikiPath(path)] = "page-v"
         guard case .success(let ok) = CatalogSeedTools.checkDirection(d, task: task, wiki: wiki) else { return XCTFail() }
         XCTAssertEqual(ok.action, .update)
@@ -239,16 +277,23 @@ final class CatalogSurveyTests: XCTestCase {
             try FileManager.default.removeItem(at: wiki.root.appendingPathComponent(folder))
         }
         XCTAssertNil(tasks.load(created.id), "任务、提案、整理记录都清掉了")
-        for path in ["楼层/\(me)/在做的事", "工程/项目/纸舟", "楼层/\(me)/作息"] {
-            let record = try XCTUnwrap(wiki.read(path)?.records.first, path)
-            let labels = try XCTUnwrap(CatalogSources.split(record).labels, record)
-            for label in labels {
+        XCTAssertEqual(Set(wiki.pagePaths()), ["{{user}}/待归类"], "三份答案全落同一待归类页，不再丢称呼或新开单份项目页")
+        let page = try XCTUnwrap(wiki.read("{{user}}/待归类"))
+        XCTAssertEqual(page.triggers.filter { $0 != page.title }, [], "清理后仍只有既有标题默认词，没有折入触发词")
+        XCTAssertEqual(page.records.count, answers.count)
+        var resolvedKeys = Set<String>()
+        for record in page.records {
+            let key = try XCTUnwrap(answers.first { record.hasSuffix("（\(CatalogSurvey.prefix)\($0.key)）") }?.key, record)
+            let label = CatalogSurvey.label(CatalogSurvey.cite(key: key, taskId: created.id, day: day))
+            do {
                 let found = try XCTUnwrap(CatalogSurvey.resolve(label, wiki: wiki), label)
                 XCTAssertEqual(found.source.taskId, created.id)
                 XCTAssertEqual(found.source.day, day)
                 XCTAssertTrue(answers.contains(found.answer), "\(label) 查回的是这次问卷的原答案")
+                resolvedKeys.insert(found.answer.key)
             }
         }
+        XCTAssertEqual(resolvedKeys, Set(answers.map(\.key)), "任务清理后，三条原答案全部仍能回查，不能靠空循环通过")
 
         let again = try await create(answers: CatalogSurvey.answers(["阿青", "换成在学日语", ""]))
         let first = CatalogSurvey.label(CatalogSurvey.cite(key: "在做什么", taskId: created.id, day: day))
@@ -305,11 +350,11 @@ final class CatalogSurveyTests: XCTestCase {
     // MARK: - 不动别的数据
 
     func testSurveyLeavesOtherWikiDataAndOldSeedStateAlone() async throws {
-        try wiki.save(WikiPage(path: "楼层/地点/云桥城", kind: .place, hook: "提到云桥城", title: "云桥城", now: "云桥城有座旧码头。"))
-        let manual = WikiProposal(origin: .manual, createdAt: Date(), items: [.init(change: .newPage(page: WikiPage(path: "楼层/主题/面包", title: "面包")))])
+        try wiki.save(WikiPage(path: "地点/云桥城", kind: .place, hook: "提到云桥城", title: "云桥城", now: "云桥城有座旧码头。"))
+        let manual = WikiProposal(origin: .manual, createdAt: Date(), items: [.init(change: .newPage(page: WikiPage(path: "主题/面包", title: "面包")))])
         try store.save(manual)
         try WikiStore.writeAtomic(Data(#"{"completedAt":0}"#.utf8), to: CatalogSeed.stateURL(wiki))
-        let pageBefore = try Data(contentsOf: wiki.root.appendingPathComponent("楼层/地点/云桥城.md"))
+        let pageBefore = try Data(contentsOf: wiki.root.appendingPathComponent("地点/云桥城.md"))
 
         let model = SeedModel()
         standard(model)
@@ -318,7 +363,7 @@ final class CatalogSurveyTests: XCTestCase {
         try await approve(created.id)
         _ = await CatalogSession(job: job(model)).resumeSeed(created.id)
 
-        XCTAssertEqual(try Data(contentsOf: wiki.root.appendingPathComponent("楼层/地点/云桥城.md")), pageBefore)
+        XCTAssertEqual(try Data(contentsOf: wiki.root.appendingPathComponent("地点/云桥城.md")), pageBefore)
         XCTAssertEqual(store.load(manual.id)?.items, manual.items, "别的提案原样")
         XCTAssertTrue(CatalogSeed.isLegacyState(wiki: wiki), "三问不跑清旧种子")
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.deletingLastPathComponent().appendingPathComponent("记忆备份").path), "三问不做备份搬迁")

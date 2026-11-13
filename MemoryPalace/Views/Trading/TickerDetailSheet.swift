@@ -137,6 +137,7 @@ struct TickerDetailSheet: View {
         #if os(macOS)
         .frame(minWidth: 520, minHeight: 480)
         #endif
+        .overlay(alignment: .top) { GlobalToastOverlay() }   // sheet 盖住了根上的 toast 层，这里自己再挂一层
     }
 
     // MARK: - 头部

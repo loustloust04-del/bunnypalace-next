@@ -132,19 +132,7 @@ struct MiniMaxSynthesizer: VoiceSynthesizer {
         let text = String(decoding: body, as: UTF8.self)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("{") { return [trimmed] }
-        var out: [String] = []
-        var buffer: [String] = []
-        for rawLine in text.components(separatedBy: "\n") {
-            let line = rawLine.hasSuffix("\r") ? String(rawLine.dropLast()) : rawLine
-            if line.isEmpty {
-                if !buffer.isEmpty { out.append(buffer.joined(separator: "\n")); buffer = [] }
-                continue
-            }
-            guard line.hasPrefix("data:") else { continue }
-            buffer.append(line.dropFirst(5).trimmingCharacters(in: .whitespaces))
-        }
-        if !buffer.isEmpty { out.append(buffer.joined(separator: "\n")) }
-        return out
+        return ((try? SSEEventAssembler.events(in: body)) ?? []).map(\.data)
     }
 
     static func hexDecode(_ hex: String) -> Data? {

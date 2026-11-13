@@ -5,8 +5,6 @@ import UniformTypeIdentifiers
 /// 存头像/横幅前把相册原图缩小转 JPEG。
 /// 走 ImageIO 缩略图接口：不整张解码进内存，iOS/macOS 一套代码。
 enum TwitterImageShrinker {
-    static let avatarPixel = 400
-    static let bannerPixel = 1500
     /// 发推配图：推特自己也是长边 2048 左右
     static let postPixel = 2048
 

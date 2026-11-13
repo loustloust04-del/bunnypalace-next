@@ -13,8 +13,6 @@ final class MemoryAuditViewState {
     var state: MemoryAudit.State = .unreviewed
     /// 审计台首页推进去的那个台（plan-memory-audit-home-trial 第二节）；切楼层退回首页
     var station: AuditStationID?
-    /// wiki 台顶上「页 | 整理提案」（整理提案从原第四段挪来）：开着时三段的状态不动
-    var wikiShowsProposals = false
     var filter = MemoryAudit.Filter()
     var expanded: Set<UUID> = []
     /// 牌堆最上面压住的那张（审计台卡片 plan 2.3）
@@ -31,7 +29,6 @@ final class MemoryAuditViewState {
     func clear() {
         state = .unreviewed
         station = nil
-        wikiShowsProposals = false
         filter = MemoryAudit.Filter()
         expanded = []
         topId = nil
@@ -811,23 +808,16 @@ struct MemoryAuditPage: View {
 
     /// 同记忆 app 的 `jumpToSource`：有节点跳到那条，没有就打开那个窗口
     private func jump(_ mem: Memory) {
-        guard let viewModel, let cid = mem.sourceConversationId else { return }
-        let pid = profileId
-        let desc = FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> { $0.id == cid && $0.profileId == pid })
-        guard let conv = try? modelContext.fetch(desc).first else { return }
-        onClose?()
-        if let nodeId = mem.sourceNodeId {
-            viewModel.navigateToSearchResult(nodeId: nodeId, conversation: conv, context: modelContext)
-        } else {
-            viewModel.loadConversation(conv, context: modelContext)
-            NotificationCenter.default.post(name: .conversationNavigationRequested, object: nil)
+        guard let viewModel else { return }
+        if MemoryConversationLink.openSource(of: mem, profileId: profileId, context: modelContext, viewModel: viewModel) != .windowGone {
+            onClose?()
         }
     }
 
     private func reload() {
         let pid = profileId
         all = SwiftDataMemoryStore().listAll(profileId: pid, context: modelContext)
-        titles = MemoryAudit.windowTitles(ids: Set(all.compactMap(\.sourceConversationId)), profileId: pid, context: modelContext)
+        titles = MemoryAudit.windowTitles(ids: Set(all.compactMap(\.sourceConversationId)), profileId: pid, source: SwiftDataConversationSource(container: modelContext.container))
         let ids = Set(all.map(\.id))
         selection.formIntersection(ids)
         ui.expanded.formIntersection(ids)

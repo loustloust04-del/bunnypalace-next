@@ -1,3 +1,4 @@
+import MemoryCore
 // L2-T2（plan-stream-render-l2-t2 / D10=b 补课）：article mode simple 流式正文接 fork 增量渲染。
 // BubbleView article 分支流式时渲此组件，替换「pacer.shown → 全文 ChatMarkdownView 30Hz 重进」：
 // - thinking 实时：仍读 vm.streamingText 解析（D10=b 蓝图「thinking 段不动」）——本 wrapper
@@ -20,7 +21,9 @@ struct ArticleStreamingBody: View {
         node: MessageNode,
         viewModel: ConversationViewModel,
         conversationId: String,
-        regexScripts: [RegexScript]
+        regexScripts: [RegexScript],
+        userName: String = "",
+        charName: String = ""
     ) {
         self.node = node
         self.viewModel = viewModel
@@ -36,29 +39,26 @@ struct ArticleStreamingBody: View {
             nodeId: capturedNodeId,
             paced: true,   // L5：正文快照进 pacer 匀速放字（plan-stream-fade-l5）
             renderSnapshot: { [weak capturedVM] in
-                Self.renderableBody(from: capturedVM?.streamingText ?? "",
-                                    nodeId: capturedNodeId, scripts: capturedScripts)
+                Self.renderableBody(from: capturedVM?.streamingText ?? "", scripts: capturedScripts,
+                                    userName: userName, charName: charName)
             }
         ))
     }
 
-    /// 加工链（原 articleModeBody 流式分支同款）：clean → 剥 thinking → 正则脚本。
-    private static func renderableBody(from raw: String, nodeId: String, scripts: [RegexScript]) -> String {
+    /// 加工链走 MessageDisplayText 流式口径：clean → 剥 thinking → 正则脚本。
+    private static func renderableBody(from raw: String, scripts: [RegexScript], userName: String, charName: String) -> String {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.testBlankStream { return "" }   // 测试钩子（perf P0 §6.6 反作弊）：流式期间不显示字 → 连续进度断言必须判红
         if let cap = PerfHarness.testStallStream, raw.count > cap {   // 测试钩子（R7 C-01 反例）：渲染停在前 N 字 → 未收敛 / 晚到必须判出
-            return renderableBody(from: String(raw.prefix(cap)), nodeId: nodeId, scripts: scripts)
+            return renderableBody(from: String(raw.prefix(cap)), scripts: scripts, userName: userName, charName: charName)
         }
         #endif
-        let cleaned = ContentCleaner.clean(raw, cacheKey: "\(nodeId)_\(raw.count)")
-        let content = ContentCleaner.extractThinking(from: cleaned).content
-        guard !scripts.isEmpty else { return content }
-        return RegexEngine.apply(scripts: scripts, text: content, messagePlacement: 2, isMarkdown: true)
+        return MessageDisplayText.streaming(raw, scripts: scripts, userName: userName, charName: charName).body
     }
 
     var body: some View {
         let raw = viewModel.streamingText
-        let cleaned = ContentCleaner.clean(raw, cacheKey: "\(node.id)_\(raw.count)")
+        let cleaned = ContentCleaner.clean(raw, cached: false)
         let extracted = ContentCleaner.extractThinking(from: cleaned)
         VStack(alignment: .leading, spacing: 8) {
             if let thinking = extracted.thinking ?? (showCCThinking ? node.ccThinking : nil), !thinking.isEmpty {

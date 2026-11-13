@@ -50,6 +50,8 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
     case calendar, reminders, clipboard, notifications
     // 本地推特（page2 推特子应用）：AI 在本楼层的推特上发推、刷推；纯本地、不碰真 X，默认允许
     case twitter
+    // AI 在花园浏览器里动手（plan-ai-browser-operate）：打开 / 看 / 点 / 填 / 翻 / 后退；默认每次询问
+    case browserOperate
     // 运行命令（plan-离线沙箱 phase1/phase2）：macOS 原生 shell / iOS app 内 Alpine 沙箱；默认 askOnce（粟粟拍）
     case shell
     #if os(macOS)
@@ -90,6 +92,7 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         case .notifications: return ("deviceTools.notifications", false)
         case .shell: return ("deviceTools.shell", false)
         case .twitter: return ("twitter.aiTool", true)   // 无历史 key；新能力纯本地，老装机迁移也写允许
+        case .browserOperate: return ("browserOperate.enabled", false)
         #if os(macOS)
         case .codingSessions: return ("codingTools.enabled", false)
         #endif
@@ -118,8 +121,8 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
             return .bypass
         #endif
         #endif
-        case .shell:
-            return .askOnce   // 每对话首次弹卡问一次（粟粟 08-25 拍）
+        case .shell, .browserOperate:
+            return .askOnce   // 每对话首次弹卡问一次（shell 粟粟 08-25 拍；浏览器操作同款）
         #if os(macOS)
         case .codingSessions:
             return .notAllowed   // 母 plan W-N：AI 工具默认关
@@ -155,6 +158,7 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         case .notifications: return "发通知"
         case .shell: return "运行命令"
         case .twitter: return "推特"
+        case .browserOperate: return "AI 操作浏览器"
         #if os(macOS)
         case .codingSessions: return "编程会话"
         #endif
@@ -189,6 +193,7 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         case .clipboard: return "AI 可读取剪贴板内容（文本/链接/图片）"
         case .notifications: return "AI 可给你发本地通知"
         case .twitter: return "AI 可在本楼层的推特上发推、回复、点赞、关注和刷时间线（纯本地，不碰真 X）"
+        case .browserOperate: return "AI 可在花园浏览器里打开网页、点按钮、填字（你看得见、随时接管；发布 / 购买这类先问你，密码不填）"
         case .shell:
             // 文案按平台分：macOS 是真机器上的 shell（零隔离），iOS 是 app 内的 Linux 沙箱
             #if os(macOS)
@@ -205,13 +210,14 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
     /// 该工具调用属于哪个域（T5 调用时检查；不在表内的按 toolsMaster 兜底）。
     static func forTool(named name: String) -> PermissionDomain {
         if name.hasPrefix("fs_") || name == "update_profile_card" { return .fileLibrary }
-        if name == "search_web" || name == "browse_url" { return .webSearch }
+        if name == "search_web" || name == "browse_url" || name == "chrome_read" || name == "site_query" { return .webSearch }
         if name.hasPrefix("calendar_") { return .calendar }
         if name.hasPrefix("reminders_") { return .reminders }
         if name == "clipboard_read" { return .clipboard }
         if name == "notify_schedule" { return .notifications }
         if name == "run_command" { return .shell }
-        if name == "local_twitter" { return .twitter }   // 🔴 绝不能落进 toolsMaster 兜底（默认 bypass = shell 裸奔）
+        if name == "local_twitter" { return .twitter }
+        if name.hasPrefix("browser_") { return .browserOperate }   // 🔴 绝不能落进 toolsMaster 兜底（默认 bypass = shell 裸奔）
         #if os(macOS)
         // 精确四名，不按前缀：MCP 工具以原名下发，同前缀的 code_review 之类不能被劫持进这个域
         if CodingTools.names.contains(name) { return .codingSessions }
@@ -235,27 +241,79 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         #endif
         return domains
     }
-    static var toolDomains: [PermissionDomain] { [.toolsMaster, .webSearch, .voiceProactive, .pocket, .calendar, .reminders, .clipboard, .notifications, .shell, .twitter] }
+    static var toolDomains: [PermissionDomain] {
+        var domains: [PermissionDomain] = [.toolsMaster, .webSearch, .voiceProactive, .pocket, .calendar, .reminders, .clipboard, .notifications, .shell, .twitter]
+        #if os(iOS)
+        domains.append(.browserOperate)   // 花园浏览器只在 iOS
+        #endif
+        return domains
+    }
 }
 
 // MARK: - 中心
 
 /// 域级读写适配器（plan-权限管理 §1）：档位真相源 + per 对话 askOnce 授权判定。
-/// 副作用类写路径（单例缓存/WS 帧）由 `setLevel` 统一触发，权限页与原 tab 都必须走这里。
+/// 副作用类写路径（单例缓存/WS 帧）由 `setDefaultLevel` 统一触发，权限页与原 tab 都必须走这里。
+/// 按层（atrium P3⑤）：`perm.<domain>` = 默认，`perm.floors.v1` = 谁单独设了什么（`PermissionFloors`）；
+/// 读一律带 `profileId`（对话里的事按 `conversation.profileId`），nil = 没有楼层语境 → 默认。
+/// 只有这里写 `perm.*` / `perm.floors.v1`。
 enum PermissionCenter {
 
-    private static var d: UserDefaults { .standard }
+    static let floorsKey = "perm.floors.v1"
 
-    // MARK: 档位读写
+    /// 测试换成 suite，tearDown 换回
+    static var defaults: UserDefaults = .standard {
+        didSet { cacheLock.withLock { floorsCache = nil } }
+    }
+    private static var d: UserDefaults { defaults }
 
-    static func level(_ domain: PermissionDomain) -> PermissionLevel {
+    // MARK: 档位读
+
+    /// 默认档（= 没单独设过的人用的）：「我 › 权限」、只全局域、老 Bool 投影用
+    static func defaultLevel(_ domain: PermissionDomain) -> PermissionLevel {
         guard let raw = d.object(forKey: domain.storageKey) as? Int,
               let l = PermissionLevel(rawValue: raw) else { return domain.defaultLevel }
         return l
     }
 
-    /// 唯一合法写入口。同步旧 key 投影（bypass→true / 其余→false）喂还没改造完的读点与单例缓存。
-    static func setLevel(_ level: PermissionLevel, for domain: PermissionDomain) {
+    /// 这一层生效的档位（三类规则见 `PermissionFloors.resolve`）。
+    /// 前置门（atrium P3⑥a）：域连着的 App 这一层没装 → 不允许；装了照档位。只收紧，不放宽
+    static func level(_ domain: PermissionDomain, profileId: String?) -> PermissionLevel {
+        if blockingApp(domain, profileId: profileId) != nil { return .notAllowed }
+        let def = defaultLevel(domain)
+        guard let profileId, domain.floorRule != .globalOnly else { return def }
+        return PermissionFloors.resolve(domain, profileId: profileId, defaultLevel: def, floors: floors())
+    }
+
+    /// 被「主屏上没装」挡住的话返回那个 App 的 id（界面 / 拒绝文案说原因用）；不连 App 或装着 → nil。
+    /// `profileId` nil = 按默认装没装；不看 lite 白名单（lite 隐藏 ≠ 没装）
+    static func blockingApp(_ domain: PermissionDomain, profileId: String?) -> String? {
+        guard let app = domain.page2App, !Page2Apps.isInstalled(app, profileId: profileId) else { return nil }
+        return app
+    }
+
+    /// 界面上被门挡住的原因。iOS 按人装卸在人页；Mac 没有按人装卸，只有「右栏」里默认那一份
+    static func notInstalledLabel(_ app: String) -> String {
+        #if os(macOS)
+        "右栏里没开\(Page2Apps.displayName(app))"
+        #else
+        "主屏上没装\(Page2Apps.displayName(app))"
+        #endif
+    }
+
+    /// 工具被门挡住时回给模型的拒绝（atrium P3⑥a §3.2），代替「用户未允许」+ `adjustHint`
+    static func notInstalledDenial(_ app: String) -> String {
+        #if os(macOS)
+        "permission_denied：你的右栏里没开「\(Page2Apps.displayName(app))」，用的话可以请用户到 设置 → 右栏 打开。"
+        #else
+        "permission_denied：你的主屏上没装「\(Page2Apps.displayName(app))」，用的话可以请用户到你的人页 › 权限里给你装上。"
+        #endif
+    }
+
+    // MARK: 默认写
+
+    /// 改默认。同步旧 key 投影（bypass→true / 其余→false，只代表默认）喂还没改造完的读点与单例缓存。
+    static func setDefaultLevel(_ level: PermissionLevel, for domain: PermissionDomain) {
         d.set(level.rawValue, forKey: domain.storageKey)
         let projected = (level == .bypass)
         d.set(projected, forKey: domain.legacy.key)
@@ -268,18 +326,101 @@ enum PermissionCenter {
         }
     }
 
+    // MARK: 层写（⑤0 没有界面入口）
+
+    /// nil = 回到跟默认；只全局的域拒写；只能更严的域里不比默认严的存成 nil
+    static func setFloorLevel(_ level: PermissionLevel?, for domain: PermissionDomain, profileId: String) {
+        var stored = level
+        switch domain.floorRule {
+        case .globalOnly:
+            NSLog("[Permission] \(domain.rawValue) 只在默认里改，拒写层 \(profileId)")
+            return
+        case .stricterOnly:
+            if let l = level, l.rawValue <= defaultLevel(domain).rawValue { stored = nil }
+        case .free:
+            break
+        }
+        updateFloors { $0.set(stored, for: domain, profileId: profileId) }
+    }
+
+    /// 这个域所有人都回到跟默认
+    static func clearFloor(_ domain: PermissionDomain) {
+        updateFloors { $0.clear(domain: domain) }
+    }
+
+    /// 这个人全部回到跟默认
+    static func clearAll(profileId: String) {
+        updateFloors { $0.clear(profileId: profileId) }
+    }
+
+    /// 新建复制：只抄单独设过的（来源跟默认 → 新层也空）
+    static func copyFloor(from: String, to: String) {
+        updateFloors { $0.floors[to] = $0.floors[from] }
+    }
+
+    /// 这个域单独设了的人：profileId → 档位（「N 个人单独设了」；楼层存不存在调用方筛）
+    static func overrides(_ domain: PermissionDomain) -> [String: PermissionLevel] {
+        floors().floors.compactMapValues { $0[domain.rawValue].flatMap(PermissionLevel.init(rawValue:)) }
+    }
+
+    // MARK: 层存取（读缓存：Data 没变复用上次解出来的值；有后台读者，加锁）
+
+    private static let cacheLock = NSLock()
+    private static var floorsCache: (data: Data?, floors: PermissionFloors)?
+
+    static func floors() -> PermissionFloors {
+        let data = d.data(forKey: floorsKey)
+        return cacheLock.withLock {
+            if let floorsCache, floorsCache.data == data { return floorsCache.floors }
+            let decoded = PermissionFloors.decoded(data)
+            if decoded == nil { NSLog("[Permission] \(floorsKey) 解不开，按空读（写入口拒写）") }
+            let value = decoded ?? PermissionFloors()
+            floorsCache = (data, value)
+            return value
+        }
+    }
+
+    /// 解不开的数据拒写，不覆盖（plan §5-5）
+    private static func updateFloors(_ body: (inout PermissionFloors) -> Void) {
+        cacheLock.withLock {
+            let data = d.data(forKey: floorsKey)
+            guard var next = PermissionFloors.decoded(data) else {
+                NSLog("[Permission] \(floorsKey) 解不开，拒写")
+                return
+            }
+            body(&next)
+            if next.isEmpty {
+                d.removeObject(forKey: floorsKey)
+                floorsCache = (nil, next)
+            } else {
+                let encoded = next.encoded()
+                d.set(encoded, forKey: floorsKey)
+                floorsCache = (encoded, next)
+            }
+        }
+    }
+
+    /// 工具被拒时告诉模型去哪改（atrium P3⑤a §3.8）：iOS 在 TA 的人页；Mac 没人页，在权限页切「这一层」
+    static var adjustHint: String {
+        #if os(macOS)
+        "可以请用户到 设置 → 权限 → 这一层 调整。"
+        #else
+        "可以请用户到你的人页 › 权限 调整。"
+        #endif
+    }
+
     // MARK: 判定（组装/下发路径用）
 
     /// 纯档位判定（不含 askOnce 授权语境）：schema 下发、hint 注入等"要不要给能力"用。
     /// askOnce 视为"给能力"（工具下发、真调用时再问）。
-    static func capabilityEnabled(_ domain: PermissionDomain) -> Bool {
-        level(domain) != .notAllowed
+    static func capabilityEnabled(_ domain: PermissionDomain, profileId: String?) -> Bool {
+        level(domain, profileId: profileId) != .notAllowed
     }
 
     /// 注入判定：bypass 直过；askOnce 看该对话的授权记录，**无记录 = 不注入**
     /// （ask 只发生在交互发送路径；后台组装路径拿不到授权就安全缺省，见 plan §2）。
-    static func injectionAllowed(_ domain: PermissionDomain, grants: PermissionGrants) -> Bool {
-        switch level(domain) {
+    static func injectionAllowed(_ domain: PermissionDomain, profileId: String?, grants: PermissionGrants) -> Bool {
+        switch level(domain, profileId: profileId) {
         case .bypass: return true
         case .notAllowed: return false
         case .askOnce: return grants.isAllowed(domain)

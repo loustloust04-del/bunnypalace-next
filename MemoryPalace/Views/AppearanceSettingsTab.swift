@@ -6,7 +6,8 @@ import UIKit
 
 // MARK: - Appearance Pages
 
-/// 外观总览页：主题 / 窗口（mac）/ 文本 / 聊天样式 / 消息显示 / 动效 / 对话列表（iOS）/ 音乐（iOS）/ 宽屏布局（iPad 二级）/ 高级外观（二级）。
+/// 外观总览页：主题 / 窗口（mac）/ 文本 / 聊天样式 / 气泡对话 / 文章对话 / 消息显示 / 动效 / 对话列表（iOS）/ 音乐（iOS）/ 宽屏布局（iPad 二级）/ 高级外观（二级）。
+/// 10-29 共存第二步：全局「显示方式」删掉（每个对话自己选），只对一种对话生效的设置归到「气泡对话」「文章对话」两块。
 /// 10-02 重整（`docs/prompts/2026-10-02-appearance-ia/r1-ia-rulings.md`）：语言挪设置根一级，群聊颜色挪 设置 › 群聊，
 /// 流式输出挪 设置 › API，mac 的面板四项挪 Mac 工作区，正文栏宽度挪 高级外观 › 排版（只 iPad）。
 ///
@@ -15,16 +16,10 @@ import UIKit
 struct AppearancePage: View {
     @Environment(ThemeManager.self) private var themeManager: ThemeManager?
     @Environment(\.settingsMetrics) private var m
-    /// 时间戳开关保持原入口：mac常驻，iOS只在气泡模式露出。
-    private var showTimestampToggle: Bool {
-        #if os(macOS)
-        true
-        #else
-        chatBubbleMode
-        #endif
-    }
-    @AppStorage("selectedFont") private var selectedFont = ""
-    @AppStorage("fontScale") private var fontScale = 1.2
+    #if os(macOS)
+    /// Mac 没人页：聊天主题 / 聊天背景两行绑当前层（atrium P3④a）
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+    #endif
     #if os(macOS)
     @Bindable private var glass = MacGlass.shared
     #endif
@@ -32,7 +27,6 @@ struct AppearancePage: View {
     @AppStorage("hideActionBar") private var hideActionBar: Bool = false
     @AppStorage("showFlagBlocks") private var showFlagBlocks: Bool = true
     @AppStorage("showMessageUsage") private var showMessageUsage: Bool = true
-    @AppStorage("chatBubbleMode") private var chatBubbleMode = false
     /// page0 对话列表样式（和列表 ≡ 筛选面板里那组是同一个 key）
     @AppStorage("page0ListStyle") private var page0ListStyle = "compact"
     @AppStorage("page0LiquidMetal") private var page0LiquidMetal = true
@@ -41,19 +35,22 @@ struct AppearancePage: View {
     @AppStorage("globalMusicCapsuleEnabled") private var globalMusicCapsuleEnabled = true
     @AppStorage(OrbState.storageKey) private var orbStyleRaw = OrbState.working.rawValue
 
-    @State private var importedFonts: [(fileName: String, fontName: String)] = []
-
     private var manager: ThemeManager {
         themeManager ?? ThemeManager.shared
     }
 
-    private var currentFontDisplayName: String {
-        if selectedFont.isEmpty { return "系统默认" }
-        if let preset = FontManager.presetFonts.first(where: { $0.name == selectedFont }) {
-            return preset.displayName
-        }
-        return importedFonts.first(where: { $0.fontName == selectedFont })?.fileName ?? "系统默认"
+    #if os(macOS)
+    private var currentLayerTarget: ThemeTarget {
+        profileManager.map { .person($0.currentProfile.id) } ?? .interface
     }
+
+    /// 「聊天背景」行摘要：Mac 是这一层的聊天背景，iOS 是界面主题的
+    private var chatBackgroundRowURL: URL? { manager.chatBackgroundImageURL }
+    private var chatBackgroundRowStyle: ThemeBackgroundStyle { manager.chatBackgroundStyle }
+    #else
+    private var chatBackgroundRowURL: URL? { manager.currentBackgroundImageURL }
+    private var chatBackgroundRowStyle: ThemeBackgroundStyle { manager.currentBackgroundStyle }
+    #endif
 
     private var orbDisplayName: String {
         orbStyleRaw == OrbState.legacyDotsRaw ? "三个点" : OrbState.stored(orbStyleRaw).displayName
@@ -62,9 +59,9 @@ struct AppearancePage: View {
     /// 高级外观入口的副标题：照二级页实际装的东西写（iPad 多一行正文栏宽度）
     private var advancedSubtitle: String {
         #if os(iOS)
-        if UIDevice.current.userInterfaceIdiom == .pad { return "气泡圆角、内边距、间距、行距、正文栏宽度、边缘模糊" }
+        if UIDevice.current.userInterfaceIdiom == .pad { return "正文栏宽度、边缘模糊" }
         #endif
-        return "气泡圆角、内边距、间距、行距、边缘模糊"
+        return "边缘模糊"
     }
 
     var body: some View {
@@ -75,16 +72,23 @@ struct AppearancePage: View {
         SettingsSectionList(.list) {
             // 主题：显示模式三卡 + 三个二级入口（主题库 / 主题颜色 / 聊天背景），右侧就是当前状态摘要
             // （plan-theme-decouple M3.1，学 rootshell #1：不点进去就知道现在是什么）
-            Section("主题") {
+            // atrium P3④a：iOS 这三行管「界面 + 跟随宫殿默认的人」，单独给人换去人页；Mac 没人页，拆成界面两行 + 这一层两行
+            Section {
                 ThemeModeCardPicker()
 
                 SettingsNavRow(.themeLibrary) {
                     ThemeLibraryPage()
                 } label: {
                     HStack(spacing: 8) {
+                        #if os(macOS)
+                        Text("界面主题")
+                            .font(m.body)
+                            .foregroundColor(Theme.textPrimary)
+                        #else
                         Text("主题库")
                             .font(m.body)
                             .foregroundColor(Theme.textPrimary)
+                        #endif
                         Spacer()
                         ThemeChatPreview(
                             tokenSet: manager.currentTokenSet,
@@ -113,24 +117,59 @@ struct AppearancePage: View {
                 }
                 .searchAnchor("leaf-appear-colors")
 
-                SettingsNavRow(.chatBackground) {
-                    ChatBackgroundPage()
+                #if os(macOS)
+                // 聊天主题（这一层）：ThemeManager 里镜像的就是当前层，摘要直接读它
+                SettingsNavRow(.chatThemeLibrary) {
+                    ThemeLibraryPage(target: currentLayerTarget)
                 } label: {
                     HStack(spacing: 8) {
-                        Text("聊天背景")
+                        Text("聊天主题（这一层）")
                             .font(m.body)
                             .foregroundColor(Theme.textPrimary)
                         Spacer()
-                        if let url = manager.currentBackgroundImageURL {
+                        ThemeChatPreview(
+                            tokenSet: manager.previewTokenSet(for: manager.chatTheme.id, scheme: manager.activeScheme),
+                            scheme: manager.activeScheme,
+                            backgroundImageURL: manager.chatBackgroundImageURL,
+                            backgroundStyle: manager.chatBackgroundStyle,
+                            size: .row
+                        )
+                        Text(manager.chatThemeId.flatMap(manager.themeDefinition(id:)) == nil ? "跟随界面主题" : manager.chatTheme.name)
+                            .font(m.secondary)
+                            .foregroundColor(Theme.textMuted)
+                    }
+                }
+                .searchAnchor("leaf-appear-chattheme")
+                #endif
+
+                SettingsNavRow(.chatBackground) {
+                    #if os(macOS)
+                    ChatBackgroundPage(target: currentLayerTarget)
+                    #else
+                    ChatBackgroundPage()
+                    #endif
+                } label: {
+                    HStack(spacing: 8) {
+                        #if os(macOS)
+                        Text("聊天背景（这一层）")
+                            .font(m.body)
+                            .foregroundColor(Theme.textPrimary)
+                        #else
+                        Text("聊天背景")
+                            .font(m.body)
+                            .foregroundColor(Theme.textPrimary)
+                        #endif
+                        Spacer()
+                        if let url = chatBackgroundRowURL {
                             ThemeBackgroundView(
                                 fill: Theme.mainBg,
                                 imageURL: url,
                                 scheme: manager.activeScheme,
-                                backgroundStyle: manager.currentBackgroundStyle
+                                backgroundStyle: chatBackgroundRowStyle
                             )
                             .frame(width: 44, height: 30)
                             .clipShape(RoundedRectangle(cornerRadius: 6))
-                            Text("\(Int((manager.currentBackgroundStyle.resolvedOpacity(for: manager.activeScheme) * 100).rounded()))%")
+                            Text("\(Int((chatBackgroundRowStyle.resolvedOpacity(for: manager.activeScheme) * 100).rounded()))%")
                                 .font(m.secondary)
                                 .foregroundColor(Theme.textMuted)
                         } else {
@@ -141,6 +180,14 @@ struct AppearancePage: View {
                     }
                 }
                 .searchAnchor("leaf-appear-chatbg")
+            } header: {
+                Text("主题")
+            } footer: {
+                #if os(macOS)
+                Text("界面主题管侧栏、列表和设置；聊天主题和聊天背景只管这一层，换一层各是各的。")
+                #else
+                Text("这里换的是界面，和没单独选过主题的人聊天时也用它。单独给某个人换，去 TA 的人页。")
+                #endif
             }
             .listRowBackground(Theme.mainBg)
             .listRowSeparator(.hidden)
@@ -185,75 +232,15 @@ struct AppearancePage: View {
             .listRowSeparator(.hidden)
             #endif
 
-            // 文本：字体（二级）+ 字号 + 划线颜色（二级）
+            #if os(macOS)
+            // atrium P3④b：字体字号 / 气泡几何 / 行距段距按层存；Mac 没人页，这里改的是当前这一层
+            if let current = profileManager?.currentProfile {
+                ChatAppearanceSections(profileId: current.id, layerName: current.name)
+            }
+            #endif
+
+            // 文本：划线颜色（二级）。字体 / 字号 atrium P3④b 起按人存，iOS 在人页「气泡 · 字号」，Mac 在上面「这一层」
             Section("文本") {
-                SettingsNavRow(.appearanceFont) {
-                    FontPickerPage()
-                } label: {
-                    HStack {
-                        Text("字体")
-                            .font(m.body)
-                            .foregroundColor(Theme.textPrimary)
-                        Spacer()
-                        Text(currentFontDisplayName)
-                            .font(selectedFont.isEmpty
-                                  ? m.secondary
-                                  : .custom(selectedFont, size: m.secondarySize))
-                            .foregroundColor(Theme.textMuted)
-                    }
-                }
-                .searchAnchor("leaf-appear-font")
-
-                VStack(spacing: 8) {
-                    HStack {
-                        Text("聊天字号")
-                            .font(m.label)
-                            .foregroundColor(Theme.textPrimary)
-                        Spacer()
-                        Text("\(Int(fontScale * 100))%")
-                            .font(m.secondary.weight(.medium))
-                            .foregroundColor(Theme.branchIndicator)
-                    }
-
-                    HStack(spacing: 12) {
-                        Button(action: { fontScale = max(0.5, fontScale - 0.1) }) {
-                            Image(systemName: "textformat.size.smaller")
-                                .font(m.label)
-                                .foregroundColor(Theme.textSecondary)
-                        }
-                        .buttonStyle(.plain)
-
-                        Slider(value: $fontScale, in: 0.5...2.0, step: 0.05)
-                            .tint(Theme.branchIndicator)
-
-                        Button(action: { fontScale = min(2.0, fontScale + 0.1) }) {
-                            Image(systemName: "textformat.size.larger")
-                                .font(m.label)
-                                .foregroundColor(Theme.textSecondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    if fontScale != 1.2 {
-                        Button(action: { fontScale = 1.2 }) {
-                            Text("重置默认")
-                                .font(m.secondary)
-                                .foregroundColor(Theme.textMuted)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    // ⌘ 快捷键提示：iOS 无菜单快捷键，mac 保留 J2 原样一行（第 2 类）
-                    #if os(macOS)
-                    HStack(spacing: 4) {
-                        Spacer()
-                        Text("⌘+ 放大  ⌘- 缩小  ⌘0 重置")
-                            .font(m.secondary)
-                            .foregroundColor(Theme.textMuted.opacity(0.7))
-                    }
-                    #endif
-                }
-                .searchAnchor("leaf-appear-text")
-
                 SettingsNavRow(.highlightColors) {
                     HighlightColorsPage()
                 } label: {
@@ -274,23 +261,8 @@ struct AppearancePage: View {
             .listRowBackground(Theme.mainBg)
             .listRowSeparator(.hidden)
 
-            // 聊天样式：版式 + 气泡周边信息 + 新对话开场
+            // 聊天样式：新对话开场（气泡 / 文章各自的交互在下面两块）
             Section("聊天样式") {
-                Picker("显示方式", selection: $chatBubbleMode) {
-                    Text("文章").tag(false)
-                    Text("气泡").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .searchAnchor("leaf-appear-bubblemode")
-
-                if showTimestampToggle {
-                    Toggle("显示时间戳", isOn: Binding(
-                        get: { !hideTimestamp }, set: { hideTimestamp = !$0 }))
-                        .font(m.body)
-                        .tint(Theme.branchIndicator)
-                        .searchAnchor("leaf-appear-timestamp")
-                }
-
                 Toggle(isOn: $gardenSceneEnabled) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("花园背景")
@@ -303,6 +275,34 @@ struct AppearancePage: View {
                 }
                 .tint(Theme.branchIndicator)
                 .searchAnchor("leaf-appear-opening")
+            }
+            .listRowBackground(Theme.mainBg)
+            .listRowSeparator(.hidden)
+
+            // 气泡对话：只对气泡对话生效的设置（时间戳原在聊天样式）。气泡圆角 atrium P3④b 起按人存（ChatAppearanceSections）
+            Section("气泡对话") {
+                Toggle("显示时间戳", isOn: Binding(
+                    get: { !hideTimestamp }, set: { hideTimestamp = !$0 }))
+                    .font(m.body)
+                    .tint(Theme.branchIndicator)
+                    .searchAnchor("leaf-appear-timestamp")
+            }
+            .listRowBackground(Theme.mainBg)
+            .listRowSeparator(.hidden)
+
+            // 文章对话：只对文章对话生效的设置（操作按钮原在消息显示）。气泡几何 atrium P3④b 起按人存（ChatAppearanceSections）
+            Section("文章对话") {
+                Toggle(isOn: Binding(
+                    get: { !hideActionBar }, set: { hideActionBar = !$0 })) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("显示消息操作按钮")
+                            .font(m.body)
+                        Text("消息下方的复制 / 收藏等按钮行")
+                            .font(.caption)
+                            .foregroundColor(Theme.textMuted)
+                    }
+                }
+                .searchAnchor("leaf-appear-articlechat")
             }
             .listRowBackground(Theme.mainBg)
             .listRowSeparator(.hidden)
@@ -330,17 +330,6 @@ struct AppearancePage: View {
                         Text("显示消息用量")
                             .font(m.body)
                         Text("AI 气泡右下角的 token 数 / 缓存命中 / 费用小字")
-                            .font(.caption)
-                            .foregroundColor(Theme.textMuted)
-                    }
-                }
-
-                Toggle(isOn: Binding(
-                    get: { !hideActionBar }, set: { hideActionBar = !$0 })) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("显示消息操作按钮")
-                            .font(m.body)
-                        Text("消息下方的复制 / 收藏等按钮行")
                             .font(.caption)
                             .foregroundColor(Theme.textMuted)
                     }
@@ -491,17 +480,17 @@ struct AppearancePage: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .settingsAnchorScroll(anchorProxy)
-        .onAppear {
-            importedFonts = FontManager.importedFonts()
-        }
         }
     }
 }
 
-/// 字体选择（外观页二级）：preset 列表 + 已导入字体 + 导入文件。
+/// 字体选择（`ChatAppearanceSections` 二级）：preset 列表 + 已导入字体 + 导入文件。
+/// atrium P3④b：选的是 `profileId` 那一层的字体，点选直接写楼层（当前层经 `publishUpdated` 镜像进 `selectedFont` 老键）
 struct FontPickerPage: View {
+    let profileId: String
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.settingsMetrics) private var m
-    @AppStorage("selectedFont") private var selectedFont = ""
+    @State private var saveError: String?
     @State private var importedFonts: [(fileName: String, fontName: String)] = []
     @State private var showFontImporter = false
     /// D8：删导入字体只置 pending，确认分支才真删（按字体 ID = `fontName`），取消零写入
@@ -518,7 +507,7 @@ struct FontPickerPage: View {
                             isSelected: selectedFont == preset.name,
                             previewFont: preset.name.isEmpty ? .system(size: m.bodySize) : .custom(preset.name, size: m.bodySize)
                         ) {
-                            selectedFont = preset.name
+                            select(preset.name)
                         }
                     }
 
@@ -532,7 +521,7 @@ struct FontPickerPage: View {
                                 previewFont: .custom(font.fontName, size: m.bodySize),
                                 onDelete: { pendingDeleteFont = font }
                             ) {
-                                selectedFont = font.fontName
+                                select(font.fontName)
                             }
                         }
                     }
@@ -579,7 +568,7 @@ struct FontPickerPage: View {
                 if let target = pendingDeleteFont,
                    FontManager.importedFonts().contains(where: { $0.fontName == target.fontName }) {
                     FontManager.deleteFont(named: target.fontName)
-                    if selectedFont == target.fontName { selectedFont = "" }
+                    if selectedFont == target.fontName { select(nil) }
                     importedFonts = FontManager.importedFonts()
                 }
                 pendingDeleteFont = nil
@@ -600,12 +589,247 @@ struct FontPickerPage: View {
                     guard url.startAccessingSecurityScopedResource() else { continue }
                     defer { url.stopAccessingSecurityScopedResource() }
                     if let name = FontManager.importFont(from: url) {
-                        selectedFont = name
+                        select(name)
                     }
                 }
                 importedFonts = FontManager.importedFonts()
             }
         }
+        .alert("保存失败", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(saveError ?? "")
+        }
+    }
+
+    private var selectedFont: String {
+        (profileManager?.profiles.first(where: { $0.id == profileId })?.chatAppearance ?? ChatAppearance()).effectiveFontName
+    }
+
+    /// nil = 回到系统默认（删键）
+    private func select(_ name: String?) {
+        guard let profileManager else { return }
+        do { try profileManager.updateChatAppearance(profileId: profileId) { $0.fontName = name } }
+        catch { saveError = error.localizedDescription }
+    }
+}
+
+/// 「聊天时的样子」按层的那几项（atrium P3④b）：字体 › / 聊天字号 / 行距段距 / 气泡对话圆角 / 文章对话气泡几何 / 恢复默认。
+/// iOS 人页「气泡 · 字号」和 Mac 外观「这一层」共用。拖动时实时写老键（只当前层，聊天区当场看得见），
+/// 松手 / 加减钮 / 离开页才写楼层（同 `VoiceEffectControls`，别每帧重写整份楼层列表）；值没变不写
+struct ChatAppearanceSections: View {
+    let profileId: String
+    /// Mac：节头标「这一层（名字）」
+    var layerName: String? = nil
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+    @Environment(\.settingsMetrics) private var m
+    @State private var draft = ChatAppearance()
+    @State private var loadedProfileId: String?
+    @State private var importedFonts: [(fileName: String, fontName: String)] = []
+    @State private var saveError: String?
+
+    private var stored: ChatAppearance {
+        profileManager?.profiles.first(where: { $0.id == profileId })?.chatAppearance ?? ChatAppearance()
+    }
+
+    private var isCurrentLayer: Bool { profileManager?.currentProfile.id == profileId }
+
+    private var fontScale: Double { draft.value(ChatAppearance.fontScaleMetric) }
+
+    private var currentFontDisplayName: String {
+        let name = stored.effectiveFontName
+        if name.isEmpty { return "系统默认" }
+        if let preset = FontManager.presetFonts.first(where: { $0.name == name }) { return preset.displayName }
+        return importedFonts.first(where: { $0.fontName == name })?.fileName ?? "系统默认"
+    }
+
+    private func header(_ title: String, first: Bool = false) -> String {
+        guard let layerName else { return title }
+        return first ? "这一层（\(layerName)）" : "这一层 · \(title)"
+    }
+
+    var body: some View {
+        Section {
+            SettingsNavRow(.appearanceFont) {
+                FontPickerPage(profileId: profileId)
+            } label: {
+                HStack {
+                    Text("字体")
+                        .font(m.body)
+                        .foregroundColor(Theme.textPrimary)
+                    Spacer()
+                    Text(currentFontDisplayName)
+                        .font(stored.effectiveFontName.isEmpty
+                              ? m.secondary
+                              : .custom(stored.effectiveFontName, size: m.secondarySize))
+                        .foregroundColor(Theme.textMuted)
+                }
+            }
+            .searchAnchor("leaf-appear-font")
+            // 生命周期挂在行上不挂 Section：Mac 设置表单按 Section 拆，Section 带修饰会认不出来
+            .onAppear {
+                importedFonts = FontManager.importedFonts()
+                load()
+            }
+            .onChange(of: profileId) { _, _ in load() }
+            .onChange(of: stored) { _, _ in load() }
+            .onDisappear { save() }
+            .alert("保存失败", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(saveError ?? "")
+            }
+
+            VStack(spacing: 8) {
+                HStack {
+                    Text("聊天字号")
+                        .font(m.label)
+                        .foregroundColor(Theme.textPrimary)
+                    Spacer()
+                    Text("\(Int(fontScale * 100))%")
+                        .font(m.secondary.weight(.medium))
+                        .foregroundColor(Theme.branchIndicator)
+                }
+
+                HStack(spacing: 12) {
+                    Button(action: { setFontScale(max(0.5, fontScale - 0.1)) }) {
+                        Image(systemName: "textformat.size.smaller")
+                            .font(m.label)
+                            .foregroundColor(Theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+
+                    Slider(value: binding(ChatAppearance.fontScaleMetric), in: 0.5...2.0, step: 0.05,
+                           onEditingChanged: commitOnRelease)
+                        .tint(Theme.branchIndicator)
+
+                    Button(action: { setFontScale(min(2.0, fontScale + 0.1)) }) {
+                        Image(systemName: "textformat.size.larger")
+                            .font(m.label)
+                            .foregroundColor(Theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if fontScale != ChatAppearance.fontScaleMetric.defaultValue {
+                    Button(action: { setFontScale(ChatAppearance.fontScaleMetric.defaultValue) }) {
+                        Text("重置默认")
+                            .font(m.secondary)
+                            .foregroundColor(Theme.textMuted)
+                    }
+                    .buttonStyle(.plain)
+                }
+                // ⌘ 快捷键提示：iOS 无菜单快捷键，mac 保留 J2 原样一行（⌘ 也改当前层）
+                #if os(macOS)
+                HStack(spacing: 4) {
+                    Spacer()
+                    Text("⌘+ 放大  ⌘- 缩小  ⌘0 重置")
+                        .font(m.secondary)
+                        .foregroundColor(Theme.textMuted.opacity(0.7))
+                }
+                #endif
+            }
+            .searchAnchor("leaf-appear-text")
+
+            VStack(spacing: 12) {
+                slider("行间距", ChatAppearance.lineSpacingMetric, range: 0.5...2.0, step: 0.05) { "\(Int($0 * 100))%" }
+                slider("段落间距", ChatAppearance.paragraphSpacingMetric, range: 0.5...2.0, step: 0.05) { "\(Int($0 * 100))%" }
+            }
+            .searchAnchor("leaf-appear-typeset")
+        } header: {
+            Text(header("文字", first: true))
+        }
+        .listRowBackground(Theme.mainBg)
+        .listRowSeparator(.hidden)
+
+        Section(header("气泡对话")) {
+            slider("气泡圆角", ChatAppearance.bubbleModeCornerMetric, range: 14...34, step: 1) { "\(Int($0))pt" }
+                .searchAnchor("leaf-appear-bubblechat")
+        }
+        .listRowBackground(Theme.mainBg)
+        .listRowSeparator(.hidden)
+
+        Section(header("文章对话")) {
+            VStack(spacing: 12) {
+                slider("圆角", ChatAppearance.bubbleCornerMetric, range: 0...28, step: 1) { "\(Int($0))pt" }
+                slider("水平内边距", ChatAppearance.bubblePaddingHMetric, range: 8...24, step: 1) { "\(Int($0))pt" }
+                slider("垂直内边距", ChatAppearance.bubblePaddingVMetric, range: 4...20, step: 1) { "\(Int($0))pt" }
+                slider("气泡间距", ChatAppearance.bubbleSpacingMetric, range: 8...40, step: 1) { "\(Int($0))pt" }
+            }
+            .searchAnchor("leaf-appear-geometry")
+        }
+        .listRowBackground(Theme.mainBg)
+        .listRowSeparator(.hidden)
+
+        Section {
+            Button(action: resetToDefaults) {
+                HStack {
+                    Spacer()
+                    Text("恢复默认")
+                        .font(m.secondary)
+                        .foregroundColor(Theme.branchIndicator)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        } footer: {
+            Text("字体、字号、行距段距和气泡几何每个人各是各的；新建的人从当前这一层带过去。")
+        }
+        .listRowBackground(Theme.mainBg)
+        .listRowSeparator(.hidden)
+    }
+
+    private func slider(_ title: String, _ metric: ChatAppearance.Metric, range: ClosedRange<Double>, step: Double,
+                        formatter: @escaping (Double) -> String) -> some View {
+        AppearanceSliderRow(title: title, value: binding(metric), range: range, step: step,
+                            onEditingChanged: commitOnRelease, formatter: formatter)
+    }
+
+    /// 拖动中：草稿 + 当前层的老键（聊天区实时看得见）；写楼层等松手
+    private func binding(_ metric: ChatAppearance.Metric) -> Binding<Double> {
+        Binding(get: { draft.value(metric) }, set: { value in
+            draft[keyPath: metric.path] = value
+            if isCurrentLayer { ChatAppearance.sync(value, key: metric.key, into: .standard) }
+        })
+    }
+
+    private func commitOnRelease(_ editing: Bool) {
+        if !editing { save() }
+    }
+
+    private func setFontScale(_ value: Double) {
+        binding(ChatAppearance.fontScaleMetric).wrappedValue = value
+        save()
+    }
+
+    private func load() {
+        draft = stored
+        loadedProfileId = profileId
+    }
+
+    /// 只写数值项、只写和楼层里实际生效值不同的（字体由字体页直接写）
+    private func save() {
+        guard let profileManager, loadedProfileId == profileId else { return }
+        let next = draft
+        do {
+            try profileManager.updateChatAppearance(profileId: profileId) { a in
+                for metric in ChatAppearance.metrics where a.value(metric) != next.value(metric) {
+                    a[keyPath: metric.path] = next.value(metric)
+                }
+            }
+        } catch {
+            saveError = error.localizedDescription
+        }
+    }
+
+    /// 9 项全置 nil（读侧默认值）；当前层先把老键删掉，楼层写失败也和草稿一致到下次镜像
+    private func resetToDefaults() {
+        guard let profileManager else { return }
+        draft.resetLayout()
+        if isCurrentLayer { ChatAppearance.writeKeys(draft, into: .standard) }
+        do { try profileManager.updateChatAppearance(profileId: profileId) { $0.resetLayout() } }
+        catch { saveError = error.localizedDescription }
     }
 }
 
@@ -664,17 +888,11 @@ struct WideLayoutPage: View {
     }
 }
 
-/// 高级外观（外观页二级）：低频几何精调 + 排版（iPad 多正文栏宽度）+ 边缘模糊 + 重置。
+/// 高级外观（外观页二级）：排版（只 iPad：正文栏宽度）+ 边缘模糊 + 重置。
+/// 行距段距、气泡几何 atrium P3④b 起按人存，在 `ChatAppearanceSections`（它自己的「恢复默认」管那 7 个）。
 struct AdvancedAppearancePage: View {
     @Environment(ThemeManager.self) private var themeManager: ThemeManager?
     @Environment(\.settingsMetrics) private var m
-    @AppStorage("bubbleCornerRadius") private var bubbleCornerRadius: Double = 16
-    @AppStorage("bubblePaddingH") private var bubblePaddingH: Double = 18
-    @AppStorage("bubblePaddingV") private var bubblePaddingV: Double = 15
-    @AppStorage("bubbleSpacing") private var bubbleSpacing: Double = 31
-    @AppStorage("lineSpacingScale") private var lineSpacingScale: Double = 1.45
-    @AppStorage("paragraphSpacingScale") private var paragraphSpacingScale: Double = 1.65
-    @AppStorage("bubbleModeCornerRadius") private var bubbleModeCornerRadius: Double = 20
     @AppStorage("blurRadius") private var blurRadius = 1.3
     // 负向 key：true = 关闭自动半透明。这样 key 缺省（false）= 行为保持原样。
     @AppStorage("disableAutoTransparentBubblesOnWallpaper") private var disableAutoTransparent: Bool = false
@@ -691,27 +909,11 @@ struct AdvancedAppearancePage: View {
 
     var body: some View {
         SettingsSectionList(.list) {
-            Section("气泡几何（文章模式）") {
-                sliderRow("圆角", value: $bubbleCornerRadius, range: 0...28, step: 1) { "\(Int($0))pt" }
-                sliderRow("水平内边距", value: $bubblePaddingH, range: 8...24, step: 1) { "\(Int($0))pt" }
-                sliderRow("垂直内边距", value: $bubblePaddingV, range: 4...20, step: 1) { "\(Int($0))pt" }
-                sliderRow("气泡间距", value: $bubbleSpacing, range: 8...40, step: 1) { "\(Int($0))pt" }
-            }
-            .listRowBackground(Theme.mainBg)
-            .listRowSeparator(.hidden)
-
-            Section("气泡几何（气泡模式）") {
-                sliderRow("气泡圆角", value: $bubbleModeCornerRadius, range: 14...34, step: 1) { "\(Int($0))pt" }
-            }
-            .listRowBackground(Theme.mainBg)
-            .listRowSeparator(.hidden)
-
-            Section("排版") {
-                sliderRow("行间距", value: $lineSpacingScale, range: 0.5...2.0, step: 0.05) { "\(Int($0 * 100))%" }
-                sliderRow("段落间距", value: $paragraphSpacingScale, range: 0.5...2.0, step: 0.05) { "\(Int($0 * 100))%" }
-                #if os(iOS)
-                // 正文栏宽度只在宽屏看得出（手机竖屏比这个数窄），所以只 iPad 露；不进下面的重置
-                if UIDevice.current.userInterfaceIdiom == .pad {
+            #if os(iOS)
+            // 正文栏宽度只在宽屏看得出（手机竖屏比这个数窄），所以只 iPad 露；不进下面的重置。
+            // 行距段距 atrium P3④b 起按人存，这一节只剩它
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                Section("排版") {
                     VStack(alignment: .leading, spacing: 8) {
                         sliderRow("正文栏宽度", value: $ipadContentWidth, range: 480...900, step: 20) { "\(Int($0))pt" }
                         Text("宽屏下正文和输入条居中的最大宽度。窄了每行字少、更好读，两侧留给悬浮面板的地方也更大；宽了一行装得下更长的代码。")
@@ -728,10 +930,10 @@ struct AdvancedAppearancePage: View {
                         }
                     }
                 }
-                #endif
+                .listRowBackground(Theme.mainBg)
+                .listRowSeparator(.hidden)
             }
-            .listRowBackground(Theme.mainBg)
-            .listRowSeparator(.hidden)
+            #endif
 
             // 「壁纸下气泡自动半透明」搬去 外观 › 聊天背景（plan-theme-decouple M3.4）；下面的重置仍会把它归位
             Section("聊天区边缘") {
@@ -744,8 +946,9 @@ struct AdvancedAppearancePage: View {
                 Button(action: resetPageToDefaults) {
                     HStack {
                         Spacer()
-                        // 重置跨页：时间戳在聊天样式，操作按钮在消息显示，壁纸半透明在聊天背景。
-                        Text("重置气泡几何、行距段距、边缘模糊、壁纸下半透明，以及时间戳、操作按钮的显示")
+                        // 重置跨页：时间戳、操作按钮在外观一级页的气泡对话 / 文章对话，壁纸半透明在聊天背景。
+                        // 气泡几何、行距段距按人存，归「气泡 · 字号」（Mac「这一层」）的「恢复默认」
+                        Text("重置边缘模糊、壁纸下半透明，以及时间戳、操作按钮的显示")
                             .font(m.secondary)
                             .foregroundColor(Theme.textMuted)
                             .multilineTextAlignment(.center)
@@ -775,36 +978,45 @@ struct AdvancedAppearancePage: View {
         step: Double,
         formatter: @escaping (Double) -> String
     ) -> some View {
+        AppearanceSliderRow(title: title, value: value, range: range, step: step, formatter: formatter)
+    }
+
+    /// 两端恢复同一组默认值，并通知主题刷新。
+    /// 不含主题 / 语言 / 正文栏宽度，也不含按人存的字体字号、气泡几何、行距段距（atrium P3④b）。
+    private func resetPageToDefaults() {
+        blurRadius = 1.3
+        disableAutoTransparent = false
+        hideTimestamp = false
+        hideActionBar = false
+        themeManager?.notifyThemeChange()
+    }
+}
+
+/// 外观页的滑杆行（标题 + 当前值 + 滑杆）：高级外观和按人的 `ChatAppearanceSections` 共用。
+/// `onEditingChanged` 松手时 false（按人那几根靠它写楼层，拖动中不逐帧落盘）
+struct AppearanceSliderRow: View {
+    @Environment(\.settingsMetrics) private var m
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    var onEditingChanged: (Bool) -> Void = { _ in }
+    let formatter: (Double) -> String
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(title)
                     .font(m.label)
                     .foregroundColor(Theme.textPrimary)
                 Spacer()
-                Text(formatter(value.wrappedValue))
+                Text(formatter(value))
                     .font(m.secondary.weight(.medium))
                     .foregroundColor(Theme.branchIndicator)
             }
-            Slider(value: value, in: range, step: step)
+            Slider(value: $value, in: range, step: step, onEditingChanged: onEditingChanged)
                 .tint(Theme.branchIndicator)
         }
-    }
-
-    /// 两端恢复同一组默认值，并通知主题刷新。
-    /// 不含主题 / 字体 / 语言 / 正文栏宽度。
-    private func resetPageToDefaults() {
-        bubbleCornerRadius = 16
-        bubblePaddingH = 18
-        bubblePaddingV = 15
-        bubbleSpacing = 31
-        lineSpacingScale = 1.45
-        paragraphSpacingScale = 1.65
-        bubbleModeCornerRadius = 20
-        blurRadius = 1.3
-        disableAutoTransparent = false
-        hideTimestamp = false
-        hideActionBar = false
-        themeManager?.notifyThemeChange()
     }
 }
 

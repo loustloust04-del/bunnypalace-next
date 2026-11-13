@@ -96,6 +96,57 @@ final class BubbleMenuOverlayPresenter {
     }
 }
 
+/// 拉起系统 emoji 键盘的隐藏输入框：`textInputMode` 返回 emoji 输入法（iMessage Tapback「+」同做法）。
+/// emoji 键盘被关掉时系统找不到这个输入法，退回普通键盘，照样能切过去选。选中第一个字符就回调并收键盘
+private struct EmojiKeyboardField: UIViewRepresentable {
+    @Binding var active: Bool
+    let onPick: (String) -> Void
+
+    final class Field: UITextField {
+        override var textInputContextIdentifier: String? { "" }
+        override var textInputMode: UITextInputMode? {
+            UITextInputMode.activeInputModes.first { $0.primaryLanguage == "emoji" } ?? super.textInputMode
+        }
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        var parent: EmojiKeyboardField
+        init(_ parent: EmojiKeyboardField) { self.parent = parent }
+
+        func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
+            guard let first = string.first, ChatReactionIntent.isEmoji(first) else { return false }
+            textField.resignFirstResponder()
+            parent.active = false
+            parent.onPick(String(first))
+            return false
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            if parent.active { parent.active = false }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> Field {
+        let field = Field()
+        field.delegate = context.coordinator
+        field.autocorrectionType = .no
+        field.tintColor = .clear
+        field.accessibilityIdentifier = "reaction-emoji-field"
+        return field
+    }
+
+    func updateUIView(_ field: Field, context: Context) {
+        context.coordinator.parent = self
+        if active, !field.isFirstResponder {
+            DispatchQueue.main.async { field.becomeFirstResponder() }
+        } else if !active, field.isFirstResponder {
+            field.resignFirstResponder()
+        }
+    }
+}
+
 /// 裁剪区按方向外扩的矩形：水平/垂直各自留 bleed，让画在 frame 外的气泡尾巴不被剃
 private struct BleedRect: Shape {
     var horizontal: CGFloat
@@ -149,6 +200,8 @@ private struct BubbleMenuOverlayContent: View {
     @State private var previewMoreBelow = true
     /// 二级菜单：点带 children 的行，卡内原地换成这一页（顶上「返回」）
     @State private var submenu: MenuActionSpec?
+    /// 表情条末尾「+」：隐藏输入框拉起系统 emoji 键盘（10-29 甲，iMessage 做法）
+    @State private var emojiPickerActive = false
 
     private let edgeMargin: CGFloat = 16
     private let topMargin: CGFloat = 70      // 状态栏下缘呼吸位
@@ -314,30 +367,55 @@ private struct BubbleMenuOverlayContent: View {
     // MARK: - 表情条（照抄群聊 GroupMessageActionOverlay：玻璃胶囊、44 的圆钮、28 号表情、横滑、已点的有底色）
 
     private func emojiBar(target: ChatReactionTarget, maxWidth: CGFloat) -> some View {
-        let selected = Set(ChatReactionStore.shared.reactions(for: target.nodeId))
-        return ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 2) {
-                ForEach(ChatReactionStore.emojis, id: \.self) { emoji in
-                    Button {
-                        tapped { ChatReactionStore.shared.toggle(emoji, on: target) }
-                    } label: {
-                        Image(systemName: ChatReactionIcon.symbol(for: emoji))
-                            .font(.system(size: 23))
-                            .foregroundStyle(Theme.textPrimary)
-                            .frame(width: 44, height: 44)
-                            .background(Circle().fill(selected.contains(emoji) ? Theme.textPrimary.opacity(0.1) : .clear))
-                            .contentShape(Rectangle())
+        let selected = Set(ChatReactionStore.shared.reactions(for: target))
+        return HStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    ForEach(ChatReactionStore.emojis, id: \.self) { emoji in
+                        Button {
+                            react(emoji, on: target)
+                        } label: {
+                            Text(emoji)
+                                .font(.system(size: 23))
+                                .frame(width: 44, height: 44)
+                                .background(Circle().fill(selected.contains(emoji) ? Theme.chat.textPrimary.opacity(0.1) : .clear))
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(ChatReactionIcon.title(for: emoji))
+                        .accessibilityAddTraits(selected.contains(emoji) ? .isSelected : [])
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(ChatReactionIcon.title(for: emoji))
-                    .accessibilityAddTraits(selected.contains(emoji) ? .isSelected : [])
                 }
+                .padding(.vertical, 6)
+                .padding(.leading, 6)
             }
-            .padding(6)
+            // 横滑内容按附件条同款两端淡出——之前没裁，最右那颗半截表情画在胶囊圆头外
+            .horizontalScrollEdgeFade()
+            // 全量表情（10-29 甲）：钉在条尾不跟着滑（滑到底才看见就等于没有），点了弹系统 emoji 键盘，选中的那个直接贴上
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                emojiPickerActive = true
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundStyle(Theme.chat.textSecondary)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(Theme.chat.textPrimary.opacity(0.06)))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 6)
+            .accessibilityLabel("更多表情")
+            .accessibilityIdentifier("reaction-more")
         }
-        // 横滑内容按附件条同款两端淡出、再裁进胶囊——之前没裁，最右那颗半截表情画在胶囊圆头外
-        .horizontalScrollEdgeFade()
-        .frame(width: min(maxWidth, CGFloat(ChatReactionStore.emojis.count) * 46 + 10), height: Self.emojiBarHeight)
+        .background {
+            EmojiKeyboardField(active: $emojiPickerActive) { emoji in
+                react(emoji, on: target)
+            }
+            .frame(width: 1, height: 1)
+            .opacity(0.01)
+        }
+        .frame(width: min(maxWidth, CGFloat(ChatReactionStore.emojis.count + 1) * 46 + 12), height: Self.emojiBarHeight)
         .clipShape(Capsule())
         .glassEffect(.regular, in: Capsule())
         .shadow(color: .black.opacity(0.12), radius: 28, y: 10)
@@ -400,7 +478,7 @@ private struct BubbleMenuOverlayContent: View {
                 Image(systemName: spec.systemImage)
                     .font(.system(size: 18))
                     .frame(height: 22)
-                    .foregroundStyle(spec.isDestructive ? Color.red : Theme.textPrimary)
+                    .foregroundStyle(spec.isDestructive ? Color.red : Theme.chat.textPrimary)
                 Text(spec.quickLabel ?? spec.title)
                     .font(.system(size: 10, weight: .medium))
                     .lineLimit(1)
@@ -441,7 +519,7 @@ private struct BubbleMenuOverlayContent: View {
                         .foregroundStyle(Self.quickLabelColor)
                 }
             }
-            .foregroundStyle(spec.isDestructive ? Color.red : Theme.textPrimary)
+            .foregroundStyle(spec.isDestructive ? Color.red : Theme.chat.textPrimary)
             .padding(.leading, 24)
             .padding(.trailing, 20)
             .frame(height: 40)
@@ -464,7 +542,7 @@ private struct BubbleMenuOverlayContent: View {
                     .lineLimit(1)
                 Spacer(minLength: 8)
             }
-            .foregroundStyle(Theme.textPrimary)
+            .foregroundStyle(Theme.chat.textPrimary)
             .padding(.leading, 24)
             .padding(.trailing, 20)
             .frame(height: 40)
@@ -475,11 +553,22 @@ private struct BubbleMenuOverlayContent: View {
 
     // MARK: - dismiss
 
-    /// 点菜单项 / 表情：先轻震（同群聊表情条、气泡下操作行的 .light）再收浮层；点背景收起不震
+    /// 点菜单项：先轻震（同群聊表情条、气泡下操作行的 .light）再收浮层；点背景收起不震（表情走 react）
     private func tapped(then handler: @escaping () -> Void) {
         guard !dismissing else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         dismiss(then: handler)
+    }
+
+    /// 点表情（条上的 / 「+」键盘选的）：贴上才震一下（.soft，照 iMessage tapback 的软实手感，粟粟 10-30），取消不震
+    private func react(_ emoji: String, on target: ChatReactionTarget) {
+        guard !dismissing else { return }
+        #if os(iOS)
+        if !ChatReactionStore.shared.reactions(for: target).contains(emoji) {
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        }
+        #endif
+        dismiss { ChatReactionStore.shared.toggle(emoji, on: target) }
     }
 
     private func dismiss(then handler: (() -> Void)? = nil) {

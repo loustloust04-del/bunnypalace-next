@@ -7,6 +7,8 @@ options:
   minimumXcodeGenVersion: "2.38"
 
 packages:
+  MemoryCore:
+    path: Packages/MemoryCore
   sherpa-onnx:
     url: https://github.com/k2-fsa/sherpa-onnx
     exactVersion: "1.13.8"
@@ -84,6 +86,19 @@ targets:
           # CFBundle 识别错乱 → devicectl 装真机报 not a valid bundle（09-11 装 Air 实锤）
           - "Info-iOS.plist"
           - "Info-macOS.plist"
+          # 兔兔皮肤仅 iOS 私人包使用；不能被共享 sources 自动平铺进 macOS 包。
+          - "Resources/TutuSkin"
+          #if PERSONAL_APPS
+          - "Views/TutuSkin/TutuChatCards.metal"
+          - "Views/TutuSkin/TutuChatFelt.metal"
+          - "Views/TutuSkin/TutuChatLace.metal"
+          - "Views/TutuSkin/TutuChatIntro.metal"
+          - "Views/TutuSkin/TutuChatSurface.metal"
+          - "Views/TutuSkin/TutuChatShadow.metal"
+          - "Views/TutuSkin/TutuPage0.metal"
+          - "Views/TutuSkin/TutuPage0Glass.metal"
+          - "Views/TutuSkin/TutuWu.metal"
+          #endif
       # 思考链回传 Stop hook 脚本：打进 bundle，启动时自检安装到 Application Support（app 自包含）
       - path: cc-bridge/thinking-hook.py
         buildPhase: resources
@@ -135,6 +150,7 @@ targets:
         basedOnDependencyAnalysis: false
         script: bash "$SRCROOT/scripts/copy-local-debug-icon.sh"
     dependencies:
+      - package: MemoryCore
       - package: sherpa-onnx
         product: sherpa-onnx
       - package: Grape
@@ -228,6 +244,7 @@ targets:
     dependencies:
       - package: zstd
         product: libzstd
+      - package: MemoryCore
     settings:
       base:
         PRODUCT_NAME: mp-code
@@ -257,6 +274,48 @@ targets:
           # 同 mac target：INFOPLIST_FILE 源文件不进资源拷贝（devicectl not a valid bundle 案）
           - "Info-iOS.plist"
           - "Info-macOS.plist"
+          # 资源闸由下方私人 postBuildScripts 控制，同时保留各场景目录层级。
+          - "Resources/TutuSkin"
+          #if PERSONAL_APPS
+          - "Views/TutuSkin/TutuCathedral.metal"
+          - "Views/TutuSkin/TutuUnlock.metal"
+          - "Views/TutuSkin/TutuUnlockBaked.metal"
+          - "Views/TutuSkin/TutuChatCards.metal"
+          - "Views/TutuSkin/TutuChatFelt.metal"
+          - "Views/TutuSkin/TutuChatLace.metal"
+          - "Views/TutuSkin/TutuChatIntro.metal"
+          - "Views/TutuSkin/TutuChatSurface.metal"
+          - "Views/TutuSkin/TutuChatShadow.metal"
+          - "Views/TutuSkin/TutuPage0.metal"
+          - "Views/TutuSkin/TutuPage0Glass.metal"
+          - "Views/TutuSkin/TutuWu.metal"
+          #endif
+      #if PERSONAL_APPS
+      - path: MemoryPalace/Views/TutuSkin/TutuCathedral.metal
+        compilerFlags: "-fno-fast-math"
+      - path: MemoryPalace/Views/TutuSkin/TutuUnlock.metal
+        compilerFlags: "-fno-fast-math"
+      - path: MemoryPalace/Views/TutuSkin/TutuUnlockBaked.metal
+        compilerFlags: "-fno-fast-math"
+      - path: MemoryPalace/Views/TutuSkin/TutuChatCards.metal
+        compilerFlags: "-fno-fast-math"
+      - path: MemoryPalace/Views/TutuSkin/TutuChatFelt.metal
+        compilerFlags: "-fno-fast-math"
+      - path: MemoryPalace/Views/TutuSkin/TutuChatLace.metal
+        compilerFlags: "-fno-fast-math"
+      - path: MemoryPalace/Views/TutuSkin/TutuChatIntro.metal
+        compilerFlags: "-fno-fast-math"
+      - path: MemoryPalace/Views/TutuSkin/TutuChatSurface.metal
+        compilerFlags: "-fno-fast-math"
+      - path: MemoryPalace/Views/TutuSkin/TutuChatShadow.metal
+        compilerFlags: "-fno-fast-math"
+      - path: MemoryPalace/Views/TutuSkin/TutuPage0.metal
+        compilerFlags: "-fno-fast-math"
+      - path: MemoryPalace/Views/TutuSkin/TutuPage0Glass.metal
+        compilerFlags: "-fno-fast-math"
+      - path: MemoryPalace/Views/TutuSkin/TutuWu.metal
+        compilerFlags: "-fno-fast-math"
+      #endif
       - path: LiveActivityShared
       # 离线沙箱（SBX-T0）：ish 的 ObjC 胶水单独放 Sandbox/ish，只挂 iOS target。
       # 不能放 MemoryPalace/ —— 两个 target 共用那份 sources，放进去 macOS 也会编。
@@ -290,7 +349,13 @@ targets:
       - name: "Copy local debug icon (Debug only)"
         basedOnDependencyAnalysis: false
         script: bash "$SRCROOT/scripts/copy-local-debug-icon.sh"
+      #if PERSONAL_APPS
+      - name: "Sync TutuSkin resources (PERSONAL_APPS only)"
+        basedOnDependencyAnalysis: false
+        script: bash "$SRCROOT/scripts/tutu-skin/copy-resources.sh"
+      #endif
     dependencies:
+      - package: MemoryCore
       # ish 静态库要的系统库：libsqlite3=fakefs meta.db，libresolv+SystemConfiguration=ISHKernel DNS
       - sdk: libsqlite3.tbd
       - sdk: libresolv.tbd
@@ -350,6 +415,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: $(MP_BUNDLE_ID_BASE).ios
         PRODUCT_NAME: "记忆花园"
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(PERSONAL_APPS_FLAG)"
+        #if PERSONAL_APPS
+        # 兔兔 Metal 源与 Swift 共用私人编译闸；空值不编入场景函数。
+        MTL_PREPROCESSOR_DEFINITIONS: "$(inherited) $(PERSONAL_APPS_FLAG)"
+        #endif
         # ---- 离线沙箱（SBX-T0）链接面 ----
         SWIFT_OBJC_BRIDGING_HEADER: Sandbox/ish/MemoryPalace-Bridging-Header.h
         # fs/fake.h 顶部有 #ifndef ISH_INTERNAL/#error 闸门；GUEST_ARM64 决定 emu/kernel 走 arm64 分支。
@@ -503,7 +572,10 @@ targets:
       iOS: "26.0"
     sources:
       - path: MemoryPalaceIOSTests
+      - path: MemoryPalaceTests/ScriptedHTTPServer.swift
+      - path: MemoryPalaceTests/TurnStatusStreamFixture.swift
     dependencies:
+      - package: MemoryCore
       - target: MemoryPalaceIOS
     settings:
       base:
@@ -529,6 +601,9 @@ targets:
       - path: MemoryPalaceTests
         excludes:
           - Fixtures/CardFrontends
+      - path: Packages/MemoryCore/Tests/MemoryCoreTests/RecallTestTuning.swift
+      - path: Packages/MemoryCore/Tests/MemoryCoreTests/TimelineTestSupport.swift
+      - path: Packages/MemoryCore/Tests/MemoryCoreTests/ConversationSourceContract.swift
       # 卡库第二批 B8：她 25 张前端卡 + 8 份含脚本聊天的脱敏结构用例（只留 DOM / API 调用形状，文字换占位、外链换 .invalid）
       - path: MemoryPalaceTests/Fixtures/CardFrontends
         type: folder
@@ -556,6 +631,7 @@ targets:
         type: folder
         buildPhase: resources
     dependencies:
+      - package: MemoryCore
       - target: MemoryPalace
     settings:
       base:
@@ -605,7 +681,7 @@ schemes:
       environmentVariables:
         MP_TEST_HOST: "1"
         MP_SPLASH: "0"
-        MP_BUBBLE_SNAPSHOT_DIR: "/Users/susu/MemoryPalace-docs-media/docs/imessage-ref/ours"
+        MP_BUBBLE_SNAPSHOT_DIR: "/Users/susu/MemoryPalace-docs-media/docs/imessage-ref/ours/coexist-step2"
   StickerProbeUITests:
     build:
       targets:

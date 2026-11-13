@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -67,7 +68,7 @@ final class ContextWindowTests: XCTestCase {
 
     private func plantSummary(covered: Int) {
         SummaryFileStore.save(ContextSummary(summary: "已有摘要", coveredCount: covered, updatedAt: Date()),
-                              conversationId: convId, profileId: pid, conversationTitle: "t")
+                              conversationId: convId, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), conversationTitle: "t")
     }
 
     func testUnderDepthNeedsNothing() {

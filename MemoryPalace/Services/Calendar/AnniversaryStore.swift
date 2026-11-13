@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 // MARK: - 纪念日（plan-calendar §3.2 / §3.3）

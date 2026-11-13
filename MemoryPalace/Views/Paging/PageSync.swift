@@ -139,8 +139,8 @@ struct PageSync: View {
                 NextFrame.run { viewModel.flushPendingRefresh() }
             }
             // 焦点上报：只有对话页(1)算「在看该会话」，列表/终端页都算没在看 → hub 据此决定推不推
-            CCBridgeWebSocketClient.shared.updateFocus(
-                newPage == 1 && isChatDestination ? viewModel.selectedConversation?.id : nil
+            CCHubRegistry.shared.updateFocus(
+                newPage == 1 && isChatDestination ? viewModel.selectedConversation : nil
             )
         }
     }

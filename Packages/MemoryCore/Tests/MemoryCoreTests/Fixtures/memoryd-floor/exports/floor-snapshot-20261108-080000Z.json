@@ -1,0 +1,105 @@
+{
+  "schema": 2,
+  "exportedAt": 1794124800000,
+  "profileId": "xingyan-floor",
+  "windows": [
+    {
+      "id": "xingyan-window-0001",
+      "title": "潮汐与航图",
+      "current": "sn-n5",
+      "memoryEnabled": true,
+      "trashed": false,
+      "updateTime": 1793495040000,
+      "branchSelection": { "sn-n2": "sn-n4", "sn-n4": "sn-n5" },
+      "isCC": true,
+      "lastRealChatAt": 1793494920000,
+      "provider": "cc-bridge",
+      "importBatchId": "batch-1",
+      "nodes": [
+        {
+          "id": "sn-n1",
+          "role": "user",
+          "text": "星砚楼今夜退潮，云桥城的航图还挂在墙上。",
+          "at": 1793494800000,
+          "childrenIds": ["sn-n2"]
+        },
+        {
+          "id": "sn-n2",
+          "role": "assistant",
+          "text": "岚舟把航图摊开，指着礁石说：退潮后那三条水道都会露出来。",
+          "at": 1793494860000,
+          "parent": "sn-n1",
+          "childrenIds": ["sn-n3", "sn-n4", "sn-deleted"]
+        },
+        {
+          "id": "sn-n3",
+          "role": "user",
+          "text": "我先去码头等潮。",
+          "at": 1793494920000,
+          "parent": "sn-n2",
+          "childrenIds": []
+        },
+        {
+          "id": "sn-n4",
+          "role": "user",
+          "text": "林栖说潮水要到子夜才退，别急着下水。",
+          "at": 1793494980000,
+          "parent": "sn-n2",
+          "childrenIds": ["sn-hidden", "sn-n5"]
+        },
+        {
+          "id": "sn-hidden",
+          "role": "system",
+          "text": "（界面提示：本段来自源侧隐藏）",
+          "at": 1793494990000,
+          "parent": "sn-n4",
+          "hidden": true,
+          "sourceVisibility": "hidden"
+        },
+        {
+          "id": "sn-deleted",
+          "role": "assistant",
+          "text": "我先下水试试深浅。",
+          "at": 1793494940000,
+          "parent": "sn-n2",
+          "deleted": true
+        },
+        {
+          "id": "sn-n5",
+          "role": "assistant",
+          "text": "那就等子夜，先把灯挂在栈桥上。",
+          "at": 1793495040000,
+          "parent": "sn-n4",
+          "contentType": "segmented",
+          "segments": [{ "kind": "text", "text": "那就等子夜，" }, { "kind": "other" }],
+          "childrenIds": []
+        }
+      ]
+    },
+    {
+      "id": "recycle-window-0002",
+      "title": "放弃的冬夜",
+      "current": "rw-n2",
+      "memoryEnabled": false,
+      "trashed": true,
+      "updateTime": 1793581200000,
+      "provider": "api",
+      "nodes": [
+        {
+          "id": "rw-n1",
+          "role": "user",
+          "text": "冬夜先记一笔，星砚楼的风很大。",
+          "at": 1793581140000,
+          "childrenIds": ["rw-n2"]
+        },
+        {
+          "id": "rw-n2",
+          "role": "assistant",
+          "text": "记下了，等春天再翻出来看。",
+          "at": 1793581200000,
+          "parent": "rw-n1"
+        }
+      ]
+    }
+  ]
+}

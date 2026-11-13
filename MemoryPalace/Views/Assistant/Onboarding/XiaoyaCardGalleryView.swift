@@ -182,7 +182,7 @@ struct XiaoyaCardGalleryView: View {
     }
 
     #if os(iOS)
-    private var fakePair: (CCPairPayload) -> XiaoyaPairOutcome { { _ in .paired("已配对 ✓ LAN+Tailscale") } }
+    private var fakePair: @MainActor (CCPairPayload) async -> XiaoyaPairOutcome { { _ in .paired("已配对 ✓ LAN+Tailscale") } }
     #endif
 
     private func record(_ id: String, _ answer: XiaoyaCardAnswer) {

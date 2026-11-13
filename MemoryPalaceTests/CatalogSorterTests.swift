@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -46,7 +47,7 @@ final class CatalogSorterTests: XCTestCase {
         fragment("删了的").supersededAt = Date()
         let organized = fragment("整理进页的")
         organized.organizedAt = Date()
-        organized.organizedPage = "楼层/人/小慧"
+        organized.organizedPage = "人/小慧"
         let single = fragment("单条就够的")
         single.organizedAt = Date()
         fragment("驳回的").organizeRejectedAt = Date()
@@ -54,7 +55,7 @@ final class CatalogSorterTests: XCTestCase {
         let waiting = fragment("在待批提案里")
         try context.save()
         try WikiProposalStore(wiki: wiki).save(WikiProposal(origin: .scheduled, createdAt: Date(), items: [
-            .init(change: .appendRecords(path: "楼层/人/小慧", lines: ["x"]), fragmentIds: [waiting.id], baseVersion: "v"),
+            .init(change: .appendRecords(path: "人/小慧", lines: ["x"]), fragmentIds: [waiting.id], baseVersion: "v"),
         ]))
 
         let got = await CatalogMaterial.pending(profileId: pid, container: container, wiki: wiki)
@@ -85,13 +86,13 @@ final class CatalogSorterTests: XCTestCase {
             let blocked: Int? = try await CatalogJSON.call(system: "预算系统", user: "预算输入", retries: 1, caller: { _, _ in
                 MemoryWriteLog.addCost(0.125)
                 return nil
-            }, drafts: nil, name: "预算", run: run) { _ in parsed = true; return 1 }
+            }, drafts: nil, name: "预算", userName: "", run: run) { _ in parsed = true; return 1 }
             XCTAssertNil(blocked)
             do {
                 let _: Int? = try await CatalogJSON.call(system: "错误系统", user: "错误输入", retries: 1, caller: { _, _ in
                     MemoryWriteLog.addCost(0.25)
                     throw MemoryWriterError.format("测试调用错误")
-                }, drafts: nil, name: "异常", run: run) { _ in parsed = true; return 1 }
+                }, drafts: nil, name: "异常", userName: "", run: run) { _ in parsed = true; return 1 }
                 XCTFail("原始请求错误必须仍然抛出")
             } catch MemoryWriterError.format(let message) {
                 XCTAssertEqual(message, "测试调用错误")
@@ -101,7 +102,7 @@ final class CatalogSorterTests: XCTestCase {
                     MemoryWriteLog.addCost(0.5)
                     cancel.cancel()
                     return "取消时已经收到的完整模型原文```"
-                }, drafts: nil, name: "取消", cancel: cancel, run: run) { _ in parsed = true; return 1 }
+                }, drafts: nil, name: "取消", userName: "", cancel: cancel, run: run) { _ in parsed = true; return 1 }
                 XCTFail("取消必须仍然抛出")
             } catch is CancellationError {}
         }
@@ -136,14 +137,14 @@ final class CatalogSorterTests: XCTestCase {
                 calls += 1
                 cancel.cancel()
                 return "不合格"
-            }, drafts: nil, name: "x", cancel: cancel) { _ -> Int? in nil }
+            }, drafts: nil, name: "x", userName: "", cancel: cancel) { _ -> Int? in nil }
             XCTFail("停了应该抛 CancellationError")
         } catch is CancellationError {}
         XCTAssertEqual(calls, 1, "回来就查：不再重试")
 
         calls = 0
         _ = try? await CatalogJSON.call(system: "s", user: "u", retries: 2, caller: { _, _ in calls += 1; return "{}" },
-                                        drafts: nil, name: "x", cancel: cancel) { _ -> Int? in 1 }
+                                        drafts: nil, name: "x", userName: "", cancel: cancel) { _ -> Int? in 1 }
         XCTAssertEqual(calls, 0, "发请求前就查")
     }
 
@@ -153,5 +154,21 @@ final class CatalogSorterTests: XCTestCase {
         XCTAssertEqual(CatalogModelRoute.key, "mem_model_c3")
         XCTAssertNil(d.string(forKey: FragmentModelRoute.key), "C3 不改 C2 的选择")
         XCTAssertNotNil(FragmentModelRoute.localModelId(choice: d.string(forKey: CatalogModelRoute.key) ?? ""))
+    }
+
+    /// 单发请求：发出去 {{user}} 换成当前名字；回复原样，解析副本里「名字/…」路径换回 {{user}}；改名后同一份显示新名字
+    func testSingleShotRequestShowsAndStoresUserBranch() async throws {
+        for name in ["岚舟", "星砚"] {
+            var sent: [String] = []
+            let reply = try await CatalogJSON.request(system: "本人的页挂在 {{user}}/ 下", user: "- [[{{user}}/品味]] 品味",
+                                                      caller: { s, u in sent = [s, u]; return "{\"page\":\"\(name)/品味\",\"subject\":\"\(name)\"}" },
+                                                      run: nil, name: "t", userName: name)
+            XCTAssertEqual(sent, ["本人的页挂在 \(name)/ 下", "- [[\(name)/品味]] 品味"])
+            XCTAssertEqual(reply, "{\"page\":\"\(name)/品味\",\"subject\":\"\(name)\"}", "回复原样返回（草稿、运行记录是模型原文）")
+            XCTAssertEqual(WikiStore.storedJSON(try XCTUnwrap(reply), fields: .sorter, user: name), "{\"page\":\"\(name)/品味\",\"subject\":\"\(name)\"}",
+                           "顶层 page 不是分拣的路径位置（fragments[].page 才是），不换")
+            XCTAssertEqual(WikiStore.storedJSON("{\"fragments\":[{\"page\":\"\(name)/品味\",\"subject\":\"\(name)\"}]}", fields: .sorter, user: name),
+                           "{\"fragments\":[{\"page\":\"{{user}}/品味\",\"subject\":\"\(name)\"}]}", "解析时只换路径位置，别的字段里的名字不换")
+        }
     }
 }

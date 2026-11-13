@@ -26,11 +26,6 @@ struct TavernCard {
     var hasWorldBook: Bool {
         !characterBookEntries.isEmpty
     }
-
-    /// 是否包含正则脚本
-    var hasRegexScripts: Bool {
-        !regexScripts.isEmpty
-    }
 }
 
 // MARK: - Parse Errors

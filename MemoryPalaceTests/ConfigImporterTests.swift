@@ -61,4 +61,98 @@ final class ConfigImporterTests: XCTestCase {
         let cards = try importCredentials([c])
         XCTAssertEqual(cards[0].models.map(\.modelId), ["mine"])
     }
+
+    func testImportPreservesProfileNameMirrorsWhileApplyingOrdinarySettings() throws {
+        for version in [0, ConfigSchema.currentVersion] {
+            for transport in 0...2 {
+                defaults.set("当前用户", forKey: "userName")
+                defaults.set("当前助手", forKey: "assistantName")
+                defaults.set("原导出方式", forKey: "exportMode")
+                let root: [String: Any] = [
+                    "schema_version": version,
+                    "general": [
+                        "userName": "备份旧用户",
+                        "assistantName": "备份旧助手",
+                        "exportMode": "导入导出方式"
+                    ]
+                ]
+
+                let result = try importNameConfig(root, transport: transport)
+                XCTAssertTrue(result.ignoredNameMirrors)
+
+                XCTAssertEqual(defaults.string(forKey: "userName"), "当前用户")
+                XCTAssertEqual(defaults.string(forKey: "assistantName"), "当前助手")
+                XCTAssertEqual(defaults.string(forKey: "exportMode"), "导入导出方式")
+            }
+        }
+    }
+
+    func testImportOfOnlyNamesDoesNotCreateIndependentMirrors() throws {
+        for version in [0, ConfigSchema.currentVersion] {
+            for transport in 0...2 {
+                let root: [String: Any] = [
+                    "schema_version": version,
+                    "general": ["userName": "备份用户", "assistantName": "备份助手"]
+                ]
+
+                let result = try importNameConfig(root, transport: transport)
+                XCTAssertTrue(result.ignoredNameMirrors)
+
+                let stored = defaults.persistentDomain(forName: suite) ?? [:]
+                XCTAssertNil(stored["userName"])
+                XCTAssertNil(stored["assistantName"])
+            }
+        }
+    }
+
+    func testImportReportsIgnoredNamesOnlyWhenGeneralContainsThoseKeys() throws {
+        let cases: [([String: Any], Bool)] = [
+            (["general": ["userName": ""]], true),
+            (["general": ["assistantName": NSNull()]], true),
+            (["general": ["exportMode": "测试导出方式"]], false),
+            (["appearance": ["userName": "不属于通用"]], false),
+            ([:], false)
+        ]
+        for (sections, expected) in cases {
+            var root = sections
+            root["schema_version"] = ConfigSchema.currentVersion
+            for transport in 0...2 {
+                let result = try importNameConfig(root, transport: transport)
+                XCTAssertEqual(result.ignoredNameMirrors, expected)
+            }
+        }
+    }
+
+    /// atrium P3④b：字体字号 / 气泡几何 / 行距段距按人存，9 个老键只是当前层的镜像，不进导出表、老备份里有也不导
+    func testPerFloorAppearanceKeysAreOutOfConfig() throws {
+        XCTAssertTrue(Set(ConfigSchema.appStorageKeys.map(\.key)).isDisjoint(with: ChatAppearance.legacyKeys))
+        let root: [String: Any] = [
+            "schema_version": ConfigSchema.currentVersion,
+            "general": ["selectedFont": "老备份字体", "fontScale": 1.8, "lineSpacingScale": 1.0],
+            "appearance": ["bubbleCornerRadius": 4.0, "bubbleSpacing": 10.0]
+        ]
+        _ = try importNameConfig(root, transport: 0)
+        for key in ChatAppearance.legacyKeys {
+            XCTAssertNil(defaults.object(forKey: key), key)
+        }
+    }
+
+    /// 同一 apply 入口的三种消费者路径：明文、带口令文件、预先解锁的文件。
+    private func importNameConfig(_ root: [String: Any], transport: Int) throws -> ConfigImporter.Result {
+        let plain = try JSONSerialization.data(withJSONObject: root)
+        if transport == 0 {
+            return try ConfigImporter.importAll(plain, defaults: defaults, secrets: NoSecrets())
+        } else {
+            let passphrase = "isolated-config-import-test"
+            let encrypted = try ConfigCrypto.seal(plain, passphrase: passphrase)
+            if transport == 1 {
+                return try ConfigImporter.importAll(
+                    encrypted, passphrase: passphrase, defaults: defaults, secrets: NoSecrets()
+                )
+            } else {
+                let unlocked = try ConfigImporter.unlock(encrypted, passphrase: passphrase)
+                return try ConfigImporter.importAll(unlocked, defaults: defaults, secrets: NoSecrets())
+            }
+        }
+    }
 }

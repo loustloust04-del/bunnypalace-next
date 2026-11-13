@@ -29,6 +29,8 @@ struct MacChatCard: ViewModifier {
     let imageURL: URL?
     let scheme: ColorScheme
     var backgroundStyle: ThemeBackgroundStyle = ThemeBackgroundStyle()
+    /// 卡里装的是聊天页（true）还是编程会话（false）：聊天页底色跟 Theme.chat，编程会话照旧全局
+    var chatPage = true
 
     func body(content: Content) -> some View {
         // 在 body 里读才会跟着参数台即时重绘（MacShellMetrics 的纪律）
@@ -49,8 +51,9 @@ struct MacChatCard: ViewModifier {
                 .padding(.horizontal, m.cardPadX)
                 .padding(.vertical, m.cardPadY)
                 .background {
-                    // fill 垫在壁纸下面：壁纸可能是半透明 PNG，没有这层会透出桌布
-                    ThemeBackgroundView(fill: ShellStyle.card, imageURL: imageURL,
+                    // fill 垫在壁纸下面：壁纸可能是半透明 PNG，没有这层会透出桌布。
+                    // 卡里装聊天页时（里面各自让开了底色）取聊天主题底色；编程会话仍取全局 ShellStyle.card
+                    ThemeBackgroundView(fill: chatPage ? Theme.chat.mainBg : ShellStyle.card, imageURL: imageURL,
                                         scheme: scheme, backgroundStyle: backgroundStyle)
                 }
                 .clipShape(shape)

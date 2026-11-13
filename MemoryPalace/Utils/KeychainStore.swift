@@ -11,8 +11,16 @@ enum KeychainStore {
 
     /// #042：锁屏来电要读的几条（hub 口令 / 语音 key / 老 ElevenLabs key）放宽到「首次解锁后可读」，其余保持系统默认。
     /// 按 account 判、不按 service（测试 service 也能覆盖）。只在 iOS 写入 / 迁移时用。
+    /// 附加 hub 的口令（`cc-bridge.hub.<id>`，plan-multi-hub）跟主 hub 一样：锁屏时后台重连也要读得到
     static func accessibleOverride(account: String) -> CFString? {
-        account == "cc-bridge" || account == "elevenlabs" || account.hasPrefix("voice.") ? kSecAttrAccessibleAfterFirstUnlock : nil
+        account == "cc-bridge" || account.hasPrefix("cc-bridge.hub.") || account == "elevenlabs" || account.hasPrefix("voice.")
+            ? kSecAttrAccessibleAfterFirstUnlock : nil
+    }
+
+    /// 只存本机、永不进 iCloud 的账户（plan-multi-hub impl1 #9）：hub 口令（附加 hub + 主 hub 本机副本 `cc-bridge.hub.*`）、
+    /// Mac 内嵌 hub 口令。「API key 云同步」开关重写时也按这个来
+    static func isLocalOnly(account: String) -> Bool {
+        account.hasPrefix("cc-bridge.hub.") || account == "cc-bridge-hub-token"
     }
 
     /// 写入/更新/删除（value == nil 等价于 remove）。成功返回 true。
@@ -23,8 +31,7 @@ enum KeychainStore {
         if BenchIsolation.active { return false }
         #endif
         guard let value, !value.isEmpty else {
-            remove(account: account, service: service)
-            return true
+            return remove(account: account, service: service)
         }
 
         // 先清掉同 account 的旧条目（不管同步模式）
@@ -81,17 +88,21 @@ enum KeychainStore {
         return SecItemCopyMatching(TestHostIsolation.keychainQuery(query) as CFDictionary, &out)
     }
 
-    static func remove(account: String, service: String = KeychainStore.service) {
+    /// 删掉（本来就没有也算成功）。返回删没删成
+    @discardableResult
+    static func remove(account: String, service: String = KeychainStore.service) -> Bool {
         #if os(macOS)
         if BenchIsolation.active {
             log.error("remove unavailable in perf bench")
-            return
+            return false
         }
         #endif
         let status = SecItemDelete(TestHostIsolation.keychainQuery(anyQuery(account: account, service: service)) as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
             print("[KeychainStore] remove failed account=\(account) status=\(status)")
+            return false
         }
+        return true
     }
 
     /// 列出当前 service 下所有 account（本机+云）。用于开关同步时统一迁移。
@@ -211,4 +222,17 @@ enum KeychainStore {
             kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
         ]
     }
+}
+
+/// API key 钥匙串（ProviderManager 读写走它，单测注入替身看 sync 属性）
+protocol APIKeyKeychain {
+    func set(_ value: String, account: String, sync: Bool) -> Bool
+    func remove(account: String) -> Bool
+    func getAll() -> [String: String]
+}
+
+struct SystemAPIKeyKeychain: APIKeyKeychain {
+    func set(_ value: String, account: String, sync: Bool) -> Bool { KeychainStore.set(value, account: account, sync: sync) }
+    func remove(account: String) -> Bool { KeychainStore.remove(account: account) }
+    func getAll() -> [String: String] { KeychainStore.getAll() }
 }

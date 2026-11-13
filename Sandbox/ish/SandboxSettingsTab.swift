@@ -36,7 +36,7 @@ struct SandboxSettingsTab: View {
             if showsReset {
                 resetSection
             } else {
-                Text("重置在 设置 › 手机里的小电脑")
+                Text("重置：在「我」里搜「重置小电脑」")
                     .font(.system(size: Theme.F.caption))
                     .foregroundColor(Theme.textMuted.opacity(0.6))
                     .padding(.horizontal, 4)

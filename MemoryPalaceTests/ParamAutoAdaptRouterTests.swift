@@ -1,10 +1,10 @@
 import XCTest
 @testable import 记忆花园
 
-/// #094 400 自愈（plan-param-autoadapt §4.2）：本机假服务器（OutputTokenCapTests.ScriptedHTTPServer），不发真请求
+/// #094 400 自愈（plan-param-autoadapt §4.2）：本机假服务器（ScriptedHTTPServer），不发真请求
 @MainActor
 final class ParamAutoAdaptRouterTests: XCTestCase {
-    typealias Server = OutputTokenCapTests.ScriptedHTTPServer
+    typealias Server = ScriptedHTTPServer
 
     static let temperature400 = Data(#"{"error":{"message":"Unsupported value: 'temperature' does not support 0.7 with this model. Only the default (1) value is supported.","type":"invalid_request_error","param":"temperature","code":"unsupported_value"}}"#.utf8)
     static let maxTokens400 = Data(#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}"#.utf8)
@@ -405,6 +405,128 @@ final class ParamAutoAdaptRouterTests: XCTestCase {
         XCTAssertTrue(router.lastAssistantBlocks.isEmpty, "提前失败的这一次读不到上一条的块")
         XCTAssertNil(router.lastRefusalCategory)
         XCTAssertFalse(router.lastRequestDroppedThinking)
+    }
+
+    /// 中转同时拒绝采样和缓存：沿现有参数自愈重发，拉黑后的 ordered / tools / 检查器全退回无标原文。
+    func testOrderedCacheControlRejectedRetriesWithoutMarksAndPreviewMatches() async throws {
+        for key in ["anthropicCacheHostBlacklist", "anthropicCacheLongTTLHostBlacklist"] {
+            let saved = UserDefaults.standard.object(forKey: key)
+            cleanups.append {
+                if let saved { UserDefaults.standard.set(saved, forKey: key) }
+                else { UserDefaults.standard.removeObject(forKey: key) }
+            }
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        let rejected = Data(#"{"error":{"message":"Unsupported parameter: 'temperature'; cache_control is also unsupported.","type":"invalid_request_error","param":"temperature","code":"unsupported_parameter"}}"#.utf8)
+        let server = try Server { index, _ in
+            index == 0 ? (400, "application/json", rejected) : (200, "text/event-stream", Self.anthropicOK)
+        }
+        try server.start()
+        let (router, pm, model) = fixture(server, modelId: "claude-sonnet-4-5", type: .anthropic)
+        var s = sampling()
+        s.cacheFriendly = true
+        let stable = "你是虚构的纸桥向导。\n保留这一行。"
+        let memory = "X：虚构旅客今天选择蓝桥。"
+        let ordered = [
+            PromptMessage(role: "system", content: stable, source: .slot(id: "main", name: "main"), nodeId: nil, pinnedToSystemPrefix: false),
+            PromptMessage(role: "user", content: "历史问题", source: .chatHistory, nodeId: "u1", pinnedToSystemPrefix: false),
+            PromptMessage(role: "assistant", content: "历史回答正文", source: .chatHistory, nodeId: "a1", pinnedToSystemPrefix: false),
+            PromptMessage(role: "system", content: memory, source: .memory, nodeId: nil, pinnedToSystemPrefix: false),
+            PromptMessage(role: "user", content: "继续走吧", source: .chatHistory, nodeId: "u2", pinnedToSystemPrefix: false)
+        ]
+        let tools: [[String: Any]] = ["paper_read", "paper_write"].map { name in
+            ["type": "function", "function": ["name": name, "description": "虚构纸桥工具",
+                "parameters": ["type": "object", "properties": [:]]] as [String: Any]]
+        }
+        let messages: [(role: String, content: String)] = [(role: "user", content: "旧入口占位，不应出现在 ordered 请求")]
+        func canonical(_ value: Any) throws -> Data {
+            try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        }
+        func containsCacheControl(_ value: Any) -> Bool {
+            if let object = value as? [String: Any] {
+                return object.keys.contains("cache_control") || object.values.contains(where: containsCacheControl)
+            }
+            if let array = value as? [Any] { return array.contains(where: containsCacheControl) }
+            return false
+        }
+        func previews() throws -> (Data, Data) {
+            let body = try XCTUnwrap(ProviderRouter.previewRequestBody(
+                model: model, messages: messages, systemPrompt: "旧入口 system",
+                providerManager: pm, samplingParams: s, tools: tools, ordered: ordered))
+            let request = ProviderRouter.previewRequest(
+                model: model, messages: messages, systemPrompt: "旧入口 system",
+                providerManager: pm, samplingParams: s, tools: tools, ordered: ordered)
+            return (try canonical(body), try canonical(XCTUnwrap(request.body)))
+        }
+        func turn() async -> Outcome {
+            let done = expectation(description: "ordered cache turn")
+            done.assertForOverFulfill = false
+            var outcome = Outcome.error("没回调")
+            router.sendStreaming(
+                model: model, messages: messages, systemPrompt: "旧入口 system",
+                providerManager: pm, samplingParams: s, tools: tools, ordered: ordered,
+                onToken: { _ in }, onComplete: { text, _ in outcome = .ok(text); done.fulfill() },
+                onError: { outcome = .error($0); done.fulfill() })
+            await fulfillment(of: [done], timeout: 5)
+            return outcome
+        }
+
+        let initialPreview = try previews()
+        let firstOutcome = await turn()
+        XCTAssertEqual(firstOutcome, .ok("ok"))
+        XCTAssertEqual(server.requestBodies.count, 2)
+        guard server.requestBodies.count == 2 else { return }
+        let first = try body(server.requestBodies[0])
+        let retry = try body(server.requestBodies[1])
+        XCTAssertEqual(first["temperature"] as? Double, 0.7)
+        XCTAssertNil(retry["temperature"], "由现有参数自愈触发重发，不新增缓存重试策略")
+        XCTAssertEqual(try canonical(first), initialPreview.0)
+        XCTAssertEqual(try canonical(first), initialPreview.1)
+        let system = try XCTUnwrap(first["system"] as? [[String: Any]])
+        XCTAssertEqual(system.count, 2)
+        XCTAssertEqual(system.compactMap { $0["text"] as? String }, [stable, "\n\n" + memory])
+        let mark = try XCTUnwrap(system.first?["cache_control"] as? [String: Any])
+        XCTAssertNil(system.last?["cache_control"])
+        let firstTools = try XCTUnwrap(first["tools"] as? [[String: Any]])
+        XCTAssertEqual(firstTools.count, tools.count)
+        XCTAssertNil(firstTools.first?["cache_control"])
+        XCTAssertEqual(try canonical(XCTUnwrap(firstTools.last?["cache_control"])), try canonical(mark))
+        let firstMessages = try XCTUnwrap(first["messages"] as? [[String: Any]])
+        let assistant = try XCTUnwrap(firstMessages.first { $0["role"] as? String == "assistant" })
+        let blocks = try XCTUnwrap(assistant["content"] as? [[String: Any]])
+        XCTAssertEqual(blocks.last?["text"] as? String, "历史回答正文")
+        XCTAssertEqual(try canonical(XCTUnwrap(blocks.last?["cache_control"])), try canonical(mark), "BP4 仍挂历史 assistant 末块")
+        XCTAssertEqual(retry["system"] as? String, stable + "\n\n" + memory)
+        XCTAssertFalse(containsCacheControl(retry), "重发体所有层级都不含 cache_control")
+        let retryTools = try XCTUnwrap(retry["tools"] as? [[String: Any]])
+        let unmarkedTools = firstTools.map { tool -> [String: Any] in
+            var result = tool
+            result.removeValue(forKey: "cache_control")
+            return result
+        }
+        XCTAssertEqual(try canonical(retryTools), try canonical(unmarkedTools), "全部工具定义保留")
+        let retryMessages = try XCTUnwrap(retry["messages"] as? [[String: Any]])
+        XCTAssertEqual(retryMessages.compactMap { $0["role"] as? String }, ["user", "assistant", "user"])
+        XCTAssertEqual(retryMessages.compactMap { $0["content"] as? String }, ["历史问题", "历史回答正文", "继续走吧"])
+        XCTAssertTrue(AnthropicProvider.cacheBlacklistContains(server.baseURL))
+        XCTAssertFalse(AnthropicProvider.longTTLBlacklistContains(server.baseURL), "cache_control 不支持不是单独 ttl 降级")
+        let blacklistedPreview = try previews()
+        XCTAssertEqual(try canonical(retry), blacklistedPreview.0)
+        XCTAssertEqual(try canonical(retry), blacklistedPreview.1)
+
+        let secondOutcome = await turn()
+        XCTAssertEqual(secondOutcome, .ok("ok"))
+        XCTAssertEqual(server.requestBodies.count, 3, "同地址记住黑名单，下一轮只发一次")
+        guard server.requestBodies.count == 3 else { return }
+        let remembered = try body(server.requestBodies[2])
+        XCTAssertFalse(containsCacheControl(remembered))
+        XCTAssertEqual(try canonical(remembered), try canonical(retry))
+        XCTAssertEqual(try canonical(remembered), blacklistedPreview.0)
+        XCTAssertEqual(try canonical(remembered), blacklistedPreview.1)
+        let systemMarkCount = system.filter { $0["cache_control"] != nil }.count
+        let toolMarkCount = firstTools.filter { $0["cache_control"] != nil }.count
+        let bp4MarkCount = blocks.filter { $0["cache_control"] != nil }.count
+        print("[ordered-cache-retry] firstSystemBlocks=\(system.count) marks(system/tools/BP4)=\(systemMarkCount)/\(toolMarkCount)/\(bp4MarkCount) retrySystemString=\(retry["system"] is String) requests=\(server.requestBodies.count) finalOK=\(secondOutcome == .ok("ok"))")
     }
 
     /// 粟粟 10-15 缓存默认 1 小时：中转不认 ttl → 这一条马上按 5 分钟重发、不报错，记住这个地址以后都 5 分钟

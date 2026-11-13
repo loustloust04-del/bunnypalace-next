@@ -157,12 +157,15 @@ struct CCPairingSheet: View {
     }
 
     private func load() async {
-        // Phase 2：/pair 强制 token。外部 hub 走 HubTokenStore（macOS 首次自动 bootstrap 读 launchd plist），
-        // 内嵌 hub 走它自己的 Keychain 口令和端口（#046 刀 2）
+        // Phase 2：/pair 强制 token。外部 hub 只用跟本机外部 hub 绑定的口令（plist / 配的就是本机 7890 时的主 hub 本机副本），
+        // 绝不读可能被 iCloud 改成别台口令的 cc-bridge（plan-multi-hub recheck1 N1）；内嵌 hub 走它自己的 Keychain 口令和端口（#046 刀 2）
         let hub = CCHubProcess.shared
         let external = await hub.refreshExternalHub()
+        let externalToken = external ? PairingEndpoint.externalHubToken(plistToken: HubTokenStore.launchdPlistToken(),
+                                                                        pairedPrimaryToken: CCHubRegistry.shared.pairedPrimaryToken,
+                                                                        primaryURLs: CCBridgeEndpoints.configuredURLs()) : nil
         let endpoint = PairingEndpoint.resolve(externalHub: external,
-                                               externalToken: external ? HubTokenStore.get() : nil,
+                                               externalToken: externalToken,
                                                embeddedPort: hub.state == .running ? hub.port : nil,
                                                embeddedToken: hub.currentToken)
         guard case .ready(let port, let token) = endpoint,
@@ -210,21 +213,39 @@ struct CCPairingSheet: View {
 #endif
 
 /// 扫码配对落地：整体替换候选地址 + Keychain token → 立即重连。所有扫码入口共用这一份（#068 收口）。
-/// 返回给她看的一句结果。
+/// 主电脑配过对之后，先握一次手认是哪台（b4 #1）：认出就是它才写；别的电脑 / 认不出 / 连不上 → confirm，调用方弹落点页（HubPairingSheet），不覆盖主电脑
 enum CCPairingApply {
-    static func apply(_ p: CCPairPayload, providerManager: ProviderManager?) -> String {
+    enum Outcome: Equatable {
+        /// 给她看的一句结果（成功那句以「已配对」开头）
+        case done(String)
+        case confirm(CCHubRegistry.PrimaryPairingCheck)
+    }
+
+    /// 握手认哪台时先给她看的那句
+    static let checking = "正在认是哪台电脑…"
+
+    /// registry / probe：单测注入
+    @MainActor
+    static func apply(_ p: CCPairPayload, providerManager: ProviderManager?, registry: CCHubRegistry? = nil,
+                      probe: CCHubRegistry.PairingProbe? = nil) async -> Outcome {
+        let registry = registry ?? .shared
         let primary = p.u.flatMap(URL.init(string:))
-        guard primary != nil || p.relayURL != nil else { return "二维码里的地址不合法" }
+        guard primary != nil || p.relayURL != nil else { return .done("二维码里的地址不合法") }
         // 主=LAN（家里直连），备=Tailscale（出门），中继=开着代理 VPN 也能连。连接时三个并发竞速，谁先通连谁。
-        CCBridgeEndpoints.save(p)
-        if let pm = providerManager { pm.setApiKey(p.t, for: "cc-bridge") }
-        else { _ = KeychainStore.set(p.t, account: "cc-bridge", sync: false) }
-        providerManager?.reload()
-        // 显式重新配对：先断掉旧连接再握手——同地址换了 pin / 口令时，旧 TLS / WS 不能接着用
-        CCBridgeWebSocketClient.shared.disconnect()
-        CCBridgeWebSocketClient.shared.connect(urls: CCBridgeEndpoints.configuredURLs(), token: p.t.isEmpty ? nil : p.t)
-        let routes = [primary != nil ? "LAN" : nil, p.u2 != nil ? "Tailscale" : nil, p.relayURL != nil ? "中继" : nil].compactMap { $0 }
-        return routes.count > 1 ? "已配对 ✓ \(routes.joined(separator: "+"))" : "已配对 ✓ \(p.u ?? p.u3 ?? "")"
+        // 走 Registry 统一入口：先写口令（失败整个放弃、地址不动）→ 再写配对快照 → 先断掉旧连接再握手（plan-multi-hub B2.1）
+        switch await registry.pairPrimary(CCHubPairing(payload: p), token: p.t, providerManager: providerManager, probe: probe) {
+        case .applied:
+            providerManager?.reload()
+            let routes = [primary != nil ? "LAN" : nil, p.u2 != nil ? "Tailscale" : nil, p.relayURL != nil ? "中继" : nil].compactMap { $0 }
+            return .done(routes.count > 1 ? "已配对 ✓ \(routes.joined(separator: "+"))" : "已配对 ✓ \(p.u ?? p.u3 ?? "")")
+        case .failed(.secretWriteFailed):
+            return .done("口令没存进钥匙串，配对没改，再扫一次")
+        case .failed(let result):
+            let names = { (id: String) in registry.hubs.first { $0.id == id }?.name ?? "这台电脑" }
+            return .done(CCHubPairingLanding.failure(result, target: CCHubRegistry.primaryId, names: names) ?? "配对没改")
+        case .confirm(let check):
+            return .confirm(check)
+        }
     }
 }
 

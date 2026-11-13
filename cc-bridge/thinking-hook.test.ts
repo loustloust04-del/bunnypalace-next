@@ -70,6 +70,20 @@ test("hook posts joined thinking of the last turn", async () => {
   expect(received[0].chat_id).toBe("conv-42")
   expect(received[0].thinking).toBe("first thought\n\nsecond thought")
   expect(received[0].session_id).toBe("sess-1")
+  // 没正文也带 message_id：hub 靠它把思考挂到这一轮 app 消息对应的回复上（2a）
+  expect(received[0].message_id).toBe("m1")
+})
+
+test("hook: MP 轮只有 thinking 没正文 → 也带 message_id（hub 靠它挂锚）", async () => {
+  received = []
+  const code = await runHook([
+    userChannel("conv-58"),
+    assistantThinking("只想不说"),
+  ], "thinking-only-mp")
+  expect(code).toBe(0)
+  expect(received.length).toBe(1)
+  expect(received[0].reply_text).toBeUndefined()
+  expect(received[0].message_id).toBe("m1")
 })
 
 test("hook excludes sidechain thinking", async () => {

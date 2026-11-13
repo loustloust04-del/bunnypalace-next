@@ -16,6 +16,13 @@ struct RegexScriptEditor: View {
     @State private var disabled: Bool
     @State private var placementUser: Bool
     @State private var placementAI: Bool
+    @State private var confirmingDiscard = false
+
+    private var isDirty: Bool {
+        scriptName != script.scriptName || findRegex != script.findRegex || replaceString != script.replaceString
+            || markdownOnly != script.markdownOnly || promptOnly != script.promptOnly || disabled != script.disabled
+            || placementUser != script.placement.contains(1) || placementAI != script.placement.contains(2)
+    }
 
     init(script: RegexScript, isNew: Bool, onSave: @escaping (RegexScript) -> Void, onCancel: @escaping () -> Void) {
         self.script = script
@@ -36,7 +43,7 @@ struct RegexScriptEditor: View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Button("取消") { onCancel() }
+                Button("取消") { if isDirty { confirmingDiscard = true } else { onCancel() } }
                     .buttonStyle(.plain)
                     .foregroundColor(Theme.branchIndicator)
                 Spacer()
@@ -126,6 +133,7 @@ struct RegexScriptEditor: View {
         .frame(width: 460, height: 520)
         #endif
         .background(Theme.sidebarBg)
+        .discardChangesGuard(isDirty: isDirty, confirming: $confirmingDiscard, onDiscard: onCancel)
     }
 
     private func fieldSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {

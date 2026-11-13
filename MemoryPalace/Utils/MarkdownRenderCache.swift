@@ -164,13 +164,11 @@ struct CachedMarkdownView: View {
 
     @State private var renderable: RenderableDocument?
 
-    #if os(macOS)
     // R9b N1：单调请求代号——每次 task 启动 +1，只许比屏上更新的结果落地（旧晚到直接丢，
     // 新的还没到旧的照常显示，不饿死）。.task 换 id 时 SwiftUI 取消旧任务，但 parse 不检查取消
-    // 仍会跑完，所以靠代号挡不靠取消。task 闭包在 MainActor 跑，代号比较无竞态。
+    // 仍会跑完，所以靠代号挡不靠取消。task 闭包在 MainActor 跑，代号比较无竞态。两端共用（共存返工①）。
     @State private var requestGen = 0
     @State private var shownGen = 0
-    #endif
 
     /// 首见同步渲染的长度闸：3000 字符内 parse+convert 是纯 CPU 毫秒级，换掉「空占位→异步长高」
     /// 两段布局 + cellGrew 补偿（深翻基准 20s 内 412 次补偿的病灶）；超长消息仍走异步兜底。
@@ -248,8 +246,12 @@ struct CachedMarkdownView: View {
                 if let document { renderable = document }
             }
             #if os(iOS)
-            .task(id: text) {
+            // 共存返工①：同 mac，task 吃「文本 + 渲染维度」——字色是 parse 时写进 attributed string 的，
+            // 只吃 text 时换主题（themeChangeID 在 cacheDims 里）已挂载的正文不重解析，泡底换了字色还是旧的
+            .task(id: text + "\u{1F}" + cacheDims) {
                 if let preparedDocument { renderable = preparedDocument; return }
+                requestGen += 1
+                let gen = requestGen
                 #if DEBUG || PERF_BENCH
                 // M3 不闪空探针：以空占位上屏（renderable == nil → DocumentView(.empty)）记开头，真身落地的 taskHit / asyncEnd 回执收口
                 if let perfNode, renderable == nil {
@@ -267,7 +269,10 @@ struct CachedMarkdownView: View {
                 }
                 #endif
                 if let hit = MarkdownRenderCache.shared.lookup(dims: cacheDims, text: text) {
-                    if renderable != hit { renderable = hit }
+                    if gen > shownGen {
+                        shownGen = gen
+                        if renderable != hit { renderable = hit }
+                    }
                     #if DEBUG || PERF_BENCH
                     if let perfNode { PerfRenderLedger.noteMarkdown(nodeId: perfNode, text: text, cacheDims: cacheDims, kind: "taskHit", reqId: perfReq) }
                     #endif
@@ -282,6 +287,8 @@ struct CachedMarkdownView: View {
                 if !transient {
                     MarkdownRenderCache.shared.store(parsed, dims: cacheDims, text: text)
                 }
+                guard gen > shownGen else { return }   // 旧请求晚到：丢，不盖屏
+                shownGen = gen
                 renderable = parsed
                 #if DEBUG || PERF_BENCH
                 if let perfNode { PerfRenderLedger.noteMarkdown(nodeId: perfNode, text: text, cacheDims: cacheDims, kind: "asyncEnd", reqId: perfReq) }

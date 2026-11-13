@@ -91,6 +91,33 @@ struct AssistantPanelView: View {
     }
 }
 
+/// 小芽台词正文：流式走 StreamingTextView，说完走 ChatMarkdownView（跟主聊天正文同一套字体 / 字号、assistant 字色）。
+/// 助手面板不是聊天页：两支一起设 `.global`，字色读全局（ThemeScope），流式和定稿同色、不吃气泡模式色。
+struct XiaoyaLineText: View {
+    let text: String
+    let engine: AssistantEngine
+    var streaming = false
+    var marked = false
+    var fontName = ""
+    var scale: CGFloat = 1.2
+    var onMarkTap: ((String) -> Void)? = nil
+
+    var body: some View {
+        Group {
+            if streaming {
+                XiaoyaStreamingText(engine: engine)
+            } else {
+                ChatMarkdownView(text: marked ? XiaoyaGlossary.markdown(text) : text,
+                                 fontName: fontName, scale: scale,
+                                 linkifyTickers: false, role: .assistant,
+                                 extraHighlights: marked ? XiaoyaMarker.highlights(XiaoyaGlossary.words(in: text), dark: Theme.activeScheme == .dark) : [],
+                                 onExtraHighlightTap: onMarkTap)
+            }
+        }
+        .environment(\.themeScope, .global)
+    }
+}
+
 struct XiaoyaConversationView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
@@ -354,18 +381,8 @@ struct XiaoyaConversationView: View {
     /// 剧本台词（marked）：[[概念词]] 换成粗体 + 一笔马克笔，点词 = onMarkTap；sticker = 右上角外侧贴一张（§12-A / E）
     private func herLine(_ text: String, streaming: Bool = false, marked: Bool = false, sticker: XiaoyaStickerKind? = nil,
                          onMarkTap: ((String) -> Void)? = nil) -> some View {
-        Group {
-            if streaming {
-                XiaoyaStreamingText(engine: engine)
-            } else {
-                // 跟主聊天正文同一套（MessageSegmentsView）：外观里选的字体 / 字号，assistant 字色
-                ChatMarkdownView(text: marked ? XiaoyaGlossary.markdown(text) : text,
-                                 fontName: selectedFont, scale: CGFloat(fontScale > 0 ? fontScale : 1.0),
-                                 linkifyTickers: false, role: .assistant,
-                                 extraHighlights: marked ? XiaoyaMarker.highlights(XiaoyaGlossary.words(in: text), dark: Theme.activeScheme == .dark) : [],
-                                 onExtraHighlightTap: onMarkTap)
-            }
-        }
+        XiaoyaLineText(text: text, engine: engine, streaming: streaming, marked: marked,
+                       fontName: selectedFont, scale: CGFloat(fontScale > 0 ? fontScale : 1.2), onMarkTap: onMarkTap)
             .textSelection(.enabled)
             .padding(.leading, 12)
             .padding(.vertical, 1)

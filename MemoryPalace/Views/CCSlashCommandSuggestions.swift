@@ -58,7 +58,7 @@ struct CCSlashCommandSuggestions: View {
     static func isHidden(_ name: String) -> Bool {
         #if PERSONAL_APPS
         let bare = name.drop { $0 == "/" }
-        return bare.lowercased().hasPrefix("susuos")
+        return bare.lowercased().hasPrefix("susuos") || TutuSkinUnlock.isHidden(name)
         #else
         return false
         #endif

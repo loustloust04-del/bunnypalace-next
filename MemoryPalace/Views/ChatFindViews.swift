@@ -17,7 +17,7 @@ struct ChatFindTopBar: View {
                 ZStack {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(Theme.textMuted)
+                        .foregroundColor(Theme.chat.textMuted)
                         .opacity(viewModel.inConvSearching ? 0 : 1)
                     ProgressView()
                         .controlSize(.small)
@@ -26,7 +26,7 @@ struct ChatFindTopBar: View {
                 .frame(width: 18)
                 TextField("在对话中查找", text: $viewModel.inConvQuery)
                     .font(.system(size: 15))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.search)
@@ -46,7 +46,7 @@ struct ChatFindTopBar: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(Theme.textSecondary)
+                    .foregroundColor(Theme.chat.textSecondary)
             }
             // 玻璃按钮只能用 .buttonStyle(.glass)：glassEffect + .plain 会吞点击（feedback_ios26_glass_button，09-26 ✕ 点不掉）
             .buttonStyle(.glass)
@@ -87,7 +87,7 @@ struct ChatFindPanel: View {
                 Button(action: openDatePicker) {
                     Image(systemName: "calendar")
                         .font(.system(size: 15))
-                        .foregroundColor(Theme.textSecondary)
+                        .foregroundColor(Theme.chat.textSecondary)
                         .frame(width: 24, height: ChatFindMetrics.size)
                         .contentShape(Rectangle())
                 }
@@ -95,7 +95,7 @@ struct ChatFindPanel: View {
                 if let status {
                     Text(status)
                         .font(.system(size: 13.5))
-                        .foregroundColor(viewModel.inConvSearchNote == nil ? Theme.textPrimary : Theme.textMuted)
+                        .foregroundColor(viewModel.inConvSearchNote == nil ? Theme.chat.textPrimary : Theme.chat.textMuted)
                         .monospacedDigit()
                         .lineLimit(1)
                 }
@@ -111,7 +111,7 @@ struct ChatFindPanel: View {
             } label: {
                 Text(viewModel.inConvListMode ? "聊天" : "列表")
                     .font(.system(size: 13.5, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
             }
             .buttonStyle(.glass)
             .buttonBorderShape(.capsule)
@@ -163,11 +163,11 @@ struct ChatFindPanel: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
         }
-        .tint(Theme.branchIndicator)
+        .tint(Theme.chat.branchIndicator)
         .padding(20)
         .presentationDetents([.height(500)])
         .presentationDragIndicator(.visible)
-        .presentationBackground(Theme.mainBg)
+        .presentationBackground(Theme.chat.mainBg)
     }
 }
 #endif
@@ -186,7 +186,7 @@ struct ChatFindNavButtons: View {
             navButton("chevron.up", enabled: canGoOlder, action: onOlder)
                 .accessibilityLabel("更早的结果")
             Rectangle()
-                .fill(Theme.textMuted.opacity(0.25))
+                .fill(Theme.chat.textMuted.opacity(0.25))
                 .frame(width: 18, height: 0.5)
             navButton("chevron.down", enabled: true, action: onNewer)
                 .accessibilityLabel("更新的结果")
@@ -202,7 +202,7 @@ struct ChatFindNavButtons: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(enabled ? Theme.textPrimary : Theme.textMuted.opacity(0.5))
+                .foregroundColor(enabled ? Theme.chat.textPrimary : Theme.chat.textMuted.opacity(0.5))
                 .frame(width: ChatFindMetrics.size, height: ChatFindMetrics.size)
                 .contentShape(Rectangle())
         }
@@ -239,7 +239,7 @@ struct ChatFindListView: View {
         .contentMargins(.bottom, bottomInset, for: .scrollContent)
         .ignoresSafeArea(.container, edges: .bottom)
         .ignoresSafeArea(.keyboard)
-        .background(Theme.mainBg.ignoresSafeArea())
+        .background(Theme.chat.mainBg.ignoresSafeArea())
     }
 
     private func row(_ hit: InConvFind.Hit) -> some View {
@@ -249,18 +249,18 @@ struct ChatFindListView: View {
                 HStack(spacing: 8) {
                     Text(hit.isUser ? userName : assistantName)
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
+                        .foregroundColor(Theme.chat.textPrimary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     if let date = hit.date {
                         Text(MacSearchQuery.dateLabel(date))
                             .font(.system(size: 12))
-                            .foregroundColor(Theme.textMuted)
+                            .foregroundColor(Theme.chat.textMuted)
                     }
                 }
                 Text(InConvFind.highlighted(hit.excerpt, terms: terms))
                     .font(.system(size: 13))
-                    .foregroundColor(Theme.textSecondary)
+                    .foregroundColor(Theme.chat.textSecondary)
                     .lineLimit(2)
             }
         }

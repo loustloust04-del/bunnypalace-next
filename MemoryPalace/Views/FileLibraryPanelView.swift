@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftStreamingMarkdown
 import ImageIO
@@ -11,6 +12,7 @@ import UIKit
 
 struct FileLibraryPanelView: View {
     @Environment(\.chatMetrics) private var metrics
+    @Environment(\.modelContext) private var modelContext
     @Environment(RightPanelNavigator.self) private var desktopNavigator: RightPanelNavigator?
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(PresetManager.self) private var presetManager: PresetManager?
@@ -29,6 +31,7 @@ struct FileLibraryPanelView: View {
     /// 「种子待批」：种子目录 / 页稿就是待批提案本身（reload 时后台读），改了写回同一份提案
     @State private var seedEntries: [CatalogSeedDrafts.Entry] = []
     @State private var editingSeed: SeedTarget? = nil
+    @State private var seedNotice: String?
     /// 修全局卡顿：reload / 外部变更检查都在后台扫盘，回主线程只按最新一次的结果落状态
     @State private var reloadGeneration = 0
     @State private var externalCheckInFlight = false
@@ -191,6 +194,11 @@ struct FileLibraryPanelView: View {
         } message: {
             Text(deletingPath.map { "确定删除「\($0)」吗？不可恢复。" } ?? "")
         }
+        .alert("重新编辑", isPresented: Binding(get: { seedNotice != nil }, set: { if !$0 { seedNotice = nil } })) {
+            Button("好", role: .cancel) { seedNotice = nil }
+        } message: {
+            Text(seedNotice ?? "")
+        }
         .alert("文件操作失败", isPresented: Binding(get: { operationError != nil }, set: { if !$0 { operationError = nil } })) {
             Button("好", role: .cancel) { operationError = nil }
         } message: {
@@ -292,11 +300,15 @@ struct FileLibraryPanelView: View {
         let pid = profileId
         // 种子待批是虚拟文件（提案里的字，盘上没有这个路径）：给个不变的时间戳，别报「已在外部删除」；
         // 别处改过由保存时的 baseline 比对拦（CatalogSeedDrafts.save）
-        return FileEditorSheet(path: entry.path, initialContent: entry.content, initialModifiedAt: .distantPast, readOnly: !entry.editable,
+        // 本人那组显示成名字；保存时按名字还原、比对（CatalogSeedDrafts.save）
+        let user = profileManager?.currentProfile.userName ?? ""
+        let shown = WikiStore.shown(entry.content, user: user)
+        return FileEditorSheet(path: entry.path, initialContent: shown, initialModifiedAt: .distantPast, readOnly: !entry.editable,
                                currentModifiedAt: { .distantPast },
-                               reloadExternalContent: { ReloadedFileContent(content: entry.content, modifiedAt: nil) },
+                               reloadExternalContent: { ReloadedFileContent(content: shown, modifiedAt: nil) },
                                onSaveAsync: { text, baseline in
-                                   try await CatalogSeedDrafts.save(entry, text: text, baseline: baseline, wiki: WikiStore(profileId: pid))
+                                   seedNotice = try await CatalogSeedDrafts.save(entry, text: text, baseline: baseline,
+                                       wiki: WikiStore(profileId: pid), userName: user, profileId: pid, context: modelContext)
                                    reload()
                                },
                                onCancel: { editingSeed = nil }, title: entry.name)
@@ -828,7 +840,7 @@ struct FileLibraryPanelView: View {
 
     /// 文件夹显示名：记忆树那几层用中文名（AI 名字取楼层变量），其余照 FileLibraryFolderStyle
     private func folderName(_ path: String) -> String {
-        FileLibraryMemoryFolder.displayName(path, assistantName: assistantDisplayName)
+        FileLibraryMemoryFolder.displayName(path, assistantName: assistantDisplayName, userName: profileManager?.currentProfile.userName ?? "")
             ?? PromptFolder.displayName(path)
             ?? FileLibrarySeedFolder.displayName(path, entries: seedEntries)
             ?? FileLibraryFolderStyle.displayName(forFolder: path)
@@ -1979,7 +1991,10 @@ struct FileEditorSheet: View {
     let versionKey: FileVersionStore.Key?
     /// C 档案 wiki 页（plan-memory-c3-catalog todo 11）：顶栏「历史」+「…」里的版本历史都走 wiki 自己的历史
     let wikiHistory: WikiHistoryTarget?
+    /// wiki 删除入口只认编辑器打开时的楼层，不跟随当前楼层变化。
+    private let openedProfileId: String?
     @State private var showWikiHistory = false
+    @State private var deletingWikiPage: WikiDeletionTarget?
 
     @State private var document: MarkdownWebEditorDocument
     @State private var savedContent: String
@@ -2104,12 +2119,16 @@ struct FileEditorSheet: View {
         onOpenWikiLink: @escaping (String) -> Void = { _ in },
         title: String? = nil,
         versionKey: FileVersionStore.Key? = nil,
-        wikiHistory: WikiHistoryTarget? = nil
+        wikiHistory: WikiHistoryTarget? = nil,
+        openedProfileId: String? = nil,
+        isStandaloneText: Bool = false
     ) {
         self.path = path
         self.title = title
         self.versionKey = readOnly ? nil : versionKey
         self.wikiHistory = readOnly ? nil : wikiHistory
+        self.openedProfileId = openedProfileId
+        self.isStandaloneText = isStandaloneText
         self.initialContent = initialContent
         self.initialModifiedAt = initialModifiedAt
         self.currentModifiedAt = currentModifiedAt
@@ -2236,6 +2255,8 @@ struct FileEditorSheet: View {
         } message: {
             Text("关闭前还有未保存的修改。")
         }
+        .modifier(WikiDeleteConfirmation(target: $deletingWikiPage,
+                                        hasUnsavedEdits: content != savedContent || liveHasPendingChanges) { _ in onCancel() })
         #if os(macOS)
         .frame(width: 720, height: 640)
         #else
@@ -2287,9 +2308,10 @@ struct FileEditorSheet: View {
         }
         .sheet(isPresented: $showWikiHistory) {
             if let wikiHistory {
-                WikiHistoryView(target: WikiHistoryTarget(store: wikiHistory.store, path: wikiHistory.path) { text in
-                    applyWikiRestore(text)
-                    wikiHistory.onRestored(text)
+                WikiHistoryView(target: WikiHistoryTarget(store: wikiHistory.store, path: wikiHistory.path,
+                    expectedVersion: wikiHistory.expectedVersion, shown: wikiHistory.shown) { text, version in
+                    applyWikiRestore(wikiHistory.shown(text))
+                    wikiHistory.onRestored(text, version)
                 }, hasUnsavedEdits: content != savedContent)
             }
         }
@@ -2343,7 +2365,7 @@ struct FileEditorSheet: View {
             if kind == .html {
                 HTMLPreviewWebView(
                     content: content,
-                    onOpenLink: { fileBrowseURL = FileBrowseTarget(url: $0) }
+                    onOpenLink: { openFileLink($0) }
                 )
                 .ignoresSafeArea(edges: .bottom)
             } else {
@@ -2430,6 +2452,11 @@ struct FileEditorSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     FrontmatterCard(fields: split.fields)
+                    if wikiHistory != nil {
+                        Text("事实域：\(WikiPage.factDomainLabel(SeedFactDomain(rawValue: split.fields.first { $0.key == "事实域" }?.value ?? "")))")
+                            .font(.system(size: Theme.F.caption))
+                            .foregroundColor(Theme.textSecondary)
+                    }
                     ForEach(location.parts.indices, id: \.self) { index in
                         previewMarkdown(location.parts[index])
                             .id(index)
@@ -2495,6 +2522,8 @@ struct FileEditorSheet: View {
             linkifyTickers: false
         )
         .chatCardRenderer(nodeId: nil)
+        // 文件库预览不是聊天页：card-* 卡壳 / 正文取色一律全局（ThemeScope）
+        .environment(\.themeScope, .global)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -2507,7 +2536,7 @@ struct FileEditorSheet: View {
             Divider()
             HTMLPreviewWebView(
                 content: splitPreviewContent,
-                onOpenLink: { fileBrowseURL = FileBrowseTarget(url: $0) }
+                onOpenLink: { openFileLink($0) }
             )
             .ignoresSafeArea(edges: .bottom)
         }
@@ -2838,6 +2867,16 @@ struct FileEditorSheet: View {
                     Label("分享…", systemImage: "square.and.arrow.up")
                 }
             }
+            if let wikiHistory, let openedProfileId {
+                Section {
+                    Button("删除页", role: .destructive) {
+                        guard !isSaving, let version = wikiHistory.expectedVersion else { return }
+                        deletingWikiPage = WikiDeletionTarget(profileId: openedProfileId, store: wikiHistory.store,
+                            path: wikiHistory.path, title: title ?? fileName, expectedVersion: version)
+                    }
+                    .disabled(isSaving)
+                }
+            }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 15, weight: .semibold))
@@ -3066,6 +3105,15 @@ struct FileEditorSheet: View {
     private func sendMarkdownCommand(_ command: String) {
         markdownCommandName = command
         markdownCommandToken += 1
+    }
+
+    /// 预览里点的链接：iOS 进花园浏览器（按「链接打开方式」），mac 照旧弹小浏览器
+    private func openFileLink(_ url: URL) {
+        #if os(iOS)
+        openWebLink(url)
+        #else
+        fileBrowseURL = FileBrowseTarget(url: url)
+        #endif
     }
 
     private func checkExternalChangeForOpenFile() {

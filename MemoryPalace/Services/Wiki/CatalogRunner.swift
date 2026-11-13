@@ -1,5 +1,9 @@
+import MemoryCore
 import Foundation
 import SwiftData
+#if DEBUG
+import os
+#endif
 
 // MARK: - C3 的设置（二级页那几行；plan-memory-c3-catalog 4.3）
 
@@ -87,18 +91,37 @@ actor CatalogLock {
     private var busy = Set<String>()
     private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
 
+    #if DEBUG
+    private static let waiterCounts = OSAllocatedUnfairLock(initialState: [String: Int]())
+
+    static func waiterCount(_ key: String) -> Int {
+        waiterCounts.withLock { $0[key, default: 0] }
+    }
+    #endif
+
     func acquire(_ profileId: String) async {
         guard busy.contains(profileId) else {
             busy.insert(profileId)
             return
         }
-        await withCheckedContinuation { waiters[profileId, default: []].append($0) }
+        await withCheckedContinuation {
+            waiters[profileId, default: []].append($0)
+            #if DEBUG
+            Self.waiterCounts.withLock { $0[profileId, default: 0] += 1 }
+            #endif
+        }
     }
 
     func release(_ profileId: String) {
         if var queue = waiters[profileId], !queue.isEmpty {
             let next = queue.removeFirst()
             waiters[profileId] = queue.isEmpty ? nil : queue
+            #if DEBUG
+            Self.waiterCounts.withLock {
+                let remaining = $0[profileId, default: 0] - 1
+                $0[profileId] = remaining > 0 ? remaining : nil
+            }
+            #endif
             next.resume()
         } else {
             busy.remove(profileId)
@@ -156,6 +179,8 @@ struct CatalogSeedResumeQueue {
     mutating func began(_ taskId: String) {
         states[taskId]?.started = true
     }
+
+    func contains(_ taskId: String) -> Bool { states[taskId] != nil }
 
     /// 跑完：要不要再续一次
     mutating func finished(_ taskId: String, ok: Bool) -> Bool {
@@ -226,7 +251,7 @@ final class CatalogSession {
         let anchor = run?.section("日志", body: CatalogRunRecord.code(note))
         await run?.flush()
         MemoryWriteLog.record(writer: .c3, profileId: job.profileId, ok: ok, note: note, model: job.modelName,
-                              run: run?.link(anchor: anchor))
+                              run: run?.link(anchor: anchor), memoryRoot: FileLibraryStore.memoryRoot(profileId: job.profileId))
     }
 
     private func save(_ proposal: WikiProposal) async -> Bool {
@@ -455,7 +480,7 @@ final class CatalogSession {
                 }.value
             }
         } catch {
-            MemoryWriteLog.record(writer: .c3, profileId: job.profileId, ok: false, note: "wiki 体检没跑成：\(error.localizedDescription)", model: "")
+            MemoryWriteLog.record(writer: .c3, profileId: job.profileId, ok: false, note: "wiki 体检没跑成：\(error.localizedDescription)", model: "", memoryRoot: FileLibraryStore.memoryRoot(profileId: job.profileId))
             return
         }
         let (health, saveError) = checked
@@ -464,7 +489,7 @@ final class CatalogSession {
         MemoryWriteLog.record(writer: .c3, profileId: job.profileId, ok: health.rebuildError == nil && saveError == nil,
                               note: "wiki 体检：" + health.summary + (health.rebuildError.map { " · 索引没重建成：\($0)" } ?? "")
                                 + (saveError.map { " · 结果没存上：\($0)" } ?? ""),
-                              model: "", run: run?.link(anchor: anchor))
+                              model: "", run: run?.link(anchor: anchor), memoryRoot: FileLibraryStore.memoryRoot(profileId: job.profileId))
     }
 
     // MARK: 批了的方向：这才搜原料、读页、写，写完交正文提案
@@ -482,7 +507,7 @@ final class CatalogSession {
             (source, claimed) = try await WikiProposalReview.claimDirections(proposalId, itemIds: itemIds, store: store, now: now)
         } catch {
             report.failures.append("方向没读到：\(error.localizedDescription)")
-            MemoryWriteLog.record(writer: .c3, profileId: job.profileId, ok: false, note: "批了的方向没读到：\(error.localizedDescription)", model: job.modelName)
+            MemoryWriteLog.record(writer: .c3, profileId: job.profileId, ok: false, note: "批了的方向没读到：\(error.localizedDescription)", model: job.modelName, memoryRoot: FileLibraryStore.memoryRoot(profileId: job.profileId))
             return report
         }
         guard !claimed.isEmpty else {
@@ -491,7 +516,7 @@ final class CatalogSession {
         }
         beginRun(source.title ?? "批了的方向", kind: "执行方向", now: now)
         let snapshot = await CatalogMaterial.snapshot(profileId: job.profileId, container: job.container, embedder: job.embedder, cancel: cancelToken)
-        let visible = await CatalogMaterial.conversationIds(profileId: job.profileId, container: job.container)
+        let visible = await CatalogMaterial.conversationIds(profileId: job.profileId, source: SwiftDataConversationSource(container: job.container))
         let drafts = CatalogDrafts(wiki: job.wiki, now: now)
         for item in claimed {
             guard let d = item.change.direction else { continue }
@@ -636,7 +661,7 @@ final class CatalogSession {
     }
 
     private func seedCancellable(entry: CatalogSeedEntry, now: Date) async -> CatalogRunReport {
-        beginRun("种子 · \(entry.label)", kind: "种子（一个 agent：读原料 → 目录 → 逐页写）", now: now)
+        beginRun("种子 · \(entry.label)", kind: "种子（要点卡 → 代码聚合 → 目录 → 逐页写）", now: now)
         var report = CatalogRunReport()
         let wiki = job.wiki
         let root = job.memoryRoot
@@ -646,6 +671,10 @@ final class CatalogSession {
             report.failures.append("C3 选的模型现在用不了（\(why)），种子不换别的模型，没开始")
             await log(report.failures[0], ok: false)
             return await finishRun(report)
+        }
+        if let open = await Task.detached(priority: .utility, operation: { tasks.open(proposals: WikiProposalStore(wiki: wiki)) }).value,
+           open.task.isLegacyLayout {
+            report.notes += await abandonSeed(open.task.id, now: now, reason: CatalogSeedTask.legacyLayoutNote).notes
         }
         if let open = await Task.detached(priority: .utility, operation: { tasks.open(proposals: WikiProposalStore(wiki: wiki)) }).value {
             report.skipped = "还有一个种子任务没完成（\(open.status.text)），先在审计台 › wiki › 整理提案批完或放弃再开新的"
@@ -690,9 +719,16 @@ final class CatalogSession {
         }
         var task = CatalogSeedTask(id: UUID().uuidString, profileId: job.profileId, entry: entry, modelName: job.modelName,
                                    modelKey: job.seedModel, createdAt: now, run: run.link())
-        task.materials = materials.items.map { .init(path: $0.path, name: $0.name, layer: $0.layer, version: $0.version) }
         task.skipped = materials.skipped
-        task.history = [.init(role: "user", content: CatalogSeedPrompts.opening(materials, names: job.names))]
+        // 原料全文先落快照（写不成不发请求），清单和版本从快照来；再存任务；之后才问模型
+        let snapshot: CatalogSeedMaterials.Snapshot
+        switch await writeSnapshot(materials, task: &task, tasks: tasks) {
+        case .success(let s): snapshot = s
+        case .failure(let failure):
+            report.failures.append(failure.message)
+            await log(failure.message, ok: false)
+            return await finishRun(report)
+        }
         let first = task
         do {
             try await Task.detached(priority: .utility) { try tasks.save(first) }.value
@@ -702,8 +738,36 @@ final class CatalogSession {
             return await finishRun(report)
         }
         let counts = Dictionary(grouping: materials.items, by: \.layer).mapValues(\.count)
-        await log("种子（\(entry.label)）：原料 \(materials.items.count) 份（Prompt \(counts["Prompt"] ?? 0) · CC \(counts["CC"] ?? 0) · wiki \(counts["wiki"] ?? 0)），一个 agent 全读")
-        return await runSeedTask(task, materials: materials, control: nil, now: now, report: &report)
+        await log("种子（\(entry.label)）：原料 \(materials.items.count) 份（Prompt \(counts["Prompt"] ?? 0) · CC \(counts["CC"] ?? 0) · wiki \(counts["wiki"] ?? 0)），"
+                  + Self.batchNote(materials, entry: entry))
+        return await runSeedTask(task, snapshot: snapshot, control: nil, now: now, report: &report)
+    }
+
+    struct SnapshotWriteError: Error {
+        let message: String
+    }
+
+    /// 原料快照写进 `.proposals/<任务>/materials/`，清单 / 版本 / 出卡进度一次填齐
+    private func writeSnapshot(_ materials: CatalogSeedMaterials, task: inout CatalogSeedTask, tasks: CatalogSeedTaskStore) async -> Result<CatalogSeedMaterials.Snapshot, SnapshotWriteError> {
+        let id = task.id
+        let written: CatalogSeedMaterials.Snapshot
+        do {
+            written = try await Task.detached(priority: .utility) { try tasks.writeSnapshot(materials, id: id) }.value
+        } catch {
+            return .failure(SnapshotWriteError(message: "原料快照没存成，没开始问模型：\(error.localizedDescription)"))
+        }
+        task.materials = written.materials
+        task.read = written.read
+        task.carded = task.carded ?? [:]
+        task.notes = task.notes ?? SeedNoteProgress()
+        return .success(written)
+    }
+
+    /// 日志里那一句：可出卡几份、分几批
+    private static func batchNote(_ materials: CatalogSeedMaterials, entry: CatalogSeedEntry) -> String {
+        let cardable = materials.items.filter { SeedNoteBatcher.cardable($0, entry: entry) }
+        let batches = SeedNoteBatcher.batches(cardable, limit: CatalogSettings.seedBatchChars(), carded: [:], entry: entry).count
+        return "可出卡 \(cardable.count) 份，分 \(batches) 批出要点卡，再由代码聚合成目录"
     }
 
     /// 重启 / 续跑前先对账：目录已经存了就认；正文提案存了、目录上还没记的补记上（都按任务文件夹里实际存下的）
@@ -740,8 +804,9 @@ final class CatalogSession {
             report.skipped = "这个种子任务不在了，或已经结束"
             return report
         }
+        if task.isLegacyLayout { return await abandonSeed(taskId, now: now, reason: CatalogSeedTask.legacyLayoutNote) }
         // 目录还有待批、这一下也没批出要写的页（逐项驳回时）：不续记录、不记日志，等批完那一下再结算（走查：每驳回一项多一行「写好了」）
-        if task.outlineSaved, task.pending == nil,
+        if task.outlineSaved,
            let saved = await Task.detached(priority: .utility, operation: { WikiProposalStore(wiki: wiki).load(taskId) }).value,
            saved.pendingCount > 0, CatalogSeedTask.unwritten(saved).isEmpty {
             report.skipped = "目录还有 \(saved.pendingCount) 项待批"
@@ -750,7 +815,7 @@ final class CatalogSession {
         run = CatalogRunRecord(wiki: wiki, continuing: task.run, topic: "种子 · \(task.entry.label)", now: now)
         let outline = await reconcileSeed(&task)
         let left = CatalogSeedTask.unwritten(outline)
-        if task.outlineSaved, left.isEmpty, task.pending == nil {
+        if task.outlineSaved, left.isEmpty {
             await settleSeed(&task, outline: outline, normal: !isCancelled, now: now, report: &report)
             return await finishRun(report)
         }
@@ -765,30 +830,22 @@ final class CatalogSession {
             await log(report.failures[0], ok: false)
             return await finishRun(report)
         }
-        var materials = CatalogSeedMaterials()
         let root = job.memoryRoot
         let day = CatalogSurvey.day(task.createdAt)
-        if task.entry == .survey {
-            let answers = task.answers ?? []
-            materials = await Task.detached(priority: .utility) { CatalogSurvey.materials(answers, day: day, memoryRoot: root, wiki: wiki) }.value
-        } else if !task.unread.isEmpty {
-            let base = job.floorBase
-            do {
-                materials = try await Task.detached(priority: .utility) { try CatalogSeedMaterials.gather(floorBase: base, memoryRoot: root, wiki: wiki) }.value
-            } catch {
-                report.failures.append("原料没读到：\(error.localizedDescription)")
-                await log(report.failures[0], ok: false)
-                return await finishRun(report)
-            }
-        }
-        // 三问：答案存好以后头一回真跑，这才定原料清单、开场，先存任务再问模型
-        let fresh = task.history.isEmpty
-        if fresh {
-            task.materials = materials.items.map { .init(path: $0.path, name: $0.name, layer: $0.layer, version: $0.version) }
-            task.skipped = materials.skipped
-            task.history = [.init(role: "user", content: CatalogSeedPrompts.opening(materials, names: job.names, entry: task.entry, day: day))]
+        let loaded = await Task.detached(priority: .utility) { () -> Result<CatalogSeedMaterials.Snapshot, Error> in
+            Result { try tasks.loadSnapshot(taskId) }
+        }.value
+        var snapshot = try? loaded.get()
+        // 还没开工（清单 / 版本都空）：上次快照写成了、任务没来得及存（或那次没存成）→ 从快照恢复清单和版本，先存任务再问模型
+        let initialized = !task.materials.isEmpty || !task.read.isEmpty
+        if !initialized, let recovered = snapshot {
+            task.materials = recovered.materials
+            task.read = recovered.read
+            task.carded = task.carded ?? [:]
+            task.notes = task.notes ?? SeedNoteProgress()
             task.state = .reading
             task.note = nil
+            task.layout = CatalogSeedTask.currentLayout
             let first = task
             do {
                 try await Task.detached(priority: .utility) { try tasks.save(first) }.value
@@ -797,25 +854,64 @@ final class CatalogSession {
                 await log(report.failures[0], ok: false)
                 return await finishRun(report)
             }
-            let answers = materials.items.filter { $0.layer == CatalogSurvey.layer }.count
-            await log("种子（\(task.entry.label)）：答案 \(answers) 条 · wiki \(materials.items.count - answers) 份（只看、不当出处），一个 agent 出目录")
+            await log("种子：上次原料快照写成了、任务没存上，从快照恢复了原料清单（\(recovered.entries.count) 份）再接着跑")
+        }
+        // 三问：答案存好以后头一回真跑，这才定原料（答案 + wiki 只看）、写快照，先存任务再问模型
+        let fresh = task.entry == .survey && snapshot == nil && !initialized
+        if fresh {
+            let answers = task.answers ?? []
+            let materials = await Task.detached(priority: .utility) { CatalogSurvey.materials(answers, day: day, memoryRoot: root, wiki: wiki) }.value
+            task.skipped = materials.skipped
+            switch await writeSnapshot(materials, task: &task, tasks: tasks) {
+            case .success(let s): snapshot = s
+            case .failure(let failure):
+                report.failures.append(failure.message)
+                await log(failure.message, ok: false)
+                return await finishRun(report)
+            }
+            task.state = .reading
+            task.note = nil
+            task.layout = CatalogSeedTask.currentLayout
+            let first = task
+            do {
+                try await Task.detached(priority: .utility) { try tasks.save(first) }.value
+            } catch {
+                report.failures.append("种子任务没存成，没开始问模型：\(error.localizedDescription)")
+                await log(report.failures[0], ok: false)
+                return await finishRun(report)
+            }
+            let answered = materials.items.filter { $0.layer == CatalogSurvey.layer }.count
+            await log("种子（\(task.entry.label)）：答案 \(answered) 条 · wiki \(materials.items.count - answered) 份（只看、不当出处），" + Self.batchNote(materials, entry: .survey))
+        }
+        guard let snapshot else {
+            var why = ""
+            if case .failure(let error as SafeWiki.PathError) = loaded { why = "（\(error.localizedDescription)）" }
+            report.failures.append("这个种子任务的原料快照不在了（或被动过）\(why)，续不了；可以放弃这次种子再重新播种")
+            await log(report.failures[0], ok: false)
+            return await finishRun(report)
+        }
+        // 已开工的：快照 manifest 必须和任务记的清单 / 版本一致，不一致不接着跑（不静默少读、不换原料）
+        if initialized, let mismatch = task.snapshotMismatch(snapshot) {
+            report.failures.append("这个种子任务的原料快照和任务记的原料清单对不上（\(mismatch)），续不了：没有再问模型。请放弃这个种子任务再重新播种")
+            await log(report.failures[0], ok: false)
+            return await finishRun(report)
         }
         let control = task.outlineSaved ? outline.map { CatalogSeedPrompts.control($0, names: job.names) } : nil
         if !fresh {
-            await log(task.outlineSaved ? "种子：接着同一个任务写 \(left.count) 页（不重读原料）" : "种子：接着同一个任务读原料（还有 \(task.unread.count) 份没读）")
+            await log(task.outlineSaved ? "种子：接着同一个任务写 \(left.count) 页（不重读原料）"
+                      : "种子：接着同一个任务出目录（还有 \(task.uncarded.count) 份没出要点卡）")
         }
-        return await runSeedTask(task, materials: materials, control: control, now: now, report: &report)
+        return await runSeedTask(task, snapshot: snapshot, control: control, now: now, report: &report)
     }
 
-    private func runSeedTask(_ task: CatalogSeedTask, materials: CatalogSeedMaterials, control: String?, now: Date,
+    private func runSeedTask(_ task: CatalogSeedTask, snapshot: CatalogSeedMaterials.Snapshot, control: String?, now: Date,
                              report: inout CatalogRunReport) async -> CatalogRunReport {
         guard let run else { return report }
         let agent = CatalogAgent(deps: job.seedDeps ?? job.agentDeps, cancel: cancelToken)
         self.agent = agent
         agent.onRound = { [weak self] round in self?.onProgress?("种子", round) }
         if isCancelled { agent.cancel() }
-        let items = Dictionary(materials.items.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
-        let outcome = await agent.runSeed(.init(task: task, materials: items, wiki: job.wiki, names: job.names, run: run, control: control, now: now))
+        let outcome = await agent.runSeed(.init(task: task, snapshot: snapshot, wiki: job.wiki, names: job.names, run: run, control: control, now: now))
         self.agent = nil
         var task = outcome.task
         report.proposals += outcome.pages.count
@@ -922,8 +1018,9 @@ final class CatalogSession {
         _ = await save(task)
     }
 
-    /// 放弃：剩下待批的目录项驳回（目录项不带碎片，不伤碎片），任务记成放弃；已交的正文提案照常在审计台
-    func abandonSeed(_ taskId: String, now: Date = Date()) async -> CatalogRunReport {
+    /// 放弃：剩下待批的目录项驳回（目录项不带碎片，不伤碎片），任务记成放弃；已交的正文提案照常在审计台。
+    /// reason = 代码替她作废（旧格式），记成这句话
+    func abandonSeed(_ taskId: String, now: Date = Date(), reason: String? = nil) async -> CatalogRunReport {
         var report = CatalogRunReport()
         let wiki = job.wiki
         let tasks = CatalogSeedTaskStore(wiki: wiki)
@@ -935,16 +1032,17 @@ final class CatalogSession {
         }
         do {
             if let outline, outline.pendingCount > 0 {
-                try await WikiProposalReview.reject(taskId, store: store, context: ModelContext(job.container), now: now)
+                try await WikiProposalReview.reject(taskId, origin: .abandonedSeed, store: store,
+                    profileId: job.profileId, context: ModelContext(job.container), now: now)
             }
             task.state = .abandoned
-            task.note = "放弃了"
+            task.note = reason ?? "放弃了"
             task.endedAt = now
             let snapshot = task
             try await Task.detached(priority: .utility) { try tasks.save(snapshot) }.value
-            report.notes.append("放弃了这次种子（已交的正文提案还在审计台 › wiki › 整理提案）")
-            MemoryWriteLog.record(writer: .c3, profileId: job.profileId, ok: true, note: "种子：放弃了这次任务", model: job.modelName,
-                                  run: CatalogRunLink(path: task.run.path))
+            report.notes.append(reason ?? "放弃了这次种子（已交的正文提案还在审计台 › wiki › 整理提案）")
+            MemoryWriteLog.record(writer: .c3, profileId: job.profileId, ok: true, note: "种子：" + (reason ?? "放弃了这次任务"), model: job.modelName,
+                                  run: CatalogRunLink(path: task.run.path), memoryRoot: FileLibraryStore.memoryRoot(profileId: job.profileId))
         } catch {
             report.failures.append("没放弃成：\(error.localizedDescription)")
         }
@@ -1082,7 +1180,7 @@ final class CatalogSession {
             + (grouped.unclear > 0 ? " · 碰上不止一页、拿不准的 \(grouped.unclear) 条留着" : ""))
         let snapshot = await CatalogMaterial.snapshot(profileId: job.profileId, container: job.container, embedder: job.embedder, cancel: cancelToken)
         guard !isCancelled else { report.cancelled = true; return await finishRun(report) }
-        let visible = await CatalogMaterial.conversationIds(profileId: job.profileId, container: job.container)
+        let visible = await CatalogMaterial.conversationIds(profileId: job.profileId, source: SwiftDataConversationSource(container: job.container))
         for topic in grouped.topics {
             if isCancelled {
                 report.cancelled = true
@@ -1120,7 +1218,7 @@ final class CatalogSession {
         var report = CatalogRunReport()
         let snapshot = await CatalogMaterial.snapshot(profileId: job.profileId, container: job.container, embedder: job.embedder, cancel: cancelToken)
         guard !isCancelled else { report.cancelled = true; return await finishRun(report) }
-        let visible = await CatalogMaterial.conversationIds(profileId: job.profileId, container: job.container)
+        let visible = await CatalogMaterial.conversationIds(profileId: job.profileId, source: SwiftDataConversationSource(container: job.container))
         let request = WikiProposal.Request(profileId: job.profileId, text: Self.personaRequest)
         var a = agentJob("人设变化", snapshot: snapshot, conversationIds: visible)
         a.hint = Self.personaHint(job.names)
@@ -1139,7 +1237,7 @@ final class CatalogSession {
         var report = CatalogRunReport()
         let snapshot = await CatalogMaterial.snapshot(profileId: job.profileId, container: job.container, embedder: job.embedder, cancel: cancelToken)
         guard !isCancelled else { report.cancelled = true; return await finishRun(report) }
-        let visible = await CatalogMaterial.conversationIds(profileId: job.profileId, container: job.container)
+        let visible = await CatalogMaterial.conversationIds(profileId: job.profileId, source: SwiftDataConversationSource(container: job.container))
         let request = WikiProposal.Request(profileId: job.profileId, text: "整理一个主题：\(topic)")
         _ = await agentTopic(agentJob(topic, snapshot: snapshot, conversationIds: visible), origin: .topic, directionRef: nil,
                              request: request, now: now, report: &report)
@@ -1197,8 +1295,8 @@ final class CatalogRunner {
             for id in ids {
                 let store = await Task.detached(priority: .utility) { WikiProposalStore(wiki: WikiStore(profileId: id)) }.value
                 do {
-                    let fixed = try await WikiProposalReview.finishInterrupted(store: store, before: before)
-                    if fixed > 0 { MemoryWriteLog.record(writer: .c3, profileId: id, ok: false, note: "上次运行中断的方向 \(fixed) 条，已记下结果", model: "") }
+                    _ = try await WikiProposalReview.finishInterrupted(store: store, before: before,
+                        profileId: id, context: ModelContext(profileManager.container))
                 } catch {
                     CacheDiagLog.shared.log("📚 整理编目: 中断方向收尾失败 \(error.localizedDescription)")
                 }
@@ -1246,7 +1344,7 @@ final class CatalogRunner {
             case nil:
                 return
             case .skip(let why)?:
-                MemoryWriteLog.record(writer: .c3, profileId: profile.id, ok: true, note: why, model: "")
+                MemoryWriteLog.record(writer: .c3, profileId: profile.id, ok: true, note: why, model: "", memoryRoot: FileLibraryStore.memoryRoot(profileId: profile.id))
             case .run?:
                 // c2c3-v2 第 7 段：同一次巡检里 A4 一天一条先拼完、落盘，再整理（拼不成也接着整理，A4 自己记状态）
                 await SessionCloseoutTrigger.shared.timelineDaily(profile: profile)
@@ -1292,9 +1390,9 @@ final class CatalogRunner {
         let store = await Task.detached(priority: .utility) { WikiProposalStore(wiki: wiki ?? WikiStore(profileId: profileId)) }.value
         do {
             try await WikiProposalReview.closeDirections(proposalId, itemIds: itemIds, result: result, store: store)
-            MemoryWriteLog.record(writer: .c3, profileId: profileId, ok: false, note: "批了的方向没执行：\(result)", model: "")
+            MemoryWriteLog.record(writer: .c3, profileId: profileId, ok: false, note: "批了的方向没执行：\(result)", model: "", memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
         } catch {
-            MemoryWriteLog.record(writer: .c3, profileId: profileId, ok: false, note: "批了的方向没执行，结果也没记上：\(error.localizedDescription)", model: "")
+            MemoryWriteLog.record(writer: .c3, profileId: profileId, ok: false, note: "批了的方向没执行，结果也没记上：\(error.localizedDescription)", model: "", memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
         }
         NotificationCenter.default.post(name: .memoryDidChange, object: nil)
     }
@@ -1314,12 +1412,16 @@ final class CatalogRunner {
 
     @ObservationIgnored private var seedResumes = CatalogSeedResumeQueue()
 
+    func hasActiveSeed(_ taskId: String, profileId: String?) -> Bool {
+        seedResumes.contains(taskId) || profileId.map { seedRequests[$0] != nil } == true
+    }
+
     /// 「从 CC 记忆播种」/「从人设生成基础 wiki」：同一个种子任务机制
     func seed(profile: Profile, entry: CatalogSeedEntry) {
         guard MemoryWriterSettings.writes(.c3, defaults: defaults), seedRequests[profile.id] == nil else { return }
         let token = CatalogCancel()
         seedRequests[profile.id] = token
-        MemoryWriteLog.record(writer: .c3, profileId: profile.id, ok: true, note: "种子（\(entry.label)）：进入整理队列", model: "")
+        MemoryWriteLog.record(writer: .c3, profileId: profile.id, ok: true, note: "种子（\(entry.label)）：进入整理队列", model: "", memoryRoot: FileLibraryStore.memoryRoot(profileId: profile.id))
         Task {
             defer { seedRequests[profile.id] = nil }
             await start(profile: profile) { session in
@@ -1364,12 +1466,12 @@ final class CatalogRunner {
                                                blocked: blocked, now: now)
             }.value
         } catch {
-            MemoryWriteLog.record(writer: .c3, profileId: profileId, ok: false, note: "种子（新用户三问）：答案没存成：\(error.localizedDescription)", model: "")
+            MemoryWriteLog.record(writer: .c3, profileId: profileId, ok: false, note: "种子（新用户三问）：答案没存成：\(error.localizedDescription)", model: "", memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
             return .failed
         }
         MemoryWriteLog.record(writer: .c3, profileId: profileId, ok: true,
                               note: blocked.map { "种子（新用户三问）：答案存好了，现在生成不了（\($0.reason)），可稍后生成" } ?? "种子（新用户三问）：答案存好了，进入整理队列",
-                              model: "")
+                              model: "", memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
         NotificationCenter.default.post(name: .memoryDidChange, object: nil)
         if blocked == nil {
             if let enqueue { enqueue(taskId, profile) } else { resumeSeed(taskId, profile: profile) }
@@ -1383,7 +1485,7 @@ final class CatalogRunner {
             return MemoryWriterSettings.isOn(.c3, defaults: defaults) ? .memoryOff : .c3Off
         }
         guard let providers = providerManager else { return .noModel }
-        let chat = providers.resolveModel(conversationModelId: nil, globalFallbackId: defaults.string(forKey: "selectedChatModel"))
+        let chat = providers.resolveModel(conversationModelId: nil, profileModelId: nil, globalFallbackId: defaults.string(forKey: "selectedChatModel"))
         let route = CatalogModelRoute.resolve(providerManager: providers, chatFallback: chat, defaults: defaults)
         if route.fallbackNote != nil { return route.localMissing || !LocalLLMService.isSupported ? .localModel : .background }
         if case .remote(let m) = route.route, !(providers.provider(for: m).map(providers.isUsable) ?? false) { return .noModel }
@@ -1441,7 +1543,7 @@ final class CatalogRunner {
     private func makeJob(profile: Profile) async -> CatalogJob? {
         guard let pm = profileManager, let providers = providerManager else { return nil }
         let pid = profile.id
-        let chat = providers.resolveModel(conversationModelId: nil, globalFallbackId: defaults.string(forKey: "selectedChatModel"))
+        let chat = providers.resolveModel(conversationModelId: nil, profileModelId: nil, globalFallbackId: defaults.string(forKey: "selectedChatModel"))
         let route = CatalogModelRoute.resolve(providerManager: providers, chatFallback: chat, defaults: defaults)
         let remote: ProviderModel?
         if case .remote(let m) = route.route { remote = m } else { remote = nil }

@@ -1,0 +1,85 @@
+{
+  "name": "xingyan", "now": 1793649600000,
+  "variants": [
+    {"name":"xingyan","master":true,"budget":10000},
+    {"name":"xingyan-budget","master":true,"budget":25},
+    {"name":"xingyan-current","master":true,"budget":10000,"currentConversationId":"xingyan-window-0001"},
+    {"name":"xingyan-off-window","master":true,"budget":10000,"currentConversationId":"linqi-window-0002"},
+    {"name":"xingyan-master-off","master":false,"budget":10000}
+  ],
+  "windows": [
+    {"id":"xingyan-window-0001","title":"云桥城航图","current":"xz-n4","memoryEnabled":true,"trashed":false,
+      "nodes":[
+        {"id":"xz-n0","role":"user","text":"岚舟与林栖在云桥城展开银叶罗盘。","at":1793494800000,"hidden":false,"deleted":false},
+        {"id":"xz-n1","role":"assistant","text":"星砚把航图放在白石台，林栖折好纸鹤。","at":1793494860000,"parent":"xz-n0","hidden":false,"deleted":false},
+        {"id":"xz-hidden","role":"user","text":"隐藏锚的虚构暗号是紫砂星螺。","at":1793494890000,"parent":"xz-n1","hidden":true,"deleted":false},
+        {"id":"xz-n2","role":"user","text":"岚舟确认云桥城航图从东塔出发。","at":1793494920000,"parent":"xz-hidden","hidden":false,"deleted":false},
+        {"id":"xz-branch","role":"assistant","text":"未选中分支的林栖改走西塔。","at":1793494980000,"parent":"xz-n2","hidden":false,"deleted":false},
+        {"id":"xz-deleted","role":"assistant","text":"已删除锚的虚构暗号是铜羽月灯。","at":1793494980000,"parent":"xz-n2","hidden":false,"deleted":true},
+        {"id":"xz-n3","role":"assistant","text":"星砚记下月初的银叶罗盘方位。","at":1793536200000,"parent":"xz-n2","hidden":false,"deleted":false},
+        {"id":"xz-n4","role":"user","text":"林栖在晨光中收起纸鹤与航图。","at":1793541600000,"parent":"xz-n3","hidden":false,"deleted":false}
+      ],
+      "segments":[{"from":0,"to":2,"story":"岚舟与林栖在云桥城展开银叶罗盘，星砚把航图放在白石台。"},{"from":2,"to":4,"story":"岚舟确认东塔路线，星砚记下月初罗盘方位。"}],
+      "overview":"【走向】岚舟与林栖在云桥城规划航图。\n【原话】从东塔出发。\n【关键词】云桥城、银叶罗盘"
+    },
+    {"id":"linqi-window-0002","title":"林栖独立窗口","current":"lq-n1","memoryEnabled":false,"trashed":false,
+      "nodes":[
+        {"id":"lq-n0","role":"user","text":"林栖在独立窗口画青玉风筝。","at":1793494800000,"hidden":false,"deleted":false},
+        {"id":"lq-n1","role":"assistant","text":"星砚收好青玉风筝的线轴。","at":1793494860000,"parent":"lq-n0","hidden":false,"deleted":false}
+      ],"segments":[{"from":0,"to":2,"story":"林栖的青玉风筝只留原文。"}],"overview":"林栖与青玉风筝"
+    },
+    {"id":"lantern-window-0003","title":"云桥城旧灯","current":"lt-n1","memoryEnabled":true,"trashed":false,
+      "nodes":[
+        {"id":"lt-n0","role":"user","text":"岚舟在旧灯窗口谈过琥珀风铃。","at":1793386800000,"hidden":false,"deleted":false},
+        {"id":"lt-n1","role":"assistant","text":"星砚记下琥珀风铃的清亮声音。","at":1793386860000,"parent":"lt-n0","hidden":false,"deleted":false}
+      ],"segments":[{"from":0,"to":2,"story":"岚舟听云桥城琥珀风铃。"}],"overview":"云桥城的旧灯与风铃"
+    },
+    {"id":"recycle-window-0004","title":"回收站虚构窗口","current":"rc-n0","memoryEnabled":true,"trashed":true,
+      "nodes":[{"id":"rc-n0","role":"user","text":"林栖的回收站星砂钟不应被读到。","at":1793494800000,"hidden":false,"deleted":false}],
+      "segments":[{"from":0,"to":1,"story":"回收站的星砂钟。"}],"overview":"回收站星砂钟"
+    }
+  ],
+  "pages": [
+    {"path":"人/林栖","approved":true,"versions":[
+      "---\n触发词: [林栖]\n钩子: 林栖的航图\n---\n# 林栖\n## 现在\n林栖在云桥城准备纸鹤。\n## 记录\n",
+      "---\n触发词: [林栖]\n钩子: 林栖的航图\n---\n# 林栖\n## 现在\n林栖在云桥城筹备纸鹤展览，岚舟负责航图。\n## 记录\n- 林栖折纸鹤的碎片（出处：碎片 a1000001）\n"
+    ]},
+    {"path":"地点/云桥城","approved":true,"versions":[
+      "---\n触发词: [云桥城]\n钩子: 云桥城航图\n条目: [\"memory/cc/云桥航图.md|v1\",\"memory/cc/云桥航图.md|v2\"]\n---\n# 云桥城\n## 现在\n岚舟与星砚在云桥城规划东塔航线。\n## 记录\n- 林栖参与航图（memory/cc/云桥航图.md）\n"
+    ]},
+    {"path":"物/银叶罗盘","approved":true,"versions":[
+      "---\n触发词: [银叶罗盘]\n钩子: 罗盘方位\n条目: [\"memory/cc/旧罗盘.md|old1\"]\n---\n# 银叶罗盘\n## 现在\n银叶罗盘由林栖保管，星砚把它放在云桥城白石台上。\n## 记录\n- 旧罗盘记录（memory/cc/旧罗盘.md）\n"
+    ]},
+    {"path":"主题/风铃","approved":true,"versions":[
+      "---\n触发词: [琥珀风铃]\n钩子: 风铃合成资料\n---\n# 琥珀风铃\n## 现在\ncedar maple obsidian lantern，林栖为云桥城挑选琥珀风铃。\n## 记录\n"
+    ]},
+    {"path":"人/private_雾岛","approved":true,"versions":[
+      "---\n触发词: [雾岛]\n钩子: 私密虚构页\n---\n# 雾岛\n## 现在\n私密虚构暗号是绯红星壳。\n## 记录\n"
+    ]},
+    {"path":"主题/未批星帆","approved":false,"versions":[
+      "---\n触发词: [星帆]\n钩子: 尚未批准\n---\n# 星帆\n## 现在\n岚舟的星帆提案尚未批准。\n## 记录\n"
+    ]}
+  ],
+  "fragments": [
+    {"id":"A1000001-0000-4000-8000-000000000001","text":"林栖折纸鹤，岚舟与林栖一起筹备云桥城展览。","subject":"林栖","reviewed":true,"pinned":false,"superseded":false,"conversationId":"xingyan-window-0001","nodeId":"xz-n0"},
+    {"id":"A1000002-0000-4000-8000-000000000002","text":"银叶罗盘的方位由星砚记录。","subject":"银叶罗盘","reviewed":true,"pinned":false,"superseded":false,"conversationId":"xingyan-window-0001","nodeId":"xz-n3"},
+    {"id":"A1000003-0000-4000-8000-000000000003","text":"林栖未审阅的星砂笔记。","subject":"林栖","reviewed":false,"pinned":false,"superseded":false,"conversationId":"xingyan-window-0001","nodeId":"xz-n0"},
+    {"id":"A1000004-0000-4000-8000-000000000004","text":"岚舟钉住虚构楼层的纸鹤约定。","subject":"纸鹤约定","reviewed":false,"pinned":true,"superseded":false,"conversationId":"xingyan-window-0001","nodeId":"xz-n0"},
+    {"id":"A1000005-0000-4000-8000-000000000005","text":"林栖已经失效的西塔旧安排。","subject":"林栖","reviewed":true,"pinned":false,"superseded":true,"conversationId":"xingyan-window-0001","nodeId":"xz-n0"},
+    {"id":"A1000006-0000-4000-8000-000000000006","text":"琥珀风铃挂在云桥城旧灯旁。","subject":"琥珀风铃","reviewed":true,"pinned":false,"superseded":false,"conversationId":"lantern-window-0003","nodeId":"lt-n0"},
+    {"id":"A1000007-0000-4000-8000-000000000007","text":"青玉风筝是林栖独立窗口的作品。","subject":"青玉风筝","reviewed":true,"pinned":false,"superseded":false,"conversationId":"linqi-window-0002","nodeId":"lq-n0"},
+    {"id":"A1000008-0000-4000-8000-000000000008","text":"星砂钟属于回收站窗口。","subject":"星砂钟","reviewed":true,"pinned":false,"superseded":false,"conversationId":"recycle-window-0004","nodeId":"rc-n0"},
+    {"id":"A1000009-0000-4000-8000-000000000009","text":"岚舟未看过的紫玉帆。","subject":"紫玉帆","reviewed":false,"pinned":false,"superseded":false,"conversationId":"xingyan-window-0001","nodeId":"xz-n0"}
+  ],
+  "cards":[
+    {"path":"memory/cc/云桥航图.md","version":"v1","title":"云桥航图","gist":"林栖与岚舟最初选择北塔。","original":"岚舟与林栖在云桥城的旧版航图选择北塔，星砚画下纸鹤。"},
+    {"path":"memory/cc/云桥航图.md","version":"v2","title":"云桥航图","gist":"林栖与岚舟改走东塔。","original":"岚舟与林栖在云桥城的新版航图改走东塔，星砚收起银叶罗盘。"},
+    {"path":"memory/cc/旧罗盘.md","version":"old1","title":"旧罗盘","gist":"林栖保管银叶罗盘，没有保存历史原料。"}
+  ],
+  "days":[
+    {"day":"2026-10-31","conversationId":"xingyan-window-0001","from":"xz-n0","to":"xz-n1","title":"岚舟与林栖展开银叶罗盘"},
+    {"day":"2026-10-31","conversationId":"xingyan-window-0001","from":"xz-n2","to":"xz-n3","title":"跨月深夜星砚记下罗盘方位"},
+    {"day":"2026-11-01","conversationId":"xingyan-window-0001","from":"xz-n4","to":"xz-n4","title":"林栖收起航图"}
+  ],
+  "daily":"2026-10-30"
+}

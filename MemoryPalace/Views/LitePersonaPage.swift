@@ -12,11 +12,11 @@ struct LitePersonaPage: View {
     @Environment(PresetManager.self) private var presetManager: PresetManager?
 
     @State private var showCoach = false
-    @State private var editingField: EditingField?
+    @State private var editingPromptSlot: PromptSlotEditing.Target?
+    @State private var saveError: String?
 
-    private enum EditingField: Identifiable {
+    private enum EditingField {
         case char, persona
-        var id: Int { hashValue }
         var title: String {
             switch self {
             case .char: return "助手设定"
@@ -94,13 +94,8 @@ struct LitePersonaPage: View {
                 if !persona.isEmpty { slotBinding(PromptSlot.personaDescriptionId).wrappedValue = persona }
             }
         }
-        .fullScreenCover(item: $editingField) { field in
-            FileEditorSheet.text(title: field.title,
-                                 text: slotBinding(field.slotId).wrappedValue,
-                                 format: .markdown,
-                                 onSave: { slotBinding(field.slotId).wrappedValue = $0 },
-                                 onCancel: { editingField = nil })
-        }
+        .fullScreenCover(item: $editingPromptSlot) { PromptSlotEditorSheet(target: $0) }
+        .modifier(SaveFailedAlert(message: $saveError))
     }
 
     // MARK: - 内容框（原样可直接编辑，标签旁小按钮展开全屏）
@@ -120,15 +115,16 @@ struct LitePersonaPage: View {
                         .lineLimit(1)
                 }
                 Spacer()
-                Button { editingField = field } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 12))
-                        .foregroundColor(Theme.textMuted.opacity(0.6))
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
+                PromptSlotEditorButton(label: label) {
+                    guard let pm = profileManager, let psm = presetManager else { return }
+                    do {
+                        editingPromptSlot = try PromptSlotEditing.shared.open(
+                            profileId: pm.currentProfile.id, presetId: pm.currentProfile.presetId,
+                            slotId: field.slotId, label: field.title, profiles: pm, presets: psm)
+                    } catch {
+                        saveError = error.localizedDescription
+                    }
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("全屏编辑\(label)")
             }
             ZStack(alignment: .topLeading) {
                 TextEditor(text: text)
@@ -154,18 +150,21 @@ struct LitePersonaPage: View {
     // MARK: - 插槽读写（与 PersonaSettingsTab.personaSlotField 同路径）
 
     private func slotBinding(_ slotId: String) -> Binding<String> {
-        Binding<String>(
+        let profileId = profileManager?.currentProfile.id ?? ""
+        let presetId = profileManager?.currentProfile.presetId ?? ""
+        return Binding<String>(
             get: {
-                guard let pm = profileManager, let psm = presetManager else { return "" }
-                return psm.preset(byId: pm.currentProfile.presetId)?
+                guard let psm = presetManager else { return "" }
+                return psm.preset(byId: presetId)?
                     .prompts.first(where: { $0.id == slotId })?.content ?? ""
             },
             set: { newValue in
                 guard let pm = profileManager, let psm = presetManager else { return }
-                var p = psm.preset(byId: pm.currentProfile.presetId) ?? Preset.balanced
-                if let idx = p.prompts.firstIndex(where: { $0.id == slotId }) {
-                    p.prompts[idx].content = newValue
-                    psm.save(p)
+                do {
+                    try PromptSlotEditing.shared.setInline(newValue, profileId: profileId, presetId: presetId,
+                                                          slotId: slotId, profiles: pm, presets: psm)
+                } catch {
+                    saveError = error.localizedDescription
                 }
             }
         )

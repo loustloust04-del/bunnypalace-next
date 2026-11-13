@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftData
 import SwiftUI
 import SwiftStreamingMarkdown
@@ -344,7 +345,7 @@ private struct EqualizerBars: View {
     }
 }
 
-/// 岛的玻璃：iOS 26 真玻璃；mac（最低 15）退回毛玻璃
+/// 岛的玻璃：iOS 26 / macOS 26 真玻璃；macOS 15 退回毛玻璃
 struct IslandGlass: ViewModifier {
     let cornerRadius: CGFloat
     var clear = false
@@ -354,7 +355,11 @@ struct IslandGlass: ViewModifier {
         #if os(iOS)
         content.glassEffect(clear ? .identity : .regular, in: shape)
         #else
-        content.background(shape.fill(clear ? AnyShapeStyle(Color.clear) : AnyShapeStyle(.ultraThinMaterial)))
+        if #available(macOS 26.0, *) {
+            content.glassEffect(clear ? .identity : .regular, in: shape)
+        } else {
+            content.background(shape.fill(clear ? AnyShapeStyle(Color.clear) : AnyShapeStyle(.ultraThinMaterial)))
+        }
         #endif
     }
 }

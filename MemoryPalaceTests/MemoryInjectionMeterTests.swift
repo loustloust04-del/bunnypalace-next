@@ -1,64 +1,57 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
-/// 修复第一刀·刀5：「实际注入量」= 注入器真实命中按同一计费公式累加。
+/// 旧记录兼容和 CC 未注入标记；逐轮账与 wire 一致由真实路径套件验证。
 final class MemoryInjectionMeterTests: XCTestCase {
 
     let pid = "xctest-meter"
-    private let touchedKeys = ["mem_inject_catalog", "mem_inject_keyword", "mem_inject_vector", "mem_inject_full"]
-
     override func setUp() {
         super.setUp()
-        touchedKeys.forEach { UserDefaults.standard.removeObject(forKey: $0) }
         MemoryInjectionMeter.clear(profileId: pid)
     }
 
     override func tearDown() {
-        touchedKeys.forEach { UserDefaults.standard.removeObject(forKey: $0) }
         MemoryInjectionMeter.clear(profileId: pid)
         super.tearDown()
     }
 
-    private func mems() -> [Memory] {
-        [Memory(content: "钉住：我们约好每周日一起散步", category: "fact", profileId: pid, isUserExplicit: true),
-         Memory(content: "用户最近在学日语", category: "goal", profileId: pid),
-         Memory(content: "用户喜欢暖奶白配色", category: "preference", profileId: pid)]
-    }
-
-    func testFullTextTokensEqualInjectedMemoriesTokenCount() {
-        let ms = mems()
-        let r = MemoryInjector.buildInjectionSplit(memories: ms, recentMessages: [])
-        let m = MemoryInjectionMeter.measure(hits: r.hits, memories: ms)
-        let injectedIds = Set(r.hits.map(\.memoryId))
-        XCTAssertEqual(m.tokens, ms.filter { injectedIds.contains($0.id) }.reduce(0) { $0 + $1.tokenCount })
-        XCTAssertEqual(m.stable + m.hit, r.hits.count)
-        XCTAssertEqual(m.stable, 1, "纯全量模式常驻层 = 钉住的那一条")
-    }
-
-    func testCatalogTokensUseCatalogLineCost() {
-        UserDefaults.standard.set(true, forKey: "mem_inject_catalog")
-        let ms = mems()
-        let r = MemoryInjector.buildInjectionSplit(memories: ms, recentMessages: [])
-        let m = MemoryInjectionMeter.measure(hits: r.hits, memories: ms)
-        let expected = r.hits.reduce(0) { sum, h in
-            let mem = ms.first { $0.id == h.memoryId }!
-            return sum + (h.catalog ? Memory.estimateTokens(MemoryInjector.catalogLine(mem)) : mem.tokenCount)
-        }
-        XCTAssertEqual(m.tokens, expected)
-    }
 
     /// cc-bridge 那一轮照实记「CC 没收到」；之后走普通 provider 的一轮会覆盖回实际注入量
     func testCCBridgeRecordOverridesAndNormalTurnRestores() {
-        let ms = mems()
-        let r = MemoryInjector.buildInjectionSplit(memories: ms, recentMessages: [])
-        MemoryInjectionMeter.record(profileId: pid, hits: r.hits, memories: ms)
+        let record = MemoryInjectionRecord(tokens: 42, stableCount: 1, hitCount: 2, at: Date())
+        MemoryInjectionMeter.record(profileId: pid, record: record)
         MemoryInjectionMeter.recordCCBridge(profileId: pid)
         let cc = MemoryInjectionMeter.load(profileId: pid)
         XCTAssertEqual(cc?.viaCCBridge, true)
         XCTAssertEqual(cc?.tokens, 0)
-        MemoryInjectionMeter.record(profileId: pid, hits: r.hits, memories: ms)
-        XCTAssertNotEqual(MemoryInjectionMeter.load(profileId: pid)?.viaCCBridge, true, "普通一轮覆盖掉 CC 记录")
-        XCTAssertGreaterThan(MemoryInjectionMeter.load(profileId: pid)?.tokens ?? 0, 0)
+        MemoryInjectionMeter.record(profileId: pid, record: record)
+        XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid), record)
+    }
+
+    func testRecordsExactSubmittedSnapshotWithoutRecomputingCountsOrTime() {
+        var receipt = RecallTurnReceipt(decision: RecallTurnDecision(
+            turnId: "star-user", branchAnchor: "cloud-window", origin: .user, gateReason: .search,
+            tuning: RecallTestTuning.make(), topicAnchor: "星砚在云桥城", selected: [], candidates: [],
+            suppressions: [], ignored: [], thawed: [], stateAfterResponse: RecallConversationState()))
+        let snapshot = MemoryInjectionRecord(tokens: 137, stableCount: 2, hitCount: 1,
+                                             at: Date(timeIntervalSince1970: 1_792_880_000),
+                                             selfTokens: 23, selfCount: 1,
+                                             timelineKeys: ["2026-10-24|cloud-window|last-node"],
+                                             contextKeys: ["cloud-window|summary-node"])
+        receipt.injectionRecord = snapshot
+        MemoryInjectionMeter.record(profileId: pid, receipt: receipt)
+        XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid), snapshot)
+        MemoryInjectionMeter.record(profileId: pid, record: snapshot)
+        XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid)?.at, snapshot.at,
+                       "重放同轮真实快照不能改成当前时间或重算选择")
+
+        let emptyTurn = MemoryInjectionRecord(tokens: 0, stableCount: 0, hitCount: 0,
+                                              at: snapshot.at.addingTimeInterval(1),
+                                              selfTokens: 0, selfCount: 0, timelineKeys: [], contextKeys: [])
+        MemoryInjectionMeter.record(profileId: pid, record: emptyTurn)
+        XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid), emptyTurn,
+                       "本轮没有注入也必须覆盖上轮数据，不沿用旧命中或时间轴")
     }
 
     /// 刀5 时期写下的旧记录（没有 viaCCBridge 字段）照常能读
@@ -70,13 +63,19 @@ final class MemoryInjectionMeterTests: XCTestCase {
         XCTAssertNil(r?.viaCCBridge)
     }
 
-    func testRecordRoundTripAndSkipsUnchanged() {
-        let ms = mems()
-        let r = MemoryInjector.buildInjectionSplit(memories: ms, recentMessages: [])
-        MemoryInjectionMeter.record(profileId: pid, hits: r.hits, memories: ms)
-        let first = MemoryInjectionMeter.load(profileId: pid)
-        XCTAssertNotNil(first)
-        MemoryInjectionMeter.record(profileId: pid, hits: r.hits, memories: ms)
-        XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid)?.at, first?.at, "没变就不重写")
+    /// 新记录带窗口 id；没有这个键的老记录照常解（可选字段，缺键 = nil）
+    func testConversationIdRoundTripAndOldRecordDecodes() {
+        let record = MemoryInjectionRecord(tokens: 7, stableCount: 1, hitCount: 2,
+                                           at: Date(timeIntervalSince1970: 1), conversationId: "cloud-window")
+        MemoryInjectionMeter.record(profileId: pid, record: record)
+        XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid)?.conversationId, "cloud-window")
+        XCTAssertEqual(MemoryInjectionMeter.load(profileId: pid), record)
+        let legacy = #"{"hitCount":2,"stableCount":1,"tokens":7,"at":1}"#
+        UserDefaults.standard.set(Data(legacy.utf8), forKey: "mem_last_injection_\(pid)")
+        let decoded = MemoryInjectionMeter.load(profileId: pid)
+        XCTAssertEqual(decoded?.tokens, 7)
+        XCTAssertEqual(decoded?.hitCount, 2)
+        XCTAssertNil(decoded?.conversationId)
     }
+
 }

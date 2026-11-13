@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 import ZIPFoundation

@@ -35,8 +35,13 @@ ProtectHome=yes
 # 只能写这些目录
 ReadWritePaths=/opt/cc-bridge /var/lib/cc-bridge /etc/cc-bridge
 # 不让 hub 绑非本机/Tailscale 之外的地址（用户主动配 MP_CC_HUB_HOST 才覆盖）
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-RestrictNamespaces=yes
+# AF_NETLINK：hub 启动探测网卡（os.networkInterfaces → getifaddrs）要开 netlink socket，不放 hub 直接崩
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# 命名空间放行给 CC 的 Bash 沙箱（bubblewrap）：yes 会让 bwrap 报 No permissions to create new namespace。
+# 实测（systemd 255 容器，Claude Code 2.1.317）：原生 claude 给 bwrap 的参数是
+# --unshare-user/pid/net/ipc/uts + --unshare-cgroup-try（-try 挡不住 EPERM），少放任何一种都起不来，
+# 所以七种都得列上（等于 no，显式写出来是为了看得见放了什么）。只用 sandbox-runtime（srt）的话 user mnt pid net 就够。
+RestrictNamespaces=user mnt pid net ipc uts cgroup
 LockPersonality=yes
 MemoryDenyWriteExecute=no
 RestrictRealtime=yes

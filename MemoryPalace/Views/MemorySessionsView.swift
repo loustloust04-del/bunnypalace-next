@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -67,7 +68,7 @@ final class MemorySessionsModel {
     private(set) var queue: [QueueRow] = []
     private(set) var queueLoaded = false
     private var profileId: String?
-    private var stale = false
+    private(set) var stale = false
     private var generation = 0
     private var queueGeneration = 0
 
@@ -75,7 +76,16 @@ final class MemorySessionsModel {
         let conversationId: String
         let title: String
         let state: SessionCloseout.QueueState
+        var isRewrite = false
         var id: String { conversationId }
+    }
+
+    /// 手动重写可以没有新消息，因此不能只靠日常收尾查询出队列。
+    func displayedQueue(profileId: String) -> [QueueRow] {
+        let status = SessionCloseoutStatus.shared
+        guard status.runningProfileId == profileId, let cid = status.runningConversationId,
+              !queue.contains(where: { $0.conversationId == cid }) else { return queue }
+        return [QueueRow(conversationId: cid, title: status.runningTitle ?? "", state: .due, isRewrite: true)] + queue
     }
 
     func loadIfNeeded(profileId: String, container: ModelContainer) {
@@ -126,7 +136,7 @@ final class MemorySessionsModel {
         let gen = queueGeneration
         Task {
             let rows = await Task.detached(priority: .utility) {
-                SessionCloseout.queue(profileId: profileId, container: container, now: Date(), force: nil, includeWaiting: true)
+                SessionCloseout.queue(profileId: profileId, source: SwiftDataConversationSource(container: container), now: Date(), force: nil, includeWaiting: true)
                     .map { QueueRow(conversationId: $0.conversationId, title: $0.title, state: $0.state) }
             }.value
             guard gen == queueGeneration else { return }
@@ -137,7 +147,7 @@ final class MemorySessionsModel {
 
     /// 后台：读 windows/ 和 sessions/ 每个窗口那份文件 → 查哪些对话还在（后台 context，只取 id、标题）
     nonisolated static func read(profileId: String, container: ModelContainer) -> [WindowSummaryRow] {
-        let windows = WindowSummaryStore.all(profileId: profileId), sessions = SessionSummaryStore.all(profileId: profileId)
+        let windows = WindowSummaryStore.all(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId)), sessions = SessionSummaryStore.all(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
         let ids = Array(Set((windows + sessions).map(\.conversationId)))
         var alive: [String: String] = [:]
         if !ids.isEmpty {
@@ -225,7 +235,7 @@ struct MemorySessionsView: View {
             if model.rows.isEmpty {
                 MemoryEmptyState(title: "还没有窗口总结",
                                  message: memMaster && a3On
-                                    ? "每个窗口聊完、安静 12 小时后，会在这里记下"
+                                    ? "每个窗口聊完后会在这里记下，默认等安静 24 小时"
                                     : "现在不记新的，原因看上面「正在记」那行")
                     .allowsHitTesting(false)
             }
@@ -235,12 +245,13 @@ struct MemorySessionsView: View {
     /// 「正在记」：收尾巡检接下来要写的对话 + 每个现在什么状态；空时一行灰字
     @ViewBuilder
     private var queueRows: some View {
-        if let note = WindowSummaryListLayout.queueNote(masterOn: memMaster, a3On: a3On, queueEmpty: model.queue.isEmpty) {
+        let rows = model.displayedQueue(profileId: profileId)
+        if let note = WindowSummaryListLayout.queueNote(masterOn: memMaster, a3On: a3On, queueEmpty: rows.isEmpty) {
             Text(note)
                 .font(.system(size: m.secondarySize))
                 .foregroundColor(Theme.textMuted)
         } else {
-            ForEach(model.queue) { q in
+            ForEach(rows) { q in
                 // 每 30 秒重算一次：「安静到 HH:mm」过点后变「该记了」
                 SwiftUI.TimelineView(.periodic(from: .now, by: 30)) { tl in
                     queueRow(q, now: tl.date)
@@ -260,7 +271,7 @@ struct MemorySessionsView: View {
                     .font(.system(size: m.bodySize))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(1)
-                if let s = TimelineListLayout.queueStatus(q.state, running: running, now: now) {
+                if let s = q.isRewrite && running ? "正在写" : TimelineListLayout.queueStatus(q.state, running: running, now: now) {
                     Text(s)
                         .font(.system(size: m.secondarySize))
                         .foregroundColor(Theme.textMuted)

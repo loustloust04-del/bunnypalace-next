@@ -17,6 +17,7 @@ struct CredentialDraft: Equatable, Codable {
     var emoji: String = "🔑"
     var models: [ProviderModel] = []
     var toolsSupported: Bool = true
+    var sideCallStreaming: Bool = true
     /// 预设的区域 id：nil = 默认区域；`ownRegion` = 沿用卡上自己的地址
     var regionSelection: String?
     /// 预设区域两种格式都有时选的那种：nil = 预设默认格式
@@ -95,7 +96,8 @@ struct CredentialDraft: Equatable, Codable {
     /// 沿用卡的地址和格式；claude-p 的地址靠发现填，维持原样
     static func loaded(from card: APICredential) -> CredentialDraft {
         var d = CredentialDraft(presetSelection: card.presetId ?? customSelection, customType: card.type, customBaseURL: card.baseURL,
-                                nickname: card.name, emoji: card.emoji, models: card.models, toolsSupported: card.toolsSupported ?? true)
+                                nickname: card.name, emoji: card.emoji, models: card.models, toolsSupported: card.toolsSupported ?? true,
+                                sideCallStreaming: card.sideCallStreaming ?? true)
         guard let preset = d.preset else { return d }
         if let r = preset.resolveRegion(for: card) {
             d.regionSelection = r.id
@@ -138,6 +140,7 @@ struct CredentialDraft: Equatable, Codable {
             lastUsedAt: existing?.lastUsedAt,
             lastUsedModelId: existing?.lastUsedModelId,
             toolsSupported: toolsSupported ? nil : false,
+            sideCallStreaming: sideCallStreaming ? nil : false,
             regionId: usesOwnBaseURL ? existing?.regionId : region?.id
         )
     }
@@ -205,8 +208,8 @@ enum CredentialCommitter {
         if let modelHints { hintStore.replace(credentialId: cardId, with: modelHints) }
         switch draft.type {
         case .ccBridge:
-            // Token 可空（loopback）
-            pm.setApiKey(trimmedKey, for: cardId)
+            // Token 可空（loopback）。主 hub 口令（cc-bridge）只由 CCHubRegistry 的配对入口写一次（impl1 #10），这里不再写第二遍
+            if cardId != HubTokenStore.keychainAccount { pm.setApiKey(trimmedKey, for: cardId) }
         case .chatgptOAuth:
             // chatgptOAuth：登录时已即时存了 token；这里不动 keychain
             // 仅落卡（emoji/昵称/preset/baseURL/extraHeaders/models）

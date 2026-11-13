@@ -18,35 +18,43 @@ struct BrowsingHistoryEntry: Codable, Identifiable {
 enum BrowsingHistoryStore {
     private static let maxEntries = 500
 
-    private static var fileURL: URL {
-        let base = AppPaths.checked(AppPaths.applicationSupport
-            .appendingPathComponent("MemoryPalace", isDirectory: true))
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        return AppPaths.checked(base.appendingPathComponent("browsing-history.json"))
+    /// 每个身份各记各的；主号沿用原来的文件名
+    private static func fileURL(_ identity: UUID) -> URL {
+        let name = identity == BrowserIdentity.mainID ? "browsing-history.json" : "browsing-history-\(identity.uuidString).json"
+        return BrowserIdentityStore.directory.appendingPathComponent(name)
     }
 
-    static func load() -> [BrowsingHistoryEntry] {
-        guard let data = try? Data(contentsOf: fileURL),
+    static func load(identity: UUID = BrowserIdentity.mainID) -> [BrowsingHistoryEntry] {
+        guard let data = try? Data(contentsOf: fileURL(identity)),
               let entries = try? JSONDecoder().decode([BrowsingHistoryEntry].self, from: data) else { return [] }
-        return entries
+        // 老文件里同网址的重复条目：读的时候只留最新那条
+        var seen = Set<String>()
+        return entries.filter { seen.insert($0.url).inserted }
     }
 
-    /// 新条目插头部；与上一条同 url 则只更新标题（避免刷新刷出一串重复）
-    static func append(url: String, title: String) {
-        var entries = load()
-        if let first = entries.first, first.url == url {
-            entries[0] = BrowsingHistoryEntry(id: first.id, url: url, title: title, date: Date())
-        } else {
-            entries.insert(BrowsingHistoryEntry(id: UUID(), url: url, title: title, date: Date()), at: 0)
-        }
+    /// 新条目插头部；同一网址只留最新一条（粟粟 11-10：维基 / pipeline 交替开刷出一串）
+    static func append(url: String, title: String, identity: UUID = BrowserIdentity.mainID) {
+        var entries = load(identity: identity)
+        let old = entries.first { $0.url == url }
+        entries.removeAll { $0.url == url }
+        entries.insert(BrowsingHistoryEntry(id: old?.id ?? UUID(), url: url, title: title, date: Date()), at: 0)
         if entries.count > maxEntries { entries = Array(entries.prefix(maxEntries)) }
-        if let data = try? JSONEncoder().encode(entries) {
-            try? data.write(to: fileURL, options: .atomic)
-        }
+        write(entries, identity: identity)
     }
 
-    static func clear() {
-        try? FileManager.default.removeItem(at: fileURL)
+    static func remove(id: UUID, identity: UUID = BrowserIdentity.mainID) {
+        write(load(identity: identity).filter { $0.id != id }, identity: identity)
+    }
+
+    static func clear(identity: UUID = BrowserIdentity.mainID) {
+        try? FileManager.default.removeItem(at: fileURL(identity))
+    }
+
+    private static func write(_ entries: [BrowsingHistoryEntry], identity: UUID) {
+        try? FileManager.default.createDirectory(at: BrowserIdentityStore.directory, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(entries) {
+            try? data.write(to: fileURL(identity), options: .atomic)
+        }
     }
 }
 
@@ -58,8 +66,21 @@ final class MiniBrowserController: NSObject, ObservableObject, WKNavigationDeleg
     @Published var isLoading = true
     @Published var canGoBack = false
     @Published var canGoForward = false
+    @Published var url: URL?
+    @Published var progress: Double = 0
+    /// 往下滚收成只显示域名的小胶囊，往上滚展开（花园浏览器底栏用）
+    @Published var isCollapsed = false
+    #if os(iOS)
+    /// 网页自己的底色（状态栏柔边照它染，深色网页不出灰带——Safari 同款）
+    @Published var pageBackground: UIColor?
+    #endif
+
+    /// 这个网页开在哪个身份里（历史记到这个身份）
+    var identityID = BrowserIdentity.mainID
 
     private var observations: [NSKeyValueObservation] = []
+    private var lastScrollY: CGFloat = 0
+    private var scrollAnchorY: CGFloat = 0
 
     weak var webView: WKWebView? {
         didSet { observeWebView() }
@@ -80,6 +101,9 @@ final class MiniBrowserController: NSObject, ObservableObject, WKNavigationDeleg
     func load(_ url: URL) {
         if showBenchOfflinePage() { return }
         webView?.load(URLRequest(url: url))
+    }
+    func stopLoading() {
+        webView?.stopLoading()
     }
 
     static var benchOffline: Bool {
@@ -119,14 +143,76 @@ final class MiniBrowserController: NSObject, ObservableObject, WKNavigationDeleg
             },
             webView.observe(\.isLoading, options: [.initial, .new]) { [weak self] wv, _ in
                 let v = wv.isLoading
-                Task { @MainActor in self?.isLoading = v }
+                Task { @MainActor in
+                    self?.isLoading = v
+                    #if os(iOS)
+                    if !v { self?.webView?.scrollView.refreshControl?.endRefreshing() }
+                    #endif
+                }
+            },
+            // SPA（pushState）换页不走 didFinish：地址跟着 url 走，历史也在这里补记
+            webView.observe(\.url, options: [.initial, .new]) { [weak self] wv, _ in
+                let v = wv.url
+                let settled = !wv.isLoading
+                let title = wv.title
+                Task { @MainActor in
+                    self?.url = v
+                    if settled, let s = v?.absoluteString, s.hasPrefix("http"), let self {
+                        BrowsingHistoryStore.append(url: s, title: title ?? s, identity: self.identityID)
+                    }
+                }
+            },
+            webView.observe(\.estimatedProgress, options: [.initial, .new]) { [weak self] wv, _ in
+                let v = wv.estimatedProgress
+                Task { @MainActor in self?.progress = v }
             }
         ]
+        #if os(iOS)
+        observations.append(webView.scrollView.observe(\.contentOffset, options: [.new]) { [weak self] sv, _ in
+            let y = sv.contentOffset.y + sv.adjustedContentInset.top
+            let dragging = sv.isTracking || sv.isDecelerating
+            Task { @MainActor in self?.scrolled(to: y, byUser: dragging) }
+        })
+        observations.append(webView.observe(\.underPageBackgroundColor, options: [.initial, .new]) { [weak self] wv, _ in
+            let c = wv.underPageBackgroundColor
+            Task { @MainActor in self?.pageBackground = c }
+        })
+        #endif
     }
+
+    /// KVO 每帧只走几个点：同一方向累计走够 24pt 才收 / 展（方向一变就从这里重新起算）
+    private func scrolled(to y: CGFloat, byUser: Bool) {
+        defer { lastScrollY = y }
+        guard byUser, y > 0 else {
+            scrollAnchorY = y
+            if y <= 0, isCollapsed { isCollapsed = false }
+            return
+        }
+        if (y - lastScrollY) * (lastScrollY - scrollAnchorY) < 0 { scrollAnchorY = lastScrollY }
+        let moved = y - scrollAnchorY
+        if moved > 24, y > 40, !isCollapsed {
+            isCollapsed = true
+        } else if moved < -24, isCollapsed {
+            isCollapsed = false
+        }
+    }
+
+    #if os(iOS)
+    /// 底栏盖住的高度：让网页最底下的内容能滚到底栏上面
+    func setBottomObscuredHeight(_ h: CGFloat) {
+        guard let sv = webView?.scrollView, sv.contentInset.bottom != h else { return }
+        sv.contentInset.bottom = h
+        sv.verticalScrollIndicatorInsets.bottom = h
+    }
+
+    @objc func pullToRefresh(_ sender: UIRefreshControl) {
+        reload()
+    }
+    #endif
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if let url = webView.url?.absoluteString, url.hasPrefix("http") {
-            BrowsingHistoryStore.append(url: url, title: webView.title ?? url)
+            BrowsingHistoryStore.append(url: url, title: webView.title ?? url, identity: identityID)
         }
     }
 
@@ -173,11 +259,17 @@ final class MiniBrowserController: NSObject, ObservableObject, WKNavigationDeleg
 struct BrowserWebView {
     let initialURL: URL
     let controller: MiniBrowserController
+    /// 主号 = `.default()`；别的身份各用自己的数据仓（plan-garden-browser-identities §3）
+    var identity: BrowserIdentity = .main
 
     @MainActor
     func makeWebView() -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
+        configuration.websiteDataStore = identity.dataStore
+        #if os(iOS)
+        // 视频在页面里播，不强制跳全屏播放器
+        configuration.allowsInlineMediaPlayback = true
+        #endif
         #if os(macOS) && (DEBUG || PERF_BENCH)
         if BenchIsolation.active { configuration.websiteDataStore = .nonPersistent() }
         #endif
@@ -187,13 +279,18 @@ struct BrowserWebView {
         // satyricon §4：阻止 Universal Links 把用户踢出 app（点 zhihu/X 链接被踢去装原生 app 这种）
         webView.allowsLinkPreview = false
         // satyricon §8：UA 伪装真 Safari——X.com 等反爬站默认 WebView UA 缺 Version/N 字段会拒服务白屏
-        webView.customUserAgent = WebUserAgent.platformDefault
+        webView.customUserAgent = identity.userAgent
         #if os(iOS)
         webView.allowsBackForwardNavigationGestures = true
         // 滑动 webview 自动收键盘（CC 终端同款）
         webView.scrollView.keyboardDismissMode = .onDrag
+        webView.isFindInteractionEnabled = true
+        let refresh = UIRefreshControl()
+        refresh.addTarget(controller, action: #selector(MiniBrowserController.pullToRefresh(_:)), for: .valueChanged)
+        webView.scrollView.refreshControl = refresh
         #endif
         controller.webView = webView
+        controller.identityID = identity.id
         controller.load(initialURL)
         return webView
     }
@@ -222,76 +319,7 @@ struct MiniBrowserView: View {
 
     var body: some View {
         #if os(iOS)
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            // 四边全出血：和 artifact 预览一致，页面 canvas 铺到灵动岛/home 条底下
-            BrowserWebView(initialURL: initialURL, controller: controller)
-                .ignoresSafeArea()
-
-            // 顶部渐变遮罩：1:1 抄 page1 照片预览（0.88/150），白按钮对比度靠它
-            VStack(spacing: 0) {
-                LinearGradient(
-                    colors: [.black.opacity(0.88), .black.opacity(0)],
-                    startPoint: .top, endPoint: .bottom
-                )
-                .frame(height: 150)
-                .allowsHitTesting(false)
-                Spacer()
-            }
-            .ignoresSafeArea()
-
-            VStack {
-                HStack(spacing: 10) {
-                    glassCircle("xmark") { dismiss() }
-                    // 能后退就后退，第一页按后退=关浏览器回预览（Safari push 语义）
-                    glassCircle("chevron.left") {
-                        if controller.canGoBack { controller.goBack() } else { dismiss() }
-                    }
-                    glassCircle("chevron.right", disabled: !controller.canGoForward) { controller.goForward() }
-
-                    Spacer(minLength: 4)
-
-                    HStack(spacing: 6) {
-                        if controller.isLoading {
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(.white)
-                        }
-                        Text(controller.title.isEmpty ? initialURL.host() ?? "网页" : controller.title)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.white)
-                            .lineLimit(1)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .capsule)
-
-                    Spacer(minLength: 4)
-
-                    glassCircle("arrow.clockwise") { controller.reload() }
-                    Menu {
-                        menuItems
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 38, height: 38)
-                            .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle)
-                    }
-                }
-                .compositingGroup()
-                .padding(.horizontal, 12)
-                .padding(.top, 12)
-
-                Spacer()
-            }
-        }
-        .sheet(isPresented: $showHistory) {
-            BrowsingHistorySheet { url in
-                controller.load(url)
-            }
-        }
+        GardenBrowserView(initialURL: initialURL, onClose: { dismiss() })
         #else
         NavigationStack {
             BrowserWebView(initialURL: initialURL, controller: controller)
@@ -359,27 +387,16 @@ struct MiniBrowserView: View {
         }
     }
 
-    #if os(iOS)
-    private func glassCircle(_ icon: String, disabled: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(.white.opacity(disabled ? 0.35 : 1))
-                .frame(width: 38, height: 38)
-                .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle)
-        }
-        .disabled(disabled)
-    }
-    #endif
 }
 
 // MARK: - 历史面板
 
-private struct BrowsingHistorySheet: View {
+struct BrowsingHistorySheet: View {
+    var identity: UUID = BrowserIdentity.mainID
     let onOpen: (URL) -> Void
 
     @Environment(\.dismiss) private var dismiss
-    @State private var entries = BrowsingHistoryStore.load()
+    @State private var entries: [BrowsingHistoryEntry] = []
 
     var body: some View {
         NavigationStack {
@@ -434,7 +451,7 @@ private struct BrowsingHistorySheet: View {
                 }
                 ToolbarItem(placement: .destructiveAction) {
                     Button("清空") {
-                        BrowsingHistoryStore.clear()
+                        BrowsingHistoryStore.clear(identity: identity)
                         entries = []
                     }
                     .foregroundColor(Theme.textMuted)
@@ -442,6 +459,7 @@ private struct BrowsingHistorySheet: View {
                 }
             }
         }
+        .task { entries = BrowsingHistoryStore.load(identity: identity) }
         #if os(macOS)
         .frame(width: 480, height: 420)
         #endif

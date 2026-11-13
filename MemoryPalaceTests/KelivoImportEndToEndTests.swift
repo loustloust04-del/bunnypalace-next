@@ -1,3 +1,4 @@
+import MemoryCore
 import CryptoKit
 import XCTest
 import SwiftData

@@ -457,6 +457,18 @@ enum AssistantTools {
 
     // MARK: - 外观（P3）
 
+    /// 小芽 `read_appearance` 列给模型的 app / `propose_app_icon` 能改的 app。系统 App（设置）不列、不让换图标：
+    /// 加了它小芽这条工具结果的字节也不变（atrium P4 §4）。internal 给单测
+    static func isVisibleAppearanceTool(_ id: String) -> Bool {
+        guard !RightPanelToolManager.secretToolIds.contains(id),
+              !RightPanelToolManager.systemToolIds.contains(id) else { return false }
+        #if PERSONAL_APPS
+        return !TutuSkinUnlock.isHidden(id)
+        #else
+        return true
+        #endif
+    }
+
     @MainActor
     private static func readAppearance() -> AssistantToolOutcome {
         var lines = ["舞台：\(XiaoyaStageTheme.current.title)（\(XiaoyaStageTheme.current.rawValue)）。可选："
@@ -469,7 +481,7 @@ enum AssistantTools {
             let a = Page2AppearanceStore.shared.value
             lines.append("gardenOS 桌面：壁纸 \(a.wallpaper)，图标外观 \(a.rendering)，明暗 \(a.luminosity)，大图标 \(a.largeIcons ? "开" : "关")，明亮遮罩 \(a.dimming)，着色色相 \(a.tintHue) 饱和度 \(a.tintSaturation)")
             lines.append("壁纸可选：" + Page2AppearancePatch.wallpapers.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "，"))
-            lines.append("app（id=名字）：" + RightPanelToolManager.builtInTools.filter { !RightPanelToolManager.secretToolIds.contains($0.id) }.map { tool -> String in
+            lines.append("app（id=名字）：" + RightPanelToolManager.builtInTools.filter { isVisibleAppearanceTool($0.id) }.map { tool -> String in
                 let custom = a.icons[tool.id].map { " [自定义 \($0.symbol ?? "图片") \($0.tint)]" } ?? ""
                 return "\(tool.id)=\(tool.name)\(custom)"
             }.joined(separator: "，"))
@@ -517,7 +529,7 @@ enum AssistantTools {
             return AssistantToolOutcome(resultText: AssistantStamp.stitchedHome, isError: true)
         }
         guard let toolId = args["toolId"] as? String,
-              !RightPanelToolManager.secretToolIds.contains(toolId),
+              isVisibleAppearanceTool(toolId),
               let tool = RightPanelToolManager.builtInTools.first(where: { $0.id == toolId }) else {
             return AssistantToolOutcome(resultText: "没有这个 app，先 read_appearance 拿 id", isError: true)
         }

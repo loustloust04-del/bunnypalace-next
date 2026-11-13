@@ -159,7 +159,7 @@ export async function sendAPNs(
   // 索引拿楼层 assistantName/avatar。没 NSE 的端（macOS/旧 app）这字段无副作用，照旧弹 title。
   const payload = JSON.stringify({
     aps: { alert: { title, body }, sound: "default", "mutable-content": 1 },
-    chat_id: chatId,
+    ...(chatId ? { chat_id: chatId } : {}),
     ...metadata,
   })
   return postAPNs({

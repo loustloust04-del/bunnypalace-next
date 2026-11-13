@@ -106,9 +106,8 @@ final class MermaidRenderer: NSObject, WKNavigationDelegate {
 
     // MARK: - 请求
 
-    /// 按当前主题建请求（读 ThemeManager：在视图 body 里调用会随换主题重算）
-    static func request(code: String) -> Request {
-        let tokens = ThemeManager.shared.currentTokenSet
+    /// 按给定配色建请求（调用方在视图 body 里读 ThemeManager 取 tokens：会随换主题重算）
+    static func request(code: String, tokens: ThemeTokenSet) -> Request {
         let dark = ThemeManager.shared.activeScheme == .dark
         var variables: [String: Any] = themeVariables(tokens: tokens)
         variables["darkMode"] = dark
@@ -165,7 +164,7 @@ final class MermaidRenderer: NSObject, WKNavigationDelegate {
         #endif
         guard webView == nil || !pageReady, current == nil, queue.isEmpty else { return }
         let begin = CFAbsoluteTimeGetCurrent()
-        let request = Self.request(code: "flowchart LR\n  a --> b")
+        let request = Self.request(code: "flowchart LR\n  a --> b", tokens: ThemeManager.shared.currentTokenSet)
         queue.append(Job(request: request, prewarm: true, completions: [{ outcome in
             let ms = Int((CFAbsoluteTimeGetCurrent() - begin) * 1000)
             switch outcome {
@@ -393,7 +392,7 @@ final class MermaidRenderer: NSObject, WKNavigationDelegate {
 
     // MARK: - 平台
 
-    /// 照 ChatHTMLSnapshotter.attachOffscreen：iOS 挂 key window 最底层，mac 挂第一个窗口 contentView 最底层
+    /// 离屏挂载：iOS 挂 key window 最底层，mac 挂第一个窗口 contentView 最底层
     private static func attachOffscreen(_ webView: WKWebView) {
         #if os(iOS)
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }

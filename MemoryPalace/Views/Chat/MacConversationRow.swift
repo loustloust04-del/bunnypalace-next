@@ -72,7 +72,7 @@ private struct MacConversationTitle: View {
                     Image(systemName: "star.fill").font(.system(size: 9)).foregroundStyle(Theme.favorite)
                 }
                 if conversation.unreadCount > 0 {
-                    Text("\(conversation.unreadCount)")
+                    Text(Page0LocalState.unreadLabel(conversation.unreadCount))
                         .font(.system(size: 10, weight: .semibold)).monospacedDigit()
                         .foregroundStyle(Theme.branchIndicator)
                 }

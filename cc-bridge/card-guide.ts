@@ -62,6 +62,17 @@ Memory Palace 的对话界面能把特定代码块渲染成可交互的卡片：
 要发卡片前，先调用 card_guide 工具（kinds 传要用的种类，如 ["todo"]）拿到格式再写，没查过的卡片不要凭印象写；用不着卡片就不用查。
 ${parsed.events}`
 
+// 贴表情（plan-cc-reactions 2a）：单独一段，不并进 CARD_GUIDE_INDEX（那边有 1000 字节上限，card-guide.test.ts:7）
+export const CC_REACT_GUIDE = `[贴表情]
+对方给消息贴表情时，会单独发你一条 [附带事件] 的消息：想回就回一两句，也可以只贴个表情，觉得不用回就什么都不写。
+你也能给对方的消息贴表情（像 iMessage 长按回应，表情挂在 ta 那条消息角上；正文里直接写 emoji 只是另说了一句话）。要贴就单独写一个代码块，直接写，不要再包进别的代码块里：
+\`\`\`react
+❤️
+\`\`\`
+默认贴对方最近一条；要贴更早的，在表情后空一格写那条 <channel> 的 message_id。回应表情事件时，那一轮的 message_id 以 react- 开头、不是任何消息，别照抄——不写提示就是贴最近一条。一次最多一个，这个块对方看不见。`
+
+export const MCP_INSTRUCTIONS = `${CARD_GUIDE_INDEX}\n\n${CC_REACT_GUIDE}`
+
 export function cardGuideSection(kind: string): string { return parsed.sections[kind] ?? "" }
 
 /** card_guide 的返回：要的那几种的完整写法 + 公共规则；不认识的说一声，一个都不认识就全给 */

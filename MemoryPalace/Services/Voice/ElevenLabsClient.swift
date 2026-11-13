@@ -54,7 +54,7 @@ struct ElevenLabsClient {
     /// 表演脚本 → mp3 字节（eleven_v3 + Audio Tags）
     func synthesize(
         script: String, voiceId: String, apiKey: String,
-        settings: VoiceTuning.Settings = VoiceTuning.current()
+        settings: VoiceTuning.Settings
     ) async throws -> Data {
         var comps = URLComponents(
             url: Self.apiBase.appendingPathComponent("text-to-speech/\(voiceId)"),

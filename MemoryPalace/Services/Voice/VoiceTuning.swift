@@ -1,11 +1,13 @@
 import Foundation
 
-/// 语音条调音参数：AppStorage 键 + 默认值一处管。
-/// 默认值来自《非官方状态标签攻略》推荐（表演感拉满）；设置-朗读「声音效果」折叠节可调。
+/// 语音条调音参数：默认值 + 按楼层读写一处管（atrium P3③ 起存在 `Profile`）。
+/// 默认值来自《非官方状态标签攻略》推荐（表演感拉满）；人页 › 声音（Mac：设置 › 语音）「声音效果」可调。
 enum VoiceTuning {
+    /// 老的全局键（P3③ 前存 UserDefaults）；现在只给一次性迁移读
     static let stabilityKey = "voice_stability"
     static let styleKey = "voice_style"
     static let speedKey = "voice_speed"
+    static let migratedKey = "voiceTuning.perFloorMigrated"
     /// 「AI 主动发语音」总开关
     static let proactiveKey = "voice_proactive_enabled"
     /// ElevenLabs key 的 Keychain account
@@ -24,20 +26,44 @@ enum VoiceTuning {
         var speed: Double
     }
 
-    /// 当前生效参数（未设置过的键回落默认值）
-    static func current(defaults: UserDefaults = .standard) -> Settings {
-        Settings(
-            stability: read(stabilityKey, or: defaultStability, from: defaults),
-            similarityBoost: similarityBoost,
-            style: read(styleKey, or: defaultStyle, from: defaults),
-            speed: read(speedKey, or: defaultSpeed, from: defaults)
-        )
+    static let defaults = Settings(stability: defaultStability, similarityBoost: similarityBoost,
+                                   style: defaultStyle, speed: defaultSpeed)
+
+    /// 这一层生效的参数
+    static func current(for profile: Profile) -> Settings {
+        Settings(stability: profile.voiceStability, similarityBoost: similarityBoost,
+                 style: profile.voiceStyle, speed: profile.voiceSpeed)
     }
 
-    static func resetToDefaults(defaults: UserDefaults = .standard) {
-        defaults.removeObject(forKey: stabilityKey)
-        defaults.removeObject(forKey: styleKey)
-        defaults.removeObject(forKey: speedKey)
+    static func set(_ settings: Settings, on profile: inout Profile) {
+        profile.voiceStability = settings.stability
+        profile.voiceStyle = settings.style
+        profile.voiceSpeed = settings.speed
+    }
+
+    static func resetToDefaults(_ profile: inout Profile) {
+        set(defaults, on: &profile)
+    }
+
+    /// 老的全局三键任一设过 → 原样复制到所有已有楼层（没设的那个用默认值）。
+    /// 改过的楼层全部落盘成功才落标记，失败下次启动重试；返回是否落了标记
+    @discardableResult
+    static func migrateGlobalToFloors(profiles: [Profile], defaults store: UserDefaults, persist: ([Profile]) -> Bool) -> Bool {
+        guard !store.bool(forKey: migratedKey) else { return false }
+        if [stabilityKey, styleKey, speedKey].contains(where: { store.object(forKey: $0) != nil }) {
+            let global = Settings(stability: read(stabilityKey, or: defaultStability, from: store),
+                                  similarityBoost: similarityBoost,
+                                  style: read(styleKey, or: defaultStyle, from: store),
+                                  speed: read(speedKey, or: defaultSpeed, from: store))
+            let changed = profiles.map { p -> Profile in
+                var p = p
+                set(global, on: &p)
+                return p
+            }
+            if !changed.isEmpty, !persist(changed) { return false }
+        }
+        store.set(true, forKey: migratedKey)
+        return true
     }
 
     private static func read(_ key: String, or fallback: Double, from defaults: UserDefaults) -> Double {

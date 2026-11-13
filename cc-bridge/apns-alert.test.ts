@@ -51,6 +51,17 @@ test("payload 形状：aps.alert + sound default + mutable-content 1 + chat_id +
   })
 })
 
+test("payload 形状：chatId 为空（小芽状态提醒）→ 不写 chat_id，只平铺 metadata", async () => {
+  const t = installTransport(respondWith(200))
+  await sendAPNs({ token: TOKEN }, "小芽", "梯子掉了 1 颗：线路A。点我看原因。", "", { route: "status", alert_id: "a1" })
+
+  expect(JSON.parse(t.clients[0].stream.payloads[0])).toEqual({
+    aps: { alert: { title: "小芽", body: "梯子掉了 1 颗：线路A。点我看原因。" }, sound: "default", "mutable-content": 1 },
+    route: "status",
+    alert_id: "a1",
+  })
+})
+
 test("http2.connect 钉死 IPv4（family:4）并连 HOST", async () => {
   const t = installTransport(respondWith(200))
   await sendAPNs({ token: TOKEN }, "t", "b", "chat1")

@@ -1,0 +1,49 @@
+Tutu chat v11 fonts — M3a r1
+Official upstream: https://github.com/google/fonts
+Pinned commit: 6c1dbe27dcf7d817d4b62cec033ba77fa8e2a5ec
+Both bundled TTFs are complete static wght=500 instances, not subsets. No glyphs removed.
+Conversion: fontTools 4.62.1 varLib.instancer.instantiateVariableFont(TTFont(input), {"wght": 500}, inplace=False, updateFontNames=True).save(output)
+TrueType glyf outlines are retained. Static names identify Medium; no runtime axis defaults are relied on.
+
+Noto Serif SC
+version: Version 2.003-H1;hotconv 1.1.1;makeotfexe 2.6.0
+source-url: https://raw.githubusercontent.com/google/fonts/6c1dbe27dcf7d817d4b62cec033ba77fa8e2a5ec/ofl/notoserifsc/NotoSerifSC%5Bwght%5D.ttf
+source-bytes: 25125512
+source-sha256: 050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9
+font: NotoSerifSC-Medium.ttf
+postscript: NotoSerifSC-Medium
+font-bytes: 14854768
+font-sha256: a7c23e4545266424a0a966d01e0e28cbcd4e8dca105f568131b866f278fed040
+complete-cmap-codepoints: 30928
+complete-glyph-count: 31058
+license: notoserifsc-OFL.txt (SIL Open Font License 1.1)
+license-url: https://raw.githubusercontent.com/google/fonts/6c1dbe27dcf7d817d4b62cec033ba77fa8e2a5ec/ofl/notoserifsc/OFL.txt
+license-sha256: 5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6
+
+Cormorant Garamond
+version: Version 4.001
+source-url: https://raw.githubusercontent.com/google/fonts/6c1dbe27dcf7d817d4b62cec033ba77fa8e2a5ec/ofl/cormorantgaramond/CormorantGaramond%5Bwght%5D.ttf
+source-bytes: 1195560
+source-sha256: b20b7d9626dd956b2c5e558692ad328b1f19e3275e2782db4fa07670d83f35e0
+font: CormorantGaramond-Medium.ttf
+postscript: CormorantGaramond-Medium
+font-bytes: 774332
+font-sha256: 1fed695265a7a5bb441f8aa97036a9a238a56392bc7d6457348cffce0569ca35
+complete-cmap-codepoints: 974
+complete-glyph-count: 3241
+license: cormorantgaramond-OFL.txt (SIL Open Font License 1.1)
+license-url: https://raw.githubusercontent.com/google/fonts/6c1dbe27dcf7d817d4b62cec033ba77fa8e2a5ec/ofl/cormorantgaramond/OFL.txt
+license-sha256: 60700d351cac4650c51f3f9db318d2a420f8b45052dba2715eb5fec41f0f6956
+
+Web provenance (not a replacement acceptance reference)
+Pinned design: susumi123/susupack@43ecd35c5a5d79f19f5cf0531185fa9417f7a3e3
+Path: 06_兔兔_聊天页/v11_网点大教堂与他的卡片/源码/fonts/
+zh_serif_500.woff2: Version 2.003-H1;hotconv 1.1.1;makeotfexe 2.6.0; SHA256 03bd5b7a9eee5338aa108003f8d6ab5e7659112da90cfd9113fb8f7153b2eb6a
+cg_500.woff2: Version 4.001; variable wght=500; SHA256 5d618c462b7a5b74f442e1548880086af71764d9cc7d35c16ab45353da934621
+All 142 Noto web codepoints and all 229 Cormorant web codepoints have identical serialized glyf coordinates, contour endpoints/flags and hmtx at weight 500. This is font-table provenance, not raster/pixel acceptance or proof of iOS smoothing parity.
+font-metadata.json in the original M3a evidence records the Noto version; Cormorant was absent there, so its version is read from the pinned web binary itself.
+Detailed table provenance: ~/MemoryPalace-docs-media/tutu-skin/m3a/r1/font-source/font-provenance.json
+
+Typography follows chat11.js TYPE, not its old header: English say/act use Cormorant 500; CJK say/act use Noto Serif SC 500. English action is uppercase with tracking 1.5; Chinese action tracking .72. Sizes/line-heights/margins remain 18/23.4/0, 15.5/25/0, 10.5/14/7, 12/18/6 respectively. Body tracking is 0/.62. Font cascades retain the other bundled family as fallback.
+Packaging keeps the existing whole-tree rules: project.yml excludes Resources/TutuSkin from shared/macOS sources; the private iOS copy-resources.sh phase syncs this tree; personal-apps-files.txt removes it recursively from export-public. No shared Regular font is changed.
+Binary payload: old 41335412 bytes; new 15629100 bytes; delta -25706312 bytes. License/source text deltas are separate from font payload; app archive/compression/signature overhead is not measured here.

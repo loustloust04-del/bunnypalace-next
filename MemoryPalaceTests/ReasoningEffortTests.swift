@@ -4,6 +4,36 @@ import XCTest
 /// 思考强度跟着模型走（research-reasoning-effort §2，粟粟 10-02：跟模型记、默认、CC / codex / 本地都要能调；学 magpie）
 final class ReasoningEffortTests: XCTestCase {
 
+    func testLocalEffectiveResponseIgnoresThinkingAcrossEveryChunkBoundary() {
+        let thinking = "<think>岚舟在思考林栖</think>"
+        for split in thinking.indices {
+            let converter = ThinkTagConverter()
+            var effective = 0
+            let notify = { effective += 1 }
+            let first = converter.feed(String(thinking[..<split]), onVisibleContent: notify)
+            let second = converter.feed(String(thinking[split...]), onVisibleContent: notify)
+            XCTAssertEqual(effective, 0, "半标签、完整思考和关闭标签都不是正文")
+            XCTAssertEqual(first + second, "[thinking]岚舟在思考林栖[/thinking]")
+            XCTAssertEqual(converter.feed("星砚，继续聊云桥城", onVisibleContent: notify), "星砚，继续聊云桥城")
+            XCTAssertEqual(effective, 1)
+            _ = converter.feed("再补一句", onVisibleContent: notify)
+            _ = converter.flush(onVisibleContent: notify)
+            XCTAssertEqual(effective, 1, "每个本机请求只报告一次有效正文")
+        }
+    }
+
+    func testLocalVisibleResponseCanFollowClosingThinkTagInSameChunk() {
+        let converter = ThinkTagConverter()
+        var effective = 0
+        XCTAssertEqual(converter.feed("<think>岚舟思考</think>星砚的答复", onVisibleContent: { effective += 1 }),
+                       "[thinking]岚舟思考[/thinking]星砚的答复")
+        XCTAssertEqual(effective, 1)
+        let incomplete = ThinkTagConverter()
+        _ = incomplete.feed("<think>岚舟尚未想完", onVisibleContent: { effective += 1 })
+        _ = incomplete.flush(onVisibleContent: { effective += 1 })
+        XCTAssertEqual(effective, 1, "流在思考内结束不能推进召回状态")
+    }
+
     private func catalog(_ table: [String: [String]], noReasoning: Set<String> = []) -> (String) -> CatalogModel? {
         { id in
             if noReasoning.contains(id) {

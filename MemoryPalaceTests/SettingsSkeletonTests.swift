@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -7,8 +8,7 @@ final class SettingsSkeletonTests: XCTestCase {
     typealias Row = MemoryPageLayout.Row
 
     func testSectionTitlesInHerOrder() {
-        XCTAssertEqual(MemoryPageLayout.sections.map(\.title),
-                       ["", "写入 · 记什么", "整理 · 怎么管", "注入 · 塞什么进 prompt", "检索 · 怎么挑记忆（可叠加）"])
+        XCTAssertEqual(MemoryPageLayout.sections.map(\.title), ["", "写入 · 记什么", "整理 · 怎么管", "回想 · 怎么想起来"])
     }
 
     func testTopBlock() {
@@ -21,13 +21,18 @@ final class SettingsSkeletonTests: XCTestCase {
         XCTAssertEqual(writers, [.a2, .a3, .a4, .b1, .b2, .b3, .b4, .c, .c2, .c3])
         XCTAssertEqual(writers.filter(\.isTodo), [.b2, .b3], "还没做的照样列出")
         XCTAssertEqual(writers.filter { SettingsRoute.memoryWriter($0) != nil }, [.a2, .a3, .a4, .b1, .b4, .c, .c2, .c3], "做了的都能点进二级页")
+        XCTAssertEqual(Array(MemoryPageLayout.sections[1].rows.suffix(2)), [.writerC3, .ccMemorySync],
+                       "CC 记忆同步放在写入组末尾，原有写入行的顺序不变")
     }
 
-    func testOrganizeInjectRetrieve() {
-        XCTAssertEqual(MemoryPageLayout.sections[2].rows, [.audit, .pending, .trash], "审计台第一行，顶掉老「整理记忆」")
-        XCTAssertEqual(MemoryPageLayout.sections[3].rows, [.openWindow, .catalog, .recall, .feedback, .injectBudget])
-        XCTAssertEqual(MemoryPageLayout.sections[4].rows, [.injectFull, .injectKeyword, .injectVector, .injectGraph, .convHistory],
-                       "检索整节不动")
+    func testOrganizeAndRecall() {
+        XCTAssertEqual(MemoryPageLayout.sections[2].rows, [.audit, .pending, .trash])
+        XCTAssertEqual(MemoryPageLayout.sections[3].rows, [
+            .everyRound, .openWindow, .injectBudget,
+            .automatic, .archiveTrigger, .maximumPages, .cooldown, .oldFragments,
+            .injectFull, .injectKeyword, .injectVector, .injectGraph,
+            .browse, .convHistory, .seen, .recall
+        ])
     }
 
     func testMovedRowsNotOnMainPage() {

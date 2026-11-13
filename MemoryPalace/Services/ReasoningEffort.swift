@@ -207,9 +207,11 @@ enum ReasoningEffort {
 /// 用 class：流式回调里要改它的状态（闭包里改捕获的 struct 不安全）
 final class ThinkTagConverter {
     private var pending = ""
+    private var insideThinking = false
+    private var didReportVisibleContent = false
     private static let pairs = [("<think>", "[thinking]"), ("</think>", "[/thinking]")]
 
-    func feed(_ chunk: String) -> String {
+    func feed(_ chunk: String, onVisibleContent: (() -> Void)? = nil) -> String {
         var text = pending + chunk
         pending = ""
         for (from, to) in Self.pairs { text = text.replacingOccurrences(of: from, with: to) }
@@ -218,14 +220,41 @@ final class ThinkTagConverter {
             let tail = String(text.suffix(len))
             if Self.pairs.contains(where: { $0.0.hasPrefix(tail) }) {
                 pending = tail
-                return String(text.dropLast(len))
+                let output = String(text.dropLast(len))
+                reportVisibleContent(in: output, callback: onVisibleContent)
+                return output
             }
         }
+        reportVisibleContent(in: text, callback: onVisibleContent)
         return text
     }
 
-    func flush() -> String {
+    func flush(onVisibleContent: (() -> Void)? = nil) -> String {
         defer { pending = "" }
+        reportVisibleContent(in: pending, callback: onVisibleContent)
         return pending
+    }
+
+    /// 只看转换器已吐出的完整标签；跨 token 的半标签仍由 pending 保管，不误算正文。
+    private func reportVisibleContent(in text: String, callback: (() -> Void)?) {
+        guard let callback, !didReportVisibleContent else { return }
+        var remaining = text[...]
+        while !remaining.isEmpty {
+            let delimiter = insideThinking ? "[/thinking]" : "[thinking]"
+            guard let tag = remaining.range(of: delimiter) else {
+                if !insideThinking && !remaining.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    didReportVisibleContent = true
+                    callback()
+                }
+                return
+            }
+            if !insideThinking && !remaining[..<tag.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                didReportVisibleContent = true
+                callback()
+                return
+            }
+            insideThinking.toggle()
+            remaining = remaining[tag.upperBound...]
+        }
     }
 }

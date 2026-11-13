@@ -16,7 +16,6 @@ enum BackupStore {
 
     static let isEnabledKey = "backupAutoEnabled"
     static let lastSnapshotKey = "backupLastSnapshotAt"   // BreadcrumbLog/UI 显示用
-    static let containerLowSpaceAlertKey = "backupLowSpaceAlertShown"
 
     /// 用户开关. 默认关. 首启 onboarding 让用户开启.
     static var isEnabled: Bool {
@@ -418,8 +417,9 @@ enum BackupStore {
         let descriptor = FetchDescriptor<Conversation>(
             predicate: #Predicate<Conversation> { $0.profileId == pid }
         )
-        let current = (try? context.fetch(descriptor)) ?? []
-        for conv in current where !backupConvIds.contains(conv.id) {
+        let removed = ((try? context.fetch(descriptor)) ?? []).filter { !backupConvIds.contains($0.id) }
+        PreviousWindowPicker.invalidateCopies(of: Set(removed.lazy.map(\.id)), context: context)
+        for conv in removed {
             let convId = conv.id
             let p = pid
             let nodeDesc = FetchDescriptor<MessageNode>(
@@ -496,12 +496,15 @@ enum BackupStore {
             existing.updateTime = doc.updateTime
             existing.currentNodeId = doc.currentNodeId
             existing.branchSelectionData = doc.branchSelectionData
+            existing.recallStateData = doc.recallStateData
             existing.provider = doc.provider
             existing.isFavorite = doc.isFavorite
             existing.folderId = doc.folderId
             existing.pinnedAt = doc.pinnedAt
             existing.memoryEnabled = doc.memoryEnabled
             existing.selectedModelId = doc.selectedModelId
+            if let mode = doc.displayMode { existing.displayMode = mode }
+            existing.displayModeUpdatedAt = doc.displayModeUpdatedAt
             existing.isTrashed = doc.isDeleted ?? false
             existing.trashedAt = doc.deletedAt
             conv = existing
@@ -518,6 +521,9 @@ enum BackupStore {
             created.memoryEnabled = doc.memoryEnabled
             created.selectedModelId = doc.selectedModelId
             created.branchSelectionData = doc.branchSelectionData
+            created.recallStateData = doc.recallStateData
+            if let mode = doc.displayMode { created.displayMode = mode }
+            created.displayModeUpdatedAt = doc.displayModeUpdatedAt
             created.isTrashed = doc.isDeleted ?? false
             created.trashedAt = doc.deletedAt
             context.insert(created)
@@ -559,6 +565,10 @@ enum BackupStore {
                 local.ccEdited = nd.ccEdited
                 local.ccThinking = nd.ccThinking
                 local.imageDescsData = nd.imageDescsData
+                local.recallReceiptData = nd.recallReceiptData
+                if let outcome = nd.replyOutcome { local.replyOutcome = outcome }   // 老备份没有这字段：不清本地
+                if let reason = nd.finishReason { local.finishReason = reason }
+                if let events = nd.cardEventsData { local.cardEventsData = events }   // 老备份没有这字段：不清本地
                 result.nodesUpdated += 1
             } else {
                 let node = MessageNode(
@@ -578,6 +588,10 @@ enum BackupStore {
                 node.ccEdited = nd.ccEdited
                 node.ccThinking = nd.ccThinking
                 node.imageDescsData = nd.imageDescsData
+                node.recallReceiptData = nd.recallReceiptData
+                node.cardEventsData = nd.cardEventsData
+                node.replyOutcome = nd.replyOutcome
+                node.finishReason = nd.finishReason
                 context.insert(node)
                 result.nodesInserted += 1
             }
@@ -590,8 +604,7 @@ enum BackupStore {
     }
 
     private static func clearSyncExportFingerprint(pid: String) {
-        let dir = AppPaths.checked(AppPaths.applicationSupport
-            .appendingPathComponent("MemoryPalace/sync-state", isDirectory: true))
+        let dir = SyncStore.localStateDir()
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(pid).export.json"))
         try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(pid).import.json"))
     }
@@ -692,12 +705,19 @@ enum BackupStore {
                     isFavorite: node.isFavorite, isPinned: node.isPinned, pinnedAt: node.pinnedAt,
                     segmentsData: node.segmentsData, ccMessageId: node.ccMessageId,
                     replyToId: node.replyToId, replyQuote: node.replyQuote, ccEdited: node.ccEdited, ccThinking: node.ccThinking,
-                    imageDescsData: node.imageDescsData
+                    imageDescsData: node.imageDescsData,
+                    recallReceiptData: node.recallReceiptData,
+                    cardEventsData: node.cardEventsData,
+                    replyOutcome: node.replyOutcome,
+                    finishReason: node.finishReason
                 )
             },
             isDeleted: conv.isTrashed,
             deletedAt: conv.trashedAt,
-            branchSelectionData: conv.branchSelectionData
+            branchSelectionData: conv.branchSelectionData,
+            recallStateData: conv.recallStateData,
+            displayMode: conv.displayMode,
+            displayModeUpdatedAt: conv.displayModeUpdatedAt
         )
         return try? encoder.encode(doc)
     }

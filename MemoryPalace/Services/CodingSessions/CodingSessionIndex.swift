@@ -1,6 +1,7 @@
 #if os(macOS)
 import Foundation
 import SQLite3
+import MemoryCore
 
 /// 列表排序键（Wake `SortKey`）
 enum CodingSortKey: String, CaseIterable, Sendable {
@@ -948,67 +949,7 @@ final class CodingSessionIndex {
 
     // MARK: - SQLite 小封装
 
-    final class Statement {
-        private var handle: OpaquePointer?
-        private let db: OpaquePointer?
-        private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-
-        init(db: OpaquePointer?, sql: String) throws {
-            self.db = db
-            guard sqlite3_prepare_v2(db, sql, -1, &handle, nil) == SQLITE_OK else {
-                throw CodingSessionError.sqlite(String(cString: sqlite3_errmsg(db)))
-            }
-        }
-
-        deinit {
-            sqlite3_finalize(handle)
-        }
-
-        func reset() {
-            sqlite3_reset(handle)
-            sqlite3_clear_bindings(handle)
-        }
-
-        func bind(_ i: Int32, _ value: String?) {
-            if let value {
-                sqlite3_bind_text(handle, i, value, -1, Self.transient)
-            } else {
-                sqlite3_bind_null(handle, i)
-            }
-        }
-
-        func bind(_ i: Int32, _ value: Int64?) {
-            if let value {
-                sqlite3_bind_int64(handle, i, value)
-            } else {
-                sqlite3_bind_null(handle, i)
-            }
-        }
-
-        func step() throws -> Bool {
-            let rc = sqlite3_step(handle)
-            if rc == SQLITE_ROW { return true }
-            if rc == SQLITE_DONE { return false }
-            throw CodingSessionError.sqlite(String(cString: sqlite3_errmsg(db)))
-        }
-
-        func run() throws {
-            _ = try step()
-        }
-
-        func text(_ i: Int32) -> String? {
-            guard sqlite3_column_type(handle, i) != SQLITE_NULL, let c = sqlite3_column_text(handle, i) else { return nil }
-            return String(cString: c)
-        }
-
-        func int64(_ i: Int32) -> Int64 {
-            sqlite3_column_int64(handle, i)
-        }
-
-        func optionalInt64(_ i: Int32) -> Int64? {
-            sqlite3_column_type(handle, i) == SQLITE_NULL ? nil : sqlite3_column_int64(handle, i)
-        }
-    }
+    private typealias Statement = SQLiteDB.Statement
 
     private func prepare(_ sql: String) throws -> Statement {
         #if (DEBUG || PERF_BENCH) && os(macOS)

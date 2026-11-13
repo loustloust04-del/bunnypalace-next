@@ -23,7 +23,7 @@ struct Page2GridView<Cell: View>: View {
     private var displayedBoard: Page2Board {
         if let preview = drag.preview { return preview }
         if drag.sourceID != nil || resize.sourceID != nil { return board }
-        // [Bunny patch BP-003] 松手后 preview 清空的那一帧，父视图传进来的 board 可能还是落地前的旧值（A→B 闪烁）；
+        // 松手后 preview 清空的那一帧，父视图传进来的 board 可能还是落地前的旧值（A→B 闪烁）；
         // 非拖拽 / 非缩放时直接读 store 里的最新布局（按 capacityKey 找，与 Page2HomeStore 的约定一致）。
         return home.layout.boards.first { $0.capacityKey == board.capacityKey } ?? board
     }

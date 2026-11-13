@@ -1,3 +1,4 @@
+import MemoryCore
 import CryptoKit
 import Foundation
 
@@ -70,11 +71,12 @@ enum MemoryRegeneration {
         return f.string(from: date)
     }
 
-    /// 能恢复的备份（新→旧）：v4-1-* / v5搬迁-* / 种子清理前-* / A4日级前-* / 回滚前-*，并且有完成清单。拷到一半的（`.partial-*`、没清单的）不列
+    /// 有完成清单才列出（含 A3 新格式重写前的 windows 备份）；半份 `.partial-*` 不列。
     static func backups(memoryRoot: URL) -> [URL] {
         let root = backupRoot(memoryRoot: memoryRoot)
         let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
-        let prefixes = ["v4-1-", MemoryMigration.backupPrefix, CatalogSeedCleanup.backupPrefix, TimelineDaily.backupPrefix, "回滚前-"]
+        let prefixes = ["v4-1-", MemoryMigration.backupPrefix, CatalogSeedCleanup.backupPrefix, TimelineDaily.backupPrefix,
+                        WindowSummaryRewrite.backupPrefix, "回滚前-"]
         return names.filter { n in prefixes.contains { n.hasPrefix($0) } }.sorted(by: >)
             .map { root.appendingPathComponent($0, isDirectory: true) }
             .filter { manifest(of: $0) != nil }
@@ -238,6 +240,26 @@ enum MemoryRegeneration {
     }
 
     // MARK: - 恢复
+
+    /// 含 wiki 的整目录恢复：wiki 楼层锁 → 月文件写锁 → 待续本子锁；同步换盘只在后台执行。
+    @MainActor
+    static func restoreExclusively(backup: URL, memoryRoot: URL, now: Date,
+                                   copy: @escaping FileOp = MemoryRegeneration.copy, profileId: String? = nil,
+                                   defaults: UserDefaults = .standard) async throws {
+        let touchesWiki = await Task.detached(priority: .userInitiated) {
+            profileId?.isEmpty == false && manifest(of: backup)?.coveredFolders.contains("wiki") == true
+        }.value
+        let restoreFiles = {
+            try await Task.detached(priority: .userInitiated) {
+                try restore(backup: backup, memoryRoot: memoryRoot, now: now, copy: copy, profileId: profileId, defaults: defaults)
+            }.value
+        }
+        if touchesWiki {
+            try await WikiProposalReview.exclusive(wiki: WikiStore(root: memoryRoot.appendingPathComponent("wiki", isDirectory: true)), restoreFiles)
+        } else {
+            try await restoreFiles()
+        }
+    }
 
     /// 先按完成清单核备份（拷到一半的、文件对不上的拒绝），把这份备份管的文件夹（covered；老清单 = 老三个）挪到一边，
     /// 挪好就发布成「回滚前-<时间>」（备份列表里看得到、能恢复，astra #11），再把备份拷回去、逐个核；

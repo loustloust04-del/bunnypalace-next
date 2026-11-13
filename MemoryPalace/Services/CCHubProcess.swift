@@ -316,10 +316,11 @@ final class CCHubProcess: ObservableObject {
         p.terminate()
     }
 
-    /// 内嵌 hub 拿到端口：Mac 自己的 WS 连接切过去（原来在设置页 onChange 里，设置页不开就跟不上）
+    /// 内嵌 hub 拿到端口：Mac 自己的 WS 连接切过去（原来在设置页 onChange 里，设置页不开就跟不上）。
+    /// 走 Registry 的本机切换（plan-multi-hub impl1 #2 / #4）：新 hub_id 直接核准，旧问题卡的答案不发给它
     private func followPortWithMainConnection(_ port: Int) {
         guard let token = currentToken, let url = URL(string: "ws://127.0.0.1:\(port)/cc") else { return }
-        CCBridgeWebSocketClient.shared.connect(urls: [url], token: token)
+        CCHubRegistry.shared.switchPrimaryLocally(urls: [url], token: token)
     }
 
     // MARK: - Log（环形缓冲 500 条）

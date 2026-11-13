@@ -1,0 +1,136 @@
+{
+ "hi_len": 300,
+ "page_len": 128,
+ "petals": [
+  {
+   "name": "petal00",
+   "front": "petal00_front.webp",
+   "back": "petal00_back.webp",
+   "w": 210,
+   "h": 332,
+   "len_painted": 297.9
+  },
+  {
+   "name": "petal01",
+   "front": "petal01_front.webp",
+   "back": "petal01_back.webp",
+   "w": 222,
+   "h": 212,
+   "len_painted": 180.8
+  },
+  {
+   "name": "petal02",
+   "front": "petal02_front.webp",
+   "back": "petal02_back.webp",
+   "w": 206,
+   "h": 296,
+   "len_painted": 256.0
+  },
+  {
+   "name": "petal03",
+   "front": "petal03_front.webp",
+   "back": "petal03_back.webp",
+   "w": 208,
+   "h": 328,
+   "len_painted": 297.1
+  },
+  {
+   "name": "petal04",
+   "front": "petal04_front.webp",
+   "back": "petal04_back.webp",
+   "w": 190,
+   "h": 320,
+   "len_painted": 294.5
+  },
+  {
+   "name": "petal05",
+   "front": "petal05_front.webp",
+   "back": "petal05_back.webp",
+   "w": 186,
+   "h": 302,
+   "len_painted": 282.5
+  },
+  {
+   "name": "petal06",
+   "front": "petal06_front.webp",
+   "back": "petal06_back.webp",
+   "w": 198,
+   "h": 328,
+   "len_painted": 295.6
+  },
+  {
+   "name": "petal07",
+   "front": "petal07_front.webp",
+   "back": "petal07_back.webp",
+   "w": 212,
+   "h": 322,
+   "len_painted": 279.2
+  },
+  {
+   "name": "petal08",
+   "front": "petal08_front.webp",
+   "back": "petal08_back.webp",
+   "w": 184,
+   "h": 316,
+   "len_painted": 286.0
+  },
+  {
+   "name": "petal09",
+   "front": "petal09_front.webp",
+   "back": "petal09_back.webp",
+   "w": 246,
+   "h": 336,
+   "len_painted": 291.2
+  },
+  {
+   "name": "petal10",
+   "front": "petal10_front.webp",
+   "back": "petal10_back.webp",
+   "w": 208,
+   "h": 344,
+   "len_painted": 299.2
+  },
+  {
+   "name": "petal11",
+   "front": "petal11_front.webp",
+   "back": "petal11_back.webp",
+   "w": 262,
+   "h": 340,
+   "len_painted": 295.2
+  },
+  {
+   "name": "petal12",
+   "front": "petal12_front.webp",
+   "back": "petal12_back.webp",
+   "w": 190,
+   "h": 308,
+   "len_painted": 278.7
+  },
+  {
+   "name": "petal13",
+   "front": "petal13_front.webp",
+   "back": "petal13_back.webp",
+   "w": 188,
+   "h": 256,
+   "len_painted": 217.5
+  }
+ ],
+ "lie": [
+  {
+   "front": "lie00_front.webp",
+   "back": "lie00_back.webp"
+  },
+  {
+   "front": "lie01_front.webp",
+   "back": "lie01_back.webp"
+  },
+  {
+   "front": "lie02_front.webp",
+   "back": "lie02_back.webp"
+  },
+  {
+   "front": "lie03_front.webp",
+   "back": "lie03_back.webp"
+  }
+ ]
+}

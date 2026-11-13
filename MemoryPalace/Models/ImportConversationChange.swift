@@ -71,6 +71,7 @@ struct ConversationSnapshot: Codable {
     let personaId: String?
     let archiveKind: String?
     let sourceMetadata: Data?
+    let recallStateData: Data?
 
     init(conversation: Conversation) {
         id = conversation.id
@@ -93,6 +94,7 @@ struct ConversationSnapshot: Codable {
         personaId = conversation.personaId
         archiveKind = conversation.archiveKind
         sourceMetadata = conversation.sourceMetadata
+        recallStateData = conversation.recallStateData
     }
 
     func apply(to conversation: Conversation) {
@@ -113,6 +115,7 @@ struct ConversationSnapshot: Codable {
         conversation.personaId = personaId
         conversation.archiveKind = archiveKind
         conversation.sourceMetadata = sourceMetadata
+        conversation.recallStateData = recallStateData
     }
 
     func makeConversation(profileId: String) -> Conversation {
@@ -147,6 +150,7 @@ struct MessageNodeSnapshot: Codable {
     /// 卡库 ⑧c：老快照无这些 key，解码为 nil
     let sourceMetadata: Data?
     let sourceVisibility: String?
+    let recallReceiptData: Data?
 
     init(node: MessageNode) {
         id = node.id
@@ -164,6 +168,7 @@ struct MessageNodeSnapshot: Codable {
         segmentsData = node.segmentsData
         sourceMetadata = node.sourceMetadata
         sourceVisibility = node.sourceVisibility
+        recallReceiptData = node.recallReceiptData
     }
 
     func apply(to node: MessageNode) {
@@ -180,6 +185,7 @@ struct MessageNodeSnapshot: Codable {
         node.segmentsData = segmentsData
         node.sourceMetadata = sourceMetadata
         node.sourceVisibility = sourceVisibility
+        node.recallReceiptData = recallReceiptData
     }
 
     func makeNode(profileId: String) -> MessageNode {

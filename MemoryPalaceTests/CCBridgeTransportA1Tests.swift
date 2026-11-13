@@ -73,7 +73,7 @@ final class CCBridgeTransportA1Tests: XCTestCase {
         client.adoptTaskForTesting(task, url: hubURL)
         var seen: [String] = []
         client.onEditMessage = { _, id, _, _ in seen.append("edit:\(id):\(client.isConnected)") }
-        client.onProactiveMessage = { _, _, _, _, _, _, ccId, _, _ in seen.append("reply:\(ccId ?? "-"):\(client.isConnected)") }
+        client.onProactiveMessage = { _, _, _, _, _, _, ccId, _, _ in seen.append("reply:\(ccId ?? "-"):\(client.isConnected)"); return true }
         let rid = "a1-early-\(UUID().uuidString.prefix(8))"
         client.didReceive(.success(editFrame("m1")), on: task)
         client.didReceive(.success(replyFrame(rid)), on: task)

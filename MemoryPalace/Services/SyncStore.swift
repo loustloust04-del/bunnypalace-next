@@ -138,6 +138,14 @@ enum SyncStore {
         var deletedAt: Date?
         /// 卡库 ③b 分支选择表（optional：老文档无此 key）
         var branchSelectionData: Data? = nil
+        var recallStateData: Data? = nil
+        /// 气泡 / 文章（optional：老文档无此 key = 不动本地，新建按文章）
+        var displayMode: String? = nil
+        /// 换模式的时间（optional：老文档 / 没换过 = nil），模式单独按它合并，见 mergeDisplayMode
+        var displayModeUpdatedAt: Date? = nil
+        /// 多 hub（plan-multi-hub B1）：发送端那台的 hub 槽位 id + 那台自报的 hub_id。对端按 hub_id 在本机认机器，见 CCHubRegistry.resolveSynced
+        var ccHubId: String? = nil
+        var ccHubIdentity: String? = nil
     }
 
     /// 永久删除墓碑：对话彻底删时写一份，对端扫到无条件永久删本地副本（永久删赢）。
@@ -168,6 +176,12 @@ enum SyncStore {
         var ccEdited: Bool
         var ccThinking: String?
         var imageDescsData: Data?
+        var recallReceiptData: Data? = nil
+        /// 网页卡事件 / 表情回应捎带（user 节点），表情触发那轮的触发事件（assistant 节点）；老文档没有 = nil
+        var cardEventsData: Data? = nil
+        /// 回复结局 / 上游原样的 finish_reason（plan-reply-error-report-1106）；老文档没有 = nil
+        var replyOutcome: String? = nil
+        var finishReason: String? = nil
     }
 
     private static var encoder: JSONEncoder {
@@ -195,15 +209,21 @@ enum SyncStore {
     /// ⚠️ 指纹表是**设备私有**的，必须放本机（App Support）——
     /// 曾放进共享 sync 目录，两台设备经 iCloud 互相覆盖对方账本：A 导出的指纹把 B 的导入
     /// 记录涂掉，B 永远"已读过"新文档（双机实测抓出的事故）。
-    private static func localStateDir() -> URL {
-        let dir = AppPaths.checked(AppPaths.applicationSupport
-            .appendingPathComponent("MemoryPalace/sync-state", isDirectory: true))
+    /// 注入云端根时，设备私有账本也留在临时根，测试不触碰宿主资料。
+    static func localStateDir() -> URL {
+        let dir = overrideRoot?.appendingPathComponent(".local-state", isDirectory: true)
+            ?? AppPaths.checked(AppPaths.applicationSupport
+                .appendingPathComponent("MemoryPalace/sync-state", isDirectory: true))
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
     private static func stateURL(profileId: String) -> URL? {
         localStateDir().appendingPathComponent("\(profileId).export.json")
+    }
+
+    private static func hubStateURL(profileId: String) -> URL? {
+        localStateDir().appendingPathComponent("\(profileId).export-hub.json")
     }
 
     private static func importStateURL(profileId: String) -> URL? {
@@ -235,6 +255,28 @@ enum SyncStore {
         try? data.write(to: url, options: .atomic)
     }
 
+    /// 本机导出过的 hub 归属（convId → hubOwnership，impl1 #11）：改绑 / 身份补齐不推进 updateTime（列表按它排），
+    /// 跟导出时不一样就重新导出。没有归属的对话不记
+    private static func loadHubState(profileId: String) -> [String: String] {
+        guard let url = hubStateURL(profileId: profileId),
+              let data = try? Data(contentsOf: url),
+              let state = try? decoder.decode([String: String].self, from: data) else { return [:] }
+        return state
+    }
+
+    private static func saveHubState(_ state: [String: String], profileId: String) {
+        guard let url = hubStateURL(profileId: profileId),
+              let data = try? encoder.encode(state) else { return }
+        if (try? Data(contentsOf: url)) == data { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    /// 文档里的 hub 归属合成一个比较值；两个都没有 = nil
+    static func hubOwnership(ccHubId: String?, identity: String?) -> String? {
+        guard ccHubId != nil || identity != nil else { return nil }
+        return (ccHubId ?? "") + "\n" + (identity ?? "")
+    }
+
     /// 本机导出指纹（convId → 已导出 updateTime）。设备本机文件，不参与同步语义。
     private static func loadExportState(profileId: String) -> [String: Date] {
         guard let url = stateURL(profileId: profileId),
@@ -254,11 +296,16 @@ enum SyncStore {
 
     /// 导出该楼层有变化的对话（updateTime > 已导出指纹）。
     /// S4：含软删对话（带 isDeleted=true）——回收站状态也要传播，对端跟着进回收站。
+    /// 回执 / recallState 的持久写入也必须推进所属 Conversation.updateTime；
+    /// 即使没有新增消息，终态仍按同一个 LWW 时钟导出、导入并收敛。
     /// ⚠️ 必须在后台 context 上跑：大楼层初次全量导出会卡死主线程（Mac 实测事故）。
-    static func exportChanged(profileId: String, context: ModelContext, progress: ((String) -> Void)? = nil) -> ExportResult {
+    /// hubIdentity：导出带的 hub_id（单测注入，缺省对话自己记的、没记补本机那台现在记下的）
+    static func exportChanged(profileId: String, context: ModelContext, progress: ((String) -> Void)? = nil,
+                              hubIdentity: (Conversation) -> String? = { CCHubRegistry.exportedIdentity(of: $0) }) -> ExportResult {
         var result = ExportResult()
         guard let root = syncRoot(profileId: profileId) else { return result }
         var state = loadExportState(profileId: profileId)
+        var hubState = loadHubState(profileId: profileId)
 
         let pid = profileId
         let descriptor = FetchDescriptor<Conversation>(
@@ -269,7 +316,10 @@ enum SyncStore {
         for conversation in conversations {
             result.scanned += 1
             if result.scanned % 50 == 0 { progress?("导出中 \(result.scanned)/\(conversations.count)…") }
-            if let exported = state[conversation.id], exported >= conversation.updateTime { continue }
+            // 只换模式不推进 updateTime（列表按它排），所以按 syncStamp（内容 / 模式取较新）判断要不要导出；hub 归属单独比（impl1 #11）
+            let identity = hubIdentity(conversation)
+            let ownership = hubOwnership(ccHubId: conversation.ccHubId, identity: identity)
+            if let exported = state[conversation.id], exported >= conversation.syncStamp, hubState[conversation.id] == ownership { continue }
 
             let convId = conversation.id
             let nodeDescriptor = FetchDescriptor<MessageNode>(
@@ -299,14 +349,23 @@ enum SyncStore {
                         isFavorite: node.isFavorite, isPinned: node.isPinned, pinnedAt: node.pinnedAt,
                         segmentsData: node.segmentsData, ccMessageId: node.ccMessageId,
                         replyToId: node.replyToId, replyQuote: node.replyQuote, ccEdited: node.ccEdited, ccThinking: node.ccThinking,
-                        imageDescsData: node.imageDescsData
+                        imageDescsData: node.imageDescsData,
+                        recallReceiptData: node.recallReceiptData,
+                        cardEventsData: node.cardEventsData,
+                        replyOutcome: node.replyOutcome,
+                        finishReason: node.finishReason
                     )
                 },
                 // JSON 字段名沿用 isDeleted/deletedAt 兼容跨版本同步；模型读写走
                 // isTrashed/trashedAt（避开 NSManagedObject 框架冲突，见 research-isDeleted-clash.md）。
                 isDeleted: conversation.isTrashed,
                 deletedAt: conversation.trashedAt,
-                branchSelectionData: conversation.branchSelectionData
+                branchSelectionData: conversation.branchSelectionData,
+                recallStateData: conversation.recallStateData,
+                displayMode: conversation.displayMode,
+                displayModeUpdatedAt: conversation.displayModeUpdatedAt,
+                ccHubId: conversation.ccHubId,
+                ccHubIdentity: identity
             )
 
             guard let data = try? encoder.encode(document) else { continue }
@@ -319,17 +378,24 @@ enum SyncStore {
                existingDoc.title == document.title,
                existingDoc.currentNodeId == document.currentNodeId,
                existingDoc.branchSelectionData == document.branchSelectionData,
+               existingDoc.recallStateData == document.recallStateData,
+               existingDoc.displayMode == document.displayMode,
+               existingDoc.displayModeUpdatedAt == document.displayModeUpdatedAt,
                (existingDoc.isDeleted ?? false) == (document.isDeleted ?? false),
+               existingDoc.ccHubId == document.ccHubId,
+               existingDoc.ccHubIdentity == document.ccHubIdentity,
                existingDoc.nodes.count == document.nodes.count,
                let existingNodes = try? encoder.encode(existingDoc.nodes),
                let newNodes = try? encoder.encode(document.nodes),
                existingNodes == newNodes {
-                state[conversation.id] = conversation.updateTime
+                state[conversation.id] = conversation.syncStamp
+                hubState[conversation.id] = ownership
                 continue
             }
             do {
                 try data.write(to: fileURL, options: .atomic)
-                state[conversation.id] = conversation.updateTime
+                state[conversation.id] = conversation.syncStamp
+                hubState[conversation.id] = ownership
                 result.exported += 1
                 SyncProbe.log("EXPORT conv=\(conversation.id.prefix(8)) nodes=\(nodes.count) bytes=\(data.count)")
             } catch {
@@ -340,6 +406,8 @@ enum SyncStore {
         }
 
         saveExportState(state, profileId: profileId)
+        let present = Set(conversations.map(\.id))
+        saveHubState(hubState.filter { present.contains($0.key) }, profileId: profileId)
         return result
     }
 
@@ -485,6 +553,7 @@ enum SyncStore {
             )
             if let items = try? context.fetch(favDesc) { for i in items { context.delete(i) } }
             AttachmentStore.deleteConversationAttachments(conversationId: convId, profileId: profileId)
+            PreviousWindowPicker.invalidateCopies(of: [convId], context: context)
             context.delete(conv)
             try? context.save()
 
@@ -529,13 +598,16 @@ enum SyncStore {
 
     /// 扫描同步目录全部文档（含 iCloud 冲突副本——并集合并天然幂等，越合越全）。
     /// 合并规则见 plan：元数据 LWW / 只插缺失节点 / childrenIds 并集。后台 context 上跑。
-    static func importAll(profileId: String, context: ModelContext) -> ImportResult {
+    /// hubResolver：对端的 (ccHubId, hub_id) → 本机的 ccHubId（单测注入，缺省读本机 hub 名单）
+    static func importAll(profileId: String, context: ModelContext,
+                          hubResolver: (String?, String?) -> String? = { CCHubRegistry.resolveSynced(hubId: $0, identity: $1) }) -> ImportResult {
         processTombstones(profileId: profileId, context: context)
         var result = ImportResult()
         guard let root = syncRoot(profileId: profileId) else { return result }
         let (allFiles, downloading) = materializeDocuments(in: root)
         result.documentsDownloading = downloading
         var state = loadExportState(profileId: profileId)
+        var hubState = loadHubState(profileId: profileId)
         var importState = loadImportState(profileId: profileId)
         var dirty = false
 
@@ -544,7 +616,10 @@ enum SyncStore {
             let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
             // 恢复纪元闸：纪元前导出的云端货一律不认（不记账本——文件之后真更新了照常进）
             if let epoch = restoreEpoch, mtime < epoch { return false }
-            if let seen = importState[url.lastPathComponent], seen >= mtime { return false }
+            // 账本以 Unix 秒 Double 保存；Date 的 reference epoch 精度更高，直接比较会把
+            // 同一个文件的亚微秒舍入误差当作更新。比较持久化表示，不丢弃真实可表示的新 mtime。
+            if let seen = importState[url.lastPathComponent],
+               seen.timeIntervalSince1970 >= mtime.timeIntervalSince1970 { return false }
             importState[url.lastPathComponent] = mtime
             return true
         }
@@ -575,6 +650,7 @@ enum SyncStore {
                 predicate: #Predicate<Conversation> { $0.id == convId && $0.profileId == pid }
             )
             let existing = (try? context.fetch(convDescriptor))?.first
+            let incomingRecallIsNewer = document.updateTime > (existing?.updateTime ?? .distantPast)
 
             let conversation: Conversation
             if let existing {
@@ -587,6 +663,7 @@ enum SyncStore {
                         existing.branchSelectionData = document.branchSelectionData
                     }
                     existing.currentNodeId = document.currentNodeId
+                    existing.recallStateData = document.recallStateData
                     existing.isFavorite = document.isFavorite
                     existing.folderId = document.folderId
                     existing.pinnedAt = document.pinnedAt
@@ -600,6 +677,16 @@ enum SyncStore {
                     result.conversationsUpdated += 1
                     dirty = true
                 }
+                // hub 归属是本机的事：只在本机还没有归属时按对端的补一次，之后本机的绑定 / 改绑不被对端覆盖
+                if existing.ccHubId == nil, existing.ccHubIdentity == nil, document.ccHubId != nil {
+                    existing.ccHubId = hubResolver(document.ccHubId, document.ccHubIdentity)
+                    existing.ccHubIdentity = document.ccHubIdentity
+                    // 回环抑制：对端的归属换成本机的说法不算本机改了归属，不回写
+                    hubState[convId] = hubOwnership(ccHubId: existing.ccHubId, identity: existing.ccHubIdentity)
+                    dirty = true
+                }
+                // 模式不跟内容的 updateTime 走（换模式不推进它），单独按模式时间合并
+                if mergeDisplayMode(document, into: existing, contentNewer: incomingRecallIsNewer) { dirty = true }
             } else {
                 let created = Conversation(
                     id: document.conversationId, title: document.title,
@@ -613,9 +700,15 @@ enum SyncStore {
                 created.memoryEnabled = document.memoryEnabled
                 created.selectedModelId = document.selectedModelId
                 created.branchSelectionData = document.branchSelectionData
+                created.recallStateData = document.recallStateData
+                if let mode = document.displayMode { created.displayMode = mode }
+                created.displayModeUpdatedAt = document.displayModeUpdatedAt
                 // S4：对端软删的对话首次到货 → 直接建成回收站状态（模型字段同上）
                 created.isTrashed = document.isDeleted ?? false
                 created.trashedAt = document.deletedAt
+                created.ccHubId = hubResolver(document.ccHubId, document.ccHubIdentity)
+                created.ccHubIdentity = document.ccHubIdentity
+                hubState[convId] = hubOwnership(ccHubId: created.ccHubId, identity: created.ccHubIdentity)
                 context.insert(created)
                 conversation = created
                 result.conversationsCreated += 1
@@ -638,6 +731,25 @@ enum SyncStore {
                         local.childrenIds = merged
                         dirty = true
                     }
+                    if incomingRecallIsNewer,
+                       local.recallReceiptData != nodeDoc.recallReceiptData {
+                        local.recallReceiptData = nodeDoc.recallReceiptData
+                        dirty = true
+                    }
+                    // 捎带事件发出去就定了：本地没有、文档有 → 补上（老文档没有这字段不动本地）
+                    if local.cardEventsData == nil, let events = nodeDoc.cardEventsData {
+                        local.cardEventsData = events
+                        dirty = true
+                    }
+                    // 结局是终态、写完不再变：本地还没有就补上（老文档没有这字段不动本地）
+                    if local.replyOutcome == nil, let outcome = nodeDoc.replyOutcome {
+                        local.replyOutcome = outcome
+                        dirty = true
+                    }
+                    if local.finishReason == nil, let reason = nodeDoc.finishReason {
+                        local.finishReason = reason
+                        dirty = true
+                    }
                     continue
                 }
                 let node = MessageNode(
@@ -657,6 +769,10 @@ enum SyncStore {
                 node.ccEdited = nodeDoc.ccEdited
                 node.ccThinking = nodeDoc.ccThinking
                 node.imageDescsData = nodeDoc.imageDescsData
+                node.recallReceiptData = nodeDoc.recallReceiptData
+                node.cardEventsData = nodeDoc.cardEventsData
+                node.replyOutcome = nodeDoc.replyOutcome
+                node.finishReason = nodeDoc.finishReason
                 context.insert(node)
                 localById[nodeDoc.id] = node
                 result.nodesInserted += 1
@@ -665,13 +781,19 @@ enum SyncStore {
 
             conversation.nodeCount = countDisplayableOnPath(Array(localById.values), leafId: conversation.currentNodeId)
             // 回环抑制：导入版指纹直接记为已导出，避免回声导出
-            if (state[convId] ?? .distantPast) < document.updateTime {
-                state[convId] = document.updateTime
+            let documentStamp = max(document.updateTime, document.displayModeUpdatedAt ?? .distantPast)
+            if (state[convId] ?? .distantPast) < documentStamp {
+                state[convId] = documentStamp
+            }
+            // 本地的模式比这份文档新（对端没收到就发了内容更新）：清掉账本，下一轮导出把本地模式写回去
+            if let local = conversation.displayModeUpdatedAt, isNewerModeStamp(local, than: document.displayModeUpdatedAt) {
+                state[convId] = nil
             }
         }
 
         if dirty { try? context.save() }
         saveExportState(state, profileId: profileId)
+        saveHubState(hubState, profileId: profileId)
         saveImportState(importState, profileId: profileId)
         if result.nodesInserted > 0 || result.conversationsCreated > 0 || result.documentsDownloading > 0 {
             SyncProbe.log("IMPORT done +conv=\(result.conversationsCreated) +nodes=\(result.nodesInserted) downloading=\(result.documentsDownloading)")
@@ -680,6 +802,26 @@ enum SyncStore {
     }
 
     /// 立即同步 = 先导入后导出。后台 context 上跑。
+    /// 气泡 / 文章单独合并，返回本地有没有改。文档带模式时间：比本地新才收；
+    /// 没带（老版本 / 对端没换过）：只在对端内容更新、本地也没换过时照旧跟着内容走
+    static func mergeDisplayMode(_ document: ConversationDocument, into conversation: Conversation, contentNewer: Bool) -> Bool {
+        guard let mode = document.displayMode else { return false }
+        if let stamp = document.displayModeUpdatedAt {
+            guard isNewerModeStamp(stamp, than: conversation.displayModeUpdatedAt) else { return false }
+            conversation.displayModeUpdatedAt = stamp
+        } else {
+            guard contentNewer, conversation.displayModeUpdatedAt == nil else { return false }
+        }
+        conversation.displayMode = mode
+        return true
+    }
+
+    /// 模式时间经 JSON（secondsSince1970 Double）往返会差亚微秒：差 1ms 以内算同一次，免得自己导出的回声被当成更旧 / 更新
+    static func isNewerModeStamp(_ a: Date, than b: Date?) -> Bool {
+        guard let b else { return true }
+        return a.timeIntervalSince(b) > 0.001
+    }
+
     static func syncNow(profileId: String, context: ModelContext, progress: ((String) -> Void)? = nil) -> (imported: ImportResult, exported: ExportResult) {
         cleanupLegacySharedState(profileId: profileId)
         progress?("正在导入…")

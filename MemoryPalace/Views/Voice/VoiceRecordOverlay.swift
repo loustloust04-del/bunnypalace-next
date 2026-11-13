@@ -146,7 +146,7 @@ private enum VoiceDotField {
 
 /// 浮层画家：电平平滑、跟手、点阵、锁、取消花全在一个 Canvas 里逐帧算（只读写 VoiceRecordLive）
 enum VoiceBlobRenderer {
-    /// 花色（小样常量：粉 / 金；薄荷走 Theme.branchIndicator）
+    /// 花色（小样常量：粉 / 金；薄荷走 Theme.chat.branchIndicator）
     static let pink = Color(red: 217 / 255, green: 154 / 255, blue: 165 / 255)
     static let gold = Color(red: 184 / 255, green: 149 / 255, blue: 76 / 255)
     static let petalPink = Color(red: 227 / 255, green: 169 / 255, blue: 176 / 255)
@@ -176,7 +176,7 @@ enum VoiceBlobRenderer {
         s.clock += dt
 
         let anchor = CGPoint(x: live.sendCenter.x - live.overlayOrigin.x, y: live.sendCenter.y - live.overlayOrigin.y)
-        let mint = Theme.branchIndicator
+        let mint = Theme.chat.branchIndicator
         let m = ThemeColorValue(color: mint)                  // 内圈点比按钮薄荷深一档（小样 127,165,141 vs 142,189,159）
         let innerMint = Color(red: m.red * 0.88, green: m.green * 0.88, blue: m.blue * 0.88)
 
@@ -345,9 +345,9 @@ enum VoiceBlobRenderer {
         let shape = Path(roundedRect: box, cornerRadius: 20)
         lg.drawLayer { sh in
             sh.addFilter(.shadow(color: Color(red: 60 / 255, green: 50 / 255, blue: 40 / 255).opacity(0.14), radius: 6, x: 0, y: 2))
-            sh.fill(shape, with: .color(Theme.mainBg.opacity(0.94)))
+            sh.fill(shape, with: .color(Theme.chat.mainBg.opacity(0.94)))
         }
-        lg.stroke(shape, with: .color(Theme.textPrimary.opacity(0.06)), lineWidth: 1)
+        lg.stroke(shape, with: .color(Theme.chat.textPrimary.opacity(0.06)), lineWidth: 1)
         lg.clip(to: shape)
 
         let lockedT = lockedAt.map { Ease.clamp((now - $0) / 0.15) } ?? 0
@@ -359,14 +359,14 @@ enum VoiceBlobRenderer {
             ig.translateBy(x: -10, y: top + 10)                    // 20×22 的锁图标，顶距 10
             let style = StrokeStyle(lineWidth: 1.8, lineCap: .round)
             ig.stroke(Path(roundedRect: CGRect(x: 3, y: 10, width: 14, height: 10), cornerRadius: 3),
-                      with: .color(Theme.textSecondary), style: style)
+                      with: .color(Theme.chat.textSecondary), style: style)
             var shackle = Path()
             let lift = -3 * (1 - L)
             shackle.move(to: CGPoint(x: 6, y: 10 + lift))
             shackle.addLine(to: CGPoint(x: 6, y: 7 + lift))
             shackle.addArc(center: CGPoint(x: 10, y: 7 + lift), radius: 4, startAngle: .degrees(180), endAngle: .degrees(360), clockwise: false)
             shackle.addLine(to: CGPoint(x: 14, y: 10 + lift))
-            ig.stroke(shackle, with: .color(Theme.textSecondary), style: style)
+            ig.stroke(shackle, with: .color(Theme.chat.textSecondary), style: style)
 
             // 上拉箭头：0.9s 来回浮 4pt，随上拉淡出
             let bobPhase = (now / 0.9).truncatingRemainder(dividingBy: 2)
@@ -376,7 +376,7 @@ enum VoiceBlobRenderer {
             ag.translateBy(x: -6, y: top + 36 + bob)
             var arrow = Path()
             arrow.move(to: CGPoint(x: 2, y: 7)); arrow.addLine(to: CGPoint(x: 6, y: 3)); arrow.addLine(to: CGPoint(x: 10, y: 7))
-            ag.stroke(arrow, with: .color(Theme.textMuted), style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
+            ag.stroke(arrow, with: .color(Theme.chat.textMuted), style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
         }
         if let lockedAt {
             let stopAlpha = Ease.clamp((now - lockedAt - 0.56) / 0.25)
@@ -384,7 +384,7 @@ enum VoiceBlobRenderer {
                 var sg = lg
                 sg.opacity = alpha * stopAlpha
                 sg.fill(Path(roundedRect: CGRect(x: -8, y: top + 12, width: 16, height: 16), cornerRadius: 4),
-                        with: .color(Theme.danger))
+                        with: .color(Theme.chat.danger))
             }
         }
     }
@@ -398,7 +398,7 @@ enum VoiceBlobRenderer {
                    with: .color(color.opacity(min(1, alpha))))
         }
         let lerp = { (a: Double, b: Double, t: Double) in a + (b - a) * t }
-        let red = Theme.danger
+        let red = Theme.chat.danger
         if t < 420 {
             let u = Ease.inOutCubic(t / 420)
             let cx = (from.x + to.x) / 2, cy = min(from.y, to.y) - 22
@@ -534,13 +534,13 @@ struct VoiceInlineRow: View {
                 let t = timeline.date.timeIntervalSinceReferenceDate - live.recordStart
                 HStack(spacing: 10) {
                     Circle()
-                        .fill(Theme.danger)
+                        .fill(Theme.chat.danger)
                         .frame(width: 10, height: 10)
                         .opacity(Self.blink(t))
                     Text(Self.timer(t))
                         .font(.system(size: 15, design: .monospaced))
                         .monospacedDigit()
-                        .foregroundColor(Theme.textPrimary)
+                        .foregroundColor(Theme.chat.textPrimary)
                         .frame(minWidth: 38, alignment: .leading)
                 }
                 .padding(.leading, 6)
@@ -550,7 +550,7 @@ struct VoiceInlineRow: View {
                 let t = timeline.date.timeIntervalSinceReferenceDate
                 Text("‹ 左滑取消")
                     .font(.system(size: 14))
-                    .foregroundColor(Theme.textSecondary)
+                    .foregroundColor(Theme.chat.textSecondary)
                     .fixedSize()
                     .offset(x: locked ? 0 : Self.shimmy(t) + VoiceRecordGesture.hintOffset(dx: live.dx))
                     .opacity(locked ? 1 : VoiceRecordGesture.hintOpacity(dx: live.dx))
@@ -565,7 +565,7 @@ struct VoiceInlineRow: View {
             Button { voice.cancel(fromTrash: false) } label: {
                 Text("取消")
                     .font(.system(size: 15))
-                    .foregroundColor(Theme.danger)
+                    .foregroundColor(Theme.chat.danger)
                     .frame(height: 44)
                     .contentShape(Rectangle())
             }
@@ -586,7 +586,7 @@ struct VoiceInlineRow: View {
             Button { voice.cancel(fromTrash: true) } label: {
                 Image(systemName: "trash")
                     .font(.system(size: 17))
-                    .foregroundColor(Theme.danger)
+                    .foregroundColor(Theme.chat.danger)
                     .frame(width: 34, height: 44)
                     .contentShape(Rectangle())
             }
@@ -604,7 +604,7 @@ struct VoiceInlineRow: View {
             ProgressView().controlSize(.small)
             Text("转文字中…")
                 .font(.system(size: 14))
-                .foregroundColor(Theme.textMuted)
+                .foregroundColor(Theme.chat.textMuted)
         }
         .padding(.leading, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -645,7 +645,7 @@ struct VoicePreviewCapsule: View {
         let bars = VoiceWave.normalized(VoiceWave.resampledPeaks(recording.peaks, count: barCount), floor: VoiceWave.levelFloor)
         HStack(spacing: 8) {
             ZStack {
-                Circle().fill(Theme.branchIndicator)
+                Circle().fill(Theme.chat.branchIndicator)
                 PlayPauseShape(morph: state == .playing ? 1 : 0)
                     .fill(Color.white)
                     .frame(width: 11, height: 11)
@@ -660,7 +660,7 @@ struct VoicePreviewCapsule: View {
                         let rect = CGRect(x: CGFloat(i) * 4, y: (size.height - h) / 2, width: 2, height: h)
                         let played = state == .idle ? 0 : VoiceWave.playedFill(index: i, count: n, fraction: fraction)
                         g.fill(Path(roundedRect: rect, cornerRadius: 1),
-                               with: .color(Theme.branchIndicator.opacity(0.4 + 0.6 * played)))
+                               with: .color(Theme.chat.branchIndicator.opacity(0.4 + 0.6 * played)))
                     }
                 }
                 .frame(width: CGFloat(bars.count) * 4 - 2, height: 22)
@@ -669,12 +669,12 @@ struct VoicePreviewCapsule: View {
             Text(VoiceWave.clock(recording.duration))
                 .font(.system(size: 12, design: .monospaced))
                 .monospacedDigit()
-                .foregroundColor(Theme.textSecondary)
+                .foregroundColor(Theme.chat.textSecondary)
         }
         .padding(.leading, 5)
         .padding(.trailing, 12)
         .frame(height: 36)
-        .background(Capsule().fill(Theme.userBubble))
+        .background(Capsule().fill(Theme.chat.userBubble))
         .contentShape(Capsule())
         .onTapGesture { player.toggle(url: recording.url, id: id) }
         .accessibilityElement(children: .ignore)

@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -66,6 +67,23 @@ final class MigrationClassifyTests: XCTestCase {
         XCTAssertEqual(classify([seg(.rolling, m, 0..<60, pending: "周三问结果"), seg(.closeout, m, 60..<80)], m)?.kind, .a2Full, "没标的老式段照旧")
         let tail = seg(.closeout, m, 60..<100, tail: true)
         XCTAssertNotEqual(classify([fresh, tail], m)?.kind, .a2Full, "新写的 A2 + 尾段不重写 A2")
+    }
+
+    func testFormatOneAndTwoKeepMigrationClassificationAndWatermarks() {
+        let m = msgs(80, from: date(10, 6, 9))
+        for format in [1, 2] {
+            var rolling = seg(.rolling, m, 0..<60, pending: "取云桥城地图")
+            rolling.format = format
+            var tail = seg(.closeout, m, 60..<80, tail: true)
+            tail.format = format
+            var window = seg(.closeout, m, 0..<80)
+            window.format = format
+            let a3 = summary([window], closed: "n79")
+            XCTAssertEqual(classify([rolling, tail], a3: a3, m)?.kind, .skip)
+            XCTAssertEqual(classify([rolling], a3: a3, m)?.kind, .tailA3)
+            XCTAssertEqual(classify([rolling, seg(.closeout, m, 60..<80)], a3: a3, m)?.kind, .a2Incremental)
+            XCTAssertFalse(MemoryMigration.a3Done(a3, lastId: "new-message"))
+        }
     }
 
     /// Q4：起点以前的老收尾段不算「要补」（起点以前的消息不给写手）

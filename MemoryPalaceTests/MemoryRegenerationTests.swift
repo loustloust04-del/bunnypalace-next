@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -366,16 +367,16 @@ final class MemoryRegenerationTests: XCTestCase {
             UserDefaults.standard.removeObject(forKey: PendingStore.migratedKey(profileId: pid))
             try? FileManager.default.removeItem(at: proot.deletingLastPathComponent())
         }
-        try PendingStore.add(["问结果"], conversationId: "c1", day: "2026-10-14", anchor: nil, profileId: pid)
+        try PendingStore.add(["问结果"], conversationId: "c1", day: "2026-10-14", anchor: nil, profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         try put("summaries/conv-old-x.md", "第一代", in: proot)
         try put("sessions/c1.md", "老 A2", in: proot)
         let b = try MemoryRegeneration.makeBackup(memoryRoot: proot, name: "v5搬迁-t2", folders: five)
-        try PendingStore.add(["搬完才有的"], conversationId: "c1", day: "2026-10-16", anchor: nil, profileId: pid)
+        try PendingStore.add(["搬完才有的"], conversationId: "c1", day: "2026-10-16", anchor: nil, profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         try put("windows/c1.md", "新 A3", in: proot)
         try put("sessions/c1.md", "新 A2", in: proot)
-        XCTAssertEqual(PendingStore.load(profileId: pid)?.count, 2)
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid))?.count, 2)
         try MemoryRegeneration.restore(backup: b, memoryRoot: proot, now: date(10, 16, 2), profileId: pid)
-        XCTAssertEqual(PendingStore.load(profileId: pid)?.map(\.text), ["问结果"], "待续本子回到备份那刻")
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid))?.map(\.text), ["问结果"], "待续本子回到备份那刻")
         XCTAssertEqual(text("sessions/c1.md", in: proot), "老 A2")
         XCTAssertEqual(text("summaries/conv-old-x.md", in: proot), "第一代")
         XCTAssertFalse(FileManager.default.fileExists(atPath: proot.appendingPathComponent(WindowSummaryStore.folder).path),
@@ -399,34 +400,34 @@ final class MemoryRegenerationTests: XCTestCase {
     func testRestoreFailureStillForgetsPendingCache() throws {
         let pid = "xctest-regen-pending-fail"
         let proot = pendingFloor(pid)
-        try PendingStore.add(["问结果"], conversationId: "c1", day: "2026-10-14", anchor: nil, profileId: pid)
+        try PendingStore.add(["问结果"], conversationId: "c1", day: "2026-10-14", anchor: nil, profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         try put("sessions/c1.md", "老 A2", in: proot)
         let b = try MemoryRegeneration.makeBackup(memoryRoot: proot, name: "v5搬迁-t5", folders: five)
-        XCTAssertEqual(PendingStore.load(profileId: pid)?.count, 1, "缓存热着")
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid))?.count, 1, "缓存热着")
         let onDisk = [PendingItem(id: "p0001", text: "问结果", state: .done, conversationId: "c1", day: "2026-10-14", anchor: nil)]
-        try Data(PendingStore.render(onDisk).utf8).write(to: PendingStore.fileURL(profileId: pid))
+        try Data(PendingStore.render(onDisk).utf8).write(to: PendingStore.fileURL(root: FileLibraryStore.memoryRoot(profileId: pid)))
         let failing: MemoryRegeneration.FileOp = { from, to in
             if from.lastPathComponent == SessionSummaryStore.folder { throw InjectedFailure() }
             try FileManager.default.copyItem(at: from, to: to)
         }
         XCTAssertThrowsError(try MemoryRegeneration.restore(backup: b, memoryRoot: proot, now: date(10, 16, 2), copy: failing, profileId: pid))
-        XCTAssertEqual(PendingStore.load(profileId: pid), onDisk, "缓存清了，读回挪回来的那份")
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid)), onDisk, "缓存清了，读回挪回来的那份")
     }
 
     /// astra #7：恢复期间改待续（pending_notes / 设置里改）要等恢复做完，落在恢复以后的本子上，不拿旧缓存整份写回去
     func testPendingEditDuringRestoreWaitsAndLandsOnRestored() throws {
         let pid = "xctest-regen-pending-lock"
         let proot = pendingFloor(pid)
-        try PendingStore.add(["问结果"], conversationId: "c1", day: "2026-10-14", anchor: nil, profileId: pid)
+        try PendingStore.add(["问结果"], conversationId: "c1", day: "2026-10-14", anchor: nil, profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         let b = try MemoryRegeneration.makeBackup(memoryRoot: proot, name: "v5搬迁-t6", folders: five)
-        try PendingStore.add(["现在的"], conversationId: "c1", day: "2026-10-16", anchor: nil, profileId: pid)
+        try PendingStore.add(["现在的"], conversationId: "c1", day: "2026-10-16", anchor: nil, profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         let added = DispatchSemaphore(value: 0)
         var blocked = false
         let editing: MemoryRegeneration.FileOp = { from, to in
             try FileManager.default.copyItem(at: from, to: to)
             guard from.lastPathComponent == PendingStore.folder else { return }
             Thread.detachNewThread {
-                _ = try? PendingStore.add(["恢复中加的"], conversationId: "c1", day: "2026-10-16", anchor: nil, profileId: pid)
+                _ = try? PendingStore.add(["恢复中加的"], conversationId: "c1", day: "2026-10-16", anchor: nil, profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
                 added.signal()
             }
             blocked = added.wait(timeout: .now() + 0.3) == .timedOut
@@ -434,7 +435,7 @@ final class MemoryRegenerationTests: XCTestCase {
         try MemoryRegeneration.restore(backup: b, memoryRoot: proot, now: date(10, 16, 2), copy: editing, profileId: pid)
         XCTAssertTrue(blocked, "恢复拿着锁，改待续进不来")
         XCTAssertEqual(added.wait(timeout: .now() + 5), .success)
-        XCTAssertEqual(PendingStore.load(profileId: pid)?.map(\.text), ["问结果", "恢复中加的"], "加在恢复以后的本子上，旧缓存没写回去")
+        XCTAssertEqual(PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid))?.map(\.text), ["问结果", "恢复中加的"], "加在恢复以后的本子上，旧缓存没写回去")
     }
 
     // MARK: - astra #6 搬迁 / 恢复全局一趟

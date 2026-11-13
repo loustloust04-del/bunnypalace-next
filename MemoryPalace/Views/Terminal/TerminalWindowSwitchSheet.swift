@@ -12,11 +12,11 @@ struct TerminalWindowSwitchSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showClosed: Bool
     @State private var renaming: TerminalRenameRequest?
-    @State private var ending: TerminalWindowInfo?
+    @State private var ending: TerminalHubWindow?
     @State private var endingLocal: String?
     @State private var showSandbox = false
     @State private var showConnect = false
-    private var store: TerminalWindowStore { .shared }
+    private var store: TerminalWindowStore? { model.store }
 
     init(model: TerminalPanelModel, connected: Bool) {
         self.model = model
@@ -43,7 +43,7 @@ struct TerminalWindowSwitchSheet: View {
                     ForEach(items.filter { $0.engine.cell == .phone }) { localRow($0) }
                     row(selected: false) {
                         HStack(spacing: 8) {
-                            TerminalCellChip(cell: .phone)
+                            TerminalCellChip(engine: .phone)
                             Text("新终端（离线）")
                             Spacer()
                         }
@@ -98,7 +98,8 @@ struct TerminalWindowSwitchSheet: View {
             Spacer()
             TerminalNewWindowMenu(
                 connected: connected,
-                closedCount: store.closed.count,
+                closedCount: store?.closed.count ?? 0,
+                tools: model.client?.currentHubInfo?.tools,
                 onOpen: { engine in
                     model.open(engine: engine)
                     dismiss()
@@ -106,7 +107,9 @@ struct TerminalWindowSwitchSheet: View {
                 onOpenLocal: openLocal,
                 onSandbox: { showSandbox = true },
                 onRestore: { showClosed = true },
-                onConnect: { showConnect = true }
+                onConnect: { showConnect = true },
+                hubs: model.hubs,
+                selectedHub: Binding(get: { model.hubId }, set: { model.hubId = $0 })
             ) {
                 Image(systemName: "plus")
                     .font(.system(size: 17))
@@ -145,6 +148,7 @@ struct TerminalWindowSwitchSheet: View {
                 HStack(spacing: 6) {
                     TerminalStatusDot(dot: item.dot)
                     Text(item.engine.displayName)
+                    if let name = item.hubName { TerminalHubTag(name: name) }
                     Spacer()
                     if let dot = item.dot {
                         Text(dot.statusText)
@@ -168,8 +172,7 @@ struct TerminalWindowSwitchSheet: View {
         }
         .onTapGesture { choose(item.target) }
         .contextMenu { Button("改名…", systemImage: "pencil") { renaming = model.renameRequest(for: item) } }
-        .modifier(WindowSwipeActions(window: item.window, onCollapse: { model.collapse($0.code) },
-                                     onEnd: { ending = $0 }))
+        .modifier(swipeActions(item))
     }
 
     private func shellRow(_ item: TerminalTabItem) -> some View {
@@ -180,13 +183,20 @@ struct TerminalWindowSwitchSheet: View {
                     .font(.system(size: 13.5))
                     .foregroundColor(TerminalChrome.ink)
                     .lineLimit(1)
+                if let name = item.hubName { TerminalHubTag(name: name) }
                 Spacer()
             }
         }
         .onTapGesture { choose(item.target) }
         .contextMenu { Button("改名…", systemImage: "pencil") { renaming = model.renameRequest(for: item) } }
-        .modifier(WindowSwipeActions(window: item.window, onCollapse: { model.collapse($0.code) },
-                                     onEnd: { ending = $0 }))
+        .modifier(swipeActions(item))
+    }
+
+    private func swipeActions(_ item: TerminalTabItem) -> WindowSwipeActions {
+        let hub = item.target.hubId
+        return WindowSwipeActions(window: hub == nil ? nil : item.window,
+                                  onCollapse: { if let hub { model.collapse($0.code, hub: hub) } },
+                                  onEnd: { if let hub { ending = TerminalHubWindow(hubId: hub, window: $0) } })
     }
 
     /// 小电脑的 shell：点切过去、左滑结束（没有收起，D1）、长按改名
@@ -222,24 +232,29 @@ struct TerminalWindowSwitchSheet: View {
         dismiss()
     }
 
+    /// 所有电脑收起的窗口（≥2 台每条带电脑名）
     @ViewBuilder
     private var closedGroup: some View {
-        if !store.closed.isEmpty {
+        let closed = model.hubStores.flatMap { hub, store in store.closed.map { TerminalHubWindow(hubId: hub, window: $0) } }
+        if !closed.isEmpty {
             DisclosureGroup(isExpanded: $showClosed) {
-                ForEach(store.closed) { window in
+                ForEach(closed, id: \.key) { ref in
                     row(selected: false) {
-                        Text(closedLabel(window))
-                            .font(.system(size: 13))
-                            .foregroundColor(TerminalChrome.dim)
-                            .lineLimit(1)
+                        HStack(spacing: 6) {
+                            Text(closedLabel(ref.window))
+                                .font(.system(size: 13))
+                                .foregroundColor(TerminalChrome.dim)
+                                .lineLimit(1)
+                            if let name = model.hubName(ref.hubId) { TerminalHubTag(name: name) }
+                        }
                     }
                     .onTapGesture {
-                        model.restore(window.code)
+                        model.restore(ref.window.code, hub: ref.hubId)
                         dismiss()
                     }
                 }
             } label: {
-                Text("已收起 \(store.closed.count) 个")
+                Text("已收起 \(closed.count) 个")
                     .font(.system(size: 13.5))
                     .foregroundColor(TerminalChrome.faint)
             }

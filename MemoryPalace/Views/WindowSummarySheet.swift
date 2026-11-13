@@ -1,66 +1,20 @@
+import MemoryCore
 import SwiftUI
 
-/// 窗口总结 / 上下文摘要的读盘入口：界面只经这里拿「一个窗口」（plan-memory-migrate-3gen §六）。
-/// 一个窗口 = A3 一段（windows/ 是一段从头压的才算；v4-1 抄本当「还没压」）+ A2（sessions/，没有就第一代当第 0 段）
-enum WindowSummaryReader {
-    struct Doc: Equatable {
-        var conversationId: String
-        var title: String
-        var a3: SessionSegment?
-        /// A2：第 0 段 + 正式段 + 尾段，按时间
-        var a2: [SessionSegment]
-        /// 老收尾段（v4，起点以前没搬的）：不注入、不进 A3，灰字放最下面
-        var oldCloseouts: [SessionSegment] = []
-        /// windows/ 里认不成 A3 的旧窗口总结（v4-1 抄本，还没搬）：灰字一组，不算段数（astra #13）
-        var oldWindow: [SessionSegment] = []
-
-        var isEmpty: Bool { a3 == nil && a2.isEmpty && oldCloseouts.isEmpty && oldWindow.isEmpty }
-    }
-
+extension WindowSummaryReader {
     /// 窗口总结页，读盘，后台调
     static func load(conversationId: String, profileId: String) -> Doc? {
-        let w = WindowSummaryStore.load(conversationId: conversationId, profileId: profileId)
-        let s = SessionSummaryStore.load(conversationId: conversationId, profileId: profileId)
-            ?? SessionSummaryStore.legacySeed(conversationId: conversationId, profileId: profileId)
+        let w = WindowSummaryStore.load(conversationId: conversationId, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
+        let s = SessionSummaryStore.load(conversationId: conversationId, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
+            ?? SessionSummaryStore.legacySeed(conversationId: conversationId, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
         guard w != nil || s != nil else { return nil }
         return doc(conversationId: conversationId, window: w, context: s)
     }
 
     /// 上下文摘要（对话 ⋯ 弹层）：直接读 sessions/，尾段算（标出来），老收尾段不算。读盘，后台调
     static func loadContext(conversationId: String, profileId: String) -> Doc? {
-        guard let s = SessionSummaryStore.load(conversationId: conversationId, profileId: profileId) else { return nil }
+        guard let s = SessionSummaryStore.load(conversationId: conversationId, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId)) else { return nil }
         return Doc(conversationId: s.conversationId, title: s.title, a3: nil, a2: contextSegments(ordered(s.segments)))
-    }
-
-    /// 纯函数：windows/ + sessions/ → 一个窗口
-    static func doc(conversationId: String, window w: SessionSummary?, context s: SessionSummary?) -> Doc {
-        let segs = ordered(s?.segments ?? [])
-        let title = [w?.title, s?.title].compactMap { $0 }.first { !$0.isEmpty } ?? ""
-        let top = a3(w)
-        return Doc(conversationId: conversationId, title: title, a3: top, a2: contextSegments(segs),
-                   oldCloseouts: segs.filter { $0.kind == .closeout && !$0.isTail },
-                   oldWindow: top == nil ? w?.segments ?? [] : [])
-    }
-
-    /// v5 的 A3：windows/ 只有一段、从头压的；v4-1 抄本（多段，或最后那段 from > 0）= 还没压
-    static func a3(_ w: SessionSummary?) -> SessionSegment? {
-        guard let w, w.segments.count == 1, w.segments[0].from == 0 else { return nil }
-        return w.segments[0]
-    }
-
-    /// 纯函数：改版前的累计摘要打头（它盖的是最前面那截），其余按开始时间先后；同一时间保持文件里的先后
-    static func ordered(_ segments: [SessionSegment]) -> [SessionSegment] {
-        let legacy = segments.filter { $0.kind == .legacy }
-        let rest = segments.enumerated()
-            .filter { $0.element.kind != .legacy }
-            .sorted { ($0.element.start, $0.offset) < ($1.element.start, $1.offset) }
-            .map(\.element)
-        return legacy + rest
-    }
-
-    /// 纯函数：A2 的段 = 第 0 段 + 正式段 + 尾段，不含老收尾段
-    static func contextSegments(_ segments: [SessionSegment]) -> [SessionSegment] {
-        segments.filter { $0.kind != .closeout || $0.isTail }
     }
 
     /// 纯函数（可测）：时间轴项落在 A2 的哪一段（下标）——这一项当天第一条消息的时间落在段的起止里（秒级），
@@ -70,11 +24,6 @@ enum WindowSummaryReader {
             a2[i].kind != .legacy && a2[i].start.addingTimeInterval(-1) <= anchor.start && anchor.start <= a2[i].end.addingTimeInterval(1)
         }
         return hits.first { !a2[$0].title.isEmpty && anchor.title.hasPrefix(a2[$0].title) } ?? hits.first
-    }
-
-    /// 段号现算：有改造前累计摘要它是第 0 段，没有从 1 数（同 `CatalogALineReader.numbered`）
-    static func number(_ index: Int, in a2: [SessionSegment]) -> Int {
-        index + (a2.first?.kind == .legacy ? 0 : 1)
     }
 }
 
@@ -192,7 +141,7 @@ struct WindowSummaryPage: View {
         .scrollContentBackground(.hidden)
         .overlay {
             if loaded && (doc?.isEmpty ?? true) {
-                MemoryEmptyState(title: "这个窗口还没有窗口总结", message: "聊完、安静 12 小时后会记")
+                MemoryEmptyState(title: "这个窗口还没有窗口总结", message: "聊完会记下，默认等安静 24 小时")
                     .allowsHitTesting(false)
             }
         }
@@ -219,7 +168,7 @@ struct WindowSummaryPage: View {
     }
 }
 
-/// 一段：时间段 + 标题 / 经过 / 原话（不出待续）；改版前的累计摘要只出正文；
+/// 一段：时间段 + 标题 / 经过或走向 / 原话 / 关键词（不出待续）；改版前的累计摘要只出正文；
 /// A3 头上写「写到哪天」，尾段标「尾段」，muted = 老收尾段整段灰字
 struct WindowSegmentCard: View {
     let segment: SessionSegment
@@ -258,7 +207,7 @@ struct WindowSegmentCard: View {
                         .foregroundColor(primary)
                 }
                 if !segment.story.isEmpty {
-                    label("经过")
+                    label(segment.format >= 2 && segment.kind == .window ? "走向" : "经过")
                     paragraph(segment.story)
                 }
                 let quotes = segment.quotes.components(separatedBy: "\n")
@@ -276,6 +225,13 @@ struct WindowSegmentCard: View {
                             }
                             .textSelection(.enabled)
                     }
+                }
+                if !segment.keywords.isEmpty {
+                    Text("关键词 · " + segment.keywords.joined(separator: "、"))
+                        .font(.system(size: m.secondarySize - 1))
+                        .foregroundColor(Theme.textMuted)
+                        .lineLimit(1)
+                        .textSelection(.enabled)
                 }
             }
         }

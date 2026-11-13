@@ -95,6 +95,9 @@ struct APICredential: Identifiable, Codable {
     /// 文本模式代理等），发请求不带 tools 也不在 system 里提工具——否则模型会对着空气用文本假装调用
     /// （2026-08-25 claude-proxy 首验实锤）。Optional 是为了老存档解码不炸（对比线洞 4）。
     var toolsSupported: Bool?
+    /// 后台任务（记忆写手 / 总结 / 心声…副调用）用流式发：nil/true = 流式，false = 非流式。
+    /// 有的网络会掐 30 多秒没字节的连接（research-非流式长请求断线）；流式审查更严的服务商可以关（粟粟 11-07）
+    var sideCallStreaming: Bool?
     /// `type == .unsupported` 时保存原始 type 字符串，编码时原样写回（降级→升级不丢数据）。
     var unknownTypeRaw: String?
     /// 选的是预设里哪个区域（plan-provider-presets §2.2）。nil = 老卡 / 自定义卡 / 导入的旧配置，用 baseURL 反查
@@ -113,6 +116,7 @@ struct APICredential: Identifiable, Codable {
         lastUsedAt: Date? = nil,
         lastUsedModelId: String? = nil,
         toolsSupported: Bool? = nil,
+        sideCallStreaming: Bool? = nil,
         unknownTypeRaw: String? = nil,
         regionId: String? = nil
     ) {
@@ -128,13 +132,14 @@ struct APICredential: Identifiable, Codable {
         self.lastUsedAt = lastUsedAt
         self.lastUsedModelId = lastUsedModelId
         self.toolsSupported = toolsSupported
+        self.sideCallStreaming = sideCallStreaming
         self.unknownTypeRaw = unknownTypeRaw
         self.regionId = regionId
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, emoji, presetId, type, baseURL, extraHeaders, models
-        case createdAt, lastUsedAt, lastUsedModelId, toolsSupported, unknownTypeRaw, regionId
+        case createdAt, lastUsedAt, lastUsedModelId, toolsSupported, sideCallStreaming, unknownTypeRaw, regionId
     }
 
     init(from decoder: Decoder) throws {
@@ -158,6 +163,7 @@ struct APICredential: Identifiable, Codable {
         self.lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         self.lastUsedModelId = try c.decodeIfPresent(String.self, forKey: .lastUsedModelId)
         self.toolsSupported = try c.decodeIfPresent(Bool.self, forKey: .toolsSupported)
+        self.sideCallStreaming = try c.decodeIfPresent(Bool.self, forKey: .sideCallStreaming)
         self.regionId = try c.decodeIfPresent(String.self, forKey: .regionId)
         // 老存档可能带 modelRatio/completionRatio/groupRatio/currencyRate —— 静默忽略
     }
@@ -178,6 +184,7 @@ struct APICredential: Identifiable, Codable {
         try c.encodeIfPresent(lastUsedAt, forKey: .lastUsedAt)
         try c.encodeIfPresent(lastUsedModelId, forKey: .lastUsedModelId)
         try c.encodeIfPresent(toolsSupported, forKey: .toolsSupported)
+        try c.encodeIfPresent(sideCallStreaming, forKey: .sideCallStreaming)
         try c.encodeIfPresent(unknownTypeRaw, forKey: .unknownTypeRaw)
         try c.encodeIfPresent(regionId, forKey: .regionId)
     }
@@ -241,7 +248,12 @@ final class ProviderManager {
     @ObservationIgnored
     private var apiKeyCacheLoaded = false
 
-    init() {
+    /// API key 读写（批量预热 / setApiKey / 同步开关重写）；单测注入替身
+    @ObservationIgnored
+    private let keychain: APIKeyKeychain
+
+    init(keychain: APIKeyKeychain = SystemAPIKeyKeychain()) {
+        self.keychain = keychain
         migrateLegacyKeysIfNeeded()
         warmUpApiKeyCache()
         let isFreshInstall = !UserDefaults.standard.bool(forKey: credentialMigrationV1DoneKey)
@@ -416,7 +428,7 @@ final class ProviderManager {
 
     /// 一次性批量读 Keychain，填充 apiKeyCache。只触发一次 Keychain 授权弹窗。
     private func warmUpApiKeyCache() {
-        apiKeyCache = KeychainStore.getAll()
+        apiKeyCache = keychain.getAll()
         apiKeyCacheLoaded = true
     }
 
@@ -456,16 +468,20 @@ final class ProviderManager {
         return key
     }
 
-    func setApiKey(_ key: String, for credentialId: String) {
+    /// 返回钥匙串写 / 删没成（hub 配对要据此决定放不放弃，plan-multi-hub B2.1）。钥匙串成了才动内存缓存，失败缓存保持原样
+    @discardableResult
+    func setApiKey(_ key: String, for credentialId: String) -> Bool {
         if !apiKeyCacheLoaded { warmUpApiKeyCache() }
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
+            guard keychain.remove(account: credentialId) else { return false }
             apiKeyCache.removeValue(forKey: credentialId)
-            KeychainStore.remove(account: credentialId)
-        } else {
-            apiKeyCache[credentialId] = trimmed
-            _ = KeychainStore.set(trimmed, account: credentialId, sync: cloudSyncEnabled)
+            return true
         }
+        let sync = cloudSyncEnabled && !KeychainStore.isLocalOnly(account: credentialId)
+        guard keychain.set(trimmed, account: credentialId, sync: sync) else { return false }
+        apiKeyCache[credentialId] = trimmed
+        return true
     }
 
     func hasKey(for credentialId: String) -> Bool {
@@ -474,15 +490,15 @@ final class ProviderManager {
         return !key.isEmpty
     }
 
-    /// 切换 iCloud 同步开关后把所有已有 key 按新状态重写一遍。
+    /// 切换 iCloud 同步开关后把所有已有 key 按新状态重写一遍。只存本机的账户（hub 口令等，KeychainStore.isLocalOnly）始终写成不同步。
     /// 返回失败的 account 列表（为空表示全部成功）。
     @discardableResult
     func reencryptAllKeys(sync: Bool) -> [String] {
         UserDefaults.standard.set(sync, forKey: cloudSyncKey)
         var failures: [String] = []
-        let all = KeychainStore.getAll()
+        let all = keychain.getAll()
         for (account, value) in all {
-            if !KeychainStore.set(value, account: account, sync: sync) {
+            if !keychain.set(value, account: account, sync: sync && !KeychainStore.isLocalOnly(account: account)) {
                 failures.append(account)
             } else {
                 apiKeyCache[account] = value
@@ -549,6 +565,26 @@ final class ProviderManager {
         case .unsupported: return false
         case .openaiCompatible, .anthropic, .chatgptOAuth: return hasKey
         }
+    }
+
+    /// 后台副调用挑模型（体检 L-B3 / L-B4）：按顺序试候选 id，只要发得出请求、又走得了非流式的卡
+    /// （桥卡 / 本机卡在 router 非流式路径上必抛）；都不行返回 nil，不拿没选过的模型兜底
+    func sideModel(ids: [String]) -> ProviderModel? {
+        Self.pickSideModel(ids: ids, model: { model(byId: $0) },
+                           credential: { id in credentials.first { $0.id == id } },
+                           usable: { isUsable($0) })
+    }
+
+    static func pickSideModel(ids: [String], model: (String) -> ProviderModel?,
+                              credential: (String) -> APICredential?, usable: (APICredential) -> Bool) -> ProviderModel? {
+        for id in ids where !id.isEmpty {
+            guard let m = model(id), let c = credential(m.credentialId), usable(c) else { continue }
+            switch c.type {
+            case .openaiCompatible, .anthropic, .chatgptOAuth: return m
+            case .ccBridge, .localMLX, .unsupported: continue
+            }
+        }
+        return nil
     }
 
     /// mac 上回环地址就是本机 hub；iOS 模拟器的回环也是这台 Mac（不用配对）；真机得扫码配过对（配了主 / 备 / 中继任一个）
@@ -664,9 +700,11 @@ final class ProviderManager {
         return nil
     }
 
-    /// 三级解析：对话级 → 全局兜底 → 第一个可用 → 硬兜底。
-    func resolveModel(conversationModelId: String?, globalFallbackId: String?) -> ProviderModel {
+    /// 解析：对话级 → 这个人（`Profile.preferredModel`，atrium P3①）→ 全局默认 → 第一个可用 → 硬兜底。
+    /// 每一跳指向不存在的模型都当空（层上存的老格式默认值就这样掉到全局）
+    func resolveModel(conversationModelId: String?, profileModelId: String?, globalFallbackId: String?) -> ProviderModel {
         if let cid = conversationModelId, !cid.isEmpty, let m = model(byId: cid) { return m }
+        if let pid = profileModelId, !pid.isEmpty, let m = model(byId: pid) { return m }
         if let gid = globalFallbackId, !gid.isEmpty, let m = model(byId: gid) { return m }
         return fallbackModel ?? ProviderModel(credentialId: "openrouter", modelId: "anthropic/claude-sonnet-4", name: "Claude Sonnet 4")
     }
@@ -716,22 +754,6 @@ final class ProviderManager {
 
     // MARK: - Saved Credential List
 
-    /// 所有用户加的卡（含还没填 key 的草稿卡），按最近使用时间降序。
-    /// 给 API 一级页用 —— 替代旧 savedAPIProviders（旧逻辑是 hasKey 才进列表，新设计列表 = 全部卡）。
-    var savedAPIProviders: [APICredential] {
-        credentials.sorted { a, b in
-            switch (a.lastUsedAt, b.lastUsedAt) {
-            case let (la?, lb?): return la > lb
-            case (nil, nil): return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
-            case (_?, nil): return true
-            case (nil, _?): return false
-            }
-        }
-    }
-
-    /// 旧名沿用。
-    var customProviders: [APICredential] { credentials }
-
     /// 改卡昵称。
     func renameCredential(id: String, newName: String) {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -740,9 +762,6 @@ final class ProviderManager {
         credentials[idx].name = trimmed
         persist()
     }
-
-    /// 旧 API 名沿用。
-    func renameCustomProvider(id: String, newName: String) { renameCredential(id: id, newName: newName) }
 
     /// 改 emoji（保存时校验唯一）。
     @discardableResult
@@ -776,21 +795,8 @@ final class ProviderManager {
         persist()
     }
 
-    /// 旧 API 名沿用（参数名 providerId 实为 credentialId）。
-    func touchLastUsed(providerId: String, modelId: String) {
-        touchLastUsed(credentialId: providerId, modelId: modelId)
-    }
-
     // MARK: - Budget (全局保险闸 — 粟粟决策 2026-04-23)
     // per-id 签名保留避免上游改动；内部忽略 id，全部走 GlobalBudgetStore。
-
-    func setBudgetEnabled(_ enabled: Bool, for id: String) {
-        GlobalBudgetStore.shared.setEnabled(enabled)
-    }
-
-    func setBudgetUSD(_ amount: Double, for id: String) {
-        GlobalBudgetStore.shared.setBudgetUSD(amount)
-    }
 
     /// 发送后把实际 cost（USD）累加到全局 spent。
     func commitSpend(providerId: String, amount: Double, usage: TokenUsage? = nil) {
@@ -798,45 +804,9 @@ final class ProviderManager {
         GlobalBudgetStore.shared.commitSpend(amount)
     }
 
-    /// 重置全局"已用"；预算上限保留。
-    func resetSpent(providerId: String) {
-        GlobalBudgetStore.shared.resetSpent()
-    }
-
     /// 发送前门控：估算 cost → 全局保险闸。
     func budgetGate(providerId: String, estimatedCost: Double) -> BudgetGate {
         BudgetCalculator.gate(estimatedCost: estimatedCost)
-    }
-
-    // MARK: - ccBridge LAN URL override
-
-    var ccBridgeBaseURL: String {
-        let override = UserDefaults.standard.string(forKey: "ccBridgeBaseURLOverride") ?? ""
-        if !override.isEmpty { return override }
-        return APIProvider.ccBridge.baseURL
-    }
-
-    func setCCBridgeBaseURL(_ url: String) {
-        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || trimmed == APIProvider.ccBridge.baseURL {
-            UserDefaults.standard.removeObject(forKey: "ccBridgeBaseURLOverride")
-        } else {
-            UserDefaults.standard.set(trimmed, forKey: "ccBridgeBaseURLOverride")
-        }
-        reload()
-    }
-
-    var ccBridgeBaseURLBackup: String {
-        UserDefaults.standard.string(forKey: "ccBridgeBaseURLBackup") ?? ""
-    }
-
-    func setCCBridgeBaseURLBackup(_ url: String) {
-        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            UserDefaults.standard.removeObject(forKey: "ccBridgeBaseURLBackup")
-        } else {
-            UserDefaults.standard.set(trimmed, forKey: "ccBridgeBaseURLBackup")
-        }
     }
 
     // MARK: - Favorite Models（☆ 收藏 / M3/M4 主消费）
@@ -877,9 +847,6 @@ final class ProviderManager {
         }
     }
 
-    /// 旧 API 名沿用。
-    var favoritesByProvider: [(APICredential, [ProviderModel])] { favoritesByCredential }
-
     /// "使用这张卡"：切 selectedChatModel 到该卡 lastUsedModelId（fallback models.first）。
     @discardableResult
     func useCredential(id: String) -> String? {
@@ -896,10 +863,6 @@ final class ProviderManager {
         touchLastUsed(credentialId: id, modelId: mid)
         return combined
     }
-
-    /// 旧 API 名沿用。
-    @discardableResult
-    func useProvider(id: String) -> String? { useCredential(id: id) }
 
     // MARK: - Credential CRUD
 
@@ -932,11 +895,6 @@ final class ProviderManager {
         ModelHints.shared.replace(credentialId: id, with: [:])   // 旁表里这张卡的模型元数据
         persist()
     }
-
-    // 旧 API 名沿用 ——
-    func addProvider(_ p: APICredential) { addCredential(p) }
-    func updateProvider(_ p: APICredential) { updateCredential(p) }
-    func removeProvider(id: String) { removeCredential(id: id) }
 
     // MARK: - Model Management
 
@@ -988,11 +946,6 @@ final class ProviderManager {
         case .openaiCompatible, .anthropic, .chatgptOAuth:
             return await ProviderProbe.fetchModels(draft: c, key: key, hints: .shared)   // 已存的卡：元数据按卡 id 落旁表
         }
-    }
-
-    /// 旧 API 名沿用。
-    func fetchModels(providerId: String) async -> Result<[ProviderModel], Error> {
-        await fetchModels(credentialId: providerId)
     }
 
     // MARK: - ChatGPT OAuth /models 拉取（G-M6）
@@ -1092,11 +1045,6 @@ final class ProviderManager {
         }
     }
 
-    /// 旧 API 名沿用。
-    func fetchAndMergeModels(providerId: String) async -> Result<Int, Error> {
-        await fetchAndMergeModels(credentialId: providerId)
-    }
-
     // MARK: - Connection Test
 
     /// 已存卡的测试：取卡 + key 交给 ProviderProbe（草稿测试直接调 ProviderProbe.test，不经这里）。
@@ -1122,11 +1070,6 @@ final class ProviderManager {
                                     userInfo: [NSLocalizedDescriptionKey: "未设置 API Key"]))
         }
         return await ProviderProbe.test(draft: c, key: key, preferredModelId: preferredModelId).map(\.summary)
-    }
-
-    /// 旧 API 名沿用。
-    func testConnection(providerId: String, preferredModelId: String? = nil) async -> Result<String, Error> {
-        await testConnection(credentialId: providerId, preferredModelId: preferredModelId)
     }
 
     // MARK: - Persistence (private)

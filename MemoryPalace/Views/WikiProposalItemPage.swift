@@ -1,8 +1,9 @@
+import MemoryCore
 import SwiftUI
 
 // MARK: - 整理提案的一个目录项：点进去看详情和原料（粟粟 10-23「提案我也不能点进去，然后看每个原料是啥」）
 // 整页复用整理记录那套原生只读查看（iOS UICollectionView / mac NSTableView，`RunRecordListView`）：
-// 标题、路径 / 类 / 钩子 / 理由原地写，每份原料折成一张卡（名称 · 层），点卡弹 sheet 用 TextKit 2 看全文（「折叠全用弹 sheet」）。
+// 标题、路径 / 类 / 钩子 / 理由原地写；原料卡显示名称 · 层，种子原料另列域、摘要里标快照来源或变化注记，候选单独标记；点卡弹 sheet 用 TextKit 2 看全文（「折叠全用弹 sheet」）。
 // 只读：批 / 驳回 / 改照旧在提案页那一行上做。
 
 /// 推进去的是哪一项；碎片（线索 / 出处）在提案页主线程从库里取好带进来
@@ -18,9 +19,23 @@ struct WikiProposalItemTarget: Identifiable, Hashable {
     static func == (a: Self, b: Self) -> Bool { a.id == b.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 
-    /// 提案页上那一行要不要出「看详情」：方向（种子 / 日常）都出；正文条目有碎片出处才出
+    /// 提案页上那一块能不能整块点进详情（带行尾箭头）：方向（种子 / 日常）、带碎片出处或种子原料 cite 的正文
     static func hasDetail(_ item: WikiProposal.Item) -> Bool {
-        item.change.direction != nil || !item.fragmentIds.isEmpty || !(item.covered ?? []).isEmpty
+        item.change.direction != nil || !item.fragmentIds.isEmpty || !(item.covered ?? []).isEmpty || !seedCitePaths(item).isEmpty
+    }
+
+    static func seedCitePaths(_ item: WikiProposal.Item) -> [String] {
+        item.cites.compactMap { cite in
+            let path: String?
+            if cite.layer == CatalogSurvey.layer {
+                guard let name = cite.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
+                path = CatalogSurvey.prefix + name
+            } else {
+                path = cite.filePath
+            }
+            guard let path = path?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { return nil }
+            return path
+        }
     }
 
     /// 碎片原料一份：正文 + 原话 + 发生在哪天
@@ -38,25 +53,39 @@ struct WikiProposalItemTarget: Identifiable, Hashable {
 /// 拼整页（后台，不碰主线程）。只取这一项列着的原料的现状；任务解码 + 回执索引走 `SeedTaskCache`；
 /// `check` 每份原料之前调一次（离开页面 → 取消 → 在下一个检查点停，结果不交）
 enum WikiProposalItemDocument {
-    static func build(_ target: WikiProposalItemTarget, wiki: WikiStore, floorBase: CatalogFloorBase?) -> RunRecordDocument {
-        build(target, wiki: wiki, floorBase: floorBase, check: {})
+    static func build(_ target: WikiProposalItemTarget, wiki: WikiStore, floorBase: CatalogFloorBase?, user: String = "") -> RunRecordDocument {
+        build(target, wiki: wiki, floorBase: floorBase, user: user, check: {})
     }
 
-    static func build(_ target: WikiProposalItemTarget, wiki: WikiStore, floorBase: CatalogFloorBase?,
+    /// user = 楼层用户名：本人那组（落盘 {{user}}）显示成名字
+    static func build(_ target: WikiProposalItemTarget, wiki: WikiStore, floorBase: CatalogFloorBase?, user: String = "",
                       check: () throws -> Void) rethrows -> RunRecordDocument {
         var sources: [WikiProposalSources.Source] = []
-        if let d = target.item.change.direction, d.mode == .seed {
+        let direction = target.item.change.direction
+        let citePaths = WikiProposalItemTarget.seedCitePaths(target.item)
+        if direction?.mode == .seed || !citePaths.isEmpty {
             let memoryRoot = wiki.root.deletingLastPathComponent()
             let cached = target.seedTask.flatMap { SeedTaskCache.shared.load($0, store: CatalogSeedTaskStore(wiki: wiki)) }
             try check()
-            let paths = (d.sources ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !WikiProposalSources.isPrivate($0) }
-            let current = try WikiProposalSources.current(paths: paths, layers: WikiProposalSources.layers(paths, task: cached?.task),
+            let paths = (direction?.sources ?? citePaths)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !WikiProposalSources.isPrivate($0) }
+            // 回扫候选另列在正式原料后面、标出来（不是正式原料，写页只给它们的要点卡）
+            let candidates = (direction?.candidates ?? []).filter { !WikiProposalSources.isPrivate($0.path) && !paths.contains($0.path) }
+            let candidatesByPath = Dictionary(candidates.map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
+            let all = paths + candidates.map(\.path)
+            let current = try WikiProposalSources.current(paths: all, layers: WikiProposalSources.layers(all, task: cached?.task),
                                                           task: cached?.task, floorBase: floorBase, memoryRoot: memoryRoot, wiki: wiki, check: check)
-            sources = WikiProposalSources.seed(paths: paths, task: cached?.task, receipts: cached?.receipts ?? [:], current: current)
+            sources = WikiProposalSources.seed(paths: paths, task: cached?.task, receipts: cached?.receipts ?? [:], current: current, wiki: wiki)
+                + WikiProposalSources.seed(paths: candidates.map(\.path), task: cached?.task, receipts: cached?.receipts ?? [:], current: current, wiki: wiki).map {
+                    var s = $0
+                    s.candidate = candidatesByPath[s.path]?.hits ?? []
+                    s.factDomain = candidatesByPath[s.path]?.factDomain
+                    return s
+                }
         }
         sources += target.fragments
         try check()
-        return document(title: title(target.item), fields: fields(target.item), sources: sources)
+        return document(title: title(target.item), fields: fields(target.item), sources: sources, user: user)
     }
 
     static func title(_ item: WikiProposal.Item) -> String {
@@ -71,6 +100,7 @@ enum WikiProposalItemDocument {
             ("路径", d.path + (d.group == true ? "（整理这个分组）" : "")),
             ("类", d.kind?.rawValue ?? ""),
             ("标题", d.title),
+            ("页域", WikiPage.factDomainLabel(d.factDomain)),
             ("钩子", d.hook),
             (d.mode == .seed ? "理由" : "为什么", d.reason),
         ]
@@ -81,17 +111,21 @@ enum WikiProposalItemDocument {
     }
 
     /// 标题一行 → 字段原地（空的不写）→「原料 N 份 · 各层几份」→ 每份一张卡
-    static func document(title: String, fields: [(String, String)], sources: [WikiProposalSources.Source]) -> RunRecordDocument {
-        var rows: [RunRecordDocument.Row] = [.heading(title, level: 1)]
+    static func document(title: String, fields: [(String, String)], sources: [WikiProposalSources.Source], user: String = "") -> RunRecordDocument {
+        var rows: [RunRecordDocument.Row] = [.heading(WikiStore.shown(title, user: user), level: 1)]
         for (name, value) in fields where !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            rows.append(.prose("\(name)：\(value)"))
+            rows.append(.prose(WikiStore.shown("\(name)：\(value)", user: user)))
         }
         rows.append(.heading(sources.isEmpty ? "没有列原料" : WikiProposalSources.tally(sources), level: 2))
         for s in sources {
-            let text = s.text ?? ""
-            let first = text.split(whereSeparator: \.isNewline).first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            let summary = s.note ?? first.map { String($0.prefix(80)) } ?? ""
-            rows.append(.block(.init(id: rows.count, name: "\(s.name) · \(s.layer)", language: "", text: text,
+            let text = WikiStore.shown(s.text ?? "", user: user)
+            let seed = s.layer != "碎片"
+            let summary = s.note ?? (seed ? "快照来源：\(s.sourceLabel) · \(s.domainNote ?? "旧格式未记录")"
+                : String(text.prefix { $0 != "\n" }.prefix(80)))
+            let domain = s.domainNote?.hasSuffix("本轮按待判") == true ? "待判" : WikiPage.factDomainLabel(s.factDomain)
+            let tag = s.candidate.map { " · 回扫候选（命中：\($0.joined(separator: "、"))）" } ?? ""
+            let name = "\(s.name) · \(s.layer)" + (seed ? " · 域：\(domain)" : "") + tag
+            rows.append(.block(.init(id: rows.count, name: WikiStore.shown(name, user: user), language: "", text: text,
                                      count: text.count, summary: summary, note: s.note, alwaysCard: true)))
         }
         return RunRecordDocument(rows: rows, sectionStarts: [0], targetRow: nil)
@@ -140,10 +174,10 @@ struct WikiProposalItemPage: View {
         let pid = profile.id
         // Prompt 底图要在主线程取（PresetManager 在主线程），只拿来比 Prompt 原料的版本
         let floorBase = CatalogRunner.shared.floorBase(profile: profile)
-        let target = target
+        let target = target, user = profile.userName
         // 离开页面 = .task 取消 → 传给后台那份，在下一份原料之前停（同整理记录 `RunRecordDocument.load`）
         let job = Task.detached(priority: .userInitiated) {
-            try WikiProposalItemDocument.build(target, wiki: WikiStore(profileId: pid), floorBase: floorBase,
+            try WikiProposalItemDocument.build(target, wiki: WikiStore(profileId: pid), floorBase: floorBase, user: user,
                                                check: { try Task.checkCancellation() })
         }
         let built = try? await withTaskCancellationHandler {

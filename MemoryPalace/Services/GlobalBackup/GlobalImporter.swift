@@ -401,6 +401,11 @@ enum GlobalImporter {
                         FullPlacedStickerDocument.self, context: bgContext, decoder: decoder,
                         insert: { bgContext.insert($0.toModel()) })
 
+                    // 表情包（老包没有 memes.jsonl → 跳过）
+                    try insertJSONLBatch(stickersPidDir.appendingPathComponent("memes.jsonl"),
+                        FullChatMemeDocument.self, context: bgContext, decoder: decoder,
+                        insert: { bgContext.insert($0.toModel()) })
+
                     try bgContext.save()
                 }
                 // 局部变量出 scope → ARC deinit container/context
@@ -421,7 +426,7 @@ enum GlobalImporter {
         for fname in items where fname.hasSuffix(".json") {
             let data = try Data(contentsOf: convsDir.appendingPathComponent(fname))
             let doc = try decoder.decode(FullConversationDocument.self, from: data)
-            let conv = doc.toConversationModel()
+            let conv = restoredConversation(doc)
             context.insert(conv)
             for nodeDoc in doc.nodes {
                 context.insert(nodeDoc.toNodeModel())
@@ -432,6 +437,15 @@ enum GlobalImporter {
             }
         }
         if savedCount > 0 { try context.save() }
+    }
+
+    /// 恢复的对话：hub 归属跟同步共用按 hub_id 解析（impl1 #3）——别的设备备份里的 "primary" 不当本机主 hub，认不出 → 待绑定（hub_id 留着）。
+    /// hubResolver 单测注入，缺省读本机 hub 名单
+    static func restoredConversation(_ doc: FullConversationDocument,
+                                     hubResolver: (String?, String?) -> String? = { CCHubRegistry.resolveSynced(hubId: $0, identity: $1) }) -> Conversation {
+        let conv = doc.toConversationModel()
+        conv.ccHubId = hubResolver(doc.ccHubId, doc.ccHubIdentity)
+        return conv
     }
 
     private static func insertJSONLBatch<D: Decodable>(

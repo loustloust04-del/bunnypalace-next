@@ -6,16 +6,37 @@ struct LaunchSplashRoot<Content: View>: View {
     @ViewBuilder let content: () -> Content
     var body: some View {
         #if os(iOS)
-        if LaunchSplash.contentGate.isOpen {
-            content()
+        if contentIsReady {
+            launchContent
         } else {
             Color(red: 0.929, green: 0.914, blue: 0.875).ignoresSafeArea()
                 .onAppear { LaunchSplash.prepareForPageConstruction() }
         }
         #else
-        content()
+        launchContent
         #endif
     }
+
+    @ViewBuilder
+    private var launchContent: some View {
+        content()
+            #if PERSONAL_APPS
+            .overlay {
+                if SkinState.shared.active, let splash = TutuLaunchSplash.make() {
+                    splash
+                }
+            }
+            #endif
+    }
+
+    #if os(iOS)
+    private var contentIsReady: Bool {
+        #if PERSONAL_APPS
+        if SkinState.shared.active { return true }
+        #endif
+        return LaunchSplash.contentGate.isOpen
+    }
+    #endif
 }
 
 #if os(iOS)
@@ -217,6 +238,10 @@ enum LaunchSplash {
     }
 
     private static var isDisabled: Bool {
+        #if PERSONAL_APPS
+        // 与普通禁用路径共用预加载、content gate 和 eager readiness 放行。
+        if SkinState.shared.active { return true }
+        #endif
         let env = ProcessInfo.processInfo.environment
         if env["MP_SPLASH"] == "0" { return true }
         #if (DEBUG || PERF_BENCH) && os(iOS)

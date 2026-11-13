@@ -46,6 +46,7 @@ struct RechapterSheet: View {
                 self.error = error.localizedDescription
             }
         }
+        .overlay(alignment: .top) { GlobalToastOverlay() }   // sheet 盖住了根上的 toast 层，这里自己再挂一层
     }
 
     private func content(_ p: BookRechapter.Preview) -> some View {

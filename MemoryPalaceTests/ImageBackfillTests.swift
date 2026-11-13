@@ -1,3 +1,4 @@
+import MemoryCore
 import JavaScriptCore
 import XCTest
 import SwiftData

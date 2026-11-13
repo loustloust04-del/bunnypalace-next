@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -45,14 +46,14 @@ final class WindowSummaryReadTests: XCTestCase {
     /// 三代搬迁 W1：一个窗口 = A3（windows/ 一段从头压的才算）+ A2（第 0 段 / 正式段 / 尾段）+ 老收尾段（灰字一组）
     func testDocSplitsA3AndA2AcrossThreeGenerations() throws {
         // 第三代：A3 一段 from=0；A2 正式段 + 尾段
-        try SessionSummaryStore.save(summary("conv-v5-0001", [seg("压缩", .rolling, at: 0), tail("尾", at: 600)]), profileId: pid)
+        try SessionSummaryStore.save(summary("conv-v5-0001", [seg("压缩", .rolling, at: 0), tail("尾", at: 600)]), memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         try WindowSummaryStore.save(summary("conv-v5-0001", [oneSeg("整窗", from: 0)], closed: "x"), in: root)
         let v5 = try XCTUnwrap(WindowSummaryReader.load(conversationId: "conv-v5-0001", profileId: pid))
         XCTAssertEqual(v5.a3?.title, "整窗")
         XCTAssertEqual(v5.a2.map(\.title), ["压缩", "尾"])
         XCTAssertEqual(v5.oldCloseouts, [])
         // 第二代：v4-1 抄本（多段）当「还没压」；A2 里起点以前的老收尾段单独一组
-        try SessionSummaryStore.save(summary("conv-v41-001", [seg("老收尾", .closeout, at: 0), seg("压缩", .rolling, at: 600)]), profileId: pid)
+        try SessionSummaryStore.save(summary("conv-v41-001", [seg("老收尾", .closeout, at: 0), seg("压缩", .rolling, at: 600)]), memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         try WindowSummaryStore.save(summary("conv-v41-001", [seg("压缩", .rolling, at: 600), seg("最后那截", .closeout, at: 1200)], closed: "y"),
                                     in: root)
         let v41 = try XCTUnwrap(WindowSummaryReader.load(conversationId: "conv-v41-001", profileId: pid))
@@ -62,7 +63,7 @@ final class WindowSummaryReadTests: XCTestCase {
         XCTAssertNil(WindowSummaryReader.a3(summary("c", [oneSeg("只有最后那截", from: 40)])), "一段但 from > 0 也是抄本")
         // 第一代：只有 summaries/ → 第 0 段，还没有 A3
         SummaryFileStore.save(ContextSummary(summary: "第一代老摘要", coveredCount: 12, updatedAt: t0), conversationId: "conv-g1-0001",
-                              profileId: pid, conversationTitle: "老")
+                              memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), conversationTitle: "老")
         let g1 = try XCTUnwrap(WindowSummaryReader.load(conversationId: "conv-g1-0001", profileId: pid))
         XCTAssertNil(g1.a3)
         XCTAssertEqual(g1.a2.map(\.kind), [.legacy])
@@ -86,7 +87,7 @@ final class WindowSummaryReadTests: XCTestCase {
     /// W4：对话 ⋯「上下文摘要」显示尾段，老收尾段仍不显示，不看 windows/
     func testContextSheetShowsTailButNotOldCloseout() throws {
         try SessionSummaryStore.save(summary("conv-b-0001", [seg("老", .legacy, at: 0), seg("压缩", .rolling, at: 600), seg("老收尾", .closeout, at: 1200),
-                                                             tail("尾", at: 1800)]), profileId: pid)
+                                                             tail("尾", at: 1800)]), memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         try WindowSummaryStore.save(summary("conv-b-0001", [seg("窗口总结那份", .closeout, at: 0)]), in: root)
         let doc = WindowSummaryReader.loadContext(conversationId: "conv-b-0001", profileId: pid)
         XCTAssertEqual(doc?.a2.map(\.title), ["老", "压缩", "尾"])

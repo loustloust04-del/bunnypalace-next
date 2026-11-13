@@ -6,6 +6,8 @@ import SwiftData
 /// 数据来自 node.recallHitsData（发送时组装链落库），渲染不回查记忆库。
 /// 显示模式（隐藏 / 原地 / 弹出）见 plan-disclosure-modes。
 struct RecallCardView: View {
+    @Environment(\.themeScope) private var themeScope
+    private var palette: ThemePalette { themeScope.palette }
     let node: MessageNode
 
     #if (DEBUG || PERF_BENCH) && os(iOS)
@@ -32,9 +34,61 @@ struct RecallCardView: View {
                 Button {
                     if mode == .sheet { showSheet = true } else { expanded.toggle() }
                 } label: {
+                    #if PERSONAL_APPS && os(iOS)
+                    if SkinState.shared.active {
+                        tutuRecallLabel(hits)
+                    } else {
+                        ordinaryRecallLabel(hits)
+                    }
+                    #else
+                    ordinaryRecallLabel(hits)
+                    #endif
+                }
+                .buttonStyle(.plain)
+
+                if expanded, mode == .inline {
+                    RecallHitList(node: node, rowSpacing: 12, snippetSize: 14, metaSize: 11)
+                        .padding(14)
+                        .background(RoundedRectangle(cornerRadius: 16).fill(palette.accent.opacity(0.4)))
+                }
+            }
+            .sheet(isPresented: $showSheet) {
+                DisclosureSheet(title: "想起来了", scope: .chat) {
+                    RecallHitList(node: node, rowSpacing: 14, snippetSize: 15, metaSize: 11)
+                }
+            }
+        }
+    }
+
+    #if PERSONAL_APPS && os(iOS)
+    private func tutuRecallLabel(_ hits: [InjectionHit]) -> some View {
+        let text = "想起来了 \(hits.count) 件事" + (RecallPreview.text(hits).map { " · \($0)" } ?? "")
+        return HStack(spacing: 5) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 13)).frame(width: 13, height: 13).opacity(0.8)
+            Text(text).font(.system(size: 12)).tracking(TutuChatStyle.isCJK(text) ? 0.72 : 0.48).lineLimit(1)
+            Image(systemName: expanded && mode == .inline ? "chevron.down" : "chevron.right")
+                .font(.system(size: 10)).frame(width: 7, height: 12).opacity(0.8)
+        }
+        .foregroundStyle(Color(red: 132 / 255, green: 128 / 255, blue: 123 / 255))
+        .shadow(color: .black.opacity(0.9), radius: 4)
+        .frame(maxWidth: 310, alignment: .leading)
+        .background {
+            EllipticalGradient(stops: [
+                .init(color: Color(red: 21 / 255, green: 17 / 255, blue: 15 / 255).opacity(0.92), location: 0),
+                .init(color: Color(red: 21 / 255, green: 17 / 255, blue: 15 / 255).opacity(0.7), location: 0.6),
+                .init(color: .clear, location: 1),
+            ])
+            .padding(.leading, -14).padding(.trailing, -18).padding(.vertical, -9)
+        }
+        .contentShape(Rectangle())
+    }
+    #endif
+
+    private func ordinaryRecallLabel(_ hits: [InjectionHit]) -> some View {
                     HStack(spacing: 10) {
                         RecallPalaceMark()
-                            .stroke(Theme.textMuted, style: StrokeStyle(lineWidth: 1.3, lineCap: .round, lineJoin: .round))
+                            .stroke(palette.textMuted, style: StrokeStyle(lineWidth: 1.3, lineCap: .round, lineJoin: .round))
                             .frame(width: labelSize * 0.9, height: labelSize * 0.9)
                             .accessibilityHidden(true)
                         Text("想起来了 \(hits.count) 件事" + (RecallPreview.text(hits).map { " · \($0)" } ?? ""))
@@ -44,24 +98,9 @@ struct RecallCardView: View {
                             .font(.system(size: labelSize * 0.72, weight: .medium))
                         Spacer(minLength: 0)
                     }
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(palette.textMuted)
                     .padding(.vertical, 10)
                     .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-
-                if expanded, mode == .inline {
-                    RecallHitList(node: node, rowSpacing: 12, snippetSize: 14, metaSize: 11)
-                        .padding(14)
-                        .background(RoundedRectangle(cornerRadius: 16).fill(Theme.accent.opacity(0.4)))
-                }
-            }
-            .sheet(isPresented: $showSheet) {
-                DisclosureSheet(title: "想起来了") {
-                    RecallHitList(node: node, rowSpacing: 14, snippetSize: 15, metaSize: 11)
-                }
-            }
-        }
     }
 }
 
@@ -121,6 +160,8 @@ enum RecallActions {
 /// 逐条命中行（原地展开和 sheet 共用）：现在的内容 + 检索路/相关度 + 👍👎；
 /// 点一条展开：出处（哪段对话 + 原话）+ 改 · 停用 / 恢复 · 跳到来源（粟粟 10-03：卡上不放删除，删干净去记忆面板）
 struct RecallHitList: View {
+    @Environment(\.themeScope) private var themeScope
+    private var palette: ThemePalette { themeScope.palette }
     let node: MessageNode
     var rowSpacing: CGFloat = 6
     /// 原地 11/9；sheet 里用正文号 15/11
@@ -187,13 +228,13 @@ struct RecallHitList: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(RecallHitDisplay.text(live: memory?.content, snapshot: hit.snippet))
                         .font(.system(size: snippetSize))
-                        .foregroundColor(Theme.textSecondary)
+                        .foregroundColor(palette.textSecondary)
                         .strikethrough(state != .active)
                         .opacity(state == .active ? 1 : 0.6)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(metaLine(hit) + (state == .disabled ? " · 已停用" : state == .deleted ? " · 已删除" : ""))
                         .font(.system(size: metaSize))
-                        .foregroundColor(Theme.textMuted.opacity(0.7))
+                        .foregroundColor(palette.textMuted.opacity(0.7))
                 }
                 .contentShape(Rectangle())
                 .onTapGesture {
@@ -203,8 +244,8 @@ struct RecallHitList: View {
                 Spacer(minLength: 8)
                 if feedbackEnabled {
                     HStack(spacing: 10) {
-                        voteButton(hit, index: index, vote: 1, symbol: "hand.thumbsup", active: Theme.branchIndicator)
-                        voteButton(hit, index: index, vote: -1, symbol: "hand.thumbsdown", active: Theme.danger.opacity(0.8))
+                        voteButton(hit, index: index, vote: 1, symbol: "hand.thumbsup", active: palette.branchIndicator)
+                        voteButton(hit, index: index, vote: -1, symbol: "hand.thumbsdown", active: palette.danger.opacity(0.8))
                     }
                 }
             }
@@ -212,7 +253,7 @@ struct RecallHitList: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(RecallHitDisplay.sourceLine(conversationTitle: sourceTitle(memory), quote: memory.sourceQuote))
                         .font(.system(size: metaSize))
-                        .foregroundColor(Theme.textMuted)
+                        .foregroundColor(palette.textMuted)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 14) {
                         action("改", "pencil") { editText = memory.content; editing = memory }
@@ -232,7 +273,7 @@ struct RecallHitList: View {
     private func action(_ title: String, _ symbol: String, _ run: @escaping () -> Void) -> some View {
         Button(action: run) {
             Label(title, systemImage: symbol).font(.system(size: metaSize + 1, weight: .medium))
-                .foregroundColor(Theme.branchIndicator)
+                .foregroundColor(palette.branchIndicator)
         }
         .buttonStyle(.plain)
     }
@@ -271,7 +312,7 @@ struct RecallHitList: View {
         } label: {
             Image(systemName: hit.vote == vote ? "\(symbol).fill" : symbol)
                 .font(.system(size: 11))
-                .foregroundColor(hit.vote == vote ? active : Theme.textMuted.opacity(0.5))
+                .foregroundColor(hit.vote == vote ? active : palette.textMuted.opacity(0.5))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

@@ -232,7 +232,8 @@ struct StickerCanvasLayer: View {
 
                     // 扭矩（用 delta，不是累积 translation）
                     let off = stickerVM.dragTouchOffset
-                    let crossZ = off.x * delta.height - off.y * delta.width
+                    // 画布 y 朝上（翻过一次）：叉积取反才是屏幕上的转向
+                    let crossZ = -(off.x * delta.height - off.y * delta.width)
                     let size = stickerVM.stickerSizes[sticker.id] ?? CGSize(width: 80, height: 80)
                     let w = size.width * sticker.scale
                     let h = size.height * sticker.scale
@@ -478,6 +479,8 @@ struct StickerSelectionOverlay: View {
                 }
             }
             .rotationEffect(.degrees(sticker.rotation))
+            // 画布跟着列表翻了一次：选框和贴纸一样自己翻回正，否则上下颠倒、转向和贴纸相反
+            .flippedUpsideDown()
             .position(x: sticker.positionX, y: sticker.positionY)
     }
 
@@ -512,9 +515,8 @@ struct StickerSelectionOverlay: View {
                     }
             )
             #if os(macOS)
-            .onHover { hovering in
-                if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-            }
+            // 系统管光标：手写 push / pop 在拖动中把手消失时收不到「移出」，光标会卡住
+            .pointerStyle(.columnResize)
             #endif
     }
 
@@ -539,7 +541,8 @@ struct StickerSelectionOverlay: View {
                         // PS/Figma 旋转逻辑：atan2(鼠标 - 物体中心)
                         let dx = value.location.x - sticker.positionX
                         let dy = value.location.y - sticker.positionY
-                        let currentAngle = atan2(dx, -dy) * 180 / .pi
+                        // 画布 y 朝上（翻过一次），屏幕上的「上」= 画布 +y
+                        let currentAngle = atan2(dx, dy) * 180 / .pi
 
                         if !isDraggingRotation {
                             isDraggingRotation = true
@@ -555,9 +558,7 @@ struct StickerSelectionOverlay: View {
                     }
             )
             #if os(macOS)
-            .onHover { hovering in
-                if hovering { NSCursor.crosshair.push() } else { NSCursor.pop() }
-            }
+            .pointerStyle(.rectSelection)
             #endif
     }
 }

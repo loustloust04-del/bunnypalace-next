@@ -12,6 +12,8 @@ struct CodexSettingsTab: View {
     #if os(iOS)
     @State private var showScanner = false
     @State private var pairResult: String?
+    /// 扫到的不是主电脑 / 认不出：弹落点（b4 #1）
+    @State private var pairingCheck: CCHubRegistry.PrimaryPairingCheck?
     #endif
 
     var body: some View {
@@ -70,6 +72,7 @@ struct CodexSettingsTab: View {
         .fullScreenCover(isPresented: $showScanner) {
             CCPairScannerSheet { payload in applyPairing(payload) }
         }
+        .sheet(item: $pairingCheck) { HubPairingSheet(target: CCHubRegistry.primaryId, check: $0) }
         #endif
         .onAppear { bridgeConnected = CCBridgeWebSocketClient.shared.isConnected }
     }
@@ -77,8 +80,17 @@ struct CodexSettingsTab: View {
     #if os(iOS)
     /// hub 配对是共享的（CC 和 Codex 是同一个 cc-bridge）
     private func applyPairing(_ p: CCPairPayload) {
-        pairResult = CCPairingApply.apply(p, providerManager: providerManager)
-        bridgeConnected = true
+        pairResult = CCPairingApply.checking
+        Task {
+            switch await CCPairingApply.apply(p, providerManager: providerManager) {
+            case .done(let line):
+                pairResult = line
+                bridgeConnected = true
+            case .confirm(let check):
+                pairResult = nil
+                pairingCheck = check
+            }
+        }
     }
     #endif
 }

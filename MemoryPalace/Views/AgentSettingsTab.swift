@@ -14,19 +14,34 @@ struct AgentSettingsTab: View {
     #else
     @State private var config = AgentBridge.loadConfig()
     #endif
-    // 作息感知全局开关（09-11 粟粟拍板：全局一个，不按楼层；时区在楼层编辑页填）
-    @AppStorage("timeAwareness.enabled") private var timeAwarenessEnabled = false
     @State private var activity: [AgentBridge.ActivityEntry] = []
     @State private var spentUSD: Double?
     #if os(iOS)
     @State private var wsLoaded = false
     #endif
 
+    #if os(macOS)
+    private var bindingTimeAwareness: Binding<Bool> {
+        Binding(
+            get: { profileManager?.currentProfile.timeAwarenessEnabled ?? false },
+            set: { on in
+                guard let pm = profileManager else { return }
+                var p = pm.currentProfile
+                p.timeAwarenessEnabled = on
+                pm.updateProfile(p)
+            }
+        )
+    }
+    #endif
+
     var body: some View {
         SettingsSectionList(.list) {
             Section {
-                Toggle("作息感知（问候/作息按角色时区）", isOn: $timeAwarenessEnabled)
+                #if os(macOS)
+                // atrium P3②：开关按楼层存；iOS 在人页 › 时区，Mac 没人页留在这里
+                Toggle("作息感知（这一层）", isOn: bindingTimeAwareness)
                     .tint(Theme.branchIndicator)
+                #endif
                 Toggle("启用自主任务", isOn: bindingEnabled)
                     .tint(Theme.branchIndicator)
             } footer: {

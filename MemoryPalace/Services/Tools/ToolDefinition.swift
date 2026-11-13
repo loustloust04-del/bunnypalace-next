@@ -22,12 +22,20 @@ struct ToolGateContext {
     let profileId: String?
     /// 工具抽屉快照（#093）；默认 = 没改过，分法和抽屉之前一样
     let drawer: ToolDrawerState
+    /// 当前楼层用户名：定义里提到 wiki 本人那组（落盘 {{user}}）的工具按它显示（suggest_wiki_direction）
+    let userName: String
+    /// 本窗记忆参与（`EffectiveMemoryParticipation.writeTools`）：关参与窗不下发 remember / edit_memory /
+    /// forget_memory / pending_notes / suggest_wiki_direction。默认 true = 抽屉预览等无会话处全开
+    let memoryWriteTools: Bool
 
-    init(family: Family, deferMCP: Bool, profileId: String? = nil, drawer: ToolDrawerState = .defaults) {
+    init(family: Family, deferMCP: Bool, profileId: String? = nil, drawer: ToolDrawerState = .defaults, userName: String = "",
+         memoryWriteTools: Bool = true) {
         self.family = family
         self.deferMCP = deferMCP
         self.profileId = profileId
         self.drawer = drawer
+        self.userName = userName
+        self.memoryWriteTools = memoryWriteTools
     }
 }
 

@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 // MARK: - 日历隐私（plan-calendar §四，astra #5 #6 #7 #8）

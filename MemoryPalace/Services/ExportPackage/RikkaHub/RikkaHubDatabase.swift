@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// RikkaHub（安卓，AGPL——只参考格式）备份 zip 的容器约定，#048。格式见 docs/research-import-rikkahub.md §1。

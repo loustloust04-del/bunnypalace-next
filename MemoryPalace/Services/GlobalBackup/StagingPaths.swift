@@ -52,11 +52,6 @@ enum StagingPaths {
         return dir
     }
 
-    static func cleanupAllWorkspaces() {
-        let root = AppPaths.checked(cachesRoot.appendingPathComponent("import-workspace", isDirectory: true))
-        try? FileManager.default.removeItem(at: root)
-    }
-
     // MARK: - Staging assets (跟目标父目录同 volume)
 
     /// staging SwiftData store（跟主 store 同目录）
@@ -161,14 +156,16 @@ enum StagingPaths {
         AppPaths.checked(applicationSupportRoot.appendingPathComponent("pre-import-archive", isDirectory: true))
     }
 
-    /// 新一次 archive 目录（用 ISO 时间戳）
-    static func freshArchiveDirectory() -> URL {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let stamp = f.string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let dir = AppPaths.checked(preImportArchiveRoot.appendingPathComponent(stamp, isDirectory: true))
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+    // MARK: - 装 Air 备份（research-backup-while-open）
+
+    /// 按需一致快照（Debug：AirSnapshotResponder）：air-backup.py 丢请求、拉成品
+    static var airSnapshotRoot: URL {
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("air-snapshot", isDirectory: true))
+    }
+
+    /// 新包首启、开库前的库克隆（PreUpgradeSnapshot）
+    static var preUpgradeRoot: URL {
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("pre-upgrade", isDirectory: true))
     }
 
     // MARK: - SQLite Sidecar Helpers (plan v2 R-2)

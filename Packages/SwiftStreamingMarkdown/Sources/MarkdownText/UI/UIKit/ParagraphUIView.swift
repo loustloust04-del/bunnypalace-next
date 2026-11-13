@@ -72,6 +72,12 @@ class ParagraphUIView: UITextView {
   private var needsContentRefresh = false
   /// MP fork: 内容是段落簇时装在 textLayoutManager 上的代理（layout manager 只弱引用代理，这里持有）
   private var textRunLayout: TextRunLayoutDelegate?
+  #if DEBUG
+  /// 段尾丢字探针 B：宿主标记 / 顶层块序号（ParagraphView 从环境给）/ 上次查过的（内容, 尺寸, 标记）
+  var probeTag: String?
+  var probeBlock: Int?
+  fileprivate var probeLastKey: String?
+  #endif
   #if (DEBUG || PERF_BENCH) && os(iOS)
   /// perf M4：当前内容是否已排过（换内容清零）/ 上次 layoutSubviews 时的 bounds 宽（区分 0→真值那一遍）
   private var perfLaidOut = false
@@ -179,6 +185,9 @@ class ParagraphUIView: UITextView {
     if hasHiddenSpoilers, bounds.size != spoilerDustSize {
       refreshSpoilerDust()
     }
+    #if DEBUG
+    scheduleLayoutProbe()
+    #endif
   }
 
   #if (DEBUG || PERF_BENCH) && os(iOS)
@@ -373,6 +382,9 @@ class ParagraphUIView: UITextView {
     markdownController = nil
     onUrlTap = { UIApplication.shared.open($0) }
     needsContentRefresh = true
+    #if DEBUG
+    probeLastKey = nil
+    #endif
   }
 
   private func applyLineSpacing(to attributedString: NSMutableAttributedString, lineSpacing: CGFloat?) -> NSMutableAttributedString {
@@ -689,6 +701,46 @@ class ParagraphUIView: UITextView {
     CATransaction.commit()
   }
 }
+
+#if DEBUG
+// MARK: - MP fork: 段尾丢字探针 B
+extension ParagraphUIView {
+  /// 同一（内容, 尺寸, 标记）只查一次；挪到下一拍查，拿的是这一遍排定的 bounds
+  fileprivate func scheduleLayoutProbe() {
+    guard ParagraphLayoutProbe.onTruncation != nil, window != nil, bounds.width > 0, bounds.height > 0 else { return }
+    let key = "\(ObjectIdentifier(paragraphContents).hashValue)|\(bounds.size)|\(probeTag ?? "")|\(probeBlock ?? -1)"
+    guard key != probeLastKey else { return }
+    probeLastKey = key
+    DispatchQueue.main.async { [weak self] in self?.runLayoutProbe() }
+  }
+
+  /// 按 TextKit 2 的行底和视图高比：排不下（或片段没排到结尾）的字数 > 0 就报。不碰 `layoutManager`（会降级 TextKit 1）
+  private func runLayoutProbe() {
+    guard let report = ParagraphLayoutProbe.onTruncation, window != nil,
+          let tlm = textLayoutManager, let tcm = tlm.textContentManager else { return }
+    let total = attributedText.length
+    let height = bounds.height - textContainerInset.top - textContainerInset.bottom
+    guard total > 0, height > 0 else { return }
+    let start = tcm.documentRange.location
+    var lines: [(start: Int, maxY: CGFloat)] = []
+    var laidOutEnd = 0
+    tlm.enumerateTextLayoutFragments(from: start, options: [.ensuresLayout]) { fragment in
+      let base = tcm.offset(from: start, to: fragment.rangeInElement.location)
+      let top = fragment.layoutFragmentFrame.minY
+      for line in fragment.textLineFragments {
+        lines.append((base + line.characterRange.location, top + line.typographicBounds.maxY))
+      }
+      laidOutEnd = tcm.offset(from: start, to: fragment.rangeInElement.endLocation)
+      return true
+    }
+    let missing = ParagraphLayoutProbe.missingCount(lines: lines, laidOutEnd: laidOutEnd, total: total, height: height)
+    guard missing > 0 else { return }
+    let needed = sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height
+    report(ParagraphLayoutProbe.Report(tag: probeTag, block: probeBlock, missing: missing, length: total,
+                                       width: bounds.width, height: bounds.height, needed: needed))
+  }
+}
+#endif
 
 // MARK: - MP fork: 剧透粒子
 extension ParagraphUIView {

@@ -197,6 +197,9 @@ enum UnifiedContainerMigration {
             new.trashedAt = old.trashedAt ?? old.deletedAt
             new.importBatchId = old.importBatchId
             new.memoryEnabled = old.memoryEnabled
+            new.recallStateData = old.recallStateData
+            new.displayMode = old.displayMode
+            new.displayModeUpdatedAt = old.displayModeUpdatedAt
             unifiedCtx.insert(new)
         }
         try unifiedCtx.save()
@@ -236,6 +239,7 @@ enum UnifiedContainerMigration {
             // S4.5：见上方 Conversation 的同款注释
             new.isTrashed = old.isTrashed || old.isDeleted
             new.trashedAt = old.trashedAt ?? old.deletedAt
+            new.recallReceiptData = old.recallReceiptData
             unifiedCtx.insert(new)
             counter += 1
             // 每 500 条 save + flush，避免大数据量 OOM

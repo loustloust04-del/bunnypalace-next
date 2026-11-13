@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 
 // MARK: - 两类记忆共用的一行（#067 第 3 步）

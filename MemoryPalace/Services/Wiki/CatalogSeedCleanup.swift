@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// 旧种子一次性清理（第 6 段 A；粟粟已定 4、16）：先把目标楼层整个 wiki（含提案、状态、历史、整理记录）备份到
@@ -118,6 +119,7 @@ enum CatalogSeedCleanup {
             return (url, try? Data(contentsOf: url))
         }
         let trash = store.folder.appendingPathComponent(".seed-cleanup-\(MemoryRegeneration.stamp(now))-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { CatalogRecallIndexer.shared.changed(at: wiki.root.appendingPathComponent("INDEX.md")) }
         try fm.createDirectory(at: trash, withIntermediateDirectories: true)
         var moved: [(from: URL, to: URL)] = []
         do {

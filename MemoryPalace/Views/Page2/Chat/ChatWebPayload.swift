@@ -1,3 +1,4 @@
+import MemoryCore
 #if os(iOS)
 import Foundation
 import SwiftData
@@ -99,20 +100,16 @@ extension ChatMessageDTO {
     init(node: MessageNode, ctx: ChatRenderContext) {
         let isUser = node.role == "user"
 
-        // ① 正则脚本在 Swift 侧跑完，web 只拿成品（口径抄 CardFlowView:3417）
-        //    ⑤a：按角色分流（1 用户 / 2 AI；system / tool 不冒充 assistant），只跑显示阶段
-        let placement = RegexPipeline.placement(forRole: node.role)
-        //    正文里的 {{char}}/{{user}}（卡开场）先按显示副本展开，存储原文不动（③b，与原生气泡同源）
-        let displayContent = EffectiveCharacterContext(charName: ctx.assistantName, userName: ctx.userName).expand(node.content)
-        let raw = RegexPipeline.run(ctx.regexScripts, text: displayContent, phase: .display, placement: placement,
-                                    userName: ctx.userName, charName: ctx.assistantName)
-
-        // ② thinking 从正文里剥出来（user 消息不剥）
-        let extracted = isUser ? nil : ContentCleaner.extractThinking(from: raw)
-        let body = extracted?.content ?? raw
+        // ① 显示副本和原生气泡同一口径（MessageDisplayText）：清洗 → 展开名字 → 剥 thinking → 显示正则，web 只拿成品。
+        //    报错尾巴（⚠️ …）网页皮肤还没地方画，原样留在正文里
+        let display = MessageDisplayText.make(node.content, role: node.role, scripts: ctx.regexScripts,
+                                              userName: ctx.userName, charName: ctx.assistantName,
+                                              cacheKey: node.id, splitsSystemTail: false,
+                                              legacyErrorMarker: node.usesLegacyErrorMarker)
+        let body = display.body
         // [thinking] 标签 / CC 思考链跟「显示 CC 思考」开关；原生思考摘要（thinking 回传 §3.8）跟「思考过程」设置，回复完成后才出现
         let think: String? = isUser ? nil : DisclosureKind.thinkingLine(
-            tagOrCC: extracted?.thinking ?? node.ccThinking, showCC: ctx.showThinking,
+            tagOrCC: display.thinking ?? node.ccThinking, showCC: ctx.showThinking,
             native: node.segments?.attachedThinkingText, showNative: ctx.showNativeThinking,
             streaming: ctx.streamingNodeId == node.id)
 

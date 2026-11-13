@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// AI 写自己记忆的三个工具（记忆修复第二刀 B2）：remember / edit_memory / forget_memory。
@@ -84,7 +85,7 @@ enum SelfMemoryTool {
         func str(_ k: String) -> String? {
             (args[k] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         }
-        let list = SelfMemoryStore.list(profileId: profileId)
+        let list = SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked)
         let bodyLimit = MemoryFlags.selfBodyLimit
 
         switch name {
@@ -111,7 +112,7 @@ enum SelfMemoryTool {
                 created: now, source: conversationId, superseded: nil, body: body
             )
             do {
-                try SelfMemoryStore.save(m, profileId: profileId)
+                try SelfMemoryStore.save(m, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked)
                 return Result(text: "记住了：\(desc)（memory/self/\(m.fileName)，\(m.importance) 级）", isError: false)
             } catch {
                 return Result(text: "写入失败：\(error.localizedDescription)", isError: true)
@@ -131,7 +132,7 @@ enum SelfMemoryTool {
                 m.body = b
             }
             do {
-                try SelfMemoryStore.save(m, profileId: profileId)
+                try SelfMemoryStore.save(m, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked)
                 return Result(text: "改好了：\(m.description)", isError: false)
             } catch {
                 return Result(text: "写入失败：\(error.localizedDescription)", isError: true)
@@ -144,7 +145,7 @@ enum SelfMemoryTool {
             guard m.isActive else { return Result(text: "这条已经失效了", isError: false) }
             m.superseded = now
             do {
-                try SelfMemoryStore.save(m, profileId: profileId)
+                try SelfMemoryStore.save(m, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked)
                 return Result(text: "忘掉了：\(m.description)（对方能在「记忆」页里复活）", isError: false)
             } catch {
                 return Result(text: "写入失败：\(error.localizedDescription)", isError: true)

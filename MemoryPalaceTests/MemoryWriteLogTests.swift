@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -29,14 +30,14 @@ final class MemoryWriteLogTests: XCTestCase {
         MemoryHealthStore.recordError(.timeline, profileId: pid, message: "请求超时", modelName: "sonnet")
         MemoryHealthStore.recordOK(.dream, profileId: pid, modelName: "x")
         MemoryWriteLog.flush()
-        let list = MemoryWriteLog.entries(profileId: pid)
+        let list = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         XCTAssertEqual(list.map(\.writer), ["A4", "A3"], "新的在前；画像（下线）不记")
         XCTAssertEqual(list[0].ok, false)
         XCTAssertEqual(list[0].note, "请求超时")
         XCTAssertNil(list[0].costUSD, "没记账的那次不写钱")
         XCTAssertEqual(list[1].costUSD ?? 0, 0.04, accuracy: 1e-9, "钱从这次调用记账的那几笔取")
         XCTAssertEqual(list[1].note, "《搬家》286 字")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: MemoryWriteLog.fileURL(profileId: pid).path), "存楼层 memory/log/，不放 UserDefaults")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: MemoryWriteLog.fileURL(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).path), "存楼层 memory/log/，不放 UserDefaults")
     }
 
     func testPrune() {
@@ -70,9 +71,9 @@ final class MemoryWriteLogTests: XCTestCase {
         let list = [entry("C2", t), trial]
         XCTAssertEqual(MemoryWriteLog.latest(.c2, in: list)?.time, t, "试写更新也不顶掉真写的那条")
 
-        MemoryWriteLog.record(writer: .c2, profileId: pid, ok: true, note: "试写 · 探针", model: "Haiku", trial: true, cost: 0.02)
+        MemoryWriteLog.record(writer: .c2, profileId: pid, ok: true, note: "试写 · 探针", model: "Haiku", trial: true, cost: 0.02, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         MemoryWriteLog.flush()
-        let saved = try XCTUnwrap(MemoryWriteLog.entries(profileId: pid).first)
+        let saved = try XCTUnwrap(MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).first)
         XCTAssertEqual(saved.trial, true)
         XCTAssertEqual(saved.costUSD ?? 0, 0.02, accuracy: 1e-9, "给了 cost 就用它")
     }

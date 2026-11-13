@@ -3,8 +3,7 @@ import SwiftData
 
 /// 卡库第二页签「世界书」（⑥，小样 04）：书目录按 全部 / 全局 / 这个楼层 / 这个对话 浏览，每本书写清具体楼层或对话，
 /// 整本开关、搜索（书名 + 条目内容）、新建 / 导入；点书进 WorldBookDetailView。
-/// 旧 WorldBookPanelView 保留给右栏「世界书」工具原入口，深链 `floor:` / `global:` 仍由它消费。
-/// B8 起「世界书」工具也开卡库这一页（旧面板代码留着、不再挂），深链改由这里消费。
+/// B8 起右栏「世界书」工具开卡库这一页，深链 `floor:` / `global:` 由这里消费（旧 WorldBookPanelView 11-06 已删）。
 struct WorldBookLibraryView: View {
     var isActive = true
     @Environment(\.modelContext) private var modelContext
@@ -401,8 +400,7 @@ struct WorldBookLibraryView: View {
         reveal(target)
     }
 
-    /// 右栏深链（tool = "worldBook"）归旧世界书面板消费；这页正开着时只跟着打开，不置 nil
-    /// B8：旧面板不挂了，打开后置 nil，不然每次回到这一页签都会再开一遍那本书
+    /// 右栏深链（tool = "worldBook"）由这页消费：打开后置 nil，不然每次回到这一页签都会再开一遍那本书
     private func peek(_ target: RightPanelNavigator.Target?) {
         guard isActive, let target, target.tool == "worldBook" else { return }
         reveal(target.id)

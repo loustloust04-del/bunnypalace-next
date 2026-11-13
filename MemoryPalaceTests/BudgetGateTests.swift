@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 import Network
@@ -1056,7 +1057,7 @@ extension BudgetGateTests {
         defer { restoreBudget(budget) }
         let restoreToolsMaster = snapshotToolsMaster()
         defer { restoreToolsMaster() }
-        PermissionCenter.setLevel(.bypass, for: .toolsMaster)
+        PermissionCenter.setDefaultLevel(.bypass, for: .toolsMaster)
         let (server, node) = try await runOneToolRound(name: MetaTools.invokeName,
                                                        arguments: #"{"name":"device_info","arguments":{"kind":"storage"}}"#)
         XCTAssertEqual(server.requestCount, 2)
@@ -1161,7 +1162,7 @@ extension BudgetGateTests {
         defer { restoreBudget(budget) }
         let restoreToolsMaster = snapshotToolsMaster()
         defer { restoreToolsMaster() }
-        PermissionCenter.setLevel(.bypass, for: .toolsMaster)
+        PermissionCenter.setDefaultLevel(.bypass, for: .toolsMaster)
         let (server, _) = try await runOneToolRound(name: MetaTools.searchName, arguments: #"{"query":"图片"}"#)
         guard server.requestCount > 1 else { return XCTFail("没有第二轮") }
         let first = try requestJSON(server, at: 0)

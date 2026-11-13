@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -15,7 +16,7 @@ final class CatalogWriterTests: XCTestCase {
     override func setUp() async throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("catalog-writer-\(UUID().uuidString)", isDirectory: true)
         wiki = WikiStore(root: root.appendingPathComponent("wiki", isDirectory: true))
-        try wiki.save(WikiPage(path: "楼层/人/小慧", kind: .person, triggers: ["小慧"], hook: "她提到小慧时", title: "小慧",
+        try wiki.save(WikiPage(path: "人/小慧", kind: .person, triggers: ["小慧"], hook: "她提到小慧时", title: "小慧",
                                now: "室友（自 2026-09 起）。", records: ["2026-10-01 认识（出处：碎片 00000000）"]))
     }
 
@@ -39,39 +40,99 @@ final class CatalogWriterTests: XCTestCase {
 
     // MARK: - 条目校验
 
+    /// 提示词里的示例一律虚构（10-24 😷 真跑：示例「主题/日语学习」「过敏、吃药、身体不舒服、眼睛疼」被 Haiku 照抄进真目录）
+    func testPromptExamplesAreFictional() {
+        let day = "2026-10-24"
+        let prompts: [(String, String)] = [
+            ("写页规则", CatalogPrompts.pageRules(names: names)),
+            ("种子写页规则", CatalogPrompts.pageRules(names: names, seed: true)),
+            ("条目格式", CatalogPrompts.itemFormat(names: names)),
+            ("路径规则", CatalogPrompts.pathRules(names: names)),
+            ("诊断", CatalogPrompts.diagnostics(names: names, standalone: true)),
+            ("种子诊断", CatalogPrompts.diagnostics(names: names, standalone: false, seed: true)),
+            ("写手", CatalogWriter.systemPrompt(names: names)),
+            ("重新分组", CatalogRegrouper.systemPrompt(names: names)),
+            ("分拣", CatalogModelSorter.system(names: names)),
+            ("手动 agent", CatalogAgent.systemPrompt(names: names)),
+            ("种子要点卡", SeedNotePrompts.cards(names: names)),
+            ("三问要点卡", SeedNotePrompts.cards(names: names, entry: .survey, day: day)),
+            ("种子对齐", SeedNotePrompts.align(names: names)),
+            ("种子聚类", SeedNotePrompts.cluster(names: names)),
+            ("种子写页", CatalogSeedPrompts.pageSystem(names: names)),
+            ("三问写页", CatalogSeedPrompts.pageSystem(names: names, entry: .survey, day: day)),
+        ]
+        let real = ["日语", "N2", "过敏", "吃药", "眼睛疼", "身体不舒服", "身体与健康", "{{user}}/身体", "花生", "肾上腺素", "香菜", "面包", "减糖",
+                    "近视", "睡眠", "田中", "饼干", "橘猫", "毕设", "被裁", "裁员", "小方", "豆包", "拖延", "侘寂", "跳槽", "血型", "交易", "编码"]
+        for (name, prompt) in prompts {
+            for word in real { XCTAssertFalse(prompt.contains(word), "\(name)里还有旧示例「\(word)」") }
+        }
+        XCTAssertTrue(CatalogPrompts.pageRules(names: names).contains("{{user}}/月光体质"), "示例换成虚构的，结构照留")
+        XCTAssertTrue(CatalogModelSorter.system(names: names).contains("人/岚舟"))
+    }
+
+    func testSeedDomainRulesApplyToEveryEntryWithoutReplacingFactRules() {
+        let rule = CatalogSeedPrompts.factDomainRule(names: names)
+        for entry in [CatalogSeedEntry.cc, .persona, .survey] {
+            let system = CatalogSeedPrompts.pageSystem(names: names, entry: entry, day: "2026-10-09")
+            XCTAssertTrue(system.contains(rule))
+            if entry == .survey {
+                XCTAssertFalse(system.contains("规矩和事实分开："))
+                XCTAssertTrue(system.contains("只写答案里明确说了的，不推测、不补充、不评价；\(names.user)怎么说就怎么记。"))
+                XCTAssertTrue(system.contains("这些答案都是 2026-10-09 答的；"))
+            } else {
+                let lines = system.components(separatedBy: "\n")
+                let facts = lines.firstIndex { $0.hasPrefix("规矩和事实分开：") }
+                XCTAssertNotNil(facts)
+                if let facts { XCTAssertEqual(lines[facts + 1], rule) }
+                XCTAssertTrue(system.contains("回复规矩、语气要求、写给助手的指令"))
+                XCTAssertTrue(system.contains("不是事实，不进 wiki"))
+                XCTAssertTrue(system.contains("剧场世界、角色背景、明确边界可以保存定位"))
+            }
+        }
+    }
+
+    func testDailyWriterUsesOnlySharedDomainPrincipleWithoutSeedSchema() async {
+        let topic = CatalogSorter.Topic(path: "主题/虚构航线", title: "虚构航线", kind: .topic, existing: false)
+        let m = await material(topic, fragments: [])
+        let content = CatalogWriter.userContent(m, names: names)
+        XCTAssertTrue(content.contains(CatalogPrompts.factDomainPrinciple))
+        XCTAssertFalse(content.contains("fact_domain"))
+        XCTAssertTrue(content.contains(m.floorPrompt))
+    }
+
     func testItemValidation() throws {
         let json = """
         {"items":[
-          {"type":"new_page","path":"楼层/人/阿杰","kind":"人","title":"阿杰","triggers":["阿杰","杰哥"],"hook":"她提到阿杰时","now":"同事（自 2026-10 起）。",
+          {"type":"new_page","path":"人/阿杰","kind":"人","title":"阿杰","triggers":["阿杰","杰哥"],"hook":"她提到阿杰时","now":"同事（自 2026-10 起）。",
            "records":[{"text":"- 2026-10-12 请吃饭","fragments":["f1"]},{"text":"2026-10-12 没出处"},
                       {"text":"2026-10-12 一起看片","aline":[{"layer":"a2","window":"conv 0001aaaa-conv","segment":2}]},
                       {"text":"2026-10-12 编的窗口","aline":[{"layer":"A3","window":"99999999"}]}],
-           "links":[{"to":"楼层/人/小慧","relation":"补充","why":"室友的同事"},{"to":"楼层/人/小慧","relation":"替代"},{"to":"楼层/人/谁","relation":"引用"}]},
-          {"type":"new_page","path":"楼层/人/小慧","title":"小慧","records":[{"text":"x","fragments":["f1"]}]},
-          {"type":"append","path":"楼层/人/不存在","records":[{"text":"x","fragments":["f1"]}]},
-          {"type":"append","path":"楼层/人/小慧","records":[{"text":"2026-10-13 搬去七楼","fragments":["f2"]}],"judgment":"共存"},
+           "links":[{"to":"人/小慧","relation":"补充","why":"室友的同事"},{"to":"人/小慧","relation":"替代"},{"to":"人/谁","relation":"引用"}]},
+          {"type":"new_page","path":"人/小慧","title":"小慧","records":[{"text":"x","fragments":["f1"]}]},
+          {"type":"append","path":"人/不存在","records":[{"text":"x","fragments":["f1"]}]},
+          {"type":"append","path":"人/小慧","records":[{"text":"2026-10-13 搬去七楼","fragments":["f2"]}],"judgment":"共存"},
           {"type":"new_page","path":"其他/阿杰","records":[{"text":"x","fragments":["f1"]}]},
-          {"type":"delete_records","path":"楼层/人/小慧"},
-          {"type":"rewrite_records","path":"楼层/人/小慧","records":[{"text":"x","fragments":["f1"]}]},
-          {"type":"rewrite_now","path":"楼层/人/小慧","now":"室友，搬去七楼了（自 2026-10-13 起）。","judgment":"conflict"},
-          {"type":"link","path":"楼层/人/小慧","to":"楼层/人/阿杰","relation":"矛盾","why":"说法不一样"}
+          {"type":"delete_records","path":"人/小慧"},
+          {"type":"rewrite_records","path":"人/小慧","records":[{"text":"x","fragments":["f1"]}]},
+          {"type":"rewrite_now","path":"人/小慧","now":"室友，搬去七楼了（自 2026-10-13 起）。","judgment":"conflict"},
+          {"type":"link","path":"人/小慧","to":"人/阿杰","relation":"矛盾","why":"说法不一样"}
         ]}
         """
 
         let parsed = try XCTUnwrap(CatalogItems.parse(json, sources: sources, wiki: wiki))
 
         XCTAssertEqual(parsed.items.count, 4)
-        XCTAssertEqual(parsed.dropped, 6, "2 行没出处 / 编的窗口 + 1 条连到不存在的页 + 已有页再新开 + 页不存在 + 路径不在两支下")
-        XCTAssertEqual(parsed.unapplied.map(\.at), ["items[0] 楼层/人/阿杰.links[1]", "items[5] 楼层/人/小慧", "items[6] 楼层/人/小慧"],
+        XCTAssertEqual(parsed.dropped, 6, "2 行没出处 / 编的窗口 + 1 条连到不存在的页 + 已有页再新开 + 页不存在 + 路径第一段不在 9 组里")
+        XCTAssertEqual(parsed.unapplied.map(\.at), ["items[0] 人/阿杰.links[1]", "items[5] 人/小慧", "items[6] 人/小慧"],
                        "关系不在四种、改旧记录的两种不认识的类型：不扔，留在提案上给她看")
         XCTAssertEqual(parsed.dropReasons.count, parsed.dropped)
         for (location, reason) in [
-            ("items[0] 楼层/人/阿杰.records[1]", "没有可用出处"),
-            ("items[0] 楼层/人/阿杰.records[3]", "没有可用出处"),
-            ("items[0] 楼层/人/阿杰.links[2]", "连线不合法"),
-            ("items[1] 楼层/人/小慧", "新开页已存在"),
-            ("items[2] 楼层/人/不存在", "未读版本"),
-            ("items[4] 其他/阿杰", "路径不在工程 / 楼层下"),
+            ("items[0] 人/阿杰.records[1]", "没有可用出处"),
+            ("items[0] 人/阿杰.records[3]", "没有可用出处"),
+            ("items[0] 人/阿杰.links[2]", "连线不合法"),
+            ("items[1] 人/小慧", "新开页已存在"),
+            ("items[2] 人/不存在", "未读版本"),
+            ("items[4] 其他/阿杰", "路径第一段不是 \(WikiStore.branchesText) 之一"),
         ] {
             XCTAssertTrue(parsed.dropReasons.contains { $0.hasPrefix(location + "：") && $0.contains(reason) }, "\(location)：\(reason)")
         }
@@ -80,16 +141,16 @@ final class CatalogWriterTests: XCTestCase {
             "2026-10-12 请吃饭（出处：碎片 \(f1.id.uuidString.prefix(8).lowercased())）",
             "2026-10-12 一起看片（出处：A2《看片》第 2 段）",
         ])
-        XCTAssertEqual(page.links, [WikiPage.Link(target: "楼层/人/小慧", relation: .supplement, why: "室友的同事")])
+        XCTAssertEqual(page.links, [WikiPage.Link(target: "人/小慧", relation: .supplement, why: "室友的同事")])
         XCTAssertEqual(page.triggers, ["阿杰", "杰哥"])
         XCTAssertNil(parsed.items[0].baseVersion, "新开页没有版本")
         XCTAssertEqual(parsed.items[0].fragmentIds, [f1.id])
         XCTAssertEqual(parsed.items[0].cites, [.init(layer: "A2", day: "2026-10-12", windowId: "0001aaaa-conv", segment: 2, messageFrom: 12, messageTo: 30)])
 
-        let version = wiki.version(of: "楼层/人/小慧")
+        let version = wiki.version(of: "人/小慧")
         XCTAssertNotNil(version)
         guard case .appendRecords(let path, let lines) = parsed.items[1].change else { return XCTFail() }
-        XCTAssertEqual(path, "楼层/人/小慧")
+        XCTAssertEqual(path, "人/小慧")
         XCTAssertEqual(lines.count, 1)
         XCTAssertEqual(parsed.items[1].judgment, .coexist)
         XCTAssertEqual(parsed.items[1].baseVersion, version, "baseVersion = 生成时页的版本")
@@ -110,7 +171,7 @@ final class CatalogWriterTests: XCTestCase {
         source.addOriginal(user)
         source.addOriginal(assistant)
         let parsed = try XCTUnwrap(CatalogItems.parse("""
-        {"items":[{"type":"new_page","path":"楼层/主题/云桥城","title":"云桥城","records":[
+        {"items":[{"type":"new_page","path":"主题/云桥城","title":"云桥城","records":[
           {"text":"用户想画《云桥城》","aline":[{"layer":"原文","nodeId":"user-node"}]},
           {"text":"助手承诺陪画《云桥城》","aline":[{"layer":"原文","nodeId":"assistant-node","window":"original-conversation","role":"user","onMain":true}]}
         ]}]}
@@ -141,7 +202,7 @@ final class CatalogWriterTests: XCTestCase {
                                  created: nil, role: "tool", onMain: true, body: "工具日志不能做原文"))
         XCTAssertNil(source.originals["tool-node"])
         let parsed = try XCTUnwrap(CatalogItems.parse("""
-        {"items":[{"type":"new_page","path":"楼层/主题/云桥城","records":[
+        {"items":[{"type":"new_page","path":"主题/云桥城","records":[
           {"text":"没有登记","aline":[{"layer":"原文","nodeId":"invented-node"}]},
           {"text":"另一个窗口","aline":[{"layer":"原文","nodeId":"known-node","window":"wrong-window"}]},
           {"text":"相同前缀的伪窗口","aline":[{"layer":"原文","nodeId":"known-node","window":"original-fake"}]},
@@ -168,7 +229,7 @@ final class CatalogWriterTests: XCTestCase {
                   day: "2026-10-12", parts: [.init(text: "云桥城", isBody: true)], old: nil),
         ], found: [.a4: 1]))
         let parsed = try XCTUnwrap(CatalogItems.parse("""
-        {"items":[{"type":"new_page","path":"楼层/主题/云桥城","records":[
+        {"items":[{"type":"new_page","path":"主题/云桥城","records":[
           {"text":"没读过的段","aline":[{"layer":"A2","window":"0001aaaa","segment":99}]},
           {"text":"缺段号","aline":[{"layer":"A2","window":"0001aaaa"}]},
           {"text":"A4不能借成A2","aline":[{"layer":"A2","window":"a4only00","segment":2}]},
@@ -197,7 +258,7 @@ final class CatalogWriterTests: XCTestCase {
         ], found: [.a4: 1]))
         XCTAssertEqual(source.days, ["2026-10-12"])
         let parsed = try XCTUnwrap(CatalogItems.parse("""
-        {"items":[{"type":"new_page","path":"楼层/主题/云桥城","records":[
+        {"items":[{"type":"new_page","path":"主题/云桥城","records":[
           {"text":"给过的那天","aline":[{"layer":"A4","day":"2026-10-12"}]},
           {"text":"没给过的那天","aline":[{"layer":"A4","day":"2026-10-13"}]},
           {"text":"日期配段号","aline":[{"layer":"A4","day":"2026-10-12","segment":1}]}
@@ -219,57 +280,57 @@ final class CatalogWriterTests: XCTestCase {
     func testFieldsNotConsumedByItemTypeAreKeptAsUnappliedWithRepairHint() throws {
         let parsed = try XCTUnwrap(CatalogItems.parse("""
         {"items":[
-          {"type":"rewrite_now","path":"楼层/人/小慧","now":"新现在","records":[{"text":"记录","fragments":["f1"]}]},
-          {"type":"append","path":"楼层/人/小慧","records":[{"text":"记录","fragments":["f1"]}],
-           "links":[{"to":"楼层/人/小慧","relation":"补充"}]}
+          {"type":"rewrite_now","path":"人/小慧","now":"新现在","records":[{"text":"记录","fragments":["f1"]}]},
+          {"type":"append","path":"人/小慧","records":[{"text":"记录","fragments":["f1"]}],
+           "links":[{"to":"人/小慧","relation":"补充"}]}
         ]}
         """, sources: sources, wiki: wiki))
 
         XCTAssertTrue(parsed.items.isEmpty)
         XCTAssertEqual(parsed.dropped, 0)
         XCTAssertEqual(parsed.revisionNotes, [
-            "items[0] 楼层/人/小慧：type=rewrite_now 不收 records 字段，改用 append",
-            "items[1] 楼层/人/小慧：type=append 不收 links 字段，改用 link",
+            "items[0] 人/小慧：type=rewrite_now 不收 records 字段，改用 append",
+            "items[1] 人/小慧：type=append 不收 links 字段，改用 link",
         ])
-        XCTAssertEqual(parsed.unapplied.map(\.page), ["楼层/人/小慧", "楼层/人/小慧"])
+        XCTAssertEqual(parsed.unapplied.map(\.page), ["人/小慧", "人/小慧"])
     }
 
     func testMalformedNestedValuesAndNoChangesHaveLocatedReasons() throws {
         let parsed = try XCTUnwrap(CatalogItems.parse("""
         {"items":[
           42,
-          {"type":"new_page","path":"楼层/人/阿杰",
+          {"type":"new_page","path":"人/阿杰",
            "records":[{"text":3},{"text":"  "},{"text":"没有出处"},{"text":"有效","fragments":["f1"]}],
-           "links":[7,{"to":"楼层/人/小慧"},{"to":"楼层/人/阿杰","relation":"补充"}]},
-          {"type":"rewrite_now","path":"楼层/人/小慧","now":"室友（自 2026-09 起）。"},
-          {"type":"retag","path":"楼层/人/小慧"},
-          {"type":"unknown","path":"楼层/人/小慧"},
-          {"type":"append","path":"楼层/人/小慧","records":[]}
+           "links":[7,{"to":"人/小慧"},{"to":"人/阿杰","relation":"补充"}]},
+          {"type":"rewrite_now","path":"人/小慧","now":"室友（自 2026-09 起）。"},
+          {"type":"retag","path":"人/小慧"},
+          {"type":"unknown","path":"人/小慧"},
+          {"type":"append","path":"人/小慧","records":[]}
         ],"reason":"  已有内容不重复写  "}
         """, sources: sources, wiki: wiki))
         XCTAssertEqual(parsed.items.count, 1, "坏记录和坏连线不改变新开页的接受范围")
         XCTAssertEqual(parsed.dropped, 10)
-        XCTAssertEqual(parsed.unapplied.map(\.at), ["items[4] 楼层/人/小慧"], "不认识的类型不扔，留给她看")
+        XCTAssertEqual(parsed.unapplied.map(\.at), ["items[4] 人/小慧"], "不认识的类型不扔，留给她看")
         XCTAssertEqual(parsed.dropReasons.count, parsed.dropped)
         XCTAssertEqual(parsed.reason, "已有内容不重复写")
         for (location, reason) in [
             ("items[0]", "条目格式不合格"),
-            ("items[1] 楼层/人/阿杰.records[0]", "记录格式不合格"),
-            ("items[1] 楼层/人/阿杰.records[1]", "记录正文为空"),
-            ("items[1] 楼层/人/阿杰.records[2]", "没有可用出处"),
-            ("items[1] 楼层/人/阿杰.links[0]", "连线格式不合格"),
-            ("items[1] 楼层/人/阿杰.links[1]", "连线格式不合格"),
-            ("items[1] 楼层/人/阿杰.links[2]", "连线不合法"),
-            ("items[2] 楼层/人/小慧", "无变化"),
-            ("items[3] 楼层/人/小慧", "无变化"),
-            ("items[5] 楼层/人/小慧", "没有可追加的有效记录"),
+            ("items[1] 人/阿杰.records[0]", "记录格式不合格"),
+            ("items[1] 人/阿杰.records[1]", "记录正文为空"),
+            ("items[1] 人/阿杰.records[2]", "没有可用出处"),
+            ("items[1] 人/阿杰.links[0]", "连线格式不合格"),
+            ("items[1] 人/阿杰.links[1]", "连线格式不合格"),
+            ("items[1] 人/阿杰.links[2]", "连线不合法"),
+            ("items[2] 人/小慧", "无变化"),
+            ("items[3] 人/小慧", "无变化"),
+            ("items[5] 人/小慧", "没有可追加的有效记录"),
         ] {
             XCTAssertTrue(parsed.dropReasons.contains { $0.hasPrefix(location + "：") && $0.contains(reason) }, "\(location)：\(reason)")
         }
         var unread = sources
         unread.versions = [:]
         let noVersion = try XCTUnwrap(CatalogItems.parse(
-            "{\"items\":[{\"type\":\"retag\",\"path\":\"楼层/人/小慧\",\"hook\":\"新钩子\"}]}",
+            "{\"items\":[{\"type\":\"retag\",\"path\":\"人/小慧\",\"hook\":\"新钩子\"}]}",
             sources: unread, wiki: wiki))
         XCTAssertEqual(noVersion.items, [])
         XCTAssertEqual(noVersion.dropped, 1)
@@ -290,24 +351,24 @@ final class CatalogWriterTests: XCTestCase {
 
     func testCoveredHangsOnFirstItemOfThatPage() throws {
         let parsed = try XCTUnwrap(CatalogItems.parse("""
-        {"items":[{"type":"append","path":"楼层/人/小慧","records":[{"text":"2026-10-13 搬去七楼","fragments":["f2"]}]}],"covered":["f1","f2","f9"]}
+        {"items":[{"type":"append","path":"人/小慧","records":[{"text":"2026-10-13 搬去七楼","fragments":["f2"]}]}],"covered":["f1","f2","f9"]}
         """, sources: sources, wiki: wiki))
         XCTAssertEqual(parsed.covered, [f1.id], "认不出的编号、条目里已经引用的不算 covered")
 
         var items: [WikiProposal.Item] = [
-            .init(change: .link(from: "楼层/人/阿杰", link: .init(target: "楼层/人/小慧", relation: .resonance, why: "")), baseVersion: "v"),
-            .init(change: .appendRecords(path: "楼层/人/小慧", lines: ["x"]), fragmentIds: [f2.id], baseVersion: "v"),
+            .init(change: .link(from: "人/阿杰", link: .init(target: "人/小慧", relation: .resonance, why: "")), baseVersion: "v"),
+            .init(change: .appendRecords(path: "人/小慧", lines: ["x"]), fragmentIds: [f2.id], baseVersion: "v"),
         ]
-        XCTAssertEqual(CatalogItems.attachCovered(&items, covered: [f1.id], path: "楼层/人/小慧", version: "v"), [])
+        XCTAssertEqual(CatalogItems.attachCovered(&items, covered: [f1.id], path: "人/小慧", version: "v"), [])
         XCTAssertEqual(items[1].fragmentIds, [f2.id], "covered 不混进明确引用的（驳回不连带）")
         XCTAssertEqual(items[1].covered, [f1.id])
         XCTAssertEqual(items[1].organizedIds, [f2.id, f1.id])
         XCTAssertNil(items[0].covered)
-        XCTAssertEqual(CatalogItems.attachCovered(&items, covered: [f1.id], path: "楼层/人/谁", version: nil), [f1.id], "页不在 / 没看过版本：还给调用方，不打标")
+        XCTAssertEqual(CatalogItems.attachCovered(&items, covered: [f1.id], path: "人/谁", version: nil), [f1.id], "页不在 / 没看过版本：还给调用方，不打标")
 
         var only: [WikiProposal.Item] = []
-        XCTAssertEqual(CatalogItems.attachCovered(&only, covered: [f1.id], path: "楼层/人/小慧", version: "v2"), [])
-        XCTAssertEqual(only.map(\.change), [.confirmCovered(path: "楼层/人/小慧")], "这页一条都没写：单出一条「确认已覆盖」等批")
+        XCTAssertEqual(CatalogItems.attachCovered(&only, covered: [f1.id], path: "人/小慧", version: "v2"), [])
+        XCTAssertEqual(only.map(\.change), [.confirmCovered(path: "人/小慧")], "这页一条都没写：单出一条「确认已覆盖」等批")
         XCTAssertEqual(only.first?.covered, [f1.id])
         XCTAssertEqual(only.first?.fragmentIds, [], "驳回不连带")
         XCTAssertEqual(only.first?.baseVersion, "v2")
@@ -315,7 +376,7 @@ final class CatalogWriterTests: XCTestCase {
 
     /// astra 10-16 #1：基线取备料读页那一刻的版本，生成期间她改了页 → 批的时候置「页已变」
     func testBaseVersionTakenWhenMaterialRead() async throws {
-        let path = "楼层/人/小慧"
+        let path = "人/小慧"
         let v0 = try XCTUnwrap(wiki.version(of: path))
         let topic = CatalogSorter.Topic(path: path, title: "小慧", kind: .person, aliases: [], existing: true, fragmentIds: [f2.id])
         let m = await material(topic, fragments: [f2])
@@ -325,7 +386,7 @@ final class CatalogWriterTests: XCTestCase {
             var hand = try XCTUnwrap(wiki.read(path))
             hand.now = "她手改了"
             try wiki.saveRaw(hand.markdown, path: path)
-            return "{\"items\":[{\"type\":\"append\",\"path\":\"楼层/人/小慧\",\"records\":[{\"text\":\"2026-10-13 搬去七楼\",\"fragments\":[\"f1\"]}]}]}"
+            return "{\"items\":[{\"type\":\"append\",\"path\":\"人/小慧\",\"records\":[{\"text\":\"2026-10-13 搬去七楼\",\"fragments\":[\"f1\"]}]}]}"
         }, drafts: nil)
         let item = try XCTUnwrap(parsed?.items.first)
         XCTAssertEqual(item.baseVersion, v0, "不是解析时才读的新版本")
@@ -361,7 +422,7 @@ final class CatalogWriterTests: XCTestCase {
     func testWriterRunPreservesMaterialsRepliesValidationAndFeedback() async throws {
         let run = CatalogRunRecord(wiki: wiki, topic: "小慧", kind: "执行方向")
         let fragments = [f2, f1]
-        let topic = CatalogSorter.Topic(path: "楼层/人/小慧", title: "小慧", kind: .person, aliases: ["小慧"], existing: true,
+        let topic = CatalogSorter.Topic(path: "人/小慧", title: "小慧", kind: .person, aliases: ["小慧"], existing: true,
                                         fragmentIds: fragments.map(\.id))
         var m = await material(topic, fragments: fragments)
         let alineText = String(repeating: "完整 A 线原话，不截短。", count: 1200) + "\n```A线尾部"
@@ -370,12 +431,13 @@ final class CatalogWriterTests: XCTestCase {
             .init(layer: .a2, conversationId: "0001aaaa-conv", title: "搬家原话", start: time, end: time,
                   day: "2026-10-13", segment: 2, messages: 12..<30, parts: [.init(text: alineText, isBody: true)], old: nil),
         ], found: [.a2: 1]), fragments: [], labels: m.labels, vectorStatus: "不可用")
-        let expectedUser = CatalogWriter.userContent(m, names: names)
-        let expectedSystem = CatalogWriter.systemPrompt(names: names)
+        // 发给模型的是本人那组换成名字之后的
+        let expectedUser = WikiStore.shown(CatalogWriter.userContent(m, names: names), user: names.user)
+        let expectedSystem = WikiStore.shown(CatalogWriter.systemPrompt(names: names), user: names.user)
         let invalid = "{\"items\":[\n```模型坏格式原文"
         let reason = String(repeating: "已有内容无需重复。", count: 3000) + "原文尾部```"
         let valid = """
-        {"items":[{"type":"append","path":"楼层/人/小慧","records":[
+        {"items":[{"type":"append","path":"人/小慧","records":[
         {"text":"2026-10-13 搬去七楼","fragments":["f1"]},
         {"text":"没有可用出处","fragments":["f99"]}]}],"covered":["f2"],"reason":"\(reason)"}
         """
@@ -417,12 +479,12 @@ final class CatalogWriterTests: XCTestCase {
     }
 
     func testWriterRunRecordsEmptyAndAllDroppedWithoutAddingRetries() async throws {
-        let topic = CatalogSorter.Topic(path: "楼层/人/小慧", title: "小慧", kind: .person, existing: true)
+        let topic = CatalogSorter.Topic(path: "人/小慧", title: "小慧", kind: .person, existing: true)
         let m = await material(topic, fragments: [f2])
         let run = CatalogRunRecord(wiki: wiki, topic: "空交与全扔", kind: "种子")
         for raw in [
             "{\"items\":[],\"reason\":\"没有新事实\"}",
-            "{\"items\":[{\"type\":\"append\",\"path\":\"楼层/人/小慧\",\"records\":[{\"text\":\"没有出处\"}]}],\"reason\":\"无法引用\"}",
+            "{\"items\":[{\"type\":\"append\",\"path\":\"人/小慧\",\"records\":[{\"text\":\"没有出处\"}]}],\"reason\":\"无法引用\"}",
         ] {
             var calls = 0
             let result = try await CatalogWriter.write(m, names: names, wiki: wiki, caller: { _, _ in
@@ -440,15 +502,15 @@ final class CatalogWriterTests: XCTestCase {
     }
 
     func testWriteRetriesTwiceAndSavesDrafts() async throws {
-        let topic = CatalogSorter.Topic(path: "楼层/人/小慧", title: "小慧", kind: .person, aliases: ["小慧"], existing: true, fragmentIds: [f2.id])
+        let topic = CatalogSorter.Topic(path: "人/小慧", title: "小慧", kind: .person, aliases: ["小慧"], existing: true, fragmentIds: [f2.id])
         let m = await material(topic, fragments: [f2])
-        XCTAssertTrue(CatalogWriter.userContent(m, names: names).contains("【已有页全文】楼层/人/小慧"))
+        XCTAssertTrue(CatalogWriter.userContent(m, names: names).contains("【已有页全文】人/小慧"))
         XCTAssertTrue(CatalogWriter.userContent(m, names: names).contains("她是程序员"))
         let drafts = CatalogDrafts(wiki: wiki, now: Date())
         var calls = 0
         let ok = try await CatalogWriter.write(m, names: names, wiki: wiki, caller: { _, _ in
             calls += 1
-            return calls < 3 ? "```json\n{\"items\":\n```x" : "{\"items\":[{\"type\":\"append\",\"path\":\"楼层/人/小慧\",\"records\":[{\"text\":\"2026-10-13 搬去七楼\",\"fragments\":[\"f1\"]}]}]}"
+            return calls < 3 ? "```json\n{\"items\":\n```x" : "{\"items\":[{\"type\":\"append\",\"path\":\"人/小慧\",\"records\":[{\"text\":\"2026-10-13 搬去七楼\",\"fragments\":[\"f1\"]}]}]}"
         }, drafts: drafts)
         XCTAssertEqual(calls, 3, "同一次里最多重来 2 次")
         XCTAssertEqual(ok?.items.first?.fragmentIds, [f2.id], "编号按这个主题自己的碎片排")
@@ -479,12 +541,12 @@ final class CatalogWriterTests: XCTestCase {
     }
 
     func testWriterEmptyAndAllDroppedSaveEvidenceWithoutRetrying() async throws {
-        let topic = CatalogSorter.Topic(path: "楼层/人/小慧", title: "小慧", kind: .person, existing: true)
+        let topic = CatalogSorter.Topic(path: "人/小慧", title: "小慧", kind: .person, existing: true)
         let m = await material(topic, fragments: [f2])
         let drafts = CatalogDrafts(wiki: wiki, now: Date())
         for (raw, reason, dropped) in [
             ("{\"items\":[],\"reason\":\"  没有新事实  \"}", "没有新事实", 0),
-            ("{\"items\":[{\"type\":\"append\",\"path\":\"楼层/人/小慧\",\"records\":[{\"text\":\"没有出处\"}]}],\"reason\":\"无法引用\"}", "无法引用", 2),
+            ("{\"items\":[{\"type\":\"append\",\"path\":\"人/小慧\",\"records\":[{\"text\":\"没有出处\"}]}],\"reason\":\"无法引用\"}", "无法引用", 2),
         ] {
             var calls = 0
             let parsed = try await CatalogWriter.write(m, names: names, wiki: wiki, caller: { _, _ in
@@ -506,15 +568,15 @@ final class CatalogWriterTests: XCTestCase {
         XCTAssertTrue(empty.contains("dropReasons：\n（无）"))
         let discarded = try XCTUnwrap(reports.first { $0.contains("reason：无法引用") })
         XCTAssertTrue(discarded.contains("items：0\ndropped：2"))
-        XCTAssertTrue(discarded.contains("items[0] 楼层/人/小慧.records[0]：记录没有可用出处"))
-        XCTAssertTrue(discarded.contains("items[0] 楼层/人/小慧：没有可追加的有效记录"))
+        XCTAssertTrue(discarded.contains("items[0] 人/小慧.records[0]：记录没有可用出处"))
+        XCTAssertTrue(discarded.contains("items[0] 人/小慧：没有可追加的有效记录"))
         for report in reports {
             XCTAssertTrue(report.contains("truncated：未知/不适用"))
         }
     }
 
     func testWriterAllMalformedAttemptsHaveEvidence() async throws {
-        let topic = CatalogSorter.Topic(path: "楼层/人/小慧", title: "小慧", kind: .person, existing: true)
+        let topic = CatalogSorter.Topic(path: "人/小慧", title: "小慧", kind: .person, existing: true)
         let m = await material(topic, fragments: [])
         let drafts = CatalogDrafts(wiki: wiki, now: Date())
         var calls = 0
@@ -611,11 +673,11 @@ final class CatalogWriterTests: XCTestCase {
     private let longRecord = "2026-10-13 和男朋友一起把全部家当从五楼搬到七楼的新房间里，还请大家吃了一顿火锅"
 
     private func append(_ text: String) -> String {
-        "{\"type\":\"append\",\"path\":\"楼层/人/小慧\",\"records\":[{\"text\":\"\(text)\",\"fragments\":[\"f1\"]}]}"
+        "{\"type\":\"append\",\"path\":\"人/小慧\",\"records\":[{\"text\":\"\(text)\",\"fragments\":[\"f1\"]}]}"
     }
 
     private func existingTopic() -> CatalogSorter.Topic {
-        CatalogSorter.Topic(path: "楼层/人/小慧", title: "小慧", kind: .person, existing: true, fragmentIds: [f2.id])
+        CatalogSorter.Topic(path: "人/小慧", title: "小慧", kind: .person, existing: true, fragmentIds: [f2.id])
     }
 
     func testRecordLengthAndListLinesOnlyCountWhatCodeCanJudge() {
@@ -635,24 +697,24 @@ final class CatalogWriterTests: XCTestCase {
 
     /// 三项硬查、两种格式诊断各一条坏输出：被抓到 → 告诉模型哪一项、在哪儿 → 重写后通过，不留标记
     func testEachRevisionReasonIsCaughtAndPassesAfterOneRewrite() async throws {
-        let fresh = CatalogSorter.Topic(path: "楼层/人/阿杰", title: "阿杰", kind: .person, existing: false, fragmentIds: [f2.id])
+        let fresh = CatalogSorter.Topic(path: "人/阿杰", title: "阿杰", kind: .person, existing: false, fragmentIds: [f2.id])
         let newPage = { (relation: String) in
-            "{\"items\":[{\"type\":\"new_page\",\"path\":\"楼层/人/阿杰\",\"kind\":\"人\",\"title\":\"阿杰\",\"hook\":\"当她提到阿杰时先看这页\",\"now\":\"同事（自 2026-10 起）。\",\"records\":[{\"text\":\"2026-10-12 请吃饭\",\"fragments\":[\"f1\"]}],\"links\":[{\"to\":\"楼层/人/小慧\",\"relation\":\"\(relation)\",\"why\":\"室友的同事\"}]}]}"
+            "{\"items\":[{\"type\":\"new_page\",\"path\":\"人/阿杰\",\"kind\":\"人\",\"title\":\"阿杰\",\"hook\":\"当她提到阿杰时先看这页\",\"now\":\"同事（自 2026-10 起）。\",\"records\":[{\"text\":\"2026-10-12 请吃饭\",\"fragments\":[\"f1\"]}],\"links\":[{\"to\":\"人/小慧\",\"relation\":\"\(relation)\",\"why\":\"室友的同事\"}]}]}"
         }
-        let rewriteNow = "{\"type\":\"rewrite_now\",\"path\":\"楼层/人/小慧\",\"now\":\"室友，搬去七楼了（自 2026-10-13 起）。\"}"
+        let rewriteNow = "{\"type\":\"rewrite_now\",\"path\":\"人/小慧\",\"now\":\"室友，搬去七楼了（自 2026-10-13 起）。\"}"
         let cases: [(name: String, topic: CatalogSorter.Topic, bad: String, good: String, location: String, mention: String)] = [
             ("现在里的列表行", existingTopic(),
-             "{\"items\":[{\"type\":\"rewrite_now\",\"path\":\"楼层/人/小慧\",\"now\":\"- 室友（自 2026-09 起）\\n- 搬去七楼了（自 2026-10-13 起）\"}]}",
-             "{\"items\":[\(rewriteNow)]}", "items[0] 楼层/人/小慧", "「- 搬去七楼了（自 2026-10-13 起）」"),
+             "{\"items\":[{\"type\":\"rewrite_now\",\"path\":\"人/小慧\",\"now\":\"- 室友（自 2026-09 起）\\n- 搬去七楼了（自 2026-10-13 起）\"}]}",
+             "{\"items\":[\(rewriteNow)]}", "items[0] 人/小慧", "「- 搬去七楼了（自 2026-10-13 起）」"),
             ("记录超 30 字", existingTopic(), "{\"items\":[\(append(longRecord))]}", "{\"items\":[\(append("2026-10-13 搬去七楼"))]}",
-             "items[0] 楼层/人/小慧.records[0]", "超过 30 字"),
-            ("关系不在四种", fresh, newPage("替代"), newPage("补充"), "items[0] 楼层/人/阿杰.links[0]", "「替代」不在 补充 / 矛盾 / 共鸣 / 引用 之内"),
+             "items[0] 人/小慧.records[0]", "超过 30 字"),
+            ("关系不在四种", fresh, newPage("替代"), newPage("补充"), "items[0] 人/阿杰.links[0]", "「替代」不在 补充 / 矛盾 / 共鸣 / 引用 之内"),
             ("不认识的条目类型", existingTopic(),
-             "{\"items\":[\(append("2026-10-13 搬去七楼")),{\"type\":\"rewrite_records\",\"path\":\"楼层/人/小慧\",\"records\":[{\"text\":\"2026-10-01 认识\",\"fragments\":[\"f1\"]}]}]}",
-             "{\"items\":[\(append("2026-10-13 搬去七楼"))]}", "items[1] 楼层/人/小慧", "不支持的条目类型：rewrite_records"),
+             "{\"items\":[\(append("2026-10-13 搬去七楼")),{\"type\":\"rewrite_records\",\"path\":\"人/小慧\",\"records\":[{\"text\":\"2026-10-01 认识\",\"fragments\":[\"f1\"]}]}]}",
+             "{\"items\":[\(append("2026-10-13 搬去七楼"))]}", "items[1] 人/小慧", "不支持的条目类型：rewrite_records"),
             ("条目带了不收的字段", existingTopic(),
-             "{\"items\":[{\"type\":\"rewrite_now\",\"path\":\"楼层/人/小慧\",\"now\":\"室友，搬去七楼了（自 2026-10-13 起）。\",\"records\":[{\"text\":\"2026-10-13 搬去七楼\",\"fragments\":[\"f1\"]}]}]}",
-             "{\"items\":[\(rewriteNow),\(append("2026-10-13 搬去七楼"))]}", "items[0] 楼层/人/小慧", "type=rewrite_now 不收 records 字段，改用 append"),
+             "{\"items\":[{\"type\":\"rewrite_now\",\"path\":\"人/小慧\",\"now\":\"室友，搬去七楼了（自 2026-10-13 起）。\",\"records\":[{\"text\":\"2026-10-13 搬去七楼\",\"fragments\":[\"f1\"]}]}]}",
+             "{\"items\":[\(rewriteNow),\(append("2026-10-13 搬去七楼"))]}", "items[0] 人/小慧", "type=rewrite_now 不收 records 字段，改用 append"),
         ]
         for c in cases {
             let m = await material(c.topic, fragments: [f2])
@@ -685,7 +747,7 @@ final class CatalogWriterTests: XCTestCase {
         let cases: [(second: () throws -> String?, revision: String)] = [
             ({ bad }, "重写一次后仍有没过的"),
             ({ "{\"items\":\n```坏了" }, "不是合格的 JSON"),
-            ({ "{\"items\":[{\"type\":\"append\",\"path\":\"楼层/人/小慧\",\"records\":[{\"text\":\"2026-10-13 搬家\",\"fragments\":[\"f999\"]}]}]}" },
+            ({ "{\"items\":[{\"type\":\"append\",\"path\":\"人/小慧\",\"records\":[{\"text\":\"2026-10-13 搬家\",\"fragments\":[\"f999\"]}]}]}" },
              "没有能用的内容"),
             ({ nil }, "没回"),
             ({ throw Down() }, "出错（服务商 503）"),
@@ -719,27 +781,27 @@ final class CatalogWriterTests: XCTestCase {
     func testUnappliedContentKeepsTheOriginalOperationAndItsPage() throws {
         let json = """
         {"items":[\(append("2026-10-13 搬去七楼")),
-          {"type":"new_page","path":"楼层/人/阿杰","kind":"人","title":"阿杰","now":"同事（自 2026-10 起）。",
-           "records":[{"text":"2026-10-12 请吃饭","fragments":["f1"]}],"links":[{"to":"楼层/人/小慧","relation":"替代"}]},
-          {"type":"link","path":"楼层/人/小慧","to":"楼层/人/阿杰","relation":"取代","why":"旧说法作废"},
-          {"type":"delete_records","path":"楼层/人/小慧"},
-          {"type":"rewrite_now","path":"楼层/人/小慧","now":"室友。","records":[{"text":"2026-10-01 认识","fragments":["f1"]}]}]}
+          {"type":"new_page","path":"人/阿杰","kind":"人","title":"阿杰","now":"同事（自 2026-10 起）。",
+           "records":[{"text":"2026-10-12 请吃饭","fragments":["f1"]}],"links":[{"to":"人/小慧","relation":"替代"}]},
+          {"type":"link","path":"人/小慧","to":"人/阿杰","relation":"取代","why":"旧说法作废"},
+          {"type":"delete_records","path":"人/小慧"},
+          {"type":"rewrite_now","path":"人/小慧","now":"室友。","records":[{"text":"2026-10-01 认识","fragments":["f1"]}]}]}
         """
         let parsed = try XCTUnwrap(CatalogItems.parse(json, sources: sources, wiki: wiki))
         XCTAssertEqual(parsed.items.count, 2)
         XCTAssertTrue(parsed.items.allSatisfy { $0.checks == nil }, "不挂到别的条目上")
-        XCTAssertEqual(parsed.unapplied.map(\.page), ["楼层/人/阿杰", "楼层/人/小慧", "楼层/人/小慧", "楼层/人/小慧"])
-        XCTAssertEqual(parsed.unapplied[0].raw, #"{"relation":"替代","to":"楼层/人/小慧"}"#, "原样留下")
+        XCTAssertEqual(parsed.unapplied.map(\.page), ["人/阿杰", "人/小慧", "人/小慧", "人/小慧"])
+        XCTAssertEqual(parsed.unapplied[0].raw, #"{"relation":"替代","to":"人/小慧"}"#, "原样留下")
         XCTAssertTrue(parsed.unapplied[1].raw.contains(#""why":"旧说法作废""#) && parsed.unapplied[1].reason.contains("「取代」不在"))
         XCTAssertTrue(parsed.unapplied[2].raw.contains("delete_records") && parsed.unapplied[2].reason.contains("不支持的条目类型"))
         XCTAssertTrue(parsed.unapplied[3].raw.contains("2026-10-01 认识") && parsed.unapplied[3].reason.contains("不收 records 字段"))
         XCTAssertEqual(parsed.revisionNotes.count, 4, "都算没过，给那一次修订")
         XCTAssertEqual(parsed.dropped, 0, "不算扔掉")
 
-        let alone = try XCTUnwrap(CatalogItems.parse("{\"items\":[{\"type\":\"link\",\"path\":\"楼层/人/小慧\",\"to\":\"楼层/人/阿杰\",\"relation\":\"取代\"}]}",
+        let alone = try XCTUnwrap(CatalogItems.parse("{\"items\":[{\"type\":\"link\",\"path\":\"人/小慧\",\"to\":\"人/阿杰\",\"relation\":\"取代\"}]}",
                                                      sources: sources, wiki: wiki))
         XCTAssertEqual(alone.items, [])
-        XCTAssertEqual(alone.unapplied.map(\.page), ["楼层/人/小慧"], "没有条目可挂也留着")
+        XCTAssertEqual(alone.unapplied.map(\.page), ["人/小慧"], "没有条目可挂也留着")
         XCTAssertTrue(alone.deliverable)
     }
 
@@ -748,7 +810,7 @@ final class CatalogWriterTests: XCTestCase {
         let store = WikiProposalStore(wiki: wiki)
         let old = Date(timeIntervalSince1970: 1_700_000_000)
         var p = WikiProposal(origin: .scheduled, createdAt: old, items: [])
-        p.unapplied = [.init(page: "楼层/人/小慧", raw: #"{"relation":"取代"}"#, reason: "关系不对", at: "items[0]")]
+        p.unapplied = [.init(page: "人/小慧", raw: #"{"relation":"取代"}"#, reason: "关系不对", at: "items[0]")]
         try store.save(p)
         XCTAssertEqual(store.load(p.id)?.status, .pending)
         XCTAssertEqual(store.pendingItemCount(), 1)
@@ -774,7 +836,7 @@ final class CatalogWriterTests: XCTestCase {
         let parsed = try XCTUnwrap(written)
         XCTAssertEqual(calls, 1, "放不下的重写请求不发")
         XCTAssertTrue(parsed.revision?.contains("放不进当前模型") ?? false, parsed.revision ?? "nil")
-        XCTAssertTrue(parsed.revision?.contains("楼层/人/小慧") ?? false, "说明挤掉的是哪页全文：\(parsed.revision ?? "")")
+        XCTAssertTrue(parsed.revision?.contains("人/小慧") ?? false, "说明挤掉的是哪页全文：\(parsed.revision ?? "")")
         XCTAssertTrue(parsed.items.first?.checks?.isEmpty == false)
     }
 
@@ -800,14 +862,14 @@ final class CatalogWriterTests: XCTestCase {
 
     /// 判不准的三样只记日志，不触发重写
     func testSoftChecksOnlyGoToTheRunRecord() async throws {
-        let topic = CatalogSorter.Topic(path: "楼层/人/阿杰", title: "阿杰", kind: .person, existing: false, fragmentIds: [f2.id])
+        let topic = CatalogSorter.Topic(path: "人/阿杰", title: "阿杰", kind: .person, existing: false, fragmentIds: [f2.id])
         let m = await material(topic, fragments: [f2])
         let run = CatalogRunRecord(wiki: wiki, topic: "只记日志", kind: "测试")
         var calls = 0
         let written = try await CatalogWriter.write(m, names: names, wiki: wiki, caller: { _, _ in
             calls += 1
             return """
-            {"items":[{"type":"new_page","path":"楼层/人/阿杰","kind":"人","title":"阿杰","hook":"阿杰的信息","now":"同事。爱吃辣（自 2026-10 起）。",
+            {"items":[{"type":"new_page","path":"人/阿杰","kind":"人","title":"阿杰","hook":"阿杰的信息","now":"同事。爱吃辣（自 2026-10 起）。",
               "records":[{"text":"2026-10-12 粟粟请阿杰吃饭","fragments":["f1"]}]}]}
             """
         }, drafts: nil, run: run)
@@ -825,13 +887,13 @@ final class CatalogWriterTests: XCTestCase {
     /// 带着标记被她改过的条目记一笔「编辑后未重新检查」
     func testEditingAFlaggedItemMarksItsChecksAsStale() throws {
         let store = WikiProposalStore(wiki: wiki)
-        let flagged = WikiProposal.Item(change: .appendRecords(path: "楼层/人/小慧", lines: [longRecord]), baseVersion: wiki.version(of: "楼层/人/小慧"),
+        let flagged = WikiProposal.Item(change: .appendRecords(path: "人/小慧", lines: [longRecord]), baseVersion: wiki.version(of: "人/小慧"),
                                         checks: ["超过 30 字"])
-        let clean = WikiProposal.Item(change: .appendRecords(path: "楼层/人/小慧", lines: ["2026-10-13 搬去七楼"]), baseVersion: wiki.version(of: "楼层/人/小慧"))
+        let clean = WikiProposal.Item(change: .appendRecords(path: "人/小慧", lines: ["2026-10-13 搬去七楼"]), baseVersion: wiki.version(of: "人/小慧"))
         let p = WikiProposal(origin: .scheduled, createdAt: Date(), items: [flagged, clean])
         try store.save(p)
-        try store.edit(p.id, itemId: flagged.id, change: .appendRecords(path: "楼层/人/小慧", lines: ["2026-10-13 搬去七楼"]), judgment: nil)
-        try store.edit(p.id, itemId: clean.id, change: .appendRecords(path: "楼层/人/小慧", lines: ["2026-10-13 搬家"]), judgment: nil)
+        try store.edit(p.id, itemId: flagged.id, change: .appendRecords(path: "人/小慧", lines: ["2026-10-13 搬去七楼"]), judgment: nil)
+        try store.edit(p.id, itemId: clean.id, change: .appendRecords(path: "人/小慧", lines: ["2026-10-13 搬家"]), judgment: nil)
         let saved = try XCTUnwrap(store.load(p.id))
         XCTAssertEqual(saved.items.map(\.checksEdited), [true, nil])
         XCTAssertEqual(saved.items[0].checks, ["超过 30 字"], "检查历史保留")
@@ -841,39 +903,39 @@ final class CatalogWriterTests: XCTestCase {
 
     private func crowd(_ n: Int) throws {
         for i in 0..<n {
-            try wiki.save(WikiPage(path: "楼层/人/人\(i)", kind: .person, triggers: ["人\(i)"], hook: "", title: "人\(i)"))
+            try wiki.save(WikiPage(path: "人/人\(i)", kind: .person, triggers: ["人\(i)"], hook: "", title: "人\(i)"))
         }
     }
 
     func testRegroupParse() throws {
         try crowd(31)
-        try FileManager.default.createDirectory(at: wiki.folderURL("楼层/人/家人"), withIntermediateDirectories: true)
-        XCTAssertEqual(wiki.overfullLayers(), ["楼层/人"])
+        try FileManager.default.createDirectory(at: wiki.folderURL("人/家人"), withIntermediateDirectories: true)
+        XCTAssertEqual(wiki.overfullLayers(), ["人"])
         let raw = """
         {"groups":[
-          {"name":"朋友","hook":"她提到朋友时","members":["楼层/人/人0","楼层/人/人1","楼层/人/人1","楼层/人/谁"]},
-          {"name":"同事","hook":"她提到同事时","members":["楼层/人/人1","楼层/人/人2"]},
-          {"name":"家人","members":["楼层/人/人3","楼层/人/人4"]},
-          {"name":"a/b","members":["楼层/人/人5","楼层/人/人6"]},
-          {"name":"邻居","members":["楼层/人/人7","/楼层/人/人8.md"]}
+          {"name":"朋友","hook":"她提到朋友时","members":["人/人0","人/人1","人/人1","人/谁"]},
+          {"name":"同事","hook":"她提到同事时","members":["人/人1","人/人2"]},
+          {"name":"家人","members":["人/人3","人/人4"]},
+          {"name":"a/b","members":["人/人5","人/人6"]},
+          {"name":"邻居","members":["人/人7","/人/人8.md"]}
         ]}
         """
 
-        let items = try XCTUnwrap(CatalogRegrouper.parse(raw, layer: "楼层/人", wiki: wiki))
+        let items = try XCTUnwrap(CatalogRegrouper.parse(raw, layer: "人", wiki: wiki))
 
         XCTAssertEqual(items.count, 1)
         guard case .regroup(let layer, let groups, let moves) = items[0].change else { return XCTFail() }
-        XCTAssertEqual(layer, "楼层/人")
-        XCTAssertEqual(groups, [.init(path: "楼层/人/朋友", hook: "她提到朋友时"), .init(path: "楼层/人/邻居", hook: "")],
+        XCTAssertEqual(layer, "人")
+        XCTAssertEqual(groups, [.init(path: "人/朋友", hook: "她提到朋友时"), .init(path: "人/邻居", hook: "")],
                        "同事只剩 1 项、家人已有文件夹、名字带斜杠的都扔")
-        XCTAssertEqual(moves, [.init(from: "楼层/人/人0", to: "楼层/人/朋友/人0"), .init(from: "楼层/人/人1", to: "楼层/人/朋友/人1"),
-                               .init(from: "楼层/人/人7", to: "楼层/人/邻居/人7"), .init(from: "楼层/人/人8", to: "楼层/人/邻居/人8")])
-        XCTAssertEqual(CatalogRegrouper.parse("{\"groups\":[]}", layer: "楼层/人", wiki: wiki), [])
-        XCTAssertNil(CatalogRegrouper.parse("分好了", layer: "楼层/人", wiki: wiki))
+        XCTAssertEqual(moves, [.init(from: "人/人0", to: "人/朋友/人0"), .init(from: "人/人1", to: "人/朋友/人1"),
+                               .init(from: "人/人7", to: "人/邻居/人7"), .init(from: "人/人8", to: "人/邻居/人8")])
+        XCTAssertEqual(CatalogRegrouper.parse("{\"groups\":[]}", layer: "人", wiki: wiki), [])
+        XCTAssertNil(CatalogRegrouper.parse("分好了", layer: "人", wiki: wiki))
 
         let store = WikiProposalStore(wiki: wiki)
         try store.save(WikiProposal(origin: .scheduled, createdAt: Date(), items: items))
-        XCTAssertEqual(CatalogRegrouper.pendingLayers(store), ["楼层/人"], "她还没批的那层不再提")
+        XCTAssertEqual(CatalogRegrouper.pendingLayers(store), ["人"], "她还没批的那层不再提")
     }
 
     // MARK: - 每天自动那次：先只提方向（代码，不调写手），批了才写；单个方向失败不连坐、超 30 行带分组调整
@@ -898,12 +960,12 @@ final class CatalogWriterTests: XCTestCase {
         let caller: SessionSegmentWriter.Caller = { system, user in
             if system.contains("太长了") {
                 regroupCalls += 1
-                return "{\"groups\":[{\"name\":\"朋友\",\"hook\":\"她提到朋友时\",\"members\":[\"楼层/人/人0\",\"楼层/人/人1\"]}]}"
+                return "{\"groups\":[{\"name\":\"朋友\",\"hook\":\"她提到朋友时\",\"members\":[\"人/人0\",\"人/人1\"]}]}"
             }
             let title = user.contains("标题：电影") ? "电影" : "剧场"
             writerCalls[title, default: 0] += 1
             if title == "剧场" { return "这个主题我写不出来" }
-            return "{\"items\":[{\"type\":\"new_page\",\"path\":\"楼层/事/电影\",\"kind\":\"事\",\"title\":\"电影\",\"records\":[{\"text\":\"2026-10-10 看电影\",\"fragments\":[\"f1\"]}]}]}"
+            return "{\"items\":[{\"type\":\"new_page\",\"path\":\"事/电影\",\"kind\":\"事\",\"title\":\"电影\",\"records\":[{\"text\":\"2026-10-10 看电影\",\"fragments\":[\"f1\"]}]}]}"
         }
         let job = CatalogTestKit.job(pid: pid, root: root, container: container, caller: caller)
         let store = WikiProposalStore(wiki: wiki)
@@ -914,10 +976,10 @@ final class CatalogWriterTests: XCTestCase {
         XCTAssertEqual(report.proposals, 1, "方向和分组调整汇成一份")
         let p = try XCTUnwrap(store.list().first)
         XCTAssertEqual(p.origin, .scheduled)
-        XCTAssertEqual(p.items.compactMap(\.change.direction?.path), ["楼层/主题/电影", "楼层/主题/剧场"], "碎片多的先；香菜只有 1 条不够开页")
+        XCTAssertEqual(p.items.compactMap(\.change.direction?.path), ["主题/电影", "主题/剧场"], "碎片多的先；香菜只有 1 条不够开页")
         XCTAssertEqual(p.items.compactMap(\.change.direction?.clues.count), [4, 3])
         guard case .regroup(let layer, _, _) = p.items[2].change else { return XCTFail("第三条应该是分组调整") }
-        XCTAssertEqual(layer, "楼层/人")
+        XCTAssertEqual(layer, "人")
         XCTAssertEqual(regroupCalls, 1)
 
         let directionIds = Set(p.items.filter { $0.change.direction != nil }.map(\.id))
@@ -930,7 +992,7 @@ final class CatalogWriterTests: XCTestCase {
         let content = try XCTUnwrap(store.list().first { $0.directionRef != nil })
         XCTAssertEqual(content.items.count, 1)
         XCTAssertEqual(content.items[0].fragmentIds.count, 1, "只挂明确引用的那条（astra #7），分到却没用上的留在池里")
-        XCTAssertFalse(wiki.pageExists("楼层/事/电影"), "正文还没批，不落页")
+        XCTAssertFalse(wiki.pageExists("事/电影"), "正文还没批，不落页")
         let results = try XCTUnwrap(store.load(p.id)).items.compactMap(\.change.direction?.result)
         XCTAssertTrue(results[0].hasPrefix("交了 1 条正文等批"))
         XCTAssertTrue(results[1].hasPrefix("出错"))

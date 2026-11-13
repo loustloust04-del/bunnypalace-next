@@ -24,6 +24,8 @@ struct APIDraft: Codable, Equatable {
     var customBaseURL = ""
     var customType = ProviderType.openaiCompatible.rawValue
     var toolsSupported = true
+    /// Optional：旧草稿没这个 key 也要解得出（nil = 开）
+    var sideCallStreaming: Bool?
     var models: [DraftModel] = []
     /// 编辑页：预设的区域 id / 接口格式（`ProviderType` rawValue）。Optional：合成的 Decodable 不认默认值，旧草稿缺 key 也要解得出
     var regionSelection: String?
@@ -34,7 +36,6 @@ struct APIDraft: Codable, Equatable {
     var baseURLInSecret = false
     /// 这一版草稿的钥匙串 account（每版一个，astra #1：元数据和 key 不会串版本）
     var secretAccount: String?
-    var onboardingStep: Int?
     /// 冷启动自动回到编辑页只弹一次（Q2）
     var resumeOffered = false
     var savedAt = Date()

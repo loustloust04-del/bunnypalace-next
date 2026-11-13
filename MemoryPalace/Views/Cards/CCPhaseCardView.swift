@@ -4,9 +4,11 @@ import SwiftUI
 /// 干活中 · 3 分钟 / 在等你回答：…… / 做完了。tmux 会话带「停下」（= 终端里按 Esc）
 struct CCPhaseCardView: View {
     let phase: CCSessionPhase
+    /// 这条阶段是哪台 hub 推来的：Esc 只发回那台（plan-multi-hub B3.4）
+    let hubId: String
 
     var body: some View {
-        ChatCardShell(kindLabel: "进度") {
+        ChatCardShell(kindLabel: "进度", themed: true) {
             HStack(alignment: .center, spacing: 8) {
                 icon
                 // 只有「干活中」要走秒：只这一行每秒重画（等你 / 做完了不跳）
@@ -18,7 +20,10 @@ struct CCPhaseCardView: View {
                 Spacer(minLength: 6)
                 if phase.phase == .working, phase.canStop {
                     Button {
-                        CCBridgeWebSocketClient.shared.sendTerminalInput(session: phase.sessionName, bytes: Data([0x1b]))
+                        switch CCHubRegistry.shared.route(hubId) {
+                        case .success(let client): client.sendTerminalInput(session: phase.sessionName, bytes: Data([0x1b]))
+                        case .failure(let why): ToastCenter.shared.show(why.message)
+                        }
                     } label: {
                         Label("停下", systemImage: "stop.fill")
                             .font(.caption.weight(.medium))
@@ -45,10 +50,10 @@ struct CCPhaseCardView: View {
     private var icon: some View {
         switch phase.phase {
         case .working:
-            Image(systemName: "hammer").foregroundStyle(Theme.branchIndicator)
+            Image(systemName: "hammer").foregroundStyle(Theme.chat.branchIndicator)
                 .symbolEffect(.pulse, options: .repeating)
-        case .waiting: Image(systemName: "questionmark.circle").foregroundStyle(Theme.branchIndicator)
-        case .done: Image(systemName: "checkmark.circle").foregroundStyle(Theme.branchIndicator)
+        case .waiting: Image(systemName: "questionmark.circle").foregroundStyle(Theme.chat.branchIndicator)
+        case .done: Image(systemName: "checkmark.circle").foregroundStyle(Theme.chat.branchIndicator)
         case .idle: EmptyView()
         }
     }
@@ -61,13 +66,17 @@ struct CCPhaseHost: View {
     /// 这个对话发出去了、回复还没落地（原来的三个点）
     let waitingForReply: Bool
     let spacingBefore: CGFloat
+    /// 气泡模式：等待泡只跳三个点（10-29）
+    var bubbleMode = false
+    /// 对话所属那台 hub（阶段按它读，Esc 发回它）
+    var hubId: String = CCBridgeWebSocketClient.primaryHubId
 
     /// 已经亮够的那次「做完了」（按 updated 认）
     @State private var expiredDone: Date?
 
     var body: some View {
-        if let phase = CCSessionPhaseStore.shared.phase(for: conversationId), shows(phase) {
-            CCPhaseCardView(phase: phase)
+        if let phase = CCSessionPhaseStore.shared.phase(for: conversationId, hubId: hubId), shows(phase) {
+            CCPhaseCardView(phase: phase, hubId: hubId)
                 .padding(.top, spacingBefore)
                 .task(id: phase.updated) {
                     guard phase.phase == .done else { return }
@@ -76,7 +85,7 @@ struct CCPhaseHost: View {
                     if !Task.isCancelled { expiredDone = phase.updated }
                 }
         } else if waitingForReply {
-            CCWaitingBubbleRow()
+            CCWaitingBubbleRow(bubbleMode: bubbleMode)
                 .padding(.top, spacingBefore)
         }
     }

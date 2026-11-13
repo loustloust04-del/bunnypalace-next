@@ -9,11 +9,15 @@ enum TerminalBridgeIssue: Equatable {
     case disconnected
     /// 桥好好的，这个窗口的 tmux 没了（hub 回 session_not_found）
     case sessionGone
+    /// 那台待配对 / 换了机器（R5.6）：不接终端，给重新配对的入口；reason 写哪种
+    case needsPairing
 }
 
 /// 盖在终端区上的卡片（照 rootshell 重连卡小样）
 struct TerminalBridgeCard: View {
     let issue: TerminalBridgeIssue
+    /// ≥2 台时那台的名字（标题说连不上哪台）；1 台 = nil，照旧「我的电脑」
+    var computerName: String? = nil
     /// .disconnected 时为什么连不上（`BridgeDisconnectWording`，审计 T09）；nil 用通用那句
     var reason: String? = nil
     /// 第三行小提示（「在外面？要开 Tailscale」）
@@ -86,14 +90,16 @@ struct TerminalBridgeCard: View {
         case .notPaired: return "laptopcomputer.and.iphone"
         case .disconnected: return "arrow.counterclockwise"
         case .sessionGone: return "rectangle.dashed"
+        case .needsPairing: return "exclamationmark.lock"
         }
     }
 
-    private var title: String {
+    var title: String {
         switch issue {
         case .notPaired: return "这里能连到你的电脑"
-        case .disconnected: return "连不上我的电脑"
+        case .disconnected: return "连不上\(computerName ?? "我的电脑")"
         case .sessionGone: return "这个窗口已经不在了"
+        case .needsPairing: return "这台电脑要重新配对"
         }
     }
 
@@ -102,6 +108,7 @@ struct TerminalBridgeCard: View {
         case .notPaired: return "在 Mac 上装记忆花园，打开「让手机连这台 Mac」，再用这里扫码"
         case .disconnected: return reason ?? "电脑睡着了、hub 没在跑，或者网络不通"
         case .sessionGone: return "电脑上的这个窗口已经结束了"
+        case .needsPairing: return reason ?? "配好之前不接这个窗口"
         }
     }
 
@@ -110,6 +117,7 @@ struct TerminalBridgeCard: View {
         case .notPaired: return "连接我的电脑"
         case .disconnected: return "重新连接"
         case .sessionGone: return "重新开一个"
+        case .needsPairing: return "重新扫码配对"
         }
     }
 }

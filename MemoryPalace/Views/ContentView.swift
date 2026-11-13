@@ -86,6 +86,9 @@ struct ContentView: View {
     @SceneStorage("resume.page") private var resumePage = 1
     @SceneStorage("resume.conversationId") private var resumeConversationId = ""
     @SceneStorage("resume.newChatText") private var resumeNewChatText = ""
+    @Environment(AtriumPresenter.self) private var atriumPresenter: AtriumPresenter?
+    /// 设置里点了「换人」：设置收完再开 atrium
+    @State private var atriumAfterSettings = false
     #endif
     @State private var stickerVM = StickerViewModel()
     #if os(iOS)
@@ -113,21 +116,9 @@ struct ContentView: View {
     /// 对话 ⋯「窗口总结」「上下文摘要」打开的那个（弹层挂在 `ConversationMemorySheets`）
     @State private var memorySheet: ConversationMemorySheetTarget? = nil
     @State private var showBranchMap = false
-    #if os(macOS)
-    // bgMode 在 iOS 上从未被 read（仅 macOS 内 zstackLayer 判断），但 @AppStorage declaration
-    // 让 ContentView 订阅 _debugBackgroundModeRaw 这个 wrapper，启动后 UserDefaults 异步同步
-    // 触发 ContentView body re-eval（第三轮 log 实证 #2 +2.85s ghost body 的真凶）。
-    // 包 #if os(macOS) 后 iOS struct 没这个 property，不再订阅。
-    @AppStorage(DebugRenderSettings.themeBackgroundModeKey)
-    private var debugBackgroundModeRaw: String = DebugThemeBackgroundMode.original.rawValue
-
-    private var debugBackgroundMode: DebugThemeBackgroundMode {
-        DebugThemeBackgroundMode(rawValue: debugBackgroundModeRaw) ?? .original
-    }
-    #endif
     @AppStorage("blurRadius") private var blurRadius = 1.3
-    /// 气泡模式下悬浮条不挂 🌿 分支钮（两端共用）
-    @AppStorage("chatBubbleMode") private var chatBubbleMode = false
+    /// 气泡模式下悬浮条不挂 🌿 分支钮（两端共用）。模式是当前对话自己的，只从 viewModel 读
+    private var chatBubbleMode: Bool { viewModel.isBubbleMode }
     /// 设置 › 外观 › 音乐：聊天页以外挂不挂全局音乐胶囊
     @AppStorage("globalMusicCapsuleEnabled") private var globalMusicCapsuleEnabled = true
     // pageIndicatorInZStack / debugPageIndicatorMode / @AppStorage debugPageIndicatorModeRaw
@@ -171,9 +162,6 @@ struct ContentView: View {
         #endif
         let manager = themeManager ?? ThemeManager.shared
         let _ = manager.themeChangeID
-        #if os(macOS)
-        let bgMode = debugBackgroundMode
-        #endif
         #if DEBUG
         // 订阅源 snapshot — 砍掉之前探针 observer effect 引入的字段（ContentView 生产代码
         // 不 read 这些 field，但探针 read 让 ContentView 订阅了它们 → 第三轮 log 看到的
@@ -199,9 +187,6 @@ struct ContentView: View {
             _bodyProbeSnapshot["currentPath"] = "\(viewModel.currentPath.count)"
             _bodyProbeSnapshot["pinnedNodes"] = "\(viewModel.pinnedNodes.count)"
         }
-        #if os(macOS)
-        _bodyProbeSnapshot["bgMode"] = bgMode.rawValue
-        #endif
         let _bodyProbeDiff = _bodyProbeSnapshot
             .filter { PerfCounters.lastContentViewSnapshot[$0.key] != $0.value }
             .map { "\($0.key): \(PerfCounters.lastContentViewSnapshot[$0.key] ?? "∅")→\($0.value)" }
@@ -224,17 +209,6 @@ struct ContentView: View {
             #endif
 
             #if os(macOS)
-            // Debug: C 模式把 wallpaper 挪到 ZStack 底层（避开 .background 的 parent-size 约束）
-            // iOS 下已改为"只聊天页带 wallpaper"，全局 zstackLayer 不再适用，保留仅 macOS
-            if bgMode == .zstackLayer, !macGlassActive {
-                ThemeBackgroundView(
-                    fill: Theme.mainBg,
-                    imageURL: manager.currentBackgroundImageURL,
-                    scheme: manager.activeScheme,
-                    backgroundStyle: manager.currentBackgroundStyle
-                )
-                .ignoresSafeArea()
-            }
             // 一棵树（plan-mac-shape ⧫4）：普通窗口和系统全屏同一份 macLayout，全屏只是窗口变大；
             // 02-26 为绕白框分的双树、64pt 遮色条、右上角钮、全屏观察者 A1b 一并删
             macLayout
@@ -247,6 +221,9 @@ struct ContentView: View {
             GlobalToastOverlay()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .allowsHitTesting(false)
+            // 小芽检修提醒横幅（plan-status-panel §7.7）：挂着直到点 × 或点它
+            XiaoyaNoticeBanner()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task { resumeLastLocation(); ensureDraftConversation() }
@@ -255,12 +232,12 @@ struct ContentView: View {
         }
         #if os(macOS)
         .background {
-            if bgMode != .zstackLayer, !macGlassActive {
+            if !macGlassActive {
                 ThemeBackgroundView(
                     fill: Theme.mainBg,
-                    imageURL: manager.currentBackgroundImageURL,
+                    imageURL: manager.chatBackgroundImageURL,
                     scheme: manager.activeScheme,
-                    backgroundStyle: manager.currentBackgroundStyle
+                    backgroundStyle: manager.chatBackgroundStyle
                 )
                 .ignoresSafeArea()
             }
@@ -298,8 +275,11 @@ struct ContentView: View {
                                 showNormalChat()
                                 collapseLeftPanelAfterSelect()
                             },
+                            onOpenProfile: { showPage0Profile = true },
+                            profileZoom: profileZoom,
                             profileId: profileManager?.currentProfile.id ?? ""
                         )
+                        .modifier(Page0PersonPageCover(isPresented: $showPage0Profile, zoom: profileZoom))
                     }
                     .environment(\.widePanelMode, true)
                     // 顶部悬浮条居中于**设置算出的聊天区**（排版 / dock 左右 / 模式都是设置），与面板、窗口开关无关
@@ -377,7 +357,7 @@ struct ContentView: View {
         // 本机终端（plan-mp-local-terminal A5）：编程会话「继续 → 记忆花园」开了 tab，把终端面板拉到前面
         .onReceive(NotificationCenter.default.publisher(for: .openLocalTerminalTool)) { _ in
             if rightPanelToolManager?.tool(byId: "terminal")?.isEnabled == false {
-                rightPanelToolManager?.setEnabled("terminal", true)
+                rightPanelToolManager?.setEnabled("terminal", true, target: .defaults)
             }
             withAnimation(.easeInOut(duration: 0.2)) { openToolFromOutside("terminal") }
         }
@@ -387,7 +367,7 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openTopicBoxTool)) { notif in
             // 工具被从 toolbar 移除时自动请回来（widget 还在桌面就该点得进去）
             if rightPanelToolManager?.tool(byId: "topicBox")?.isEnabled == false {
-                rightPanelToolManager?.setEnabled("topicBox", true)
+                rightPanelToolManager?.setEnabled("topicBox", true, target: .defaults)
             }
             // 面板可能还没挂载收不到本通知——停一份，面板 onAppear 消费
             if let path = notif.userInfo?["topicPath"] as? String {
@@ -398,7 +378,7 @@ struct ContentView: View {
         #endif
         #endif
         #if PERSONAL_APPS
-        .modifier(OnNotify(.deathScaleUnlock) { unlockDeathScale() })
+        .modifier(TutuSkinHooks(onDeathScaleUnlock: unlockDeathScale, onReplay: showTutuEmptyConversation))
         #endif
         // turn 收口回填（挂 app 根，不依赖面板/阅读器存活）：
         // CR-3 vocab aiNote + CR-1 书批注 aiBubble
@@ -454,41 +434,14 @@ struct ContentView: View {
             // #042：通话接线不依赖通话页，锁屏接原生来电也能开麦
             CallController.shared.attach(viewModel: viewModel, modelContext: modelContext)
             #endif
-            // CC Bridge: 启动时自动连接
-            // 读 baseURL override（UserDefaults，由 setCCBridgeBaseURL 写入）+ token（keychain）
-            // 不走 ProviderManager 是为了维持 ContentView 不订阅它（性能优化，见上面注释）
-            let urls = CCBridgeEndpoints.configuredURLs()
-            if !urls.isEmpty {
-                // Phase 2：走 HubTokenStore（keychain 优先 + macOS 首次读 launchd plist bootstrap），
-                // 保证 hub 收紧 loopback 后 Mac app 侧仍能自愈拿到 token。
-                let token = HubTokenStore.get()
-                CCBridgeWebSocketClient.shared.connect(urls: urls, token: (token?.isEmpty == false) ? token : nil, keepExistingToken: true)
-            }
-            // CC 主动消息：收到 reply 但无 pending 占位（CC 主动发的）→ 落地成对应会话的新小克消息
-            CCBridgeWebSocketClient.shared.onProactiveMessage = { [weak viewModel] chatId, content, fileData, fileName, mime, isImage, ccMessageId, replyToId, callReply in
-                viewModel?.insertProactiveAssistantMessage(chatId: chatId, content: content, fileData: fileData, fileName: fileName, mime: mime, isImage: isImage, ccMessageId: ccMessageId, replyToId: replyToId, callReply: callReply, context: modelContext)
-            }
-            // A4：CC 编辑消息 → 按 ccMessageId 找节点改 content
-            CCBridgeWebSocketClient.shared.onEditMessage = { [weak viewModel] chatId, ccMessageId, content, streaming in
-                viewModel?.applyCCEdit(chatId: chatId, ccMessageId: ccMessageId, content: content, streaming: streaming, context: modelContext)
-            }
-            // 思考链：CC 当轮 thinking → 挂到 ccMessageId 锚定的消息节点
-            CCBridgeWebSocketClient.shared.onThinking = { [weak viewModel] chatId, ccMessageId, content in
-                viewModel?.applyCCThinking(chatId: chatId, ccMessageId: ccMessageId, content: content, context: modelContext)
-            }
-            // 问问题 CC 桥：题面弹卡 / 收账落 Q/A 泡 / 失效收卡
-            CCBridgeWebSocketClient.shared.onAskUserQuestion = { [weak viewModel] chatId, toolUseId, questions in
-                viewModel?.presentCCAskUser(chatId: chatId, toolUseId: toolUseId, questions: questions, context: modelContext)
-            }
-            CCBridgeWebSocketClient.shared.onAskUserResolved = { [weak viewModel] chatId, toolUseId, questions, answers in
-                viewModel?.handleCCAskUserResolved(chatId: chatId, toolUseId: toolUseId, questions: questions, answers: answers, context: modelContext)
-            }
-            CCBridgeWebSocketClient.shared.onAskUserStale = { [weak viewModel] toolUseId in
-                viewModel?.handleCCAskUserStale(toolUseId: toolUseId)
-            }
             // CR-4：AI 读书产物（批注落书 + 读后感进对话）；true = ack 让 hub 删 pending
             CCBridgeWebSocketClient.shared.onAgentBookNote = { payload in
                 AgentBookNoteWriter.handle(payload, context: modelContext)
+            }
+            // 状态面板：小芽提醒入横幅队列；true = ack 让 hub 删 pending。记忆提醒按运行时当前楼层判
+            XiaoyaNoticeCenter.shared.profiles = profileManager
+            CCBridgeWebSocketClient.shared.onStatusAlert = { alert in
+                XiaoyaNoticeCenter.shared.receive(alert)
             }
             #if PERSONAL_APPS
             CCBridgeWebSocketClient.shared.onTradingReport = { [weak profileManager] payload in
@@ -502,6 +455,26 @@ struct ContentView: View {
                                        currentProfileId: profileManager?.currentProfile.id ?? "",
                                        context: modelContext)
             }
+            // CC Bridge: 启动时自动连接（回调都接好了再连，plan-multi-hub B2.3）；对话类回调每台 hub 都接，附加 hub 各用自己的地址和口令
+            // 读 baseURL override（UserDefaults，CC 配对页写入）+ token（keychain）
+            // 不走 ProviderManager 是为了维持 ContentView 不订阅它（性能优化，见上面注释）
+            // Phase 2：走 HubTokenStore（keychain 优先 + macOS 首次读 launchd plist bootstrap），
+            // 保证 hub 收紧 loopback 后 Mac app 侧仍能自愈拿到 token。
+            CCSessionPhaseStore.shared.accepts = { [weak viewModel] chatId, hubId in
+                viewModel?.acceptsCCFrame(chatId: chatId, fromHub: hubId, context: modelContext) ?? true
+            }
+            CCSessionPhaseStore.shared.onTurnSettled = { [weak viewModel] chatId, hubId, at in
+                viewModel?.ccTurnSettled(chatId: chatId, hubId: hubId, settledAt: at)
+            }
+            // 某台 hub_id 首次确认 → 同步 / 恢复来的自动待绑定对话按 hub_id 绑回（impl1 #12）
+            CCHubRegistry.shared.onIdentityConfirmed = { hubId, identity in
+                CCHubRegistry.rebindAutoUnbound(identity: identity, to: hubId, context: modelContext)
+            }
+            // 删掉的电脑名字只留还有对话连着的（b4 #11）
+            if !CCHubRegistry.shared.removedNames.isEmpty {
+                CCHubRegistry.shared.pruneRemovedNames(referenced: CCHubRegistry.referencedHubIds(context: modelContext))
+            }
+            CCHubRegistry.shared.start { client in bindChatCallbacks(client) }
             #if PERSONAL_APPS
             // 夜跑自动档：启动时全量上报一次关注列表（连接未就绪则静默，下次关注变化补上）
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
@@ -517,7 +490,10 @@ struct ContentView: View {
             #endif
             // 冷启动从推送点进来：didReceive 可能早于 onAppear 把 chatId 写进 UserDefaults，延迟消费一次
             #if os(iOS)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { consumePendingPushTarget() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                consumePendingPushTarget()
+                if UserDefaults.standard.string(forKey: StatusPanelRoute.pendingKey) != nil { openStatusPanel() }
+            }
             // 推送 NSE 索引：启动期一次性全量 dump 最近 N 个 cc-bridge 会话给 NSE 用
             // （fetch 在主 context 上；writer 内部 dispatch 到 serial queue 走文件 IO，不阻塞 UI）
             PushIdentityWriter.rebuildFromContext(modelContext)
@@ -594,12 +570,21 @@ struct ContentView: View {
         }
         #if os(iOS)
         // mac 的设置是独立 Settings 窗口（A5），不再走 sheet；SidebarView 的 showSettings binding 在 mac 上不会被置 true
-        .sheet(isPresented: $showSettings) {
-            SettingsView(viewModel: viewModel)
+        .sheet(isPresented: $showSettings, onDismiss: presentAtriumAfterSettings) {
+            MySettingsRootView(viewModel: viewModel)
                 .presentationDetents([.large])
                 .presentationDragIndicator(.hidden)
                 .presentationBackground(.clear)
         }
+        // 「换人」（设置 › 通用、卡库设置页）：设置 sheet 和 atrium 同一个根控制器弹，先收设置、收完再开（plan-atrium P1）
+        .modifier(OnNotify(.atriumRequestedFromSettings) {
+            if showSettings {
+                atriumAfterSettings = true
+                showSettings = false
+            } else if atriumPresenter?.isPresented == false {
+                atriumPresenter?.present()
+            }
+        })
         #endif
         .onReceive(NotificationCenter.default.publisher(for: .feedbackGestureTriggered)) { _ in
             presentFeedback()
@@ -611,15 +596,26 @@ struct ContentView: View {
                 .presentationBackground(Theme.mainBg)
                 #endif
         }
+        // 读侧段④：显式新建普通聊天先弹纸条（这个窗口带什么），两端同一张
+        .modifier(OpenWindowNoteHost(viewModel: viewModel))
         // 报错「去改」/ 冷启动回到没存完的 API 卡：从设置外面直达设置某处（plan-api-draft-and-fix-jump §3.1）
         .modifier(SettingsJumpHost(openSettings: openSettingsEntry, resumeAllowed: { canResumeAPIDraft }))
     }
+
+    #if os(iOS)
+    private func presentAtriumAfterSettings() {
+        guard atriumAfterSettings else { return }
+        atriumAfterSettings = false
+        atriumPresenter?.present()
+    }
+    #endif
 
     /// 冷启动自动回到没存完的 API 卡编辑页的闸（同推送落点：冒烟 / 基准 / perf 启动不弹；引导盖着不弹；测试宿主不弹）
     private var canResumeAPIDraft: Bool {
         if TestHostIsolation.active || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return false }
         // 推送 / 来电带着明确去处（还没被消费也算）
         if UserDefaults.standard.string(forKey: "pendingPushChatId")?.isEmpty == false { return false }
+        if UserDefaults.standard.string(forKey: StatusPanelRoute.pendingKey) != nil { return false }
         // 新装正在走小芽引导（plan-onboarding-xiaoya-impl §5.1）
         if UserDefaults.standard.string(forKey: XiaoyaScriptRunner.onboardingKey) == "started" { return false }
         #if os(iOS)
@@ -641,6 +637,11 @@ struct ContentView: View {
             // 切楼层 .id 重建：新树从页 1 起，存值跟上（对话 id 照现状写，别盖掉推送导航刚写的）
             resumePage = iOSPage
             resumeConversationId = viewModel.isDraftConversation ? "" : viewModel.selectedConversation?.id ?? ""
+            // atrium 点人切过来：落回这层上次的页 / 对话（plan-atrium P1）；没记录 = 现状 page1 托底草稿
+            if let pid = profileManager?.currentProfile.id, LastLocationResume.takeProfileSwitch(to: pid),
+               let spot = ProfileResume().spot(for: pid) {
+                restoreLocation(page: spot.page, conversationId: spot.conversationId, profileId: pid)
+            }
             return
         }
         LastLocationResume.attempted = true
@@ -660,6 +661,13 @@ struct ContentView: View {
         #if DEBUG
         if KeyboardProbeSeed.shouldAutoSelectProbeConv || ChatSampleSeed.isActive { return }
         #endif
+        restoreLocation(page: page, conversationId: convId, profileId: pid, newChatText: text)
+        #endif
+    }
+
+    #if os(iOS)
+    /// 落到指定页 / 对话：冷启动恢复和 atrium 切层共用。对话查不到 / 在回收站回落托底草稿
+    private func restoreLocation(page: Int, conversationId convId: String, profileId pid: String, newChatText text: String = "") {
         let staysOffChat = !isWidePanelMode && (page == 0 || page == 2)
         if !convId.isEmpty {
             var descriptor = FetchDescriptor<Conversation>(predicate: #Predicate { $0.id == convId && $0.profileId == pid })
@@ -684,8 +692,8 @@ struct ContentView: View {
         suppressPageEffects = true
         iOSPage = page
         DispatchQueue.main.async { suppressPageEffects = false }
-        #endif
     }
+    #endif
 
     /// 摇一摇（iOS）/ ⌘⇧D（macOS）→ 先截图（所见即所得）再弹反馈面板。
     /// 已有面板开着 / 开关关闭时忽略。上架版不带对话标题/楼层名/消息内容。
@@ -717,11 +725,14 @@ struct ContentView: View {
 
     /// ⌘N 新建对话（S1-4）。`startDraftConversation` 自带幂等——已经停在同楼层的空草稿上就直接 return，
     /// 所以连按 ⌘N 不会攒出一堆空对话。
+    /// 通知 object 带 `ConversationDisplayMode` 的 rawValue（⇧⌘N「新建气泡对话」带 "bubble"），不带 = 文章。
     /// **不聚焦输入框**：主聊天输入框没有全局聚焦入口，接它要动 CardFlowView 的焦点管线（IME 那套），不在这一刀里。
-    private func handleNewConversationRequest() {
+    private func handleNewConversationRequest(mode: Any? = nil) {
         guard let pid = profileManager?.currentProfile.id, !pid.isEmpty else { return }
         showNormalChat()
-        viewModel.startNewConversation(profileId: pid, cards: profileManager?.characterCardManager)
+        let displayMode = (mode as? String).flatMap(ConversationDisplayMode.init(rawValue:)) ?? .article
+        viewModel.startNewConversation(profileId: pid, displayMode: displayMode, cards: profileManager?.characterCardManager,
+                                       explicit: true, context: modelContext)
         #if os(iOS)
         if iOSPage != 1 { withAnimation { iOSPage = 1 } }
         #endif
@@ -746,15 +757,22 @@ struct ContentView: View {
     #if os(iOS)
     private var iOSLayout: some View {
         let manager = themeManager ?? ThemeManager.shared
+        #if PERSONAL_APPS
+        let skinActive = SkinState.shared.active
+        let scheme = skinActive ? ColorScheme.dark : manager.activeScheme
+        let backgroundImageURL = skinActive ? nil : manager.chatBackgroundImageURL
+        #else
         let scheme = manager.activeScheme
-        let style = manager.currentBackgroundStyle
+        let backgroundImageURL = manager.chatBackgroundImageURL
+        #endif
+        let style = manager.chatBackgroundStyle
         // Wallpaper 走 UIKit 层（PagingViewController.view 底层 UIImageView + CAGradientLayer），
         // 不用 SwiftUI `.background`——A10 实测 SwiftUI .background content frame 响应
         // keyboard safeArea 等比放大 13%，导致"背景跟着键盘动"。
         // 见 docs/research-wallpaper-uikit-layer.md + docs/plan-wallpaper-uikit-layer.md。
         let wallpaperConfig = WallpaperConfig(
-            fill: Theme.mainBg,
-            imageURL: manager.currentBackgroundImageURL,
+            fill: Theme.chat.mainBg,
+            imageURL: backgroundImageURL,
             saturation: 1.0,   // M2：不再偷偷降饱和；==1 时 applyWallpaper 直接跳过 CIFilter
             opacity: style.resolvedOpacity(for: scheme),
             offsetX: style.resolvedOffsetX,
@@ -766,7 +784,7 @@ struct ContentView: View {
             LaunchTrace.page2Target = selectedToolId
             LaunchTrace.appearance = ["font": UserDefaults.standard.string(forKey: "selectedFont") ?? "",
                 "fontScale": UserDefaults.standard.double(forKey: "fontScale") > 0 ? UserDefaults.standard.double(forKey: "fontScale") : 1.2,
-                "theme": manager.selectedThemeId, "scheme": String(describing: scheme),
+                "theme": manager.selectedThemeId, "chatTheme": manager.chatTheme.id, "scheme": String(describing: scheme),
                 "backgroundOpacity": wallpaperConfig.opacity, "chatBubbleMode": chatBubbleMode,
                 "page2Presentation": homePresentation, "page2DesktopStyle": page2DesktopStyle]
         } }()
@@ -774,13 +792,39 @@ struct ContentView: View {
         // 路线 B 下 container 不变，外层 App.body 的 .id(profile.id) 已经保证 profile
         // 切换时整棵 ContentView re-init，PagingContainerView 自动跟着新建。不需要这里
         // 额外 .id() hack。
+        #if PERSONAL_APPS
+        let tutuEmpty = skinActive && !isWidePanelMode && destination == .chat && !viewModel.isLoading
+            && ((viewModel.currentPath.isEmpty && (viewModel.selectedConversation?.nodeCount ?? 0) == 0)
+                || (TutuChatIntroPresentation.shared.preparing
+                    && TutuChatIntroPresentation.shared.matches(viewModel.selectedConversation?.id)))
+        let listRoot = AnyView(iOSListPage)
+        let chatRoot: AnyView
+        if tutuEmpty {
+            chatRoot = AnyView(TutuMetalView(active: true).overlay(alignment: .top) {
+                fencedByA7 { iOSChatTopBar }
+            })
+        } else {
+            chatRoot = AnyView(iOSChatPage)
+        }
+        let dashRoot = AnyView(iOSDashboardPage)
+        let themeKey = skinActive ? manager.themeChangeID.uuidString + (tutuEmpty ? ".tutu.empty" : ".tutu") : manager.themeChangeID.uuidString
+        // 只在皮肤投影变化这一轮绕过流式 skip，避免占位页挡住首条回复或关闭后迟迟不复原。
+        let previousSkin = PagingViewController.tutuProjectedTheme?.contains(".tutu") == true
+        let refreshSkinRoots = (skinActive || previousSkin) && PagingViewController.tutuProjectedTheme != themeKey
+        #else
+        let listRoot = AnyView(iOSListPage)
+        let chatRoot = AnyView(iOSChatPage)
+        let dashRoot = AnyView(iOSDashboardPage)
+        let themeKey = manager.themeChangeID.uuidString
+        let refreshSkinRoots = false
+        #endif
         let paging = PagingContainerView(
             // 宽屏形态下列表/更多改由浮层承载，这两页喂 EmptyView——三页结构本身保留
             // （输入条挂 hostingControllers[1] 且要求 count>1，减页会让挂载链失效），
             // 但内容不重复渲染。updatePages 只换 rootView 不重建 HC，来回切安全。
-            listPage: isWidePanelMode ? AnyView(EmptyView()) : AnyView(injectPagingEnv(iOSListPage)),
-            chatPage: AnyView(injectPagingEnv(iOSChatPage)),
-            dashPage: isWidePanelMode ? AnyView(EmptyView()) : AnyView(injectPagingEnv(iOSDashboardPage)),
+            listPage: isWidePanelMode ? AnyView(EmptyView()) : AnyView(injectPagingEnv(listRoot)),
+            chatPage: AnyView(injectPagingEnv(chatRoot)),
+            dashPage: isWidePanelMode ? AnyView(EmptyView()) : AnyView(injectPagingEnv(dashRoot)),
             // B2：输入条栈独立 host（挂 chat HC + keyboardLayoutGuide），环境注入同 page 双层链
             inputBar: AnyView(injectPagingEnv(InputBarStack(stickerVM: stickerVM, newChatText: $resumeNewChatText))),
             // 翻页解耦（plan-paging-decouple §3.2）：iOSPage 只由 PageSync 读；开关关时回原 binding 链（body 读 iOSPage）
@@ -788,7 +832,7 @@ struct ContentView: View {
             onPageChanged: { iOSPage = $0 },
             contentKey: PagingContentKey(conversation: viewModel.selectedConversation?.id, destination: String(describing: destination),
                                          profile: profileManager?.currentProfile.id ?? "", wide: isWidePanelMode,
-                                         theme: manager.themeChangeID.uuidString, stickers: stickerVM.isEditingStickers),
+                                         theme: themeKey, stickers: stickerVM.isEditingStickers),
             disableScroll: stickerVM.isEditingStickers,
             widePanelMode: isWidePanelMode,
             initialPage: ProcessInfo.processInfo.arguments.contains("page2-ui-test") ? 2 : 1,
@@ -800,11 +844,12 @@ struct ContentView: View {
                       conversation.id == launchConversationID else { return false }
                 return !vm.isLoading && conversation.profileId == profileManager?.currentProfile.id
                     && UserDefaults.standard.string(forKey: "pendingPushChatId") == nil
+                    && UserDefaults.standard.string(forKey: StatusPanelRoute.pendingKey) == nil
             },
             wallpaper: isWidePanelMode ? .cleared : wallpaperConfig,
             // B2 窄版：流式期间 skip updatePages。读 isStreaming 会让 ContentView.body
             // 在流式开始/结束各重算一次（边界时刻触发更新 rootView），非流式期间无成本。
-            isStreaming: destination == .chat && viewModel.providerRouter.isStreaming
+            isStreaming: destination == .chat && viewModel.providerRouter.isStreaming && !refreshSkinRoots
         )
         .ignoresSafeArea()
         // 宽屏下正文让位：翻页容器按桌面格子 / 面板宽度内缩（输入条挂 chat HC，跟着缩）。
@@ -859,15 +904,16 @@ struct ContentView: View {
             setStickerEditScrollLock(editing)
         }
         .modifier(Page2AppShellPersistence(encoded: $page2OpenApps, readingBook: $page2ReadingBook, current: selectedToolId))
-        .modifier(LastLocationPersistence(page: $iOSPage, savedPage: $resumePage, savedConversationId: $resumeConversationId, viewModel: viewModel))
+        .modifier(LastLocationPersistence(page: $iOSPage, savedPage: $resumePage, savedConversationId: $resumeConversationId, viewModel: viewModel,
+                                          profileId: profileManager?.currentProfile.id ?? ""))
         .onChange(of: globalWBManager?.books.count) { _, _ in
             viewModel.globalWorldBookEntries = (globalWBManager?.enabledBooks ?? []).flatMap { $0.entries }
         }
         .onAppear {
             viewModel.globalWorldBookEntries = (globalWBManager?.enabledBooks ?? []).flatMap { $0.entries }
             // 首屏焦点上报（直接进对话页的情况）；连接没好时由 didOpen 重报兜底
-            CCBridgeWebSocketClient.shared.updateFocus(
-                iOSPage == 1 && destination == .chat ? viewModel.selectedConversation?.id : nil
+            CCHubRegistry.shared.updateFocus(
+                iOSPage == 1 && destination == .chat ? viewModel.selectedConversation : nil
             )
         }
         .onChange(of: viewModel.selectedConversation?.id) { _, newId in
@@ -876,7 +922,7 @@ struct ContentView: View {
                 withAnimation { iOSPage = 1 }
             }
             // 同页换会话也要重报焦点（切到 page 1 由上面 iOSPage onChange 兜）
-            CCBridgeWebSocketClient.shared.updateFocus(iOSPage == 1 && destination == .chat ? newId : nil)
+            CCHubRegistry.shared.updateFocus(iOSPage == 1 && destination == .chat && newId != nil ? viewModel.selectedConversation : nil)
         }
         .onReceive(NotificationCenter.default.publisher(for: .conversationNavigationRequested)) { _ in
             // B20 part 2: 同 conv 内点搜索结果时 selectedConversation?.id 不变，
@@ -890,7 +936,7 @@ struct ContentView: View {
         // body 这条 modifier 链已经贴着类型检查预算，再加一个 `NotificationCenter.default.publisher(for:)`
         // 的泛型就翻（iOS 侧实测 "unable to type-check this expression in reasonable time"；
         // 把闭包体抽成方法**不够**，压垮它的是链上多一项 Publisher 泛型，不是闭包复杂度）。
-        .modifier(OnNotify(.newConversationRequested) { handleNewConversationRequest() })
+        .modifier(OnNotifyObject(.newConversationRequested) { handleNewConversationRequest(mode: $0) })
         .onReceive(NotificationCenter.default.publisher(for: .pushConversationRequested)) { _ in
             consumePendingPushTarget()
         }
@@ -907,6 +953,7 @@ struct ContentView: View {
                                  openApp: { openToolFromOutside(XiaoyaApp.toolId) },
                                  leaveApp: { selectedToolId = "home"; iOSPage = 1 },
                                  goDesktop: { selectedToolId = "home"; if iOSPage != 2 { iOSPage = 2 } }))
+        .modifier(OnNotify(.statusPanelRequested) { openStatusPanel() })
         .onChange(of: scenePhase) { _, phase in
             // 切后台 socket 死 → 回前台立即重连（不等 30s 退避）——07-19 群聊全哑修复的一半
             if phase == .active, AgoraFeatureGate.isEnabled { agoraViewModel.nudgeReconnectIfNeeded() }
@@ -968,7 +1015,7 @@ struct ContentView: View {
                   let target = manager.profiles.first(where: { $0.id == profileId }) else {
                 UserDefaults.standard.removeObject(forKey: "pendingPushChatId")
                 BreadcrumbLog.shared.add("🔔", "推送对话所在楼层已删除 conv=\(convId.prefix(8))")
-                viewModel.transientNotice = TransientNotice("这条消息所在的楼层已经不在了")
+                ToastCenter.shared.show("这条消息所在的楼层已经不在了")
                 return
             }
             // key 不消费：switchTo 会同步广播清旧 SwiftData 引用再翻 currentProfile，
@@ -981,17 +1028,17 @@ struct ContentView: View {
         case .conversationMissing:
             UserDefaults.standard.removeObject(forKey: "pendingPushChatId")
             BreadcrumbLog.shared.add("🔔", "推送对话已不存在 chat=\(chatId.prefix(8))")
-            viewModel.transientNotice = TransientNotice("这条消息对应的对话已经被删除了")
+            ToastCenter.shared.show("这条消息对应的对话已经被删除了")
 
         case .profileMissing(let profileId):
             UserDefaults.standard.removeObject(forKey: "pendingPushChatId")
             BreadcrumbLog.shared.add("🔔", "推送对话所在楼层已删除 pid=\(profileId.prefix(8))")
-            viewModel.transientNotice = TransientNotice("这条消息所在的楼层已经不在了")
+            ToastCenter.shared.show("这条消息所在的楼层已经不在了")
 
         case .conversationEmpty(let convId):
             UserDefaults.standard.removeObject(forKey: "pendingPushChatId")
             BreadcrumbLog.shared.add("🔔", "推送对话还没有可跳转的消息 conv=\(convId.prefix(8))")
-            viewModel.transientNotice = TransientNotice("这个对话还没有消息可以打开")
+            ToastCenter.shared.show("这个对话还没有消息可以打开")
 
         case .unavailable:
             BreadcrumbLog.shared.add("🔔", "推送落点暂时查不了（数据库未就绪），保留待跳转")
@@ -1089,12 +1136,20 @@ struct ContentView: View {
     // 同 删 @AppStorage debugPageIndicatorModeRaw / private var debugPageIndicatorMode。
 
     @State private var showAIProfile = false
+    /// page0 右上胶囊开的人页：和气泡顶栏那张分开（那张挂在气泡顶栏上，文章模式下不在树里；两张绑同一个值会同时弹）
+    @State private var showPage0Profile = false
+    /// 资料页 zoom 转场（10-29 b，参照 Duet）：头像放大成全屏、下拖缩成圆角卡飞回头像
+    @Namespace private var profileZoom
 
     /// 气泡模式顶栏中央：大圆头像悬浮 + 底下贴一个紧身名字小胶囊（X chat 式上下结构）。
     /// 气泡模式不挂 PinBar（pin 单气泡是普通模式的事），这个替位。
     /// 头像素材 fallback：自选头像 → 角色卡封面 → 人像图标。
     private var bubbleModeAvatarCapsule: some View {
-        AvatarNameCapsule(name: profileManager?.currentProfile.assistantName ?? "助手", chevron: true, iMessageStyle: true) {
+        BubbleChatIdentity(name: profileManager?.currentProfile.assistantName ?? "助手",
+                           viewModel: viewModel, conversationId: viewModel.selectedConversation?.id ?? "",
+                           profileId: profileManager?.currentProfile.id ?? "",
+                           onProfile: { showAIProfile = true }, zoomNamespace: profileZoom,
+                           hubId: viewModel.selectedConversation.map(CCHubRegistry.hubId(of:)) ?? CCHubRegistry.primaryId) {
             Group {
                 // 自选头像和角色卡封面优先，未设置时显示人像图标。
                 if let data = profileManager?.currentProfile.assistantAvatarData,
@@ -1114,15 +1169,53 @@ struct ContentView: View {
                 } else {
                     Image(systemName: "person.fill")
                         .font(.system(size: 26))
-                        .foregroundStyle(Theme.textMuted)
+                        .foregroundStyle(Theme.chat.textMuted)
                         .frame(width: 60, height: 60)
-                        .background(Circle().fill(Theme.accent.opacity(0.6)))
+                        .background(Circle().fill(Theme.chat.accent.opacity(0.6)))
                 }
             }
         }
     }
 
     #endif
+
+    /// CC 对话类回调：每台 hub 的 client 都走这里（plan-multi-hub B2.3；来源 hub 透传留给 B3）
+    private func bindChatCallbacks(_ client: CCBridgeWebSocketClient) {
+        // 来源 hub（plan-multi-hub B3.2）：落库前核这条对话当前绑这台 / 最近在这台上发过，否则丢
+        let hub = client.hubId
+        // CC 主动消息：收到 reply 但无 pending 占位（CC 主动发的）→ 落地成对应会话的新小克消息
+        // 返回 false = 这回不收、client 不记已收不推游标（只有待绑定，impl1 #13）；绑着别的那台的拒收返回 true 记已收，改绑后回放不再收（B7.2 B1）
+        client.onProactiveMessage = { [weak viewModel] chatId, content, fileData, fileName, mime, isImage, ccMessageId, replyToId, callReply in
+            guard let viewModel else { return false }
+            return viewModel.deliverCCFrame(chatId: chatId, fromHub: hub, context: modelContext) {
+                viewModel.insertProactiveAssistantMessage(chatId: chatId, content: content, fileData: fileData, fileName: fileName, mime: mime, isImage: isImage, ccMessageId: ccMessageId, replyToId: replyToId, callReply: callReply, fromHub: hub, context: modelContext)
+            }
+        }
+        // A4：CC 编辑消息 → 按 ccMessageId 找节点改 content（只改这台自己发的那条）
+        client.onEditMessage = { [weak viewModel] chatId, ccMessageId, content, streaming in
+            guard let viewModel, viewModel.acceptsCCEdit(chatId: chatId, ccMessageId: ccMessageId, fromHub: hub, context: modelContext) else { return }
+            viewModel.applyCCEdit(chatId: chatId, ccMessageId: ccMessageId, content: content, streaming: streaming, context: modelContext)
+        }
+        // 思考链：CC 当轮 thinking → 挂到 ccMessageId 锚定的消息节点（拒收的返回值同 reply）
+        client.onThinking = { [weak viewModel] chatId, ccMessageId, content in
+            guard let viewModel else { return false }
+            return viewModel.deliverCCFrame(chatId: chatId, fromHub: hub, context: modelContext) {
+                viewModel.applyCCThinking(chatId: chatId, ccMessageId: ccMessageId, content: content, context: modelContext)
+            }
+        }
+        // 问问题 CC 桥：题面弹卡 / 收账落 Q/A 泡 / 失效收卡（绑着别的那台时拒过的题，改绑后再来也不收）
+        client.onAskUserQuestion = { [weak viewModel] chatId, toolUseId, questions in
+            guard let viewModel, viewModel.acceptsCCAskFrame(chatId: chatId, toolUseId: toolUseId, fromHub: hub, context: modelContext) else { return }
+            viewModel.presentCCAskUser(chatId: chatId, toolUseId: toolUseId, questions: questions, fromHub: hub, context: modelContext)
+        }
+        client.onAskUserResolved = { [weak viewModel] chatId, toolUseId, questions, answers in
+            guard let viewModel, viewModel.acceptsCCAskFrame(chatId: chatId, toolUseId: toolUseId, fromHub: hub, context: modelContext) else { return }
+            viewModel.handleCCAskUserResolved(chatId: chatId, toolUseId: toolUseId, questions: questions, answers: answers, fromHub: hub, context: modelContext)
+        }
+        client.onAskUserStale = { [weak viewModel] toolUseId in
+            viewModel?.handleCCAskUserStale(toolUseId: toolUseId, fromHub: hub)
+        }
+    }
 
     // MARK: - 宽屏壳共用（iPad 宽屏 overlay 与 mac 新壳都用；plan-mac-shape A1a 提出 #if）
 
@@ -1186,6 +1279,30 @@ struct ContentView: View {
     private func unlockDeathScale() {
         DeathScaleGate.unlock(profileId: profileManager?.currentProfile.id, tools: rightPanelToolManager)
         withAnimation(.easeInOut(duration: 0.2)) { openToolFromOutside(DeathScaleGate.toolId) }
+    }
+
+    private func showTutuEmptyConversation() {
+        guard let profileId = profileManager?.currentProfile.id, !profileId.isEmpty else { return }
+        showSettings = false
+        showNormalChat()
+        #if os(iOS)
+        resumeNewChatText = ""
+        #endif
+        viewModel.editingMessage = nil
+        viewModel.clearQuoting()
+        viewModel.startDraftConversation(profileId: profileId, fresh: true)
+        #if os(iOS)
+        iOSPage = 1
+        #endif
+    }
+    #endif
+
+    #if os(iOS)
+    /// 点小芽横幅 / 点 route=status 的推送（热启动 + 冷启动）→ 打开状态面板
+    private func openStatusPanel() {
+        UserDefaults.standard.removeObject(forKey: StatusPanelRoute.pendingKey)
+        SettingsJump.shared.noteExternalNavigation()
+        withAnimation(.easeInOut(duration: 0.2)) { openToolFromOutside(StatusPanelRoute.toolId) }
     }
     #endif
 
@@ -1264,6 +1381,16 @@ struct ContentView: View {
                 renameText = conv.title
                 showRenameAlert = true
             } label: { Label("重命名", systemImage: "pencil") }
+            // 共存第二步：每个对话自己选气泡 / 文章，只改这一列（分支数据不动）
+            Button {
+                viewModel.setDisplayMode(conv.isBubbleMode ? .article : .bubble, for: conv, context: modelContext)
+            } label: {
+                Label(conv.isBubbleMode ? "换成文章" : "换成气泡",
+                      systemImage: conv.isBubbleMode ? "doc.text" : "bubble.left.and.bubble.right")
+            }
+            Button { viewModel.editOpenWindowNote(for: conv) } label: {
+                Label("这个窗口带什么", systemImage: "checklist")
+            }
             // 一直显示：菜单内容会被提前算，判断「有没有」就要在主线程读 sessions/（撞主线程读盘预算），没有时弹层里说
             Button {
                 memorySheet = ConversationMemorySheetTarget(kind: .windowSummary, conversationId: conv.id,
@@ -1295,15 +1422,18 @@ struct ContentView: View {
                     }
                 } label: { Label("这个对话用的身份", systemImage: "person.crop.circle") }
             }
+            // 连哪台电脑（plan-multi-hub B4.4）：≥2 台 / 那台用不了才出，跟输入框上方「换一台」同一份选择
+            CCHubMenuEntry(conversation: conv, viewModel: viewModel)
             // 带不带终端：按 tmux session 设（从对话列表长按挪来，粟粟 10-11）。切换后 hub 收掉旧进程按新传输重生
             //（同一 claude 会话 resume，正在跑的一轮等跑完）
-            if let ccSession = conv.ccBridgeSessionName, !ccSession.isEmpty {
-                let current = CCBridgeWebSocketClient.transportPolicy(for: ccSession)
+            if let ccSession = conv.ccBridgeSessionName, !ccSession.isEmpty,
+               let hub = try? CCHubRegistry.shared.route(CCHubRegistry.hubId(of: conv)).get() {
+                let current = CCBridgeWebSocketClient.transportPolicy(for: ccSession, hub: hub)
                 Menu {
                     ForEach([("", "跟随全局设置", "gearshape"), ("tmux", "带终端", "terminal"),
                              ("stream", "不带终端（逐字流式）", "text.bubble")], id: \.0) { policy, title, icon in
                         Button {
-                            CCBridgeWebSocketClient.setTransportPolicy(policy, for: ccSession)
+                            CCBridgeWebSocketClient.setTransportPolicy(policy, for: ccSession, hub: hub)
                         } label: {
                             Label(title, systemImage: current == policy ? "checkmark" : icon)
                         }
@@ -1420,7 +1550,14 @@ struct ContentView: View {
             .help("当前编程会话：改名、路径、在终端继续")
         } else {
             Menu { conversationMenuItems } label: {
-                macTitleLabel(Self.capsuleTitle(viewModel.selectedConversation?.title ?? "新对话"))
+                // 标题栏只有红绿灯那么高、放不下第二行：电脑名跟在标题右边（小样方案 B，plan-multi-hub B4.4）
+                HStack(spacing: 0) {
+                    macTitleLabel(Self.capsuleTitle(viewModel.selectedConversation?.title ?? "新对话"))
+                    if let conv = viewModel.selectedConversation {
+                        CCHubTitleLine(conversation: conv, font: .system(size: MacShellMetrics.shared.titleSize - 1),
+                                       color: ShellStyle.secondaryText.opacity(0.65), trailing: 8)
+                    }
+                }
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
@@ -1466,10 +1603,15 @@ struct ContentView: View {
             } else {
                 Menu { conversationMenuItems } label: {
                     // 同一颗、同一个坑：对话标题长了一样会把胶囊撑出窗口
-                    MacShellLabel(symbol: "bubble.left",
-                                  title: Self.capsuleTitle(viewModel.selectedConversation?.title ?? "新对话"),
-                                  chevron: true)
-                        .frame(maxWidth: 220)
+                    HStack(spacing: 6) {
+                        MacShellLabel(symbol: "bubble.left",
+                                      title: Self.capsuleTitle(viewModel.selectedConversation?.title ?? "新对话"),
+                                      chevron: true)
+                        if let conv = viewModel.selectedConversation {
+                            CCHubTitleLine(conversation: conv, font: .system(size: 11), color: ShellStyle.secondaryText.opacity(0.65))
+                        }
+                    }
+                    .frame(maxWidth: 220)
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
@@ -1511,14 +1653,19 @@ struct ContentView: View {
                 conversationMenuItems
             } label: {
                 HStack(spacing: 5) {
-                    Text(viewModel.selectedConversation?.title ?? "新对话")
-                        .font(.system(size: Theme.F.label, weight: .semibold))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(1)
-                        .frame(maxWidth: 220)
+                    VStack(spacing: 0) {
+                        Text(viewModel.selectedConversation?.title ?? "新对话")
+                            .font(.system(size: Theme.F.label, weight: .semibold))
+                            .foregroundColor(Theme.chat.textPrimary)
+                            .lineLimit(1)
+                        if let conv = viewModel.selectedConversation {
+                            CCHubTitleLine(conversation: conv, font: .system(size: 10.5))
+                        }
+                    }
+                    .frame(maxWidth: 220)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(Theme.textMuted)
+                        .foregroundColor(Theme.chat.textMuted)
                 }
                 .padding(.horizontal, 12)
                 .frame(height: 38)
@@ -1532,7 +1679,7 @@ struct ContentView: View {
                         AppIconView(name: "ri-git-branch", size: 13)
                         Text("\(branchOffMainCount)")
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(Theme.textSecondary)
+                            .foregroundColor(Theme.chat.textSecondary)
                     }
                     .padding(.horizontal, 11)
                     .frame(height: 38)
@@ -1553,7 +1700,7 @@ struct ContentView: View {
             Button { openSettingsEntry() } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(Theme.textSecondary)
+                    .foregroundColor(Theme.chat.textSecondary)
                     .frame(width: 38, height: 38)
                     .contentShape(Rectangle())
             }
@@ -1568,7 +1715,7 @@ struct ContentView: View {
 
     private var landscapeBarDivider: some View {
         Rectangle()
-            .fill(Theme.textMuted.opacity(0.22))
+            .fill(Theme.chat.textMuted.opacity(0.22))
             .frame(width: 1, height: 20)
             .padding(.horizontal, 2)
     }
@@ -1582,11 +1729,11 @@ struct ContentView: View {
                 Text(text)
                     .font(.system(size: Theme.F.secondary, weight: .medium))
             }
-            .foregroundColor(active ? Theme.branchIndicator : Theme.textSecondary)
+            .foregroundColor(active ? Theme.chat.branchIndicator : Theme.chat.textSecondary)
             .padding(.horizontal, 12)
             .frame(height: 38)
             .background(
-                Capsule().fill(active ? Theme.branchIndicator.opacity(0.16) : Color.clear)
+                Capsule().fill(active ? Theme.chat.branchIndicator.opacity(0.16) : Color.clear)
             )
             .contentShape(Rectangle())
         }
@@ -1601,9 +1748,17 @@ struct ContentView: View {
         // 音乐在别的对话里放着：顶栏下面一行浮一个小玻璃胶囊（粟粟 09-27；放聊天页顶上会被这条顶栏压住）
         VStack(spacing: 6) {
             iOSChatTopBarRow
+            // 标题下一行小灰字电脑名（plan-multi-hub B4.4，≥2 台 / 那台用不了才有；宽屏在胶囊标题下）
+            if !isWidePanelMode, !viewModel.inConvSearchActive, !viewModel.messageSelection.isActive,
+               let conv = viewModel.selectedConversation {
+                CCHubTitleLine(conversation: conv)
+            }
             // 气泡模式中间是头像层、没有状态岛：音乐胶囊仍放顶栏下一行
             if chatBubbleMode { MusicNowPlayingCapsule(viewModel: viewModel) }
         }
+        #if PERSONAL_APPS
+        .opacity(SkinState.shared.active ? TutuChatIntroPresentation.shared.phase.chromeOpacity : 1)
+        #endif
         .onAppear {
             StreamScrollAnchor.AnchorView.onTopBarCollapse = { collapsed in
                 withAnimation(ChatCardMotion.animation(ChatCardMotion.morph, reduceMotion: topBarReduceMotion)) { topBarCollapse.collapsed = collapsed }
@@ -1628,9 +1783,9 @@ struct ContentView: View {
                     // 搜索框底下垫一层渐隐奶白：正文不再从玻璃后面透上来
                     .background {
                         LinearGradient(stops: [
-                            .init(color: Theme.mainBg, location: 0),
-                            .init(color: Theme.mainBg.opacity(0.92), location: 0.7),
-                            .init(color: Theme.mainBg.opacity(0), location: 1),
+                            .init(color: Theme.chat.mainBg, location: 0),
+                            .init(color: Theme.chat.mainBg.opacity(0.92), location: 0.7),
+                            .init(color: Theme.chat.mainBg.opacity(0), location: 1),
                         ], startPoint: .top, endPoint: .bottom)
                         .ignoresSafeArea(edges: .top)
                         .allowsHitTesting(false)
@@ -1646,8 +1801,7 @@ struct ContentView: View {
                     .transition(.opacity)
             } else if chatBubbleMode, viewModel.selectedConversation != nil, !isWidePanelMode {
                 BubbleChatHeader(
-                    onBack: { withAnimation { iOSPage = 0 } },
-                    onProfile: { showAIProfile = true }
+                    onBack: { withAnimation { iOSPage = 0 } }
                 ) {
                     bubbleModeAvatarCapsule
                 } actions: {
@@ -1657,11 +1811,11 @@ struct ContentView: View {
                         Label("更多页面", systemImage: "chevron.right")
                     }
                 }
-                .sheet(isPresented: $showAIProfile) {
+                .fullScreenCover(isPresented: $showAIProfile) {
                     AIProfileSheet()
-                        .presentationDetents([.medium, .large])
-                        .presentationDragIndicator(.visible)
                         .presentationBackground(Theme.sidebarBg)
+                        .navigationTransition(.zoom(sourceID: BubbleChatIdentity<EmptyView>.profileZoomID, in: profileZoom))
+                        .accessibilityAction(.escape) { showAIProfile = false }   // 没有关闭钮：VoiceOver 两指 Z 关
                 }
             } else if isWidePanelMode {
                 // 宽屏：悬浮条本体挂在 body overlay 上钉在屏幕正中（不跟聊天区一起被面板推来推去），
@@ -1695,7 +1849,7 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(Theme.textSecondary)
+                        .foregroundColor(Theme.chat.textSecondary)
                         .frame(width: 44, height: 44)
                         .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle)
                 }
@@ -1742,7 +1896,7 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: "ellipsis")
                             .font(.system(size: 15, weight: .medium))
-                            .foregroundColor(Theme.textSecondary)
+                            .foregroundColor(Theme.chat.textSecondary)
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
@@ -1754,7 +1908,7 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 15, weight: .semibold))
-                            .foregroundColor(Theme.textSecondary)
+                            .foregroundColor(Theme.chat.textSecondary)
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
@@ -1779,11 +1933,11 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .frame(maxWidth: .infinity)
                 .padding(.top, 6)
-                .sheet(isPresented: $showAIProfile) {
+                .fullScreenCover(isPresented: $showAIProfile) {
                     AIProfileSheet()
-                        .presentationDetents([.medium, .large])
-                        .presentationDragIndicator(.visible)
                         .presentationBackground(Theme.sidebarBg)
+                        .navigationTransition(.zoom(sourceID: BubbleChatIdentity<EmptyView>.profileZoomID, in: profileZoom))
+                        .accessibilityAction(.escape) { showAIProfile = false }   // 没有关闭钮：VoiceOver 两指 Z 关
                 }
             }
         }
@@ -1811,8 +1965,11 @@ struct ContentView: View {
             onSelectAgoraRoom: selectAgoraRoom,
             onCreateAgoraRoom: { showAgoraCreateSheet = true },
             onSelectConversation: showNormalChat,
+            onOpenProfile: { showPage0Profile = true },
+            profileZoom: profileZoom,
             profileId: profileManager?.currentProfile.id ?? ""
         )
+        .modifier(Page0PersonPageCover(isPresented: $showPage0Profile, zoom: profileZoom))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
@@ -2104,7 +2261,7 @@ struct ContentView: View {
                                        onClose: { macWorkspaceActions.closeSearch() })
             }
         }
-        .modifier(OnNotify(.newConversationRequested) { handleNewConversationRequest() })
+        .modifier(OnNotifyObject(.newConversationRequested) { handleNewConversationRequest(mode: $0) })
         .onChange(of: panelLayout.mode) { _, _ in panelLayout.cancelMacPresentation() }
         .onChange(of: panelLayout.dockSide) { _, _ in panelLayout.cancelMacPresentation() }
         .onChange(of: panelLayout.arrangement) { _, _ in panelLayout.cancelMacPresentation() }
@@ -2296,9 +2453,10 @@ struct ContentView: View {
         #endif
         // 全屏模式：正文（含输入条）装进一张卡，卡外是桌布；浮窗模式照旧铺满 + 给悬浮胶囊让 46
         .modifier(MacChatCard(layout: panelLayout,
-                              imageURL: manager.currentBackgroundImageURL,
+                              imageURL: manager.chatBackgroundImageURL,
                               scheme: manager.activeScheme,
-                              backgroundStyle: manager.currentBackgroundStyle))
+                              backgroundStyle: manager.chatBackgroundStyle,
+                              chatPage: !CodingSessionLibrary.shared.isActive))
         .task { CodingSessionLibrary.shared.scheduleStartupScan() }
         // 切会话重置轮播 / 隐藏（同 iOSChatPage 的 onChange；原在 CardFlowView 的 mac 分支）
         .onChange(of: viewModel.selectedConversation?.id) { old, _ in
@@ -2339,6 +2497,20 @@ private struct XiaoyaAppHooks: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: .xiaoyaDesktopRequested)) { _ in
                 withAnimation(.easeInOut(duration: 0.22)) { goDesktop() }
             }
+    }
+}
+
+/// page0 右上胶囊 → 人页（plan-atrium P2）。挂在 SidebarView 上（和胶囊同一个宿主，zoom 才找得到源）
+private struct Page0PersonPageCover: ViewModifier {
+    @Binding var isPresented: Bool
+    let zoom: Namespace.ID
+
+    func body(content: Content) -> some View {
+        content.fullScreenCover(isPresented: $isPresented) {
+            PersonPageView()
+                .presentationBackground(Theme.sidebarBg)
+                .navigationTransition(.zoom(sourceID: SidebarView.page0ProfileZoomID, in: zoom))
+        }
     }
 }
 #endif

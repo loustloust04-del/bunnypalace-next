@@ -313,10 +313,13 @@ enum DesktopToolStatus {
         switch toolId {
         case "ccTerminal":
             let session = viewModel.selectedConversation?.ccBridgeSessionName ?? "mp-cc"
-            let state = TerminalWindowStore.shared.sessionStates[session]
+            // 对话终端在这条对话连的那台上（R6）；那台用不了 = 未连接
+            let hub = viewModel.selectedConversation.map(CCHubRegistry.hubId(of:)) ?? CCHubRegistry.primaryId
+            let state = CCHubRegistry.shared.windowStore(for: hub)?.sessionStates[session]
             // 窗口名不露 session 名（T52）；对话终端明知是 CC → engine 兜底 claude
             let title = TerminalTitle.resolve(title: state?.title, engine: state?.engine ?? "claude", code: session)
-            return title + (CCBridgeWebSocketClient.shared.isConnected ? " · 已连接" : " · 未连接")
+            let connected = (try? CCHubRegistry.shared.route(hub).get())?.isConnected == true
+            return title + (connected ? " · 已连接" : " · 未连接")
         default:
             return nil
         }

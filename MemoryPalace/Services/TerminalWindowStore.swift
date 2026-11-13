@@ -106,7 +106,13 @@ enum TerminalTitle {
 @MainActor
 @Observable
 final class TerminalWindowStore {
-    static let shared = TerminalWindowStore()
+    /// 主 hub 那台（plan-multi-hub B2.8）；附加 hub 每台一个，CCHubRegistry 建 / 拆
+    static let shared = TerminalWindowStore(client: .shared, defaults: .standard)
+
+    /// 这张表绑的那台 hub：刷新、开 / 收 / 恢复 / 结束都只走它
+    @ObservationIgnored let client: CCBridgeWebSocketClient
+    /// 那台的存储（离线缓存写这里）
+    @ObservationIgnored private let defaults: UserDefaults
 
     /// 导航里显示的（未关闭的），按创建时间排
     private(set) var windows: [TerminalWindowInfo] = []
@@ -124,7 +130,9 @@ final class TerminalWindowStore {
     @ObservationIgnored private let defaultsKey = "terminalWindowsCache"
     @ObservationIgnored private static let syncInterval: TimeInterval = 60
 
-    private init() {
+    init(client: CCBridgeWebSocketClient, defaults: UserDefaults) {
+        self.client = client
+        self.defaults = defaults
         loadCache()
     }
 
@@ -146,7 +154,7 @@ final class TerminalWindowStore {
     }
 
     func refresh() {
-        CCBridgeWebSocketClient.shared.listWindows(includeClosed: true) { [weak self] result in
+        client.listWindows(includeClosed: true) { [weak self] result in
             Task { @MainActor in
                 guard let self else { return }
                 switch result {
@@ -227,7 +235,7 @@ final class TerminalWindowStore {
     /// 轻点 [+]：开一个新窗口。`engine` 不传 = 裸 shell（轻点的行为）；长按菜单可指定 claude/codex。
     /// 回调给出新窗口的 code，调用方可以立刻切过去；失败带原因（新 hub 会说缺 tmux / 没装 claude 之类，#046）。
     func open(engine: String? = nil, completion: @escaping (Result<String, CCBridgeRemoteError>) -> Void) {
-        CCBridgeWebSocketClient.shared.openWindow(engine: engine) { [weak self] result in
+        client.openWindow(engine: engine) { [weak self] result in
             Task { @MainActor in
                 if case .success = result { self?.refresh() }
                 completion(result)
@@ -241,11 +249,11 @@ final class TerminalWindowStore {
         var w = windows.remove(at: idx)
         w.closedAt = ISO8601DateFormatter().string(from: Date())
         closed.append(w)
-        CCBridgeWebSocketClient.shared.closeWindow(code: code)
+        client.closeWindow(code: code)
     }
 
     func restore(_ code: String, completion: @escaping (Result<String, CCBridgeRemoteError>) -> Void) {
-        CCBridgeWebSocketClient.shared.restoreWindow(code: code) { [weak self] result in
+        client.restoreWindow(code: code) { [weak self] result in
             Task { @MainActor in
                 if case .success = result { self?.refresh() }
                 completion(result)
@@ -255,7 +263,7 @@ final class TerminalWindowStore {
 
     /// 结束 = hub 真 kill tmux。成功后两个列表都删掉它（不再能恢复）。
     func end(_ code: String, completion: ((Result<Void, TerminalWindowEndError>) -> Void)? = nil) {
-        CCBridgeWebSocketClient.shared.endWindow(code: code) { [weak self] result in
+        client.endWindow(code: code) { [weak self] result in
             Task { @MainActor in
                 if case .success = result, let self {
                     self.windows.removeAll { $0.code == code }
@@ -275,14 +283,15 @@ final class TerminalWindowStore {
     // MARK: 本地缓存
 
     private func loadCache() {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+        guard let data = defaults.data(forKey: defaultsKey),
               let cached = try? JSONDecoder().decode([TerminalWindowInfo].self, from: data)
         else { return }
         apply(cached)
     }
 
     private func saveCache(_ all: [TerminalWindowInfo]) {
-        guard let data = try? JSONEncoder().encode(all) else { return }
-        UserDefaults.standard.set(data, forKey: defaultsKey)
+        // 删掉的那台：在途回包不把缓存写回它已删的 suite
+        guard !client.isInvalidated, let data = try? JSONEncoder().encode(all) else { return }
+        defaults.set(data, forKey: defaultsKey)
     }
 }

@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 import Observation
@@ -9,13 +10,14 @@ final class MemoryResidentTests: XCTestCase {
     private let pid = "xctest-memory-resident"
     private let keys = ["mem_inject_keyword", "mem_inject_full", "mem_inject_vector", "mem_master",
                         MemoryOpenWindow.cKey, MemoryOpenWindow.b4Key, "mem_self_recent_count", "mem_inject_budget",
-                        "mem_inject_catalog", "mem_content_convhistory"]
+                        "mem_inject_catalog", "mem_content_convhistory", RecallTuningStore.storageKey, MemoryOpenWindowStore.storageKey]
     private var saved: [String: Any?] = [:]
 
     override func setUp() {
         super.setUp()
         for k in keys { saved[k] = UserDefaults.standard.object(forKey: k) }
         for k in keys { UserDefaults.standard.removeObject(forKey: k) }   // 默认：全量开、关键词 / 按意思找关
+        RecallTuningStore.save(RecallTestTuning.make(), profileId: pid)
     }
 
     override func tearDown() {
@@ -148,7 +150,8 @@ final class MemoryResidentTests: XCTestCase {
         let profile = Profile(id: pid, name: "T", emoji: "🧪", description: "", userName: "阿青", assistantName: "阿白")
 
         func load(_ convOn: Bool) -> MemoryResident.Snapshot {
-            MemoryResident.Snapshot(MemoryResident.summary(profile: profile, conversationMemoryEnabled: convOn, container: container),
+            MemoryResident.Snapshot(MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid, window: convOn),
+                                                           container: container),
                                     memories: store.listAll(profileId: pid, context: context))
         }
         UserDefaults.standard.set(true, forKey: MemoryOpenWindow.cKey)
@@ -167,6 +170,43 @@ final class MemoryResidentTests: XCTestCase {
 
         let convOff = load(false)
         XCTAssertEqual(convOff.archive.first?.gate, .memoryOff)
+    }
+
+    /// ⑤-1 P2-b r2（kimi 必修 1）：检查器灰显兜底的 `listActive` 也过来源窗过滤——
+    /// C 不勾时隐藏来源（已删 / 关参与窗）的碎片不列，钉住的照列（钉住豁免）；上下半预览都不带它
+    @MainActor
+    func testSummaryFallbackDropsHiddenSourceFragments() throws {
+        let schema = ProfileManager.makeFullSchema()
+        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
+        let context = ModelContext(container)
+        let window = Conversation(id: "resident-hidden-source", title: "隐藏窗", createTime: Date(timeIntervalSince1970: 1),
+                                  updateTime: Date(timeIntervalSince1970: 1), currentNodeId: "", provider: "api", profileId: pid)
+        window.memoryEnabled = false
+        context.insert(window)
+        let store = SwiftDataMemoryStore()
+        let hidden = try store.add(content: "隐藏来源的碎片", category: "fact", keywords: [], profileId: pid,
+                                   isUserExplicit: false, extractedBy: "t", sourceConversationId: window.id, context: context)
+        hidden.occurredDay = "2026-10-10"
+        hidden.reviewedAt = Date()
+        let pinned = try store.add(content: "隐藏来源的钉住", category: "fact", keywords: [], profileId: pid,
+                                   isUserExplicit: true, extractedBy: "t", sourceConversationId: window.id, context: context)
+        try context.save()
+        let profile = Profile(id: pid, name: "T", emoji: "🧪", description: "", userName: "阿青", assistantName: "阿白")
+        UserDefaults.standard.removeObject(forKey: MemoryOpenWindow.cKey)
+        MainThreadIO.allowMainThreadInThisTest()
+        let s = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container,
+                                       selfMemories: [])
+        XCTAssertEqual(s.archive.map(\.id), [pinned.id], "C 不勾：隐藏来源碎片不列，钉住的照列")
+        XCTAssertEqual(s.archive.first?.gate, .archiveUnchecked)
+
+        // C 勾着 = 真走 roundInputs：隐藏来源碎片不注，钉住的进 stable
+        UserDefaults.standard.set(true, forKey: MemoryOpenWindow.cKey)
+        let on = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container,
+                                        selfMemories: [])
+        XCTAssertEqual(on.archive.map(\.id), [pinned.id])
+        XCTAssertFalse(on.stable.contains("隐藏来源的碎片"))
+        XCTAssertFalse(on.volatile.contains("隐藏来源的碎片"))
+        XCTAssertTrue(on.stable.contains("隐藏来源的钉住"), "钉住的照带")
     }
 
     // MARK: - 10-16 astra 返修
@@ -247,7 +287,8 @@ final class MemoryResidentTests: XCTestCase {
         UserDefaults.standard.set(true, forKey: MemoryOpenWindow.cKey)
         MainThreadIO.allowMainThreadInThisTest()
 
-        let slotOff = MemoryResident.summary(profile: profile, conversationMemoryEnabled: true, container: container, selfMemories: [], slotOn: false)
+        let slotOff = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid, slot: false),
+                                             container: container, selfMemories: [])
         XCTAssertEqual(slotOff.archive.map(\.gate), [.slotOff])
         XCTAssertEqual(slotOff.stable, "")
         XCTAssertEqual(slotOff.volatile, "")
@@ -256,12 +297,12 @@ final class MemoryResidentTests: XCTestCase {
 
         UserDefaults.standard.set(true, forKey: "mem_inject_catalog")
         UserDefaults.standard.set(true, forKey: "mem_content_convhistory")
-        let raw = MemoryResident.summary(profile: profile, conversationMemoryEnabled: true, container: container, selfMemories: [])
+        let raw = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container, selfMemories: [])
         XCTAssertTrue(raw.volatile.contains(MemoryInjector.recallCatalogHint), "不知道工具：尾注原样")
-        let noRecall = MemoryResident.summary(profile: profile, conversationMemoryEnabled: true, container: container,
+        let noRecall = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container,
                                               selfMemories: [], availableTools: [])
         XCTAssertFalse(noRecall.volatile.contains(MemoryInjector.recallCatalogHint), "这一轮没有 recall：同实发去掉那句")
-        let withRecall = MemoryResident.summary(profile: profile, conversationMemoryEnabled: true, container: container,
+        let withRecall = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container,
                                                 selfMemories: [], availableTools: [RecallTool.toolName])
         XCTAssertEqual(withRecall.volatile, raw.volatile)
     }
@@ -289,7 +330,7 @@ final class MemoryResidentTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let wiki = WikiStore(root: root)
         for title in ["旧词", "新词"] {
-            try wiki.save(WikiPage(path: "楼层/主题/\(title)", kind: .topic, triggers: [], hook: "提到时", title: title, now: "当前正文。"))
+            try wiki.save(WikiPage(path: "主题/\(title)", kind: .topic, triggers: [], hook: "提到时", title: title, now: "当前正文。"))
         }
         try wiki.rebuildAllIndexes()
         try await WikiInjectionCache.shared.warm(root.path) { wiki }
@@ -299,7 +340,7 @@ final class MemoryResidentTests: XCTestCase {
 
         func node(_ id: String, _ role: String, _ content: String) -> MessageNode {
             MessageNode(id: id, role: role, content: content, contentType: "text", createTime: nil,
-                        parentId: nil, childrenIds: [], conversationId: "resident-window")
+                        parentId: nil, childrenIds: [], conversationId: "resident-window", profileId: pid)
         }
         let real = [node("m1", "user", "窗口外"), node("m2", "user", "旧词"),
                     node("m3", "assistant", "<think>不扫描的思考</think>收到"),
@@ -314,19 +355,19 @@ final class MemoryResidentTests: XCTestCase {
         let vm = ConversationViewModel()
         vm.currentPath = real + ignored
         let before = vm.wikiScanWindow()
-        let beforeKey = MemoryResident.wikiRevisions(in: vm.currentPath)
+        let beforeKey = MemoryResident.wikiRevisions(in: vm.currentPath.map { ConversationMessage(scalar: $0) })
         XCTAssertEqual(before.map(\.id), ["m2", "m3", "m4", "m5"])
         XCTAssertEqual(before.map(\.content), ["旧词", "收到", "继续", "好呀"])
         let profile = Profile(id: pid, name: "T", emoji: "", description: "", userName: "阿青", assistantName: "阿白")
         func summary(_ window: [ConversationViewModel.WikiScanMessage]) -> MemoryResident.Summary {
-            MemoryResident.summary(profile: profile, conversationMemoryEnabled: true, container: container, selfMemories: [],
+            MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container, selfMemories: [],
                                    recentNodeIds: window.map(\.id), wikiStore: wiki)
         }
         XCTAssertEqual(summary(before).wiki?.hits.map(\.page.title), ["旧词"])
         real[0].content = "窗口外修改"
         hidden.content = "隐藏内容修改"
         XCTAssertEqual(vm.wikiScanWindow(), before, "窗口外 / 隐藏消息不导致本轮扫描变化")
-        XCTAssertEqual(MemoryResident.wikiRevisions(in: vm.currentPath), beforeKey)
+        XCTAssertEqual(MemoryResident.wikiRevisions(in: vm.currentPath.map { ConversationMessage(scalar: $0) }), beforeKey)
 
         var ticket = MemoryResident.LoadTicket()
         let old = ticket.next()
@@ -336,10 +377,11 @@ final class MemoryResidentTests: XCTestCase {
         let revised = vm.wikiScanWindow()
         XCTAssertEqual(revised.map(\.id), before.map(\.id), "原节点同长度编辑")
         XCTAssertNotEqual(revised, before)
-        XCTAssertNotEqual(MemoryResident.wikiRevisions(in: vm.currentPath), beforeKey, "同长度修订用现有编辑时间标量刷新")
+        XCTAssertNotEqual(MemoryResident.wikiRevisions(in: vm.currentPath.map { ConversationMessage(scalar: $0) }), beforeKey, "同长度修订用现有编辑时间标量刷新")
         XCTAssertEqual(summary(revised).wiki?.hits.map(\.page.title), ["新词"], "第四条的内容修订立刻改变命中")
-        let background = await MemoryResident.loadSummary(profile: profile, conversationMemoryEnabled: true, container: container,
-                                                           selfMemories: [], recentNodeIds: revised.map(\.id), wikiStore: wiki)
+        let background = await MemoryResident.loadSummary(profile: profile, participation: .testValue(profileId: pid),
+                                                          container: container,
+                                                          selfMemories: [], recentNodeIds: revised.map(\.id), wikiStore: wiki)
         XCTAssertEqual(background.wiki?.hits.map(\.page.title), ["新词"], "后台独立 context 读取已保存修订，不传主 context 模型")
         let latest = ticket.next()
         XCTAssertFalse(ticket.isLatest(old))
@@ -352,7 +394,7 @@ final class MemoryResidentTests: XCTestCase {
         let branch = vm.wikiScanWindow()
         XCTAssertEqual(branch.map(\.content), revised.map(\.content))
         XCTAssertNotEqual(branch, revised, "同文兄弟分支也靠 id 刷新")
-        XCTAssertNotEqual(MemoryResident.wikiRevisions(in: vm.currentPath).map(\.id), revised.map(\.id))
+        XCTAssertNotEqual(MemoryResident.wikiRevisions(in: vm.currentPath.map { ConversationMessage(scalar: $0) }).map(\.id), revised.map(\.id))
         XCTAssertEqual(vm.wikiScanWindow(excluding: sibling.id).map(\.id), ["m1", "m2", "m3", "m4"])
     }
 
@@ -401,7 +443,7 @@ final class MemoryResidentTests: XCTestCase {
                                createTime: nil, parentId: nil, childrenIds: [], conversationId: "literal")
         let vm = ConversationViewModel()
         vm.currentPath = [node]
-        let wiki = WikiInjectionSnapshot(pages: [.init(path: "楼层/正文词", title: "正文词", triggers: [], hook: "", now: "")])
+        let wiki = WikiInjectionSnapshot(pages: [.init(path: "主题/正文词", title: "正文词", triggers: [], hook: "", now: "")])
         let literals = [
             "正文中间 <think>标签示例</think> 后面正文词",
             "行内 `<thinking>标签示例</thinking>` 后面正文词",
@@ -452,9 +494,8 @@ final class MemoryResidentTests: XCTestCase {
                 vm.currentPath = [node]
                 XCTAssertEqual(vm.wikiScanWindow().map(\.content), ["相机说明词"], "附件无 text 段时仍保留真实 caption")
                 let background = await Task.detached {
-                    let backgroundContext = ModelContext(container)
-                    backgroundContext.autosaveEnabled = false
-                    return MemoryResident.wikiMessages(nodeIds: [id], context: backgroundContext)
+                    MemoryResident.wikiMessages(nodeIds: [id], profileId: "",
+                                                source: SwiftDataConversationSource(container: container))
                 }.value
                 XCTAssertEqual(background, ["相机说明词"])
                 XCTAssertEqual(WikiInjection.hits(wiki, recent: background, excluding: []).map(\.page.title), ["相机说明词"],
@@ -481,17 +522,16 @@ final class MemoryResidentTests: XCTestCase {
         try context.save()
         let vm = ConversationViewModel()
         vm.currentPath = nodes
-        let revisions = MemoryResident.wikiRevisions(in: nodes)
+        let revisions = MemoryResident.wikiRevisions(in: nodes.map { ConversationMessage(scalar: $0) })
         XCTAssertEqual(revisions.map(\.id), ["five-2", "five-3", "five-4", "five-5"])
         XCTAssertEqual(vm.wikiScanWindow().map(\.content), ["", "", "正文4", "正文5"])
         let ids = revisions.map(\.id)
         let background = await Task.detached {
-            let backgroundContext = ModelContext(container)
-            backgroundContext.autosaveEnabled = false
-            return MemoryResident.wikiMessages(nodeIds: ids, context: backgroundContext)
+            MemoryResident.wikiMessages(nodeIds: ids, profileId: "",
+                                        source: SwiftDataConversationSource(container: container))
         }.value
         XCTAssertEqual(background, ["", "", "正文4", "正文5"], "按传入 id 顺序，不按创建时间；空正文占格，不补第五条")
-        let wiki = WikiInjectionSnapshot(pages: [.init(path: "楼层/窗口外词", title: "窗口外词", triggers: [], hook: "", now: "")])
+        let wiki = WikiInjectionSnapshot(pages: [.init(path: "主题/窗口外词", title: "窗口外词", triggers: [], hook: "", now: "")])
         XCTAssertTrue(WikiInjection.hits(wiki, recent: background, excluding: []).isEmpty)
     }
 
@@ -500,23 +540,42 @@ final class MemoryResidentTests: XCTestCase {
         let node = MessageNode(id: "revision", role: "assistant", content: "正文", contentType: "text",
                                createTime: nil, parentId: nil, childrenIds: [], conversationId: "revision")
         node.segmentsData = try JSONEncoder().encode([MessageSegment.text("正文")])
-        let before = MemoryResident.wikiRevisions(in: [node])
+        let before = MemoryResident.wikiRevisions(in: [ConversationMessage(scalar: node)])
         node.content = "正文加长"
-        XCTAssertNotEqual(MemoryResident.wikiRevisions(in: [node]), before)
+        XCTAssertNotEqual(MemoryResident.wikiRevisions(in: [ConversationMessage(scalar: node)]), before)
         node.ccEdited = true
         node.content = "甲乙"
-        let firstCCEdit = MemoryResident.wikiRevisions(in: [node])
+        let firstCCEdit = MemoryResident.wikiRevisions(in: [ConversationMessage(scalar: node)])
         node.content = "丙丁"
-        let secondCCEdit = MemoryResident.wikiRevisions(in: [node])
+        let secondCCEdit = MemoryResident.wikiRevisions(in: [ConversationMessage(scalar: node)])
         XCTAssertNotEqual(secondCCEdit, firstCCEdit)
         node.content = "戊己"
-        XCTAssertNotEqual(MemoryResident.wikiRevisions(in: [node]), secondCCEdit, "ccEdited 已为 true 后的同长度再编辑也要换刷新键")
+        XCTAssertNotEqual(MemoryResident.wikiRevisions(in: [ConversationMessage(scalar: node)]), secondCCEdit, "ccEdited 已为 true 后的同长度再编辑也要换刷新键")
+        // 闭包里必须是生产刷新键的真实形状：标量转换 + wikiRevisions。
+        // 全量转换（ConversationMessage.init）会读 segmentsData，末行的修改就会触发 onChange。
         withObservationTracking {
-            _ = MemoryResident.wikiRevisions(in: [node])
+            _ = MemoryResident.wikiRevisions(in: [ConversationMessage(scalar: node)])
         } onChange: {
             XCTFail("刷新键不能观察、读取或解码外置 segmentsData")
         }
         node.segmentsData = Data("deliberately not JSON".utf8)
+    }
+
+    /// 反向：带分段的完整转换确实读 `segmentsData`，改它就触发观察。
+    /// 证明上一条测试不是「闭包没观察任何节点属性」的恒绿。
+    @MainActor
+    func testWikiRevisionsFullConversionObservesExternalSegments() throws {
+        let node = MessageNode(id: "revision-full", role: "assistant", content: "正文", contentType: "text",
+                               createTime: nil, parentId: nil, childrenIds: [], conversationId: "revision")
+        node.segmentsData = try JSONEncoder().encode([MessageSegment.text("正文")])
+        let observed = expectation(description: "全量转换读取外置分段，修改 segmentsData 应触发观察")
+        withObservationTracking {
+            _ = MemoryResident.wikiRevisions(in: [ConversationMessage(node)])
+        } onChange: {
+            observed.fulfill()
+        }
+        node.segmentsData = Data("deliberately not JSON".utf8)
+        wait(for: [observed], timeout: 1)
     }
 
     @MainActor
@@ -561,6 +620,30 @@ final class MemoryResidentTests: XCTestCase {
     }
 
     @MainActor
+    func testAutomaticWikiHitIsNotGrayedWhenRootIndexIsUnchecked() async throws {
+        let container = try ModelContainer(for: Memory.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("resident-y7-\(UUID().uuidString)")
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        try wiki.save(WikiPage(path: "主题/云桥城", title: "云桥城", now: "星砚与岚舟写生"))
+        try wiki.rebuildAllIndexes()
+        try await WikiInjectionCache.shared.warm(wiki.root.path) { wiki }
+        var tuning = RecallTestTuning.make()
+        tuning.archiveTriggerEnabled = true
+        RecallTuningStore.save(tuning, profileId: pid)
+        MemoryOpenWindowStore.save(.c, false, profileId: pid)
+        let profile = Profile(id: pid, name: "星砚", emoji: "", description: "", userName: "岚舟", assistantName: "星砚")
+        MainThreadIO.allowMainThreadInThisTest()
+        let summary = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container,
+                                             selfMemories: [], recentMessages: ["云桥城"], wikiStore: wiki)
+        XCTAssertEqual(summary.wiki?.hits.map(\.page.path), ["主题/云桥城"])
+        XCTAssertNil(summary.wiki?.gate)
+        let text = try XCTUnwrap(summary.wiki?.text)
+        XCTAssertTrue(text.contains("没勾"))
+        XCTAssertFalse(text.contains("0 行"))
+    }
+
+    @MainActor
     func testSummaryExcludesNamesFromSameResolvedProfileAsSend() async throws {
         let schema = ProfileManager.makeFullSchema()
         let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
@@ -569,7 +652,7 @@ final class MemoryResidentTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let wiki = WikiStore(root: root)
         for name in ["阿青", "阿禾", "小禾", "阿白"] {
-            try wiki.save(WikiPage(path: "楼层/人/\(name)", kind: .person, triggers: [], hook: "提到时", title: name, now: "当前正文。"))
+            try wiki.save(WikiPage(path: "人/\(name)", kind: .person, triggers: [], hook: "提到时", title: name, now: "当前正文。"))
         }
         try wiki.rebuildAllIndexes()
         try await WikiInjectionCache.shared.warm(root.path) { wiki }
@@ -589,8 +672,8 @@ final class MemoryResidentTests: XCTestCase {
         func summary() -> (SendContext, MemoryResident.Summary) {
             let resolved = SendContextResolver.resolve(profile: profile, conversation: conversation, context: context,
                                                         globalEntries: [], globalBooks: [], personas: personas)
-            return (resolved, MemoryResident.summary(profile: resolved.profile, conversationMemoryEnabled: true, container: container,
-                                                     selfMemories: [], recentMessages: recent, wikiStore: wiki))
+            return (resolved, MemoryResident.summary(profile: resolved.profile, participation: .testValue(profileId: pid),
+                                                     container: container, selfMemories: [], recentMessages: recent, wikiStore: wiki))
         }
         let (effective, on) = summary()
         XCTAssertEqual(effective.persona.level, .conversation)
@@ -611,6 +694,44 @@ final class MemoryResidentTests: XCTestCase {
         XCTAssertEqual(summary().1.wiki?.hits.map(\.page.title), ["阿禾", "阿白"], "助手改名后新名不触发，旧名恢复为普通触发词")
     }
 
+    @MainActor
+    func testWindowAllOffHidesB4ArchiveAndPinnedFromNextRoundSummary() async throws {
+        let schema = ProfileManager.makeFullSchema()
+        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
+        let context = ModelContext(container)
+        let root = FileLibraryStore.memoryRoot(profileId: pid)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        try wiki.save(WikiPage(path: "人/林栖", title: "林栖", now: "林栖在云桥城绘图"))
+        try wiki.rebuildAllIndexes()
+        _ = try await WikiInjectionCache.shared.warm(root.path) { wiki }
+        let own = selfMem("星砚的航图", importance: 5)
+        try SelfMemoryStore.save(own, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked)
+        context.insert(mem("岚舟钉住的坐标", pinned: true))
+        let fragment = mem("林栖留下的航线")
+        fragment.occurredDay = "2026-11-01"
+        fragment.reviewedAt = Date()
+        context.insert(fragment)
+        try context.save()
+        UserDefaults.standard.set(true, forKey: "mem_master")
+        MemoryOpenWindowStore.save(.c, true, profileId: pid)
+        MemoryOpenWindowStore.save(.b4, true, profileId: pid)
+        let profile = Profile(id: pid, name: "云桥城", emoji: "", description: "", userName: "岚舟", assistantName: "星砚")
+        let baseline = await MemoryResident.loadSummary(profile: profile, participation: .testValue(profileId: pid),
+                                                        container: container, recentNodeIds: [], wikiStore: wiki)
+        XCTAssertTrue(baseline.stable.contains("星砚的航图"))
+        XCTAssertTrue(baseline.stable.contains("岚舟钉住的坐标"))
+        let off = await MemoryResident.loadSummary(profile: profile, participation: .testValue(profileId: pid, choices: .allOff),
+                                                   container: container, wikiStore: wiki)
+        XCTAssertEqual(off.stable, "")
+        XCTAssertEqual(off.volatile, "")
+        XCTAssertEqual(off.memoryCount, 0)
+        XCTAssertNil(off.wiki?.indexCount)
+        XCTAssertTrue(off.wiki?.hits.isEmpty == true)
+        XCTAssertTrue(off.selfRows.allSatisfy { $0.gate == .selfUnchecked })
+        XCTAssertTrue(off.archive.allSatisfy { $0.gate == .archiveUnchecked })
+    }
+
     /// 记忆格 / 常驻页都走 loadSummary：读{助手}的记忆文件、组装注入在后台，主线程一次盘都不碰（对照：同步调用在主线程会碰）
     @MainActor
     func testLoadSummaryTouchesNoDiskOnMain() async throws {
@@ -620,13 +741,139 @@ final class MemoryResidentTests: XCTestCase {
 
         MainThreadIO.allowMainThreadInThisTest()
         MainThreadIO.beginCounting()
-        _ = MemoryResident.summary(profile: profile, conversationMemoryEnabled: true, container: container)
+        _ = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container)
         let onMain = MainThreadIO.endCounting()
         XCTAssertFalse(onMain.isEmpty, "对照：在主线程同步算会读{助手}的记忆文件")
 
         MainThreadIO.beginCounting()
-        let s = await MemoryResident.loadSummary(profile: profile, conversationMemoryEnabled: true, container: container)
+        let s = await MemoryResident.loadSummary(profile: profile, participation: .testValue(profileId: pid), container: container)
         XCTAssertEqual(MainThreadIO.endCounting(), [:], "loadSummary：主线程不碰盘")
         XCTAssertEqual(s.count, 0)
+    }
+
+    /// plan §4：常驻页口径（`resolve(profileId:conversation:preset:)`）传本窗 choices 后，Z6 跟 choices 走，不跟楼层 C 勾
+    @MainActor
+    func testResidentPageSummaryFollowsWindowChoicesForArchive() async throws {
+        let container = try ModelContainer(for: Memory.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("resident-choices-\(UUID().uuidString)")
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        try wiki.save(WikiPage(path: "主题/云桥城", title: "云桥城", now: "星砚与岚舟写生"))
+        try wiki.rebuildAllIndexes()
+        _ = try await WikiInjectionCache.shared.warm(wiki.root.path) { wiki }
+        MemoryOpenWindowStore.save(.c, true, profileId: pid)
+        let profile = Profile(id: pid, name: "云桥城", emoji: "", description: "", userName: "岚舟", assistantName: "星砚")
+        let conversation = Conversation(id: "resident-choices", title: "T", createTime: Date(), updateTime: Date(), currentNodeId: "")
+        conversation.profileId = pid
+        var choices = MemoryWindowChoices.allOff
+        choices.archive = false
+        conversation.memoryWindowChoices = choices
+
+        MainThreadIO.allowMainThreadInThisTest()
+        func summary() -> MemoryResident.Summary {
+            MemoryResident.summary(profile: profile,
+                                   participation: EffectiveMemoryParticipation.resolve(profileId: pid, conversation: conversation, preset: nil),
+                                   container: container, selfMemories: [], wikiStore: wiki)
+        }
+
+        let off = summary()
+        XCTAssertEqual(off.wiki?.gate, .archiveUnchecked, "C 勾着但本窗划掉档案：灰字说 C 没勾")
+        XCTAssertNil(off.wiki?.indexCount, "本窗不勾档案：根索引不计数")
+
+        choices.archive = true
+        conversation.memoryWindowChoices = choices
+        let on = summary()
+        XCTAssertNil(on.wiki?.gate)
+        XCTAssertEqual(on.wiki?.indexCount, 1)
+    }
+
+    /// 常驻页「上一轮实际注入」三级取数（plan-memory-receipt §2.4）：当前窗已生效的 assistant 回执 > CC 路由 user 回执 > 楼层账
+    func testLastInjectionPrefersCurrentWindowReceipt() throws {
+        let decision = RecallTurnDecision(turnId: "u1", branchAnchor: "resident-window", origin: .user, gateReason: .search,
+                                          tuning: RecallTestTuning.make(), topicAnchor: "", selected: [], candidates: [],
+                                          suppressions: [], ignored: [], thawed: [], stateAfterResponse: RecallConversationState())
+        let gate = RecallGateSnapshot(off: nil, participates: true, triggerOff: false, legacy: false, choices: [:],
+                                      a2Checked: false, hiddenFragments: 0, hiddenTimeline: 0)
+        func node(_ id: String, _ role: String) -> MessageNode {
+            MessageNode(id: id, role: role, content: "", contentType: "text", createTime: Date(timeIntervalSince1970: 10),
+                        parentId: nil, childrenIds: [], conversationId: "resident-window", profileId: pid)
+        }
+        let ccDelivery = RecallDelivery(id: "cc", route: "ccBridge", items: [], gate: gate)
+        var receipts: [String: RecallTurnReceipt] = [:]
+
+        let ccUser = node("u-cc", "user")
+        var cc = RecallTurnReceipt(decision: decision)
+        cc.delivery = ccDelivery
+        receipts[ccUser.id] = cc
+        let fromCC = try XCTUnwrap(MemoryResident.lastInjection(in: [ccUser]) { receipts[$0.id] })
+        XCTAssertEqual(fromCC.viaCCBridge, true, "没有回复回执：认 CC 路由")
+
+        let user = node("u1", "user")
+        let pendingReply = node("a1", "assistant")
+        receipts[user.id] = RecallTurnReceipt(decision: decision)
+        var notYet = RecallTurnReceipt(decision: decision)
+        notYet.inheritedEffective = true
+        notYet.injectionRecord = MemoryInjectionRecord(tokens: 1, stableCount: 0, hitCount: 0, at: Date(timeIntervalSince1970: 1))
+        receipts[pendingReply.id] = notYet
+        XCTAssertEqual(MemoryResident.lastInjection(in: [ccUser, user, pendingReply]) { receipts[$0.id] }?.viaCCBridge, true,
+                       "只靠 inherited 生效的在途回复（自身没收到响应）不算上一轮")
+
+        let reply = node("a2", "assistant")
+        var effective = RecallTurnReceipt(decision: decision)
+        effective.attempts = [RecallAttempt(id: "a2-attempt", status: .responded, receivedResponse: true)]
+        effective.injectionRecord = MemoryInjectionRecord(tokens: 42, stableCount: 1, hitCount: 2,
+                                                          at: Date(timeIntervalSince1970: 2), conversationId: "resident-window")
+        receipts[reply.id] = effective
+        let path = [ccUser, user, pendingReply, reply]
+        let current = try XCTUnwrap(MemoryResident.lastInjection(in: path) { receipts[$0.id] })
+        XCTAssertEqual(current.tokens, 42, "当前窗已生效的回执优先")
+        XCTAssertEqual(current.hitCount, 2)
+        XCTAssertEqual(current.conversationId, "resident-window")
+
+        XCTAssertNil(MemoryResident.lastInjection(in: [node("u-x", "user")]) { receipts[$0.id] },
+                     "都没有：调用方退回楼层账")
+    }
+
+    /// 同窗混用 API / CC 时倒序先遇到者胜（P3 r2 / Opus M1）：不能越过更晚的 CC 轮取更早的 API 轮
+    func testLastInjectionPicksLatestOfAPIThenCC() throws {
+        let decision = RecallTurnDecision(turnId: "u1", branchAnchor: "resident-window", origin: .user, gateReason: .search,
+                                          tuning: RecallTestTuning.make(), topicAnchor: "", selected: [], candidates: [],
+                                          suppressions: [], ignored: [], thawed: [], stateAfterResponse: RecallConversationState())
+        let gate = RecallGateSnapshot(off: nil, participates: true, triggerOff: false, legacy: false, choices: [:],
+                                      a2Checked: false, hiddenFragments: 0, hiddenTimeline: 0)
+        func node(_ id: String, _ role: String) -> MessageNode {
+            MessageNode(id: id, role: role, content: "", contentType: "text", createTime: Date(timeIntervalSince1970: 10),
+                        parentId: nil, childrenIds: [], conversationId: "resident-window", profileId: pid)
+        }
+        func apiReceipt(tokens: Int) -> RecallTurnReceipt {
+            var receipt = RecallTurnReceipt(decision: decision)
+            receipt.attempts = [RecallAttempt(id: "attempt-\(tokens)", status: .responded, receivedResponse: true)]
+            receipt.injectionRecord = MemoryInjectionRecord(tokens: tokens, stableCount: 1, hitCount: 1,
+                                                            at: Date(timeIntervalSince1970: TimeInterval(tokens)))
+            return receipt
+        }
+        var receipts: [String: RecallTurnReceipt] = [:]
+        let apiUser = node("u-api", "user")
+        let apiReply = node("a-api", "assistant")
+        receipts[apiUser.id] = RecallTurnReceipt(decision: decision)
+        receipts[apiReply.id] = apiReceipt(tokens: 21)
+
+        let ccUser = node("u-cc", "user")
+        var cc = RecallTurnReceipt(decision: decision)
+        cc.delivery = RecallDelivery(id: "cc", route: "ccBridge", items: [], gate: gate)
+        receipts[ccUser.id] = cc
+
+        let ccWins = try XCTUnwrap(MemoryResident.lastInjection(in: [apiUser, apiReply, ccUser]) { receipts[$0.id] })
+        XCTAssertEqual(ccWins.viaCCBridge, true, "先 API 后 CC：CC 是最近一轮")
+
+        let apiUser2 = node("u-api-2", "user")
+        let apiReply2 = node("a-api-2", "assistant")
+        receipts[apiUser2.id] = RecallTurnReceipt(decision: decision)
+        receipts[apiReply2.id] = apiReceipt(tokens: 33)
+        let apiWins = try XCTUnwrap(MemoryResident.lastInjection(in: [apiUser, apiReply, ccUser, apiUser2, apiReply2]) {
+            receipts[$0.id]
+        })
+        XCTAssertEqual(apiWins.tokens, 33, "CC 之后又来 API：API 回复是最近一轮")
+        XCTAssertNil(apiWins.viaCCBridge)
     }
 }

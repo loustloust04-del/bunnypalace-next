@@ -176,7 +176,8 @@ struct AttachmentPreviewSheet: View {
                 try? data.write(to: url)
                 return url
             case .file(let name, _, let content):
-                let url = dir.appendingPathComponent(name)
+                // 文本兜底没扩展名（如链接直读「已读取：标题」）补 .txt，QuickLook 才认得（同 mac AttachmentPreviewRequest）
+                let url = dir.appendingPathComponent((name as NSString).pathExtension.isEmpty ? name + ".txt" : name)
                 if let content, let data = content.data(using: .utf8) {
                     try? data.write(to: url)
                 }

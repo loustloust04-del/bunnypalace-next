@@ -223,9 +223,23 @@ enum PerfHarness {
             }
         }
         profileAtLaunch = pm.currentProfile.id
+        if profileAtLaunch == profileId, isActive || observeMode || UIKitChatSpikeBench.requested {
+            applyRunDisplayMode(pm.container)
+        }
         if LaunchTrace.enabled, isActive {
             LaunchTrace.fixtureBefore = LaunchTrace.measure("fixture.before") { PerfSeed.fingerprint(ModelContext(pm.container)) }
         }
+    }
+
+    /// 共存第二步：全局「显示方式」下线，测量进程的模式只认启动参数 `-chatBubbleMode YES|NO`（chatV1 协议 modes.argv、spike 同），
+    /// 开测前写进 bench 楼层每个对话自己的 displayMode（不进 fixture 指纹）。没带参数 = 文章
+    @MainActor static func applyRunDisplayMode(_ container: ModelContainer) {
+        let mode: ConversationDisplayMode = UserDefaults.standard.bool(forKey: "chatBubbleMode") ? .bubble : .article
+        let pid = profileId
+        let ctx = ModelContext(container)
+        let convs = (try? ctx.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.profileId == pid }))) ?? []
+        for conv in convs where conv.mode != mode { conv.mode = mode }
+        if ctx.hasChanges { try? ctx.save() }
     }
 
     static func processStartWallClock() -> Double? {
@@ -1245,7 +1259,7 @@ enum Driver {
             "profileAtLaunch": PerfHarness.profileAtLaunch,
             "fixture": PerfSeed.fingerprint(ctx),
             "appearance": [
-                "chatBubbleMode": defaults.bool(forKey: "chatBubbleMode"),
+                "chatBubbleMode": PerfHarness.viewModel?.isBubbleMode ?? false,
                 "style": PerfHarness.paging?.view.window?.traitCollection.userInterfaceStyle.rawValue ?? -1,
             ],
             "samples": samples,
@@ -1350,7 +1364,7 @@ enum Driver {
                 "persistent": typed(digestData(persistent[key])),
             ]
         }
-        out["themeResolved"] = ThemeManager.shared.selectedThemeId
+        out["themeResolved"] = ThemeManager.shared.chatTheme.id
         return out
     }
 

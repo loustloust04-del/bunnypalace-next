@@ -1,10 +1,11 @@
+import MemoryCore
 import Foundation
 
 // MARK: - 新用户三问（C2/C3 v2 第 11 段）：答案只当一个种子任务的原料，绑定目标楼层；目录、正文两批照种子
 
 enum CatalogSurvey {
-    static let layer = "问卷"
-    static let prefix = "问卷/"
+    static let layer = CatalogRecordLine.surveyLayer
+    static let prefix = CatalogRecordLine.surveyPrefix
     /// 每次问卷的原答案（wiki 根下隐藏文件夹，同 .runs / .proposals 一级）：不随任务、提案、整理记录清理，出处靠它查回原话
     static let folder = ".survey"
 
@@ -98,8 +99,7 @@ enum CatalogSurvey {
 
     /// 记录行「（出处：问卷「在做什么」2026-10-22#1A2B3C4D）」：日期 + 任务 id 前 8 位，分得清是哪一次问卷，也查得回原答案
     static func label(_ cite: WikiProposal.Cite) -> String {
-        let task = (cite.filePath ?? "").split(separator: "/").last.map { String($0.prefix(8)) } ?? ""
-        return "问卷「\(cite.name ?? "")」\(cite.day ?? "")#\(task)"
+        CatalogRecordLine.citeLabel(layer: layer, filePath: cite.filePath, name: cite.name, day: cite.day)
     }
 
     /// 从记录行出处里的那一项查回原答案（任务、提案、整理记录清掉了也查得到）。后台调

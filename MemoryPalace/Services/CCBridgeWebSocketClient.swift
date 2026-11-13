@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import Network
 import Observation
@@ -45,7 +46,13 @@ struct HubPendingRequests<Handler> {
 
 @Observable
 final class CCBridgeWebSocketClient: NSObject {
+    /// 主 hub（plan-multi-hub B1）：旧槽位，地址 / 去重 / 策略表全在 .standard，口令是钥匙串 `cc-bridge`
+    static let primaryHubId = "primary"
     static let shared = CCBridgeWebSocketClient()
+
+    /// 这条连接属于哪台 hub（主 hub = "primary"，附加 hub = 它在 CCHubRegistry 里的 id）
+    @ObservationIgnored let hubId: String
+    var isPrimary: Bool { hubId == Self.primaryHubId }
 
     // MARK: - Public observable state
 
@@ -59,6 +66,10 @@ final class CCBridgeWebSocketClient: NSObject {
     private(set) var hubInfoIsCurrent = false
     /// 当前连接对应电脑的 hello（不是当前连接的、或者现在没连着，就当不知道）
     var currentHubInfo: HubHello? { hubInfoIsCurrent && isConnected ? hubInfo : nil }
+    /// 最后一次确认那台还在（收到帧 / ping 回了）：断线后「连不上 · N 分钟前还在」（plan-multi-hub B4.3）。只读、不参与连接逻辑；
+    /// 每帧都写，所以不进观察，断线那一下 isConnected 变了界面重画时读
+    var lastAliveAt: Date? { lastAliveBox.withLock { $0 } }
+    @ObservationIgnored private let lastAliveBox = OSAllocatedUnfairLock<Date?>(initialState: nil)
     /// 送达异常（K1 第 4b 步）：每条消息一个状态对象，气泡标记只订阅自己那条（见 CCSendTracker）。
     /// 只放内存，app 重启就没了——hub 那边照样核对补救，丢的只是这个标记。只在 main 上用。
     @ObservationIgnored let sendTracker = CCSendTracker()
@@ -99,6 +110,7 @@ final class CCBridgeWebSocketClient: NSObject {
             if let old, old !== newValue {
                 userFramesLost(on: old)
                 failRequests(boundTo: old)
+                dropIdentityQueue(for: old)
             }
         }
     }
@@ -148,6 +160,12 @@ final class CCBridgeWebSocketClient: NSObject {
     @ObservationIgnored private var probeGeneration = 0
     @ObservationIgnored private var probeSession: URLSession?
     @ObservationIgnored private var reconnectDelay: TimeInterval = CCBridgeWebSocketClient.minReconnectDelay
+    /// 口令被拒（1008 auth）的退避（B7.2 B4）：握手成功不清它、前台也不封顶到 1 秒；换目标 / 正常连上过的连接断了才清
+    @ObservationIgnored private var authRejectDelay: TimeInterval = 0
+    /// 刚按断线处理掉的 task：它的 didClose（带 1008 auth）常晚于收帧失败到，晚到的照样认成被拒。
+    /// 连同它当时的目标代次 / 配对代次（R5.4：换了目标 / 重新配对后，旧连接迟到的拒绝不算）
+    @ObservationIgnored private weak var lastDroppedTask: URLSessionWebSocketTask?
+    @ObservationIgnored private var lastDroppedTarget: (epoch: Int, gen: Int?) = (0, nil)
     /// 前台断线重试间隔封顶（plan-hub-instant-connect）：hub 一恢复 / 网络一通 ≤1s 就再试；后台照旧退避到 30s
     private static let minReconnectDelay: TimeInterval = 0.25
     private static let foregroundMaxReconnectDelay: TimeInterval = 1
@@ -166,11 +184,12 @@ final class CCBridgeWebSocketClient: NSObject {
     @ObservationIgnored private var manualClose = false
     /// 常驻回调：所有 reply / CC 主动消息统一走它落地成会话消息（收口即发后无 pending 占位概念，
     /// insertProactive 自己存 ccMessageId，thinking/edit 锚定不受影响）。app 启动连接处注册一次（ContentView）。
-    @ObservationIgnored var onProactiveMessage: ((_ chatId: String, _ content: String, _ fileData: Data?, _ fileName: String?, _ mime: String?, _ isImage: Bool, _ ccMessageId: String?, _ replyToId: String?, _ callReply: CCCallReply?) -> Void)?
+    /// 返回收没收（impl1 #13）：false = 来源核对拒收，不记已收、不推游标（绑回那台后回放还能补到）
+    @ObservationIgnored var onProactiveMessage: ((_ chatId: String, _ content: String, _ fileData: Data?, _ fileName: String?, _ mime: String?, _ isImage: Bool, _ ccMessageId: String?, _ replyToId: String?, _ callReply: CCCallReply?) -> Bool)?
     /// A4：CC 编辑某条消息 → app 按 ccMessageId 找节点改 content。
     @ObservationIgnored var onEditMessage: ((_ chatId: String, _ ccMessageId: String, _ content: String, _ streaming: Bool) -> Void)?
-    /// 思考链回传：CC 当轮 thinking（hub 锚定到 ccMessageId 那条消息）→ app 挂到对应节点。
-    @ObservationIgnored var onThinking: ((_ chatId: String, _ ccMessageId: String, _ content: String) -> Void)?
+    /// 思考链回传：CC 当轮 thinking（hub 锚定到 ccMessageId 那条消息）→ app 挂到对应节点。返回收没收（同 onProactiveMessage）
+    @ObservationIgnored var onThinking: ((_ chatId: String, _ ccMessageId: String, _ content: String) -> Bool)?
     /// 问问题 CC 桥（plan-问问题-cc桥）：CC 调 AskUserQuestion → hub 推题面 → app 弹选择卡。
     @ObservationIgnored var onAskUserQuestion: ((_ chatId: String, _ toolUseId: String, _ questions: [[String: Any]]) -> Void)?
     /// 问题收账（答案/declined）→ 收卡 + 落 Q/A 泡（唯一落泡来源）。answers nil = declined。
@@ -179,6 +198,230 @@ final class CCBridgeWebSocketClient: NSObject {
     @ObservationIgnored var onAskUserStale: ((_ toolUseId: String) -> Void)?
     /// APNs device token（AppDelegate 注册成功后塞进来），(重)连时报给 hub。
     @ObservationIgnored private var pushToken: String?
+    /// 收到当前连接的 hello（主线程，hubInfo 已更新）：CCHubRegistry 据此核对 hub_id，返回这条连接的身份核准结果（身份闸开着时生效）
+    @ObservationIgnored var onHello: ((HubHello) -> IdentityVerdict)?
+    /// hub 拒了这条连接的口令（WS 关闭 1008 "auth"，hub.ts 鉴权失败）（主线程）。参数 = 被拒那条连接上口令的指纹（CCHubPairingStore.fingerprint）
+    @ObservationIgnored var onAuthRejected: ((String) -> Void)?
+    /// 这台 hub 的终端窗口表（plan-multi-hub B2.8）：`terminal_state` 只写它。CCHubRegistry 建好接上；没接上的主 hub = TerminalWindowStore.shared
+    @ObservationIgnored weak var windowStore: TerminalWindowStore?
+
+    // MARK: - 多 hub：失效 / 待配对（plan-multi-hub B2.2 / B2.5）
+
+    /// 不可逆失效（删 hub）：置上之后连接、发送、粘贴、迟到帧的去重 / 游标写入一律直接返回。任何线程可读
+    @ObservationIgnored private let invalidatedBox = OSAllocatedUnfairLock(initialState: false)
+    var isInvalidated: Bool { invalidatedBox.withLock { $0 } }
+    /// 配对对不上（待配对 / 换了机器）：不按钥匙串 / 旧候选自动连（keepExistingToken 的 connect、reconnectNow 都挡）。
+    /// 显式带口令的 connect（扫码 / 内嵌 hub 跟端口）不挡；配对重新写好由 CCHubRegistry 解除
+    @ObservationIgnored private let pairingHoldBox = OSAllocatedUnfairLock(initialState: false)
+    var isPairingHeld: Bool { pairingHoldBox.withLock { $0 } }
+    // MARK: - 多 hub：身份核准闸（plan-multi-hub impl1 #2 / #5）
+    //
+    // 闸开着（CCHubRegistry 接线时打开）：每条连接拿到 hello 并经 Registry 核准身份之前，只放握手帧——
+    // 出站业务帧（transmit）按连接排队，入站业务帧（hello 以外）按连接暂存；核准后按原顺序放行，矛盾则全部丢弃（Registry 停住这台）。
+    // 老 hub 的 hello 不带 hub_id：拿到 hello 即核准；连 hello 都不发的极老 hub：主 hub 等 helloTimeout 后按旧行为放行，附加 hub 不放行。
+    // 不经 Registry 建的 client（单测）闸关着，行为同原来。只握手模式（classifyPairing 的临时探测）：一帧不发，hello 以外一帧不落
+
+    enum IdentityVerdict { case approve, reject }
+
+    private struct IdentityGate {
+        var enabled = false
+        var handshakeOnly = false
+        var verified: URLSessionWebSocketTask?
+        /// 核准 verified 那条连接时 hello 报的 hub_id（老 hub / 没 hello 放行 = nil）
+        var verifiedHubId: String?
+        var rejected: URLSessionWebSocketTask?
+        var helloSeen: URLSessionWebSocketTask?
+        var outbound: [(task: URLSessionWebSocketTask, text: String, completion: (Error?) -> Void)] = []
+        var inbound: [(task: URLSessionWebSocketTask, text: String)] = []
+        var flushingOut = false
+        var drainingIn = false
+    }
+    @ObservationIgnored private let identityGate = OSAllocatedUnfairLock<IdentityGate>(uncheckedState: IdentityGate())
+    /// 核准前最多压这么多帧（出站 / 入站各算），超了丢最早的：入站靠下次连上的重放补，出站回执失败
+    private static let identityGateLimit = 4096
+    private static let helloTimeout: TimeInterval = 3
+    /// 闸丢掉的出站帧回的错（用户消息据此判「没发出去」而不是「不确定」）
+    static let identityGateDropCode = -12
+    private static let identityGateDropError = NSError(domain: "CCBridge", code: identityGateDropCode,
+                                                       userInfo: [NSLocalizedDescriptionKey: "这台电脑的身份没核准，没发出去"])
+
+    /// 交互代次（impl1 #4）：换了目标（候选 URL 集 / 口令）或 Registry 显式切换（Mac 外部 / 内嵌 hub）就 +1。问题卡等交互记着它，换过就不回原来那条
+    @ObservationIgnored private let interactionEpochBox = OSAllocatedUnfairLock(initialState: 0)
+    var interactionEpoch: Int { interactionEpochBox.withLock { $0 } }
+    func advanceInteractionEpoch() { interactionEpochBox.withLock { $0 += 1 } }
+
+    /// CCHubRegistry 接线时调：之后每条连接都要核准身份才收发业务帧
+    func enableIdentityGate() { identityGate.withLockUnchecked { $0.enabled = true } }
+
+    /// classifyPairing 的临时握手（impl1 #5）：只等 hello / 鉴权结果。一帧不发（含 client_info：hub 连上就先发 hello，不等它），
+    /// hello 以外的帧一律不落（不回调、不写去重 / 游标 / 任何 store）。connect 之前调
+    func beginHandshakeOnly() { identityGate.withLockUnchecked { $0.handshakeOnly = true } }
+
+    private var isHandshakeOnly: Bool { identityGate.withLockUnchecked { $0.handshakeOnly } }
+
+    /// 这条连接的身份核准了没有（闸关着 = 一律算核准）
+    private func identityVerified(_ t: URLSessionWebSocketTask?) -> Bool {
+        identityGate.withLockUnchecked { g in !g.enabled || (t != nil && g.verified === t) }
+    }
+
+    /// 当前连接的身份核准了没有（闸关着 = 有连接就算）。问题卡等「回原来那台」的交互据此拒绝发给还没核对完的连接（impl1 #4）
+    var isIdentityVerified: Bool {
+        let t = task
+        return t != nil && identityVerified(t)
+    }
+
+    /// 当前连接核准时 hello 报的 hub_id（没核准 / 老 hub 不报 = nil）；闸关着 = 当前这条连接收到的 hello 的。主线程读
+    var verifiedHubIdentity: String? {
+        let t = task
+        let gate = identityGate.withLockUnchecked { g -> (enabled: Bool, id: String?) in
+            (g.enabled, t != nil && g.verified === t ? g.verifiedHubId : nil)
+        }
+        return gate.enabled ? gate.id : currentHubInfo?.hubId
+    }
+
+    private enum GateAdmit { case send, queued, drop }
+
+    /// 出站：握手帧（client_info）照发；没核准的连接上排队；被拒的连接上丢
+    private func admitOutbound(_ text: String, on target: URLSessionWebSocketTask, handshake: Bool, verifiedOnly: Bool,
+                               completion: @escaping (Error?) -> Void) -> GateAdmit {
+        var overflow: ((Error?) -> Void)?
+        let admit = identityGate.withLockUnchecked { g -> GateAdmit in
+            if g.handshakeOnly { return .drop }
+            guard g.enabled, !handshake else { return .send }
+            if g.rejected === target || (verifiedOnly && g.verified !== target) { return .drop }
+            if g.verified === target, !g.flushingOut { return .send }
+            if g.outbound.count >= Self.identityGateLimit { overflow = g.outbound.removeFirst().completion }
+            g.outbound.append((target, text, completion))
+            return .queued
+        }
+        overflow?(Self.identityGateDropError)
+        return admit
+    }
+
+    /// 入站：返回 true = 现在就处理。没核准的连接上暂存（核准后按序放出），被拒的连接上丢
+    private func admitInbound(_ text: String, type: String, source: URLSessionWebSocketTask?) -> Bool {
+        guard let t = source ?? task else { return true }
+        return identityGate.withLockUnchecked { g -> Bool in
+            if type == "hello" { g.helloSeen = t; return true }
+            guard g.enabled else { return true }
+            if g.rejected === t { return false }
+            if g.verified === t, !g.drainingIn { return true }
+            if g.inbound.count >= Self.identityGateLimit { g.inbound.removeFirst() }
+            g.inbound.append((t, text))
+            return false
+        }
+    }
+
+    /// 主线程：Registry 对这条连接的 hello 下了结论（source nil = 单测直接喂的帧，当前连接）
+    private func applyIdentityVerdict(_ verdict: IdentityVerdict, for source: URLSessionWebSocketTask?, hubId: String? = nil) {
+        guard let t = source ?? task else { return }
+        switch verdict {
+        case .approve:
+            let begin = identityGate.withLockUnchecked { g -> Bool in
+                guard g.enabled, g.verified !== t, g.rejected !== t else { return false }
+                g.verified = t
+                g.verifiedHubId = hubId
+                g.flushingOut = true
+                g.drainingIn = true
+                return true
+            }
+            guard begin else { return }
+            probeLog("identity approved")
+            flushIdentityOutbound(t)
+            parseQueue.async { [weak self] in self?.drainIdentityInbound(t) }
+        case .reject:
+            probeLog("identity rejected: dropping queued frames")
+            let live = t === task   // Registry 停住时已经断开：不再留着旧连接的引用
+            let dropped = identityGate.withLockUnchecked { g -> [(Error?) -> Void] in
+                if live { g.rejected = t }
+                if g.verified === t { g.verified = nil }
+                return Self.takeQueued(&g, for: t)
+            }
+            for c in dropped { c(Self.identityGateDropError) }
+        }
+    }
+
+    private static func takeQueued(_ g: inout IdentityGate, for t: URLSessionWebSocketTask) -> [(Error?) -> Void] {
+        let out = g.outbound.filter { $0.task === t }.map(\.completion)
+        g.outbound.removeAll { $0.task === t }
+        g.inbound.removeAll { $0.task === t }
+        return out
+    }
+
+    /// 连接换掉 / 断开：那条连接上还压着的帧作废（出站回执失败）
+    private func dropIdentityQueue(for t: URLSessionWebSocketTask) {
+        let dropped = identityGate.withLockUnchecked { g -> [(Error?) -> Void] in
+            if g.verified === t { g.verified = nil }
+            if g.rejected === t { g.rejected = nil }
+            if g.helloSeen === t { g.helloSeen = nil }
+            return Self.takeQueued(&g, for: t)
+        }
+        for c in dropped { c(Self.identityGateDropError) }
+    }
+
+    private func flushIdentityOutbound(_ t: URLSessionWebSocketTask) {
+        while true {
+            let next = identityGate.withLockUnchecked { g -> (text: String, completion: (Error?) -> Void)? in
+                guard g.verified === t, let i = g.outbound.firstIndex(where: { $0.task === t }) else {
+                    g.flushingOut = false
+                    return nil
+                }
+                let item = g.outbound.remove(at: i)
+                return (item.text, item.completion)
+            }
+            guard let next else { return }
+            rawTransmit(next.text, on: t, completion: next.completion)
+        }
+    }
+
+    /// parseQueue 上：暂存的入站帧按到达顺序放出；放的过程中新到的帧排在后面（drainingIn）
+    private func drainIdentityInbound(_ t: URLSessionWebSocketTask) {
+        while true {
+            let next = identityGate.withLockUnchecked { g -> String? in
+                guard g.verified === t, let i = g.inbound.firstIndex(where: { $0.task === t }) else {
+                    g.drainingIn = false
+                    return nil
+                }
+                return g.inbound.remove(at: i).text
+            }
+            guard let next else { return }
+            guard let data = next.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let type = obj["type"] as? String, !isInvalidated else { continue }
+            dispatchIncoming(type, obj, data: data, source: t)
+        }
+    }
+
+    /// 连上之后 helloTimeout 内没收到 hello（极老 hub）：主 hub 按旧行为放行；附加 hub 不放行，只记日志
+    private func armHelloTimeout(for t: URLSessionWebSocketTask) {
+        guard identityGate.withLockUnchecked({ $0.enabled && !$0.handshakeOnly }) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + helloTimeout) { [weak self] in
+            guard let self, !self.isInvalidated, self.task === t else { return }
+            let pending = self.identityGate.withLockUnchecked { g in g.helloSeen !== t && g.verified !== t && g.rejected !== t }
+            guard pending else { return }
+            if self.isPrimary {
+                self.probeLog("no hello in \(Self.helloTimeout)s: old hub, releasing (primary)")
+                self.applyIdentityVerdict(.approve, for: t)
+            } else {
+                self.probeLog("no hello in \(Self.helloTimeout)s: secondary stays gated")
+            }
+        }
+    }
+
+    #if DEBUG
+    /// 单测：等 hello 的时长（nil = 正式的 3s）
+    @ObservationIgnored var helloTimeoutForTesting: TimeInterval?
+    private var helloTimeout: TimeInterval { helloTimeoutForTesting ?? Self.helloTimeout }
+    /// 单测：当前连接的身份核准了没有
+    var identityVerifiedForTesting: Bool { identityVerified(task) }
+    #else
+    private var helloTimeout: TimeInterval { Self.helloTimeout }
+    #endif
+
+    /// BridgeProbe 日志前缀：附加 hub 写 `[hub:<名字>]`，主 hub 不带（原样）
+    @ObservationIgnored private let logTagBox = OSAllocatedUnfairLock<String?>(initialState: nil)
+    /// 当前候选 URL 是在哪一代配对上建的（transport 上读写）：keepExistingToken 只在同一代、同一组候选上沿用旧口令
+    @ObservationIgnored private var urlsGen: Int?
 
     /// CR-4：agent 读书产物（批注+消息）到货回调。返回 true = 处理成功 → 回 ack 让 hub 删 pending。
     /// app 根接线到 AgentBookNoteWriter；未接线时不 ack（hub 重连补投，不丢）。
@@ -205,6 +448,20 @@ final class CCBridgeWebSocketClient: NSObject {
     /// 连同来源连接一起缓冲：回放后的 ack 仍发回原连接（A1 R1 #5）
     @ObservationIgnored private var bufferedTradingReports: [(payload: [String: Any], source: URLSessionWebSocketTask?)] = []
     #endif
+    /// 状态面板：小芽提醒到货（返回 true 才 ack；收过的也回 true）。ContentView 注册，冷启动没注册前同研报那样先缓冲、didSet 回放。
+    /// 注册在主线程上就地同步排空：已经排进主队列的新帧一定排在缓冲之后处理，旧的不会后到顶掉新的
+    @ObservationIgnored var onStatusAlert: (@MainActor (_ alert: StatusAlert) -> Bool)? {
+        didSet {
+            guard onStatusAlert != nil, !bufferedStatusAlerts.isEmpty else { return }
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { drainStatusAlerts() }
+            } else {
+                DispatchQueue.main.async { [weak self] in self?.drainStatusAlerts() }
+            }
+        }
+    }
+    /// 只存帧不存来源连接：回放时的 ack 走当前活着的连接（缓冲那会儿的连接可能早换了）
+    @ObservationIgnored private var bufferedStatusAlerts: [StatusAlert] = []
     /// agent_book_note 已处理 uuid（去重：hub 补投/重复广播无害）。保 200。
     private static let seenBookNoteKey = "agentBookNoteSeenUUIDs"
     #if PERSONAL_APPS
@@ -274,55 +531,53 @@ final class CCBridgeWebSocketClient: NSObject {
     // 也因此不进 SwiftData/iCloud —— tmux session 是这台 Mac 的东西，同步到手机没有意义。
     static let keepalivePolicyKey = "ccKeepalivePolicies"
 
-    /// "always" 🔥常驻 / "auto" ⚙️默认 / "never" ❄️不保
-    static func keepalivePolicy(for session: String) -> String {
-        let d = UserDefaults.standard.dictionary(forKey: keepalivePolicyKey) as? [String: String]
+    /// "always" 🔥常驻 / "auto" ⚙️默认 / "never" ❄️不保。表存在那台 hub 自己的 defaults 里（不传 = 主 hub）
+    static func keepalivePolicy(for session: String, hub: CCBridgeWebSocketClient = .shared) -> String {
+        let d = hub.defaults.dictionary(forKey: keepalivePolicyKey) as? [String: String]
         return d?[session] ?? "auto"
     }
 
-    /// 改完立刻推给 hub（hub 侧落盘，重启不丢）。auto = 删除条目，回到默认。
-    static func setKeepalivePolicy(_ policy: String, for session: String) {
-        var d = (UserDefaults.standard.dictionary(forKey: keepalivePolicyKey) as? [String: String]) ?? [:]
+    /// 改完立刻推给那台 hub（hub 侧落盘，重启不丢）。auto = 删除条目，回到默认。
+    static func setKeepalivePolicy(_ policy: String, for session: String, hub: CCBridgeWebSocketClient = .shared) {
+        guard !hub.isInvalidated else { return }   // 删掉的 hub：不把表写回已删的 suite
+        var d = (hub.defaults.dictionary(forKey: keepalivePolicyKey) as? [String: String]) ?? [:]
         if policy == "auto" { d.removeValue(forKey: session) } else { d[session] = policy }
-        UserDefaults.standard.set(d, forKey: keepalivePolicyKey)
-        shared.sendCCConfig()
+        hub.defaults.set(d, forKey: keepalivePolicyKey)
+        hub.sendCCConfig()
     }
 
     static let transportPolicyKey = "ccTransportPolicies"
 
     /// "tmux" 带终端 / "stream" 不带终端（逐字流式）/ "" 跟随全局设置。按 session 设（同保暖）。
-    static func transportPolicy(for session: String) -> String {
-        let d = UserDefaults.standard.dictionary(forKey: transportPolicyKey) as? [String: String]
+    static func transportPolicy(for session: String, hub: CCBridgeWebSocketClient = .shared) -> String {
+        let d = hub.defaults.dictionary(forKey: transportPolicyKey) as? [String: String]
         return d?[session] ?? ""
     }
 
     /// 只发这一条的改动；hub 是唯一真相，改完回推 transport_policies 给所有设备（本机也靠它落 UserDefaults）。
     /// 先本地写一份让菜单勾立刻跟上。
-    static func setTransportPolicy(_ policy: String, for session: String) {
-        var d = (UserDefaults.standard.dictionary(forKey: transportPolicyKey) as? [String: String]) ?? [:]
+    static func setTransportPolicy(_ policy: String, for session: String, hub: CCBridgeWebSocketClient = .shared) {
+        guard !hub.isInvalidated else { return }
+        var d = (hub.defaults.dictionary(forKey: transportPolicyKey) as? [String: String]) ?? [:]
         if policy.isEmpty { d.removeValue(forKey: session) } else { d[session] = policy }
-        UserDefaults.standard.set(d, forKey: transportPolicyKey)
-        shared.send(["type": "set_transport_policy", "session": session, "policy": policy]) { _ in }
+        hub.defaults.set(d, forKey: transportPolicyKey)
+        hub.send(["type": "set_transport_policy", "session": session, "policy": policy]) { _ in }
     }
 
     /// 同步 CC 设置（推送名=assistantName / nudge 参数 / 系统提示模板 / 保暖策略 / 传输策略）给 hub。连上 + 改设置时调。
+    /// nudge / 新会话传输以 hub 为准：带上本机每项的手改时间，hub 只收更新的（CCConfigSync，刀 5 D-B1）；
+    /// 名字跟着当前楼层，每次照发（模拟器不发）；保暖表是那台 hub 自己的（实例 defaults）
     func sendCCConfig() {
         let d = UserDefaults.standard
-        var payload: [String: Any] = [
-            "type": "set_cc_config",
-            "pushName": (d.string(forKey: "assistantName") ?? "助手"),
-            "userName": (d.string(forKey: "userName") ?? "你"),
-            "nudgeEnabled": (d.object(forKey: "ccNudgeEnabled") as? Bool) ?? true,
-            "newSessionTransport": d.bool(forKey: "ccNewSessionStream") ? "stream" : "tmux",
-            // 整表下发（app 是唯一真相源）。空表也发——她把最后一个常驻取消了，hub 得知道
-            "keepalivePolicies": (d.dictionary(forKey: Self.keepalivePolicyKey) as? [String: String]) ?? [:],
-        ]
-        if let v = d.object(forKey: "ccNudgeIdleMin") as? Int, v > 0 { payload["idleMinMin"] = v }
-        if let v = d.object(forKey: "ccNudgeIdleMax") as? Int, v > 0 { payload["idleMaxMin"] = v }
-        if let v = d.object(forKey: "ccNudgeQuietStartMin") as? Int { payload["quietStartMin"] = v }
-        if let v = d.object(forKey: "ccNudgeQuietEndMin") as? Int { payload["quietEndMin"] = v }
-        if let v = d.object(forKey: "ccNudgeCooldown") as? Int, v >= 0 { payload["cooldownMin"] = v }
-        if let t = d.string(forKey: "ccNudgeTemplate"), !t.isEmpty { payload["nudgeTemplate"] = t }
+        var payload = CCConfigSync.payload(d)
+        payload["type"] = "set_cc_config"
+        // 模拟器常停在测试楼层（召回 bench 的虚构名字），不拿它的名字去盖 hub 上她真机 / Mac 发的那份
+        #if !targetEnvironment(simulator)
+        payload["pushName"] = d.string(forKey: "assistantName") ?? "助手"
+        payload["userName"] = d.string(forKey: "userName") ?? "你"
+        #endif
+        // 整表下发（app 是唯一真相源）。空表也发——她把最后一个常驻取消了，hub 得知道
+        payload["keepalivePolicies"] = (defaults.dictionary(forKey: Self.keepalivePolicyKey) as? [String: String]) ?? [:]
         send(payload) { _ in }
     }
 
@@ -393,6 +648,7 @@ final class CCBridgeWebSocketClient: NSObject {
     @ObservationIgnored private var hubConfigHandlers = HubPendingRequests<(String?) -> Void>()
     /// list_dirs 等回音，按 request_id 认领。只在 handlersQueue 上读写。
     @ObservationIgnored private var dirListHandlers = HubPendingRequests<(Result<HubDirListing, CCBridgeRemoteError>) -> Void>()
+    @ObservationIgnored private var opencliHandlers = HubPendingRequests<(Result<HubOpencliReply, CCBridgeRemoteError>) -> Void>()
     /// 终端出字账本（plan-hub-instant-connect §六）：点开终端的时刻 + 发 attach 的时刻，等第一帧 terminal_init（handlersQueue 上读写）
     @ObservationIgnored private var terminalOpenTiming: [String: (openedAt: Date, attachAt: Date)] = [:]
     /// 最近一次 WS 打开（主线程）：attach 发出时桥没通，等桥的时长 = 它 - attachAt
@@ -410,7 +666,8 @@ final class CCBridgeWebSocketClient: NSObject {
     @ObservationIgnored private var seenThinkingIds: [String: Date] = [:]
     private let thinkingDedupKeepCount = 300
     private static let seenThinkingStoreKey = "ccSeenThinkingIds"
-    @ObservationIgnored private let dedupDefaults: UserDefaults
+    /// 这台 hub 的存储：去重 / 游标 / 策略表 / 配对（主 hub = .standard，附加 hub = 它的 suite `cc.hub.<id>`）
+    @ObservationIgnored let defaults: UserDefaults
     /// 收到过的最大 reply / thinking ts（hub 钟）。连接带 since= 让 hub 只补这之后的，
     /// 不再每次连上都重放 500 条（plan-hub-instant-connect）。主线程推进，transport 开 WS 时读（A1 起加锁）。
     @ObservationIgnored private let replyCursorBox = OSAllocatedUnfairLock(initialState: 0.0)
@@ -423,12 +680,18 @@ final class CCBridgeWebSocketClient: NSObject {
     private static let replyCursorMarginMs: Double = 120_000
 
     override convenience init() {
-        self.init(dedupDefaults: .standard)
+        self.init(hubId: Self.primaryHubId, defaults: .standard)
     }
 
-    /// 只注入 reply / thinking 去重存储，测试不碰真实账户的重放记录。transportOffMain：单测两条路都能建
-    init(dedupDefaults: UserDefaults, transportOffMain: Bool = CCBridgeWebSocketClient.a1TransportOffMain) {
-        self.dedupDefaults = dedupDefaults
+    /// 只注入 reply / thinking 去重存储，测试不碰真实账户的重放记录（当主 hub 用）。transportOffMain：单测两条路都能建
+    convenience init(dedupDefaults: UserDefaults, transportOffMain: Bool = CCBridgeWebSocketClient.a1TransportOffMain) {
+        self.init(hubId: Self.primaryHubId, defaults: dedupDefaults, transportOffMain: transportOffMain)
+    }
+
+    /// hubId + 那台 hub 的存储（plan-multi-hub B2.4）。shared = (primary, .standard)，行为不变
+    init(hubId: String, defaults: UserDefaults, transportOffMain: Bool = CCBridgeWebSocketClient.a1TransportOffMain) {
+        self.hubId = hubId
+        self.defaults = defaults
         self.transportOffMain = transportOffMain
         let key = DispatchSpecificKey<Void>()
         transportKey = key
@@ -446,13 +709,13 @@ final class CCBridgeWebSocketClient: NSObject {
             transportOps = nil
         }
         super.init()
-        replyCursor = dedupDefaults.double(forKey: Self.replyCursorKey)
+        replyCursor = defaults.double(forKey: Self.replyCursorKey)
         startPathMonitor()
         // 载回持久化的去重表：app 被 iOS 杀掉重启后，hub 重连仍会 replay 缓冲里全部旧 reply，
         // 内存去重表已清空会漏过 → 旧回复被当主动消息重复插入。持久化后重启仍能拦住。
         handlersQueue.async { [weak self] in
             guard let self else { return }
-            guard let dict = self.dedupDefaults.dictionary(forKey: Self.seenStoreKey) as? [String: Double] else { return }
+            guard let dict = self.defaults.dictionary(forKey: Self.seenStoreKey) as? [String: Double] else { return }
             var loaded = dict.mapValues { Date(timeIntervalSince1970: $0) }
             // 留最新 N 个（按条数，不按时间）
             if loaded.count > self.replyDedupKeepCount {
@@ -463,7 +726,7 @@ final class CCBridgeWebSocketClient: NSObject {
         }
         handlersQueue.async { [weak self] in
             guard let self else { return }
-            guard let dict = self.dedupDefaults.dictionary(forKey: Self.seenThinkingStoreKey) as? [String: Double] else { return }
+            guard let dict = self.defaults.dictionary(forKey: Self.seenThinkingStoreKey) as? [String: Double] else { return }
             var loaded = dict.mapValues { Date(timeIntervalSince1970: $0) }
             if loaded.count > self.thinkingDedupKeepCount {
                 let keep = loaded.sorted { $0.value > $1.value }.prefix(self.thinkingDedupKeepCount)
@@ -480,6 +743,128 @@ final class CCBridgeWebSocketClient: NSObject {
                                                name: UIApplication.willEnterForegroundNotification, object: nil)
         #endif
     }
+
+    func setLogName(_ name: String?) {
+        let tag = isPrimary ? nil : name
+        logTagBox.withLock { $0 = tag }
+    }
+
+    private func probeLog(_ msg: @autoclosure () -> String) {
+        guard let tag = logTagBox.withLock({ $0 }) else { BridgeProbe.log(msg()); return }
+        BridgeProbe.log("[hub:\(tag)] " + msg())
+    }
+
+    /// 待配对 / 换了机器：停住不连（CCHubRegistry 调，主线程）。reason 写进 lastError，现有「未连接」那行能看到
+    func holdForPairing(reason: String) {
+        pairingHoldBox.withLock { $0 = true }
+        probeLog("pairing hold: \(reason)")
+        disconnect()
+        lastError = reason
+    }
+
+    func releasePairingHold() {
+        pairingHoldBox.withLock { $0 = false }
+    }
+
+    /// 删 hub（plan-multi-hub B2.5 / impl1 #7）：先置失效标志，这一刻起业务投递和发送入口全关——回调、含口令的候选、终端订阅、
+    /// 待发队列当场清掉，断开，摘通知观察者，停网络监听。finalFrame（如 unregister_push_token）只发在单独摘下来的那条旧连接上
+    /// （身份核准过的才发），发完 / 最多等 3 秒再关它；completion(主线程) 带「发出去了没有」。主线程调，只生效一次
+    func invalidate(finalFrame: [String: Any]? = nil, completion: ((Bool) -> Void)? = nil) {
+        let first = invalidatedBox.withLock { flag -> Bool in
+            defer { flag = true }
+            return !flag
+        }
+        guard first else { completion?(false); return }
+        probeLog("invalidate")
+        let kept = finalFrame != nil && isConnected ? detachSocketForFinalFrame() : nil
+        tearDownAfterInvalidate()
+        guard let finalFrame, let kept, let data = try? JSONSerialization.data(withJSONObject: finalFrame),
+              let text = String(data: data, encoding: .utf8) else {
+            kept.map { Self.close($0.task, $0.session) }
+            completion?(false)
+            return
+        }
+        let once = OSAllocatedUnfairLock(initialState: false)
+        let finish: (Bool) -> Void = { sent in
+            guard once.withLock({ done -> Bool in defer { done = true }; return !done }) else { return }
+            DispatchQueue.main.async {
+                Self.close(kept.task, kept.session)
+                completion?(sent)
+            }
+        }
+        rawTransmit(text, on: kept.task) { err in finish(err == nil) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { finish(false) }
+    }
+
+    /// 摘下当前已打开、身份核准过的那条连接（不关），client 从此不再认它（收帧 / didClose 都按 task 对不上丢掉）
+    private func detachSocketForFinalFrame() -> (task: URLSessionWebSocketTask, session: URLSession?)? {
+        let kept: (task: URLSessionWebSocketTask, session: URLSession?)? = transportSync {
+            guard let current = self.task, self.openedTask === current, self.identityVerified(current) else { return nil }
+            let session = self.session
+            self.session = nil
+            self.task = nil
+            self.openedTask = nil
+            return (current, session)
+        }
+        return kept
+    }
+
+    private static func close(_ task: URLSessionWebSocketTask, _ session: URLSession?) {
+        task.cancel(with: .goingAway, reason: nil)
+        session?.invalidateAndCancel()
+    }
+
+    private func tearDownAfterInvalidate() {
+        onProactiveMessage = nil
+        onEditMessage = nil
+        onThinking = nil
+        onAskUserQuestion = nil
+        onAskUserResolved = nil
+        onAskUserStale = nil
+        onAgentBookNote = nil
+        onTwitterCmd = nil
+        onAgentStatusResult = nil
+        onStatusAlert = nil
+        onHello = nil
+        onAuthRejected = nil
+        #if PERSONAL_APPS
+        onTradingReport = nil
+        #endif
+        pushToken = nil
+        disconnect()
+        let dropped = identityGate.withLockUnchecked { g -> [(Error?) -> Void] in
+            defer { g.outbound = []; g.inbound = []; g.verified = nil }
+            return g.outbound.map(\.completion)
+        }
+        for c in dropped { c(Self.notConnectedError) }
+        transportSync {
+            self.urls = []
+            self.url = nil
+            self.urlsGen = nil
+        }
+        handlersQueue.async { [self] in
+            terminalInitHandlers.removeAll()
+            terminalChunkHandlers.removeAll()
+            terminalErrorHandlers.removeAll()
+            terminalUsageHandlers.removeAll()
+            terminalPasteHandlers.removeAll()
+            terminalAttachParams.removeAll()
+            attachSentOnTask.removeAll()
+            autoSpawnedOn.removeAll()
+            terminalOpenTiming.removeAll()
+        }
+        NotificationCenter.default.removeObserver(self)
+        pathMonitor?.cancel()
+        pathMonitor = nil
+    }
+
+    #if DEBUG
+    /// 单测：当前候选（含 token= 的完整 URL）
+    var candidateURLsForTesting: [URL] { urls }
+    /// 单测：只主 hub 才做的连上接线（LA / 通话注册、CC 记忆同步、Mac 绑定开关）跑过几次
+    @ObservationIgnored private(set) var primaryOnlyOpenHooksForTesting = 0
+    var pushTokenForTesting: String? { pushToken }
+    #endif
 
     // MARK: - 秒连账本（plan-hub-instant-connect §五）
     // 一段 = 从「需要连接」到 WS 打开。起点按粟粟口径：冷启动 = 点开图标（进程起点），回前台 = 即将进前台，
@@ -557,7 +942,7 @@ final class CCBridgeWebSocketClient: NSObject {
         #if DEBUG
         guard !onTransportNow else { return }
         ownershipBreaks.withLock { $0 += 1 }
-        BridgeProbe.log("transport ownership break at \(site)")
+        probeLog("transport ownership break at \(site)")
         #endif
     }
 
@@ -662,7 +1047,7 @@ final class CCBridgeWebSocketClient: NSObject {
         if ep.prewarm { frame["prewarm"] = true }
         let tried = ep.attempts.map { "\($0["h"] ?? "?")=\($0["r"] ?? "?")" }.joined(separator: ",")
         let launch = ep.launchMs.map { "\(Int($0))ms" } ?? "-"
-        BridgeProbe.log("connect \(Int(total))ms trigger=\(ep.trigger)\(total > 1000 ? " SLOW" : "") launch=\(launch) wait=\(Int(ep.waitMs))ms tried=\(tried)")
+        probeLog("connect \(Int(total))ms trigger=\(ep.trigger)\(total > 1000 ? " SLOW" : "") launch=\(launch) wait=\(Int(ep.waitMs))ms tried=\(tried)")
         return PendingConnectReport(frame: frame, ep: ep, finishNs: finishNs)
     }
 
@@ -672,7 +1057,7 @@ final class CCBridgeWebSocketClient: NSObject {
         var frame = report.frame
         if var ruler = report.ep.ruler {
             if let ui { ruler.noteUI(uiNs: ui.ns, uiWall: ui.wall, busy: ui.busy) }
-            frame.merge(Self.rulerFields(report.ep, ruler, finishNs: report.finishNs, deviceId: ConnectRuler.deviceId(dedupDefaults))) { old, _ in old }
+            frame.merge(Self.rulerFields(report.ep, ruler, finishNs: report.finishNs, deviceId: ConnectRuler.deviceId(isPrimary ? defaults : .standard))) { old, _ in old }
         }
         send(frame, on: opened) { [ruled = report.ep.ruler != nil] err in if err != nil, ruled { ConnectRunCounters.bump(\.reportFailed) } }   // 尺子：下一份报告带上来
         #if DEBUG
@@ -683,7 +1068,7 @@ final class CCBridgeWebSocketClient: NSObject {
     /// A1：快照轮到主线程时那次连接已经失效（换了 task / 断了）——报告不借新连接发，只在本地记一行诊断
     private func dropStaleConnectReport(_ report: PendingConnectReport) {
         if report.ep.ruler != nil { ConnectRunCounters.bump(\.reportFailed) }
-        BridgeProbe.log("connect_report dropped: attempt superseded before main applied it trigger=\(report.ep.trigger) total=\(report.frame["total_ms"] ?? "?")ms")
+        probeLog("connect_report dropped: attempt superseded before main applied it trigger=\(report.ep.trigger) total=\(report.frame["total_ms"] ?? "?")ms")
         #if DEBUG
         onConnectReportDroppedForTesting?(report.frame)
         #endif
@@ -739,7 +1124,7 @@ final class CCBridgeWebSocketClient: NSObject {
         ]
         if let hubMs { frame["hub_ms"] = hubMs }
         if let hubSteps { frame["hub_steps"] = hubSteps }
-        BridgeProbe.log("terminal \(session) \(Int(total))ms\(total > 1000 ? " SLOW" : "") layout=\(Int(layout)) bridge=\(Int(bridge)) hub=\(hubMs.map(String.init) ?? "-") [\(hubSteps ?? "")]")
+        probeLog("terminal \(session) \(Int(total))ms\(total > 1000 ? " SLOW" : "") layout=\(Int(layout)) bridge=\(Int(bridge)) hub=\(hubMs.map(String.init) ?? "-") [\(hubSteps ?? "")]")
         send(frame) { _ in }
     }
 
@@ -816,7 +1201,7 @@ final class CCBridgeWebSocketClient: NSObject {
 
     #if canImport(UIKit)
     @objc private func handleAppBackground() {
-        BridgeProbe.log("background")
+        probeLog("background")
         noteBackground()
     }
 
@@ -838,7 +1223,7 @@ final class CCBridgeWebSocketClient: NSObject {
         onTransport {
             self.isForeground = true
             self.sendTerminalActive()
-            BridgeProbe.log("foreground wasBackgrounded=\(self.wasBackgrounded) connected=\(self.isOpenNow)")
+            self.probeLog("foreground wasBackgrounded=\(self.wasBackgrounded) connected=\(self.isOpenNow)")
             if let since = self.episode?.bgSince { self.episode?.bgMs += now.timeIntervalSince(since) * 1000; self.episode?.bgSince = nil }
             guard self.wasBackgrounded, !self.manualClose, self.url != nil else { return }
             self.wasBackgrounded = false
@@ -867,9 +1252,10 @@ final class CCBridgeWebSocketClient: NSObject {
         #if os(macOS)
         if BenchIsolation.active { return }
         #endif
+        guard !isInvalidated, !isPairingHeld else { return }
         transportSync {
             guard !self.isOpenNow, !self.urls.isEmpty else { return }
-            BridgeProbe.log("reconnect now")
+            probeLog("reconnect now")
             self.manualClose = false
             self.beginEpisode("manual")
             self.reconnectTimer?.invalidate()
@@ -914,7 +1300,7 @@ final class CCBridgeWebSocketClient: NSObject {
         let previous = lastPathSignature
         lastPathSignature = signature
         guard let previous, previous != signature else { return }
-        BridgeProbe.log("path \(signature) connected=\(isOpenNow)")
+        probeLog("path \(signature) connected=\(isOpenNow)")
         guard path.status == .satisfied, !manualClose, url != nil, !urls.isEmpty else { return }
         beginEpisode("path")
         reconnectTimer?.invalidate()
@@ -925,12 +1311,14 @@ final class CCBridgeWebSocketClient: NSObject {
 
     /// 持久化去重表（reply_id→时间戳，TTL 内）。在 handlersQueue 上调。
     private func persistSeenReplyIds() {
-        dedupDefaults.set(seenReplyIds.mapValues { $0.timeIntervalSince1970 }, forKey: Self.seenStoreKey)
+        guard !isInvalidated else { return }
+        defaults.set(seenReplyIds.mapValues { $0.timeIntervalSince1970 }, forKey: Self.seenStoreKey)
     }
 
     /// 持久化 thinking 去重表。在 handlersQueue 上调。
     private func persistSeenThinkingIds() {
-        dedupDefaults.set(seenThinkingIds.mapValues { $0.timeIntervalSince1970 }, forKey: Self.seenThinkingStoreKey)
+        guard !isInvalidated else { return }
+        defaults.set(seenThinkingIds.mapValues { $0.timeIntervalSince1970 }, forKey: Self.seenThinkingStoreKey)
     }
 
     // MARK: - Public API
@@ -952,17 +1340,32 @@ final class CCBridgeWebSocketClient: NSObject {
         // 严格测量角色：声明抑制（§3.1）。connect(url:) 也转到这里；url 保持 nil，回前台 / 重连都进不去
         if PerfHarness.quietNetwork { PerfGuardrails.suppress("ccws"); return }
         #endif
+        guard !isInvalidated else { return }
+        // 待配对 / 换了机器：按钥匙串 / 旧候选自动连的调用点（keepExistingToken）一律不连
+        if keepExistingToken, isPairingHeld { probeLog("connect skipped: pairing hold"); return }
+        let gen = CCHubPairingStore.gen(defaults)
         // 判断 + 换目标 + 起探测在 transport 上一次做完（同步：调用方紧跟着登记的 hub 请求排在 failHubRequests 之后，跟原来一样）
         let retargeted: Bool = transportSync {
-            let finalURLs = Self.candidateURLs(inputURLs, token: token, keepingTokenFrom: keepExistingToken ? self.urls : [])
+            // 旧口令只在「同一代配对、候选集合完全相同」时沿用（plan-multi-hub B2.2）；部分重合 / 换过配对一律不沿用
+            let keepFrom = keepExistingToken && self.urlsGen == gen ? self.urls : []
+            let finalURLs = Self.candidateURLs(inputURLs, token: token, keepingTokenFrom: keepFrom)
+            // 读不到口令又不许沿用：别把带口令的候选换成不带口令的，这次不连
+            if keepExistingToken, token?.isEmpty ?? true, finalURLs.allSatisfy({ Self.token(in: $0) == nil }),
+               self.urls.contains(where: { Self.token(in: $0) != nil }) {
+                self.probeLog("connect skipped: no token and existing token not reusable")
+                return false
+            }
 
             // L4 根因2：去重不能用数组全等——ChatService 传 [LAN]、ContentView 传 [LAN,Tailscale]，
             // 全等不成立就会绕过去重 → startTask → invalidateAndCancel 把刚连上的活 socket 掐死 → 1006 churn。
             // 改判语义：已连/连接中，且当前已连目标仍在新候选里 → 不重启，只更新 fallback 列表（保留 LAN+Tailscale）。
+            // 口令变了不算同一目标：同地址换口令必须重新握手（B2.2）
             if self.task != nil,
                let current = self.url,
-               finalURLs.contains(where: { Self.normalizedKey($0) == Self.normalizedKey(current) }) {
+               let same = finalURLs.first(where: { Self.normalizedKey($0) == Self.normalizedKey(current) }),
+               Self.token(in: same) == Self.token(in: current) {
                 self.urls = finalURLs       // 保留/刷新 fallback 候选，但不掐活连接
+                self.urlsGen = gen
                 return false
             }
             self.manualClose = false
@@ -970,6 +1373,7 @@ final class CCBridgeWebSocketClient: NSObject {
             // 是发给旧目标的，一律回执失败、不迁移到新 hub（A1 R2 N1）。同一目标重连（集合相同）照旧留着等赢家
             if Set(finalURLs) != Set(self.urls) {
                 self.targetEpoch += 1
+                self.advanceInteractionEpoch()
                 self.failPendingUserFrames()
                 // 旧目标上还能点重发的条目改成不可重发（A1 R3 #3）：原帧不许发给别的电脑
                 let epoch = self.targetEpoch
@@ -977,14 +1381,21 @@ final class CCBridgeWebSocketClient: NSObject {
             }
             self.urls = finalURLs
             self.url = finalURLs.first
-            // 换目标：旧连接的在途请求不再认（astra 实现审 #3 / #11）
+            self.urlsGen = gen
+            // 换目标：旧连接的在途请求不再认（astra 实现审 #3 / #11）；新口令 / 新地址不背旧的被拒退避
             self.failHubRequests()
+            self.authRejectDelay = 0
             self.beginEpisode("connect")
             self.startTask()
             return true
         }
         // 换目标：手上那份 hello 只能算「上次连的电脑」
         if retargeted { toMain { self.hubInfoIsCurrent = false } }
+    }
+
+    /// URL 里带的口令（没有 / 空 = nil）
+    static func token(in url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "token" })?.value.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// URL 归一化比较键：scheme+host+port+path，忽略 token query 和顺序。
@@ -999,13 +1410,11 @@ final class CCBridgeWebSocketClient: NSObject {
     }
 
     /// 组候选 URL（带 token= / bundle=）。token 为空且 existing 非空时，沿用 existing 里同目标 URL 已带的 token。
+    /// 只在新旧候选集合完全相同（按 scheme+host+port+path）时沿用：部分重合会把旧口令贴到新地址上（plan-multi-hub B2.2）
     static func candidateURLs(_ inputURLs: [URL], token: String?, keepingTokenFrom existing: [URL]) -> [URL] {
         var token = token
-        if token?.isEmpty ?? true, !existing.isEmpty {
-            let targets = Set(inputURLs.map(normalizedKey))
-            token = existing.lazy.filter { targets.contains(normalizedKey($0)) }
-                .compactMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "token" })?.value }
-                .first { !$0.isEmpty }
+        if token?.isEmpty ?? true, !existing.isEmpty, Set(inputURLs.map(normalizedKey)) == Set(existing.map(normalizedKey)) {
+            token = existing.lazy.compactMap { Self.token(in: $0) }.first
             if token != nil { callLog.notice("hub 口令读不到，沿用已有口令") }
         }
         return inputURLs.map { url -> URL in
@@ -1079,11 +1488,28 @@ final class CCBridgeWebSocketClient: NSObject {
     }
     #endif
 
+    /// 小芽提醒（主线程）：闭包没注册 → 缓冲等回放；入队成功（或早就收过）才 ack，回来源连接（source = nil 走当前连接）
+    @MainActor func processStatusAlert(_ alert: StatusAlert, source: URLSessionWebSocketTask? = nil) {
+        guard let handler = onStatusAlert else {
+            bufferedStatusAlerts.append(alert)
+            return
+        }
+        guard handler(alert) else { return }
+        sendAck(["type": "status_alert_ack", "id": alert.id], to: source)
+    }
+
+    @MainActor private func drainStatusAlerts() {
+        let buffered = bufferedStatusAlerts
+        bufferedStatusAlerts = []
+        for alert in buffered { processStatusAlert(alert) }
+    }
+
     /// 问问题 CC 桥：答案帧（answers 按题序 [{indices:[Int]}|{text:String}]）；skip=true 整卡跳过（hub 发 Esc）。
-    func sendAskUserAnswer(toolUseId: String, answers: [[String: Any]]?, skip: Bool = false) {
+    /// verifiedOnly：只发在身份已核准的当前连接上，没核准就丢、不进身份闸的暂存（回原来那台的问题卡用，recheck1 #4）
+    func sendAskUserAnswer(toolUseId: String, answers: [[String: Any]]?, skip: Bool = false, verifiedOnly: Bool = false) {
         var frame: [String: Any] = ["type": "ask_user_answer", "tool_use_id": toolUseId]
         if skip { frame["skip"] = true } else if let answers { frame["answers"] = answers }
-        send(frame) { _ in }
+        send(frame, on: task, verifiedOnly: verifiedOnly) { _ in }
     }
 
     func send(_ payload: [String: Any], completion: @escaping (Error?) -> Void) {
@@ -1091,8 +1517,14 @@ final class CCBridgeWebSocketClient: NSObject {
     }
 
     /// 发到指定的那条连接（A1 R1）：一次操作从头到尾只用同一个 task——终端输入的多个分片、补订阅、ACK、connect_report
-    /// 都绑在调用方定下的 task 上，中途换了连接也不会借新连接发出去；那条连接死了就是 completion 报错，不自动重发
-    private func send(_ payload: [String: Any], on target: URLSessionWebSocketTask?, completion: @escaping (Error?) -> Void) {
+    /// 都绑在调用方定下的 task 上，中途换了连接也不会借新连接发出去；那条连接死了就是 completion 报错，不自动重发。
+    /// handshake = 握手帧（client_info），身份核准前也照发
+    private func send(_ payload: [String: Any], on target: URLSessionWebSocketTask?, handshake: Bool = false, verifiedOnly: Bool = false,
+                      completion: @escaping (Error?) -> Void) {
+        if isInvalidated {
+            completion(Self.notConnectedError)
+            return
+        }
         #if os(macOS)
         if BenchIsolation.active {
             completion(Self.notConnectedError)
@@ -1110,7 +1542,7 @@ final class CCBridgeWebSocketClient: NSObject {
                                    userInfo: [NSLocalizedDescriptionKey: "payload 编码失败"]))
                 return
             }
-            transmit(str, on: target, completion: completion)
+            transmit(str, on: target, handshake: handshake, verifiedOnly: verifiedOnly, completion: completion)
         } catch {
             completion(error)
         }
@@ -1131,8 +1563,22 @@ final class CCBridgeWebSocketClient: NSObject {
 
     private static let notConnectedError = NSError(domain: "CCBridge", code: -10, userInfo: [NSLocalizedDescriptionKey: "WebSocket 未连接"])
 
-    /// 所有文本帧的唯一出口
-    private func transmit(_ text: String, on target: URLSessionWebSocketTask, completion: @escaping (Error?) -> Void) {
+    /// 所有文本帧的唯一出口：删掉的 hub 一帧不发（排在 transport 上的用户消息 / 重发也到这里为止）；身份闸开着时没核准的连接上先排队
+    private func transmit(_ text: String, on target: URLSessionWebSocketTask, handshake: Bool = false, verifiedOnly: Bool = false,
+                          completion: @escaping (Error?) -> Void) {
+        guard !isInvalidated else {
+            completion(Self.notConnectedError)
+            return
+        }
+        switch admitOutbound(text, on: target, handshake: handshake, verifiedOnly: verifiedOnly, completion: completion) {
+        case .send: rawTransmit(text, on: target, completion: completion)
+        case .queued: return
+        case .drop: completion(Self.identityGateDropError)
+        }
+    }
+
+    /// 真正写 WS（单测替身在这一层）
+    private func rawTransmit(_ text: String, on target: URLSessionWebSocketTask, completion: @escaping (Error?) -> Void) {
         #if DEBUG
         if let hook = transmitHook.withLockUnchecked({ $0 }) {
             hook(target, text, completion)
@@ -1295,6 +1741,7 @@ final class CCBridgeWebSocketClient: NSObject {
         chatId: String, messageId: String, content: String, user: String,
         session: String?, replyTo: String?, attachments: [PendingChatAttachment], effort: String? = nil
     ) {
+        guard !isInvalidated else { return }
         var payload = Self.sendFrame(chatId: chatId, messageId: messageId, content: content, user: user,
                                      session: session, replyTo: replyTo, attachments: attachments, effort: effort)
         let attempt = sendTracker.didSend(messageId, frame: payload)   // 调用方在 main（sendCCFireAndForget）
@@ -1330,8 +1777,9 @@ final class CCBridgeWebSocketClient: NSObject {
         transmit(text, on: target) { [weak self] err in
             guard let self, let err else { return }
             self.onTransport {
-                let opened = self.reachedHub(target)
-                BridgeProbe.log("user send err opened=\(opened) msg=\(attempt.messageId.prefix(8)) \(err.localizedDescription)")
+                // 身份闸丢掉的 = 根本没写 WS
+                let opened = (err as NSError).code != Self.identityGateDropCode && self.reachedHub(target)
+                self.probeLog("user send err opened=\(opened) msg=\(attempt.messageId.prefix(8)) \(err.localizedDescription)")
                 self.failUserFrame(attempt, reason: opened ? Self.userFrameUncertainReason : Self.userFrameNotSentReason, mayHaveReached: opened)
             }
         }
@@ -1348,7 +1796,7 @@ final class CCBridgeWebSocketClient: NSObject {
         guard !pendingUserFrames.isEmpty else { return }
         let frames = pendingUserFrames
         pendingUserFrames = []
-        BridgeProbe.log("send: \(frames.count) user frame(s) waited for the probe winner")
+        probeLog("send: \(frames.count) user frame(s) waited for the probe winner")
         for f in frames {
             if f.epoch == targetEpoch {
                 transmitUserFrame(f.attempt, f.text, on: target)
@@ -1388,6 +1836,7 @@ final class CCBridgeWebSocketClient: NSObject {
     /// 「没送达」点重发（K1 第 4b 步）：原 send 帧 + retry，message_id 不变；标记先回到「确认中」，等 hub 再推 send_status。
     /// 登记为一次新尝试（A1 R3 #3 #6），跟用户消息同在 transport 上排序；交不给 WS（没连上）就落回 failed。main 上调。
     func retrySend(messageId: String) {
+        guard !isInvalidated else { return }
         guard let retry = sendTracker.beginRetryAttempt(messageId) else { return }
         guard let data = try? JSONSerialization.data(withJSONObject: retry.frame), let text = String(data: data, encoding: .utf8) else {
             sendTracker.retryNotSent(retry.attempt)
@@ -1417,9 +1866,9 @@ final class CCBridgeWebSocketClient: NSObject {
         let sentEpoch = taskEpoch
         toMain { self.sendTracker.didHandOff(attempt, to: current, epoch: sentEpoch) }
         transmit(text, on: current) { [weak self] err in
-            guard let self, err != nil else { return }
+            guard let self, let err else { return }
             self.onTransport {
-                let reached = self.reachedHub(current)
+                let reached = (err as NSError).code != Self.identityGateDropCode && self.reachedHub(current)
                 self.toMain { self.sendTracker.retryNotSent(attempt, mayHaveReached: reached) }
             }
         }
@@ -1630,6 +2079,10 @@ final class CCBridgeWebSocketClient: NSObject {
     /// ESC[200~…ESC[201~，没有 4096 的线。调用前看 `hubSupportsTerminalPaste`。
     /// completion（main）：nil = hub 确认贴进去了；否则一句给她看的原因（含 10 秒没回包）。
     func sendTerminalPaste(session: String, text: String, completion: @escaping (String?) -> Void) {
+        if isInvalidated {
+            DispatchQueue.main.async { completion("没发出去：这台电脑已经删掉了") }
+            return
+        }
         let requestId = UUID().uuidString
         handlersQueue.async { self.terminalPasteHandlers[requestId] = completion }
         send([
@@ -1799,6 +2252,46 @@ final class CCBridgeWebSocketClient: NSObject {
         }
     }
 
+    /// 「让 AI 用这台 Mac 的 Chrome 登录态」总开关（plan-opencli-in-app）。hub 只认本机 Mac app 发的；成功后广播新 hello。
+    func setOpencliEnabled(_ on: Bool, completion: @escaping (String?) -> Void) {
+        let id = UUID().uuidString
+        handlersQueue.async {
+            self.hubConfigHandlers.add(id, completion)
+            self.handlersQueue.asyncAfter(deadline: .now() + 10) { [weak self] in
+                self?.finishHubConfig(id: id, "电脑 10 秒没回话（hub 可能需要更新）")
+            }
+        }
+        send(["type": "set_opencli_enabled", "enabled": on, "request_id": id]) { [weak self] err in
+            guard let self, let err else { return }
+            self.handlersQueue.async { self.finishHubConfig(id: id, "没发出去：\(err.localizedDescription)") }
+        }
+    }
+
+    /// hub 用 Mac 上 Chrome 的登录态跑 opencli（`tool` = chrome_read / site_query，其余字段原样带上）。hub 自己 90 秒超时，这里等 95 秒。completion 在 main。
+    func opencli(_ request: [String: Any], completion: @escaping (Result<HubOpencliReply, CCBridgeRemoteError>) -> Void) {
+        let id = UUID().uuidString
+        handlersQueue.async {
+            self.opencliHandlers.add(id, completion)
+            self.handlersQueue.asyncAfter(deadline: .now() + 95) { [weak self] in
+                self?.finishOpencli(id: id, .failure(CCBridgeRemoteError(reason: "Mac 95 秒没回话")))
+            }
+        }
+        var payload = request
+        payload["type"] = "opencli_req"
+        payload["request_id"] = id
+        send(payload) { [weak self] err in
+            guard let self, let err else { return }
+            self.handlersQueue.async {
+                self.finishOpencli(id: id, .failure(CCBridgeRemoteError(reason: "没发出去：\(err.localizedDescription)")))
+            }
+        }
+    }
+
+    private func finishOpencli(id: String?, _ result: Result<HubOpencliReply, CCBridgeRemoteError>) {
+        guard let h = opencliHandlers.take(id) else { return }
+        DispatchQueue.main.async { h(result) }
+    }
+
     /// 只在 handlersQueue 上调。已被别的一路收走（超时 / 断线 / 回帧）就什么都不做。
     private func finishHubConfig(id: String?, _ failure: String?) {
         guard let h = hubConfigHandlers.take(id) else { return }
@@ -1818,9 +2311,11 @@ final class CCBridgeWebSocketClient: NSObject {
             let reason = Self.staleReplyReason
             let configs = self.hubConfigHandlers.takeAll()
             let listings = self.dirListHandlers.takeAll()
+            let opencli = self.opencliHandlers.takeAll()
             DispatchQueue.main.async {
                 for h in configs { h(reason) }
                 for h in listings { h(.failure(CCBridgeRemoteError(reason: reason))) }
+                for h in opencli { h(.failure(CCBridgeRemoteError(reason: reason))) }
             }
         }
     }
@@ -1879,7 +2374,8 @@ final class CCBridgeWebSocketClient: NSObject {
     private func startTask() {
         checkTransport()
         if TestHostIsolation.blocks(.hub) { return }   // #035：测试宿主不连 hub（生产 hub 严禁测试流量）
-        BridgeProbe.log("connect try")
+        guard !isInvalidated else { return }
+        probeLog("connect try")
         guard !urls.isEmpty else { return }
         probeSession?.invalidateAndCancel()
         probeSession = nil   // 非 nil = 多候选探测正在跑（用户消息据此决定排队等赢家，见 routeUserFrame）
@@ -1896,14 +2392,14 @@ final class CCBridgeWebSocketClient: NSObject {
         config.connectionProxyDictionary = [:]   // 不走系统 HTTP 代理（LAN / Tailscale 地址本来就该直连）
         let timings = ConnectRuler.enabled ? ProbeRoundTimings() : nil   // 尺子：每候选 resume 时刻 + URLSessionTaskMetrics
         // 不跟重定向 + 中继 pin。A1：委托队列 = transport，完成回调直接落在 transport 上
-        let probe = URLSession(configuration: config, delegate: CCBridgeProbeDelegate(onMetrics: timings?.noteMetrics), delegateQueue: transportOps)
+        let probe = URLSession(configuration: config, delegate: CCBridgeProbeDelegate(defaults: defaults, onMetrics: timings?.noteMetrics), delegateQueue: transportOps)
         probeSession = probe
         var settled = false      // 都在 transport 上串行访问
         var failures = 0
         var failReasons: [String] = []
         let total = urls.count
         let probeStart = Date()
-        let relayKey = CCBridgeEndpoints.relayURL().map(Self.normalizedKey)   // 只有扫码存的中继走严格判活
+        let relayKey = CCBridgeEndpoints.relayURL(defaults: defaults).map(Self.normalizedKey)   // 只有扫码存的中继走严格判活
         for (slot, candidate) in urls.enumerated() {
             let fail: (String) -> Void = { [weak self] reason in
                 guard let self, gen == self.probeGeneration else { return }
@@ -1968,7 +2464,7 @@ final class CCBridgeWebSocketClient: NSObject {
         probeSession = nil
         let reason = "探测全败：" + failReasons.joined(separator: "；")
         toMain { self.lastError = reason }
-        BridgeProbe.log("probe all failed: " + failReasons.joined(separator: " | "))
+        probeLog("probe all failed: " + failReasons.joined(separator: " | "))
         failPendingUserFrames()
         if !manualClose { scheduleReconnect() }
     }
@@ -1995,9 +2491,9 @@ final class CCBridgeWebSocketClient: NSObject {
 
     /// 主线程：reply / thinking 落地后推进游标
     private func advanceReplyCursor(_ ts: Double?) {
-        guard let ts, ts > replyCursor else { return }
+        guard !isInvalidated, let ts, ts > replyCursor else { return }
         replyCursor = ts
-        dedupDefaults.set(ts, forKey: Self.replyCursorKey)
+        defaults.set(ts, forKey: Self.replyCursorKey)
     }
 
     /// ws://host:port/cc?token=xx → http://host:port/health（probe 用；/health 无鉴权无副作用）
@@ -2142,6 +2638,7 @@ final class CCBridgeWebSocketClient: NSObject {
 
     /// 单测：transport 上当前的 task
     var currentTaskForTesting: URLSessionWebSocketTask? { task }
+    var authRejectDelayForTesting: TimeInterval { transportSync { authRejectDelay } }
 
     /// 单测：队列屏障——transport 卡住直到调返回的 release（只在 A1 用；A1=0 的 transport 是主线程，不能卡）
     func holdTransportForTesting() -> () -> Void {
@@ -2186,6 +2683,7 @@ final class CCBridgeWebSocketClient: NSObject {
     private func handleReceived(_ result: Result<URLSessionWebSocketTask.Message, Error>, on currentTask: URLSessionWebSocketTask) {
         // 旧 task 完成后 self.task 已被替换，直接忽略以免触发 ghost reconnect
         guard task === currentTask else { return }
+        if case .success = result { lastAliveBox.withLock { $0 = Date() } }
         switch result {
         case .failure(let err):
             handleDisconnect(error: err.localizedDescription, from: currentTask)
@@ -2217,7 +2715,7 @@ final class CCBridgeWebSocketClient: NSObject {
             preOpenFrames.append(text)
             preOpenBytes += text.utf8.count
             if preOpenFrames.count > frameLimits.preOpenFrames || preOpenBytes > frameLimits.preOpenBytes {
-                BridgeProbe.log("open: \(preOpenFrames.count) frame(s) / \(preOpenBytes) bytes before didOpen, over limit → reconnect, replay fills in")
+                probeLog("open: \(preOpenFrames.count) frame(s) / \(preOpenBytes) bytes before didOpen, over limit → reconnect, replay fills in")
                 currentTask.cancel(with: .goingAway, reason: nil)
                 handleDisconnect(error: "didOpen 前到的帧超限，重连", from: currentTask)
                 return
@@ -2230,7 +2728,7 @@ final class CCBridgeWebSocketClient: NSObject {
             receiveLoop()
         } else {
             receivePausedTask = currentTask
-            BridgeProbe.log("recv paused: parse backlog \(parseBacklogBytes) bytes")
+            probeLog("recv paused: parse backlog \(parseBacklogBytes) bytes")
         }
     }
 
@@ -2264,6 +2762,17 @@ final class CCBridgeWebSocketClient: NSObject {
         guard let data = text.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String else { return }
+        // 删掉的 hub：迟到帧一律不落（不回调、不写去重 / 游标）
+        guard !isInvalidated else { return }
+        // 只握手模式：hello 以外一帧不落
+        if isHandshakeOnly, type != "hello" { return }
+        // 身份闸：没核准的连接上业务帧先压着，核准后按序放出（drainIdentityInbound）
+        guard admitInbound(text, type: type, source: source) else { return }
+        dispatchIncoming(type, obj, data: data, source: source)
+    }
+
+    private func dispatchIncoming(_ type: String, _ obj: [String: Any], data: Data, source: URLSessionWebSocketTask?) {
+        if !isPrimary, rejectOnSecondary(type, obj, source: source) { return }
 
         switch type {
         case "cc_memory_manifest":
@@ -2299,7 +2808,7 @@ final class CCBridgeWebSocketClient: NSObject {
             let reply: ([String: Any]) -> Void = { [weak self] result in
                 guard let self else { return }
                 guard self.isLive(source) else {
-                    BridgeProbe.log("pocket_result dropped: source connection superseded id=\(result["id"] as? String ?? "?")")
+                    probeLog("pocket_result dropped: source connection superseded id=\(result["id"] as? String ?? "?")")
                     return
                 }
                 self.sendAck(result, to: source)
@@ -2317,6 +2826,24 @@ final class CCBridgeWebSocketClient: NSObject {
         case "agent_status_result":
             DispatchQueue.main.async { [weak self] in
                 self?.onAgentStatusResult?(obj)
+            }
+        case "status_result":
+            // 状态面板：外部检修源快照（拉取的回帧 + 新报告 / running / 静音变化时的广播）
+            let frame: StatusResultFrame
+            do { frame = try JSONDecoder().decode(StatusResultFrame.self, from: data) } catch {
+                probeLog("status_result dropped: decode failed \(error)")
+                return
+            }
+            DispatchQueue.main.async { StatusSnapshot.shared.update(frame) }
+        case "status_alert":
+            // 小芽提醒：入横幅队列 → ack（重复 id 直接 ack）
+            let frame: StatusAlertFrame
+            do { frame = try JSONDecoder().decode(StatusAlertFrame.self, from: data) } catch {
+                probeLog("status_alert dropped: decode failed \(error)")
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.processStatusAlert(frame.alert, source: source)
             }
         #if PERSONAL_APPS
         case "warroom_board_result":
@@ -2399,15 +2926,20 @@ final class CCBridgeWebSocketClient: NSObject {
                         DispatchQueue.main.async { self.advanceReplyCursor(ts) }
                         return  // 已收过，silently drop（不再比时间，按条数保留的全集里有就算见过）
                     }
-                    BridgeProbe.log("reply new rid=\(replyId?.prefix(8) ?? "-") chat=\(chatId.prefix(8)) len=\(content.count) mp=\(ccMsgId?.prefix(14) ?? "-")")
+                    probeLog("reply new rid=\(replyId?.prefix(8) ?? "-") chat=\(chatId.prefix(8)) len=\(content.count) mp=\(ccMsgId?.prefix(14) ?? "-")")
                     // 收口即发（plan-跨对话排队）：无 pending 占位概念，所有 reply（回复我们的 /
                     // CC 主动发的）统一走 proactive 落地——查重/未读/上树/ccMessageId 存储全在那边。
                     // 「已收」标记落在投递**之后**：进程死在投递前（09-17 冷启动看门狗）下次 replay 还能补上；
                     // 没接线（handler 为 nil）不算收过。投递排队窗口内同一 reply_id 再来会二次投递，
                     // 由落库层 ccMessageId 查重兜底。
                     DispatchQueue.main.async {
-                        guard let deliver = self.onProactiveMessage else { BridgeProbe.log("reply dropped: no handler rid=\(replyId?.prefix(8) ?? "-")"); return }
-                        deliver(chatId, content, fileData, fileName, fileMime, fileIsImage, ccMsgId, replyTo, callReply)
+                        guard !self.isInvalidated else { return }
+                        guard let deliver = self.onProactiveMessage else { self.probeLog("reply dropped: no handler rid=\(replyId?.prefix(8) ?? "-")"); return }
+                        // 来源核对拒收（impl1 #13）：不推游标、不记已收
+                        guard deliver(chatId, content, fileData, fileName, fileMime, fileIsImage, ccMsgId, replyTo, callReply) else {
+                            self.probeLog("reply refused by owner check rid=\(replyId?.prefix(8) ?? "-") chat=\(chatId.prefix(8))")
+                            return
+                        }
                         self.advanceReplyCursor(ts)
                         guard let replyId else { return }
                         self.handlersQueue.async {
@@ -2431,7 +2963,10 @@ final class CCBridgeWebSocketClient: NSObject {
                 // 有序交付（A1 R1 #6）：reply / thinking / edit 都锚定 mp_msg_id，统一走 handlersQueue → main 这一条通道，
                 // 落地顺序 = 到达顺序。原来 edit 直接 main.async、reply 多绕一跳 handlersQueue，edit 可能抢在它改的那条 reply 前面落地
                 handlersQueue.async { [weak self] in
-                    DispatchQueue.main.async { self?.onEditMessage?(chatId, mpMsgId, content, streaming) }
+                    DispatchQueue.main.async {
+                        guard let self, !self.isInvalidated else { return }
+                        self.onEditMessage?(chatId, mpMsgId, content, streaming)
+                    }
                 }
             }
         case "thinking":
@@ -2443,20 +2978,33 @@ final class CCBridgeWebSocketClient: NSObject {
                 let ts = (obj["ts"] as? NSNumber)?.doubleValue
                 if (obj["streaming"] as? Bool) == true {   // 逐字流式：中间态不进去重表（一轮几十帧）；同走有序通道
                     handlersQueue.async { [weak self] in
-                        DispatchQueue.main.async { self?.onThinking?(chatId, mpMsgId, content) }
+                        DispatchQueue.main.async {
+                            guard let self, !self.isInvalidated else { return }
+                            _ = self.onThinking?(chatId, mpMsgId, content)
+                        }
                     }
                     break
                 }
                 handlersQueue.async { [weak self] in
                     guard let self else { return }
                     if self.seenThinkingIds[thinkingId] != nil { DispatchQueue.main.async { self.advanceReplyCursor(ts) }; return }
-                    self.seenThinkingIds[thinkingId] = Date()
-                    if self.seenThinkingIds.count > self.thinkingDedupKeepCount {
-                        let keep = self.seenThinkingIds.sorted { $0.value > $1.value }.prefix(self.thinkingDedupKeepCount)
-                        self.seenThinkingIds = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+                    // 「已收」同 reply 落在投递确认之后（impl1 #13）：没接线 / 来源核对拒收的不记、不推游标。挂思考链是幂等的，窗口内重投无害
+                    DispatchQueue.main.async {
+                        guard !self.isInvalidated, let deliver = self.onThinking else { return }
+                        guard deliver(chatId, mpMsgId, content) else {
+                            self.probeLog("thinking refused by owner check tid=\(thinkingId.prefix(8)) chat=\(chatId.prefix(8))")
+                            return
+                        }
+                        self.advanceReplyCursor(ts)
+                        self.handlersQueue.async {
+                            self.seenThinkingIds[thinkingId] = Date()
+                            if self.seenThinkingIds.count > self.thinkingDedupKeepCount {
+                                let keep = self.seenThinkingIds.sorted { $0.value > $1.value }.prefix(self.thinkingDedupKeepCount)
+                                self.seenThinkingIds = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+                            }
+                            self.persistSeenThinkingIds()
+                        }
                     }
-                    self.persistSeenThinkingIds()
-                    DispatchQueue.main.async { self.onThinking?(chatId, mpMsgId, content); self.advanceReplyCursor(ts) }
                 }
             }
         case "ask_user_question":
@@ -2505,9 +3053,16 @@ final class CCBridgeWebSocketClient: NSObject {
         case "hello":
             if let hello = HubHello(frame: obj) {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, self.isLive(source) else { return }   // 旧连接的 hello 不能把 hubInfoIsCurrent 翻回 true
+                    guard let self, !self.isInvalidated, self.isLive(source) else { return }   // 旧连接的 hello 不能把 hubInfoIsCurrent 翻回 true
+                    if self.isHandshakeOnly {
+                        _ = self.onHello?(hello)
+                        return
+                    }
                     self.hubInfo = hello
                     self.hubInfoIsCurrent = true
+                    // 身份闸：Registry 核过这台的 hub_id 才放行这条连接上排着 / 压着的业务帧
+                    let verdict = self.onHello?(hello) ?? .approve
+                    self.applyIdentityVerdict(verdict, for: source, hubId: hello.hubId)
                 }
             }
         case "hub_config":
@@ -2530,6 +3085,11 @@ final class CCBridgeWebSocketClient: NSObject {
             if let result = HubDirListing.parse(obj) {
                 let id = Self.requestId(obj)
                 handlersQueue.async { [weak self] in self?.finishDirList(id: id, result) }
+            }
+        case "opencli_result":
+            if let result = HubOpencliReply.parse(obj) {
+                let id = Self.requestId(obj)
+                handlersQueue.async { [weak self] in self?.finishOpencli(id: id, result) }
             }
         case "error":
             let reason = (obj["reason"] as? String) ?? "unknown"
@@ -2563,10 +3123,19 @@ final class CCBridgeWebSocketClient: NSObject {
             handlersQueue.async { [weak self] in
                 self?.claimSpawn(name, .failure(CCBridgeRemoteError(reason: reason, fromHub: true)), from: source)
             }
+        case "cc_config":
+            // hub 的权威 CC 设置（回完 set_cc_config / 任何设备改了）：只认主 hub 写本机，附加 hub 各存各的
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isInvalidated, self.isPrimary, self.isLive(source) else { return }
+                CCConfigSync.apply(obj, to: .standard)
+            }
         case "transport_policies":
             // hub 推的权威表（连上 / 任何设备改了）：整表覆盖本机，菜单勾以此为准
             if let pol = obj["policies"] as? [String: String] {
-                DispatchQueue.main.async { UserDefaults.standard.set(pol, forKey: Self.transportPolicyKey) }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.isInvalidated, self.isLive(source) else { return }
+                    self.defaults.set(pol, forKey: Self.transportPolicyKey)   // 这台 hub 自己的表（主 hub = .standard，原样）
+                }
             }
         case "list_sessions_result":
             let sessions = obj["sessions"] as? [String] ?? []
@@ -2629,23 +3198,23 @@ final class CCBridgeWebSocketClient: NSObject {
             // 连接现状类（这一条到 session_phase）：来源连接失效就丢，新连接上 hub 会推新的
             let entries = (obj["windows"] as? [[String: Any]] ?? []).compactMap(TerminalStateEntry.init(frame:))
             Task { @MainActor [weak self] in
-                guard let self, self.isLive(source) else { return }
-                TerminalWindowStore.shared.applyState(entries)
+                guard let self, !self.isInvalidated, self.isLive(source) else { return }
+                (self.windowStore ?? (self.isPrimary ? TerminalWindowStore.shared : nil))?.applyState(entries)
             }
         case "session_model":
             // 底部模型胶囊「cc-opus-4.6-1m」：会话实际在用的模型（hub 读转录 / 拉起 / /model 确认）
             if let m = CCSessionModel(frame: obj) {
                 Task { @MainActor [weak self] in
-                    guard let self, self.isLive(source) else { return }
-                    CCSessionModelStore.shared.apply(m)
+                    guard let self, !self.isInvalidated, self.isLive(source) else { return }
+                    CCSessionModelStore.shared.apply(m, hubId: self.hubId)
                 }
             }
         case "session_phase":
             // 进度卡 B（粟粟 10-03）：CC 会话干活中 / 等你 / 做完了，聊天页底部的状态卡读
             if let p = CCSessionPhase(frame: obj) {
                 Task { @MainActor [weak self] in
-                    guard let self, self.isLive(source) else { return }
-                    CCSessionPhaseStore.shared.apply(p)
+                    guard let self, !self.isInvalidated, self.isLive(source) else { return }
+                    CCSessionPhaseStore.shared.apply(p, hubId: self.hubId)
                 }
             }
         case "window_opened":
@@ -2687,10 +3256,8 @@ final class CCBridgeWebSocketClient: NSObject {
                         DispatchQueue.main.async { h(usage) }
                     }
                 }
-                #if os(iOS)
-                UsageSnapshotWriter.write(sessionName: session, model: usage.model, ctx: usage.ctx,
-                                          fiveHour: usage.fiveHour, sevenDay: usage.sevenDay)
-                #endif
+                // 小组件只有一份「最新」：只主 hub 写，附加 hub 的用量只在它自己的终端顶卡里看
+                if isPrimary { writeUsageSnapshot(session: session, usage) }
             }
         case "voice_call_state":
             #if os(iOS)
@@ -2766,6 +3333,58 @@ final class CCBridgeWebSocketClient: NSObject {
         }
     }
 
+    /// 附加 hub 的最小闸（plan-multi-hub B2 安全项，其余帧归属见 B2.6）：放在任何分发之前。
+    /// 「hub 让手机执行」的口袋 / 推特命令回拒绝帧（同现有关闭 / 未接线时的回帧格式），通话 / CC 记忆这几类只认主 hub 的帧直接丢。
+    enum SecondaryFrameGate: Equatable {
+        case pass
+        /// 回拒绝帧
+        case reject
+        /// 丢弃 + 日志
+        case drop
+    }
+
+    /// research-multi-hub-frames A 类 20 个 + opencli_result（plan-opencli-in-app）：整帧只主 hub。字符串写死，不跟 `#if PERSONAL_APPS` / `#if os(iOS)` 走（编进去的 case 少，闸不能少）
+    static let primaryOnlyFrameTypes: Set<String> = [
+        "cc_memory_manifest", "cc_memory_files", "cc_memory_changed",
+        "vocab_corpus_result",
+        "pocket_cmd", TwitterCCBridge.commandType,
+        "agent_status_result",
+        "status_result", "status_alert",
+        "warroom_board_result", "warroom_request_result", "pm_req_result",
+        "agent_book_note",
+        "trading_report_result", "trading_report_progress",
+        "voice_call_state", "voice_call_snapshot", "voice_call_error",
+        "la_query_result", "la_token_nak",
+        "opencli_result",
+    ]
+
+    static func secondaryFrameGate(_ type: String) -> SecondaryFrameGate {
+        switch type {
+        case "pocket_cmd", TwitterCCBridge.commandType: return .reject
+        default: return primaryOnlyFrameTypes.contains(type) || type.hasPrefix("cc_memory_") ? .drop : .pass
+        }
+    }
+
+    /// 返回 true = 这一帧到此为止
+    private func rejectOnSecondary(_ type: String, _ obj: [String: Any], source: URLSessionWebSocketTask?) -> Bool {
+        switch Self.secondaryFrameGate(type) {
+        case .pass:
+            return false
+        case .drop:
+            probeLog("drop \(type): secondary hub")
+            return true
+        case .reject:
+            let id = obj["id"] as? String ?? ""
+            probeLog("reject \(type) id=\(id): secondary hub")
+            if type == "pocket_cmd" {
+                sendAck(["type": "pocket_result", "id": id, "ok": false, "error": "pocket not available on this hub"], to: source)
+            } else {
+                sendAck(["type": TwitterCCBridge.resultType, "id": id, "ok": false, "result": "这台电脑不能用手机上的推特"], to: source)
+            }
+            return true
+        }
+    }
+
     private var pocketEnabled: Bool {
         #if DEBUG
         if let forced = pocketEnabledForTesting { return forced }
@@ -2781,11 +3400,28 @@ final class CCBridgeWebSocketClient: NSObject {
         PocketExecutor.shared.execute(cmd, reply: reply)
     }
 
+    private func writeUsageSnapshot(session: String, _ usage: TerminalUsage) {
+        #if DEBUG
+        if let hook = usageSnapshotWriterForTesting { hook(session); return }
+        #endif
+        #if os(iOS)
+        UsageSnapshotWriter.write(sessionName: session, model: usage.model, ctx: usage.ctx,
+                                  fiveHour: usage.fiveHour, sevenDay: usage.sevenDay)
+        #endif
+    }
+
     #if DEBUG
     /// 单测：不读真实偏好（测试宿主的 UserDefaults.standard 就是她的 app 偏好）
     @ObservationIgnored var pocketEnabledForTesting: Bool?
     /// 单测：替身执行器（不建 WKWebView），由测试决定什么时候回结果
     @ObservationIgnored var pocketRunnerForTesting: (([String: Any], @escaping ([String: Any]) -> Void) -> Void)?
+    /// 单测：替身小组件写入（不碰 App Group），收帧线程上调，参数 = session 名
+    @ObservationIgnored var usageSnapshotWriterForTesting: ((String) -> Void)?
+    /// 单测：没人接的告警 / 研报缓冲有多少（主线程读）
+    var bufferedStatusAlertCountForTesting: Int { bufferedStatusAlerts.count }
+    #if PERSONAL_APPS
+    var bufferedTradingReportCountForTesting: Int { bufferedTradingReports.count }
+    #endif
     #endif
 
     /// 新 hub 失败帧里的中文原因（open / restore 失败时带）
@@ -2824,7 +3460,7 @@ final class CCBridgeWebSocketClient: NSObject {
             return
         }
         autoSpawnedOn[session] = origin
-        BridgeProbe.log("auto spawn \(session) after session_not_found")
+        probeLog("auto spawn \(session) after session_not_found")
         spawnSession(session, on: origin) { [weak self] result in
             guard let self, self.isLive(origin) else { return }   // spawn 回来时连接已换：新连接自己补订阅，这次作废
             switch result {
@@ -2863,8 +3499,17 @@ final class CCBridgeWebSocketClient: NSObject {
                 self.beginEpisode("drop")
             }
             let up = (self.openedTask === failed ? self.probeConnectedAt : nil).map { String(format: "%.0fs", Date().timeIntervalSince($0)) } ?? "never-open"
-            BridgeProbe.log("disconnect err=\(error ?? "nil") up=\(up) replies=\(self.probeReplyCount) fg=\(self.isForeground)")
+            probeLog("disconnect err=\(error ?? "nil") up=\(up) replies=\(self.probeReplyCount) fg=\(self.isForeground)")
             self.probeConnectedAt = nil
+            let authRejected = Self.isAuthRejection(error: error, task: failed)
+            let rejectedFingerprint = CCHubPairingStore.fingerprint(failed.originalRequest?.url.flatMap(Self.token(in:)))
+            if authRejected {
+                self.backOffAfterAuthRejection()
+            } else if self.openedTask === failed, self.probeConnectedAt.map({ Date().timeIntervalSince($0) >= Self.authBackoffResetUptime }) == true {
+                self.authRejectDelay = 0
+            }
+            self.lastDroppedTask = failed
+            self.lastDroppedTarget = (self.targetEpoch, self.urlsGen)
             self.task = nil
             self.openedTask = nil
             self.resetFrameGate()
@@ -2875,6 +3520,7 @@ final class CCBridgeWebSocketClient: NSObject {
                 self.hubInfoIsCurrent = false
                 self.isConnected = false
                 self.lastError = error
+                if authRejected { self.onAuthRejected?(rejectedFingerprint) }
             }
             self.failWindowEnds()
             self.failHubRequests()
@@ -2884,13 +3530,42 @@ final class CCBridgeWebSocketClient: NSObject {
         }
     }
 
+    /// hub 鉴权失败是 `ws.close(1008, "auth")`（hub.ts）：didClose 带过来的原因是 "auth"；收帧先失败的那一路看 task 上记下的关闭码 + 原因
+    static func isAuthRejection(error: String?, task: URLSessionWebSocketTask) -> Bool {
+        if task.closeCode == .policyViolation, let reason = task.closeReason, String(data: reason, encoding: .utf8) == "auth" { return true }
+        return error == "auth"
+    }
+
+    /// 连上这么久才算「正常连上过」：被拒的连接是开了就关（up=0s），不清口令被拒的退避
+    private static let authBackoffResetUptime: TimeInterval = 5
+
+    /// 口令被拒：2 秒起翻倍到 30 秒（被拒的连接握手成功会把 reconnectDelay 清回 0.25 秒，不能靠它）
+    private func backOffAfterAuthRejection() {
+        authRejectDelay = min(max(authRejectDelay * 2, 2), 30)
+    }
+
+    /// 收帧失败先把断线处理掉了，didClose 才带着 1008 auth 到：补认被拒——退避按被拒的重排，告诉 Registry
+    private func noteLateAuthRejection(_ closed: URLSessionWebSocketTask, error: String?) {
+        checkTransport()
+        // 只认：还是那次断掉的连接、目标和配对代次都没换、之后也没有新连接开着（新连接核准了，旧拒绝不改状态）
+        guard closed === lastDroppedTask, lastDroppedTarget.epoch == targetEpoch, lastDroppedTarget.gen == urlsGen,
+              openedTask == nil, Self.isAuthRejection(error: error, task: closed) else { return }
+        lastDroppedTask = nil
+        probeLog("auth rejected (late close)")
+        backOffAfterAuthRejection()
+        // 还在等退避（没有在途的连接 / 探测）：按被拒的退避重排；已经在连了就等它的结果
+        if task == nil, probeSession == nil, reconnectTimer != nil, !manualClose { scheduleReconnect() }
+        let fingerprint = CCHubPairingStore.fingerprint(closed.originalRequest?.url.flatMap(Self.token(in:)))
+        toMain { self.onAuthRejected?(fingerprint) }
+    }
+
     private func scheduleReconnect() {
         checkTransport()
         reconnectTimer?.invalidate()
-        let delay = isForeground ? min(reconnectDelay, Self.foregroundMaxReconnectDelay) : reconnectDelay
+        let delay = authRejectDelay > 0 ? authRejectDelay : isForeground ? min(reconnectDelay, Self.foregroundMaxReconnectDelay) : reconnectDelay
         reconnectDelay = min(reconnectDelay * 2, 30)
         episode?.waitMs += delay * 1000
-        BridgeProbe.log("reconnect in \(String(format: "%.2f", delay))s")
+        probeLog("reconnect in \(String(format: "%.2f", delay))s")
         // 候选选择交给 startTask 的竞速探测，这里只管退避节奏
         reconnectTimer = makeTimer(delay, repeats: false, commonModes: false) { [weak self] in
             self?.startTask()
@@ -2904,7 +3579,7 @@ extension CCBridgeWebSocketClient: URLSessionWebSocketDelegate {
     /// 中继配了自签证书 pin 时只认 pin（和竞速探测同一套，CCRelayPin）；其余地址照常走系统校验
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        let (disposition, credential) = CCRelayPin.evaluate(challenge)
+        let (disposition, credential) = CCRelayPin.evaluate(challenge, defaults: defaults)
         completionHandler(disposition, credential)
     }
 
@@ -2934,7 +3609,7 @@ extension CCBridgeWebSocketClient: URLSessionWebSocketDelegate {
             self.lastError = nil
             self.probeConnectedAt = Date()
             self.probeReplyCount = 0
-            BridgeProbe.log("open host=\(webSocketTask.originalRequest?.url?.host ?? "?")")
+            probeLog("open host=\(webSocketTask.originalRequest?.url?.host ?? "?")")
             self.lastOpenAt = Date()
             self.reconnectDelay = Self.minReconnectDelay  // 连接成功后重置退避计数
             self.startPingTimer()
@@ -2947,10 +3622,11 @@ extension CCBridgeWebSocketClient: URLSessionWebSocketDelegate {
             self.sendTerminalActive()
             // 自报平台：hub 据此把本地推特命令固定发手机（数据在手机上）
             #if os(iOS)
-            self.send(["type": "client_info", "platform": "ios"]) { _ in }
+            self.send(["type": "client_info", "platform": "ios"], on: webSocketTask, handshake: true) { _ in }
             #else
-            self.send(["type": "client_info", "platform": "macos"]) { _ in }
+            self.send(["type": "client_info", "platform": "macos"], on: webSocketTask, handshake: true) { _ in }
             #endif
+            self.armHelloTimeout(for: webSocketTask)
             self.episode?.ruler?.noteClientInfo(at: ConnectRuler.stamp())   // 尺子终点：send 同步调完 task.send 即交给了当前 task
             self.noteMainDelay(since: callbackAt)
             self.finishEpisode(host: webSocketTask.originalRequest?.url?.host, on: webSocketTask)
@@ -2958,21 +3634,40 @@ extension CCBridgeWebSocketClient: URLSessionWebSocketDelegate {
             if let t = self.pushToken {
                 self.send(self.pushTokenFrame(t, preview: self.pushPreview)) { _ in }
             }
-            #if os(iOS)
-            // LA token 同理：断线期间的注册攒在 UserDefaults，连上一次性全报。
-            Task { @MainActor in CCLiveActivityManager.shared.reportAll(); NativeCallCoordinator.shared.reportRegistration() }
-            #endif
+            self.runPrimaryOnlyLiveActivityHooks()
             // 重连后重报当前 focus（hub 重启/断线会丢 focus 表）。重置去重缓存强制发一次。
             self.lastSentFocus = nil
             self.sendEffectiveFocus()
-            // 重连后重发 CC 设置（hub 不持久化 config，靠 app 重发）
+            // 重连后发 CC 设置：名字照发，nudge 等按手改时间由 hub 合并后回推 cc_config
             self.sendCCConfig()
-            // CC 小克 memory 同步：每次连上拉一次清单（开关关着时空操作）
-            CCMemorySync.connected()
-            #if os(macOS)
-            self.sendBindConfig()   // 绑定开关只本机 Mac 同步给 hub（hub bind-config 持久，这里对齐）
-            #endif
+            self.runPrimaryOnlySyncHooks()
         }
+    }
+
+    /// 连上后只主 hub 做的接线（plan-multi-hub B2）：LA / 通话注册内部固定走 .shared，附加 hub 每连一次主 hub 就白收一遍。
+    /// 拆两段保持原来的先后：这一段在 focus / sendCCConfig 之前
+    private func runPrimaryOnlyLiveActivityHooks() {
+        guard isPrimary else { return }
+        #if DEBUG
+        primaryOnlyOpenHooksForTesting += 1
+        #endif
+        #if os(iOS)
+        // LA token 同理：断线期间的注册攒在 UserDefaults，连上一次性全报。
+        Task { @MainActor in CCLiveActivityManager.shared.reportAll(); NativeCallCoordinator.shared.reportRegistration() }
+        #endif
+    }
+
+    /// 只主 hub：CC 记忆同步（附加 hub 连一次会打断主 hub 的 6h 节奏）、Mac 绑定开关（发给附加 hub 会改那台持久化的 bind-config）
+    private func runPrimaryOnlySyncHooks() {
+        guard isPrimary else { return }
+        #if DEBUG
+        primaryOnlyOpenHooksForTesting += 1
+        #endif
+        // CC 小克 memory 同步：每次连上拉一次清单（开关关着时空操作）
+        CCMemorySync.connected()
+        #if os(macOS)
+        sendBindConfig()   // 绑定开关只本机 Mac 同步给 hub（hub bind-config 持久，这里对齐）
+        #endif
     }
 
     /// A1：didOpen 在 transport 上处理——WS 状态、补订阅、terminal_active、client_info 都在这里做完（内容和顺序同原主线程 block），
@@ -2989,7 +3684,7 @@ extension CCBridgeWebSocketClient: URLSessionWebSocketDelegate {
         lastOpenedTask = webSocketTask
         probeConnectedAt = Date()
         probeReplyCount = 0
-        BridgeProbe.log("open host=\(webSocketTask.originalRequest?.url?.host ?? "?")")
+        probeLog("open host=\(webSocketTask.originalRequest?.url?.host ?? "?")")
         reconnectDelay = Self.minReconnectDelay  // 连接成功后重置退避计数
         startPingTimer()
         // L4 根因1 / T06：断线重连、首连都补订阅没交给这个 task 的终端（见原路径注释）
@@ -3000,10 +3695,11 @@ extension CCBridgeWebSocketClient: URLSessionWebSocketDelegate {
         lastSentFocus = nil
         sendEffectiveFocus()
         #if os(iOS)
-        send(["type": "client_info", "platform": "ios"], on: webSocketTask) { _ in }
+        send(["type": "client_info", "platform": "ios"], on: webSocketTask, handshake: true) { _ in }
         #else
-        send(["type": "client_info", "platform": "macos"], on: webSocketTask) { _ in }
+        send(["type": "client_info", "platform": "macos"], on: webSocketTask, handshake: true) { _ in }
         #endif
+        armHelloTimeout(for: webSocketTask)
         episode?.ruler?.noteClientInfo(at: ConnectRuler.stamp())   // 尺子终点：交给当前 task
         noteMainDelay(since: callbackAt)
         let snapshot = OpenedSnapshot(task: webSocketTask, openedAt: Date(),
@@ -3013,7 +3709,7 @@ extension CCBridgeWebSocketClient: URLSessionWebSocketDelegate {
         let early = preOpenFrames
         preOpenFrames = []
         preOpenBytes = 0
-        if !early.isEmpty { BridgeProbe.log("open: \(early.count) frame(s) arrived before didOpen, released after snapshot") }
+        if !early.isEmpty { probeLog("open: \(early.count) frame(s) arrived before didOpen, released after snapshot") }
         for text in early { enqueueParse(text, from: webSocketTask) }
     }
 
@@ -3036,18 +3732,11 @@ extension CCBridgeWebSocketClient: URLSessionWebSocketDelegate {
         if let t = pushToken {
             send(pushTokenFrame(t, preview: pushPreview)) { _ in }
         }
-        #if os(iOS)
-        // LA token 同理：断线期间的注册攒在 UserDefaults，连上一次性全报。
-        Task { @MainActor in CCLiveActivityManager.shared.reportAll(); NativeCallCoordinator.shared.reportRegistration() }
-        #endif
+        runPrimaryOnlyLiveActivityHooks()
         // focus 已在 transport 的 didOpen 里、client_info 之前重报（A1 R1 #8）
-        // 重连后重发 CC 设置（hub 不持久化 config，靠 app 重发）
+        // 重连后发 CC 设置：名字照发，nudge 等按手改时间由 hub 合并后回推 cc_config
         sendCCConfig()
-        // CC 小克 memory 同步：每次连上拉一次清单（开关关着时空操作）
-        CCMemorySync.connected()
-        #if os(macOS)
-        sendBindConfig()   // 绑定开关只本机 Mac 同步给 hub（hub bind-config 持久，这里对齐）
-        #endif
+        runPrimaryOnlySyncHooks()
     }
 
     /// 主线程：摘下这一段的忙段窗口；更早的段（被换掉、不会再报）一并摘掉
@@ -3077,7 +3766,9 @@ extension CCBridgeWebSocketClient: URLSessionWebSocketDelegate {
         // A1：transport 队列上的 DispatchSourceTimer，不受 RunLoop mode 影响
         pingTimer = makeTimer(5.0, repeats: true, commonModes: true) { [weak self] in
             guard let task = self?.task, task.state == .running else { return }
-            task.sendPing { err in if let err { BridgeProbe.log("ping fail \(err.localizedDescription)") } }   // 断开仍由 receive 路径处理
+            task.sendPing { err in
+                if let err { self?.probeLog("ping fail \(err.localizedDescription)") } else { self?.lastAliveBox.withLock { $0 = Date() } }
+            }   // 断开仍由 receive 路径处理
         }
     }
 
@@ -3088,8 +3779,11 @@ extension CCBridgeWebSocketClient: URLSessionWebSocketDelegate {
         // startTask() 里 invalidateAndCancel 老 session 会异步触发老 task 的 didClose，
         // 那次 close 是我们主动 cancel 的预期结果，不该再起一轮 ghost reconnect。
         // 只对当前 self.task 的真实关闭做 disconnect 处理。
-        guard webSocketTask === self.task else { return }
         let r = reason.flatMap { String(data: $0, encoding: .utf8) }
+        guard webSocketTask === self.task else {
+            onTransport { [weak self] in self?.noteLateAuthRejection(webSocketTask, error: r) }
+            return
+        }
         handleDisconnect(error: r ?? "closed (\(closeCode.rawValue))", from: webSocketTask)
     }
 }

@@ -447,6 +447,12 @@ html[data-mode="site"] .platform-switch{display:flex}
 <td>关掉后请求不带工具，system 不提工具</td>
 </tr>
 <tr>
+<td>后台任务用流式</td>
+<td>卡详情（非 OAuth / CC Bridge 卡）</td>
+<td>开</td>
+<td>记忆整理、窗口总结、心声这些后台任务边生成边接收，不会因为网络掐断长时间没动静的连接而失败；服务商对流式审查更严的话可以关</td>
+</tr>
+<tr>
 <td>🌞 主对话</td>
 <td>全部模型页</td>
 <td>—</td>
@@ -557,7 +563,7 @@ html[data-mode="site"] .platform-switch{display:flex}
 <p><strong>黑名单</strong></p>
 <p>不想让<span data-var="char">AI</span>读取的网站，加进黑名单。点「黑名单（AI 不读）」：</p>
 <ul>
-<li>点「导入推荐黑名单」，一次加入 9 个支付、银行、邮箱相关域名。</li>
+<li>点「导入推荐黑名单」，一次加入 17 个支付、银行、邮箱、苹果账号、密码管理和 AI 网站（claude.ai、chatgpt.com 等）的域名。</li>
 <li>点「添加域名」手动添加。</li>
 </ul>
 <p>黑名单按后缀匹配。加了 <code>example.com</code>，<code>sub.example.com</code> 也会被屏蔽。</p>
@@ -605,7 +611,7 @@ html[data-mode="site"] .platform-switch{display:flex}
 <td>黑名单（AI 不读）</td>
 <td>联网搜索 › 黑名单</td>
 <td>空</td>
-<td>后缀匹配，子域名一并屏蔽；可导入推荐黑名单（9 个域名）</td>
+<td>后缀匹配，子域名一并屏蔽；可导入推荐黑名单（17 个域名）</td>
 </tr>
 </tbody></table>
 <h2 id="web-search--边界与限制">边界与限制</h2>
@@ -1182,27 +1188,28 @@ html[data-mode="site"] .platform-switch{display:flex}
 <p>Page 2 主屏是 App 内的桌面。图标和小组件按页、行、列排列，可以留空位、混排。从主屏打开的应用全屏显示，切回来保持离开时的样子。</p>
 <h2 id="home-screen--怎么用">怎么用</h2>
 <h3>自由摆放</h3>
-<p>长按图标或小组件先显示菜单，继续按住或开始拖动后进入编辑。拖动时其他图标沿行序让位，遇到空格即停。松手后保存一次布局。你可以刻意留出空白，位置会保存。</p>
-<p>每次布局保存为独立文件。写入失败时保留上次布局。也可撤销最近一次变更。</p>
+<p>长按图标或小组件直接进入编辑并拖动。单格图标拖动时，其他项沿行序让位，到空格即停。松手后保存一次布局。你可以刻意留出空白，位置会保存。</p>
+<p>每次布局保存为独立文件。写入失败时保留上次布局，也可撤销最近一次变更。</p>
 <p>编辑态下轻点项目，可配置组件尺寸、更换图标、「钉到 Dock」或「从主屏移除」。</p>
 <h3>小组件与文件夹</h3>
-<p>组件库提供已启用工具的组件，以及宠物、待办、花园、通讯录等。组件预览是示例数据，不启动业务。旧六组件的完整内容入口保留；新增工具摘要读取现有数据，不在主屏执行命令或审批。</p>
-<p>把图标拖到另一个图标中心稍作停留，会显示文件夹并展开预览；松手保存。编辑态下可展开文件夹并改名，内部应用可重新排列，拖到面板外才会移出。Dock 也支持创建文件夹和拖入、拖出应用。</p>
-<p>拖动小组件右下角手柄可改变尺寸，周围项目会让位。同尺寸组件可叠放；悬停显示预览，移开取消，松手保存。上下滑动切换内容，从菜单打开「编辑叠放」可添加、排序和移除成员。</p>
+<p>组件库提供已启用工具的组件。还有宠物、待办、花园、通讯录等。组件预览是示例数据，不启动业务。旧六组件的完整内容入口保留。新增工具摘要读取现有数据，不在主屏执行命令或审批。</p>
+<p>把图标拖到另一个图标上方稳定悬停，会展开文件夹预览。松手保存。编辑态下可展开文件夹并改名。</p>
 <h3>搜索与资源库</h3>
-<p>点「搜索」或在主屏向下拉，打开键盘上方的搜索框；点空白处回到原页。末页继续向左滑进入资源库，按分类浏览；聚焦搜索栏会显示工具列表。</p>
+<p>点「搜索」或在主屏向下拉，打开搜索覆盖层。末页继续向左滑进入资源库，按分类浏览。聚焦搜索栏会显示工具列表。进入资源库时 Dock 和页码指示器随最后一页移出，返回时复位。</p>
 <h3>全屏应用与后台</h3>
-<p>从主屏打开的应用全屏显示。最近打开的最多保留 4 个；打开第 5 个时移出最久没用的那个。</p>
-<p>应用底部有「返回」「全部应用」「回桌面」三个按钮。「返回」先退应用里的一层（浏览器网页、读书阅读器），再回上一个打开的应用，都没有时变灰。</p>
-<p>左上角有一段沿屏幕圆角的细线，点它下方回桌面；深色模式下变白。</p>
-<p>点「全部应用」或在底部按钮上往上划，进入后台。卡片是离开各应用时的画面，可逐个关闭；左下「+」可打开资源库。</p>
+<p>从主屏打开的应用全屏显示，最多保留 4 个。打开第 5 个时移出最久没用的那个。浏览器、阅读器的内部返回入口保留。</p>
+<p>左上角有一段沿屏幕圆角的弧线。向内小划进入后台，大划或长按回主屏。短拖未过阈值会回弹。</p>
+<p>后台以模糊主屏为背景。一个应用显示居中大卡，两个及以上显示双列小卡。点卡片展开，卡内右上圆形 × 或上划关闭。点空白回主屏。</p>
 <p>读书时离开再回来仍停在原处。应用被系统结束后重新打开，会回到离开时的应用和那本书。</p>
 <h3>换壁纸和图标</h3>
-<p>编辑主屏后打开自定面板，可选默认、深色、透明或着色外观，以及明暗和大图标。壁纸通过独立编辑页选图。</p>
-<p>想改一个应用的图标，进入编辑后轻点它，选择换符号或本地图片。图标覆盖值在主屏和 Dock 共用。</p>
-<h3>旧桌面与数据</h3>
-<p>第一次使用从经典或针脚桌面迁移旧配置。</p>
-<p>「从主屏移除」只移除入口，不删除工具数据。工具被关闭或在 Lite 隐藏时，原来的位置仍会保留。</p>
+<p>编辑主屏后打开自定面板。可选默认、深色、透明或着色外观，以及明暗和大图标。壁纸通过独立编辑页选图。</p>
+<p>想改一个应用的图标，进入编辑后轻点它。选择换符号或本地图片。图标覆盖值在主屏和 Dock 共用。</p>
+<h3>按人装卸 App</h3>
+<p>每个人主屏上装哪些 App 可以单独设定。打开人页 › 权限 ›「TA 主屏上的 App」，逐个开关。没单独改过的显示「跟随默认」。底部可一键全部恢复跟随默认。</p>
+<p>设置 › 右栏的工具开关是所有人的默认配置。有人单独改过的 App 显示「N 个人单独改了」。点开可查看是谁，也可一键恢复。</p>
+<p>没装的 App 会关掉对应的 AI 能力。涉及五个 App：文件库、推特、健康、交易、话题盒。装着的按权限档位走。权限表里被挡住的项显示「不允许 · 主屏上没装 X」。把这个 App 装回主屏即可解除。</p>
+<h3>旧桌面与保留</h3>
+<p>第一次使用从经典或针脚桌面迁移旧配置。工具被关闭或在 Lite 隐藏时，原来的位置仍会保留。</p>
 <h2 id="home-screen--全部选项">全部选项</h2>
 <table>
 <thead>
@@ -1243,21 +1250,41 @@ html[data-mode="site"] .platform-switch{display:flex}
 <td>—</td>
 <td>换符号或本地图片，主屏与 Dock 共用</td>
 </tr>
+<tr>
+<td>按人装卸</td>
+<td>人页 › 权限 ›「TA 主屏上的 App」</td>
+<td>跟随默认</td>
+<td>逐个开关，底部一键恢复</td>
+</tr>
+<tr>
+<td>默认工具开关</td>
+<td>设置 › 右栏</td>
+<td>—</td>
+<td>没单独改过的人都用这一套</td>
+</tr>
 </tbody></table>
 <h2 id="home-screen--边界与限制">边界与限制</h2>
 <ul>
 <li>这是 App 内的主屏，不是 iOS 系统桌面，也不是 WidgetKit 扩展。</li>
 <li>全屏应用只用于 iPhone 和 iPad 竖屏；iPad 横屏面板和 Mac 不变。</li>
 <li>组件内容遵守现有数据范围；待办和宠物使用原有全局服务，楼层数据按当前楼层读取。</li>
-<li>Dock 超量项目仍可横向滚动访问。</li>
+<li>Dock 超量项目仍可横向访问。</li>
+<li>按人装卸只在 iPhone / iPad 的人页可操作。Mac 只能在设置 › 右栏改默认。</li>
+<li>主屏摆法目前所有人共用一份。</li>
+<li>只有文件库、推特、健康、交易、话题盒连着 AI 权限。浏览器、日历、书房、单词等装不装不影响<span data-var="char">AI</span>的联网搜索、日历、读书等能力。</li>
 </ul>
+<h2 id="home-screen--常见问题">常见问题</h2>
+<p><strong>主屏的摆法每个人不一样吗？</strong>
+目前所有人共用一份摆法。按人装卸只控制哪些 App 出现，不控制位置。</p>
+<p><strong>关掉一个 App 后<span data-var="char">AI</span>还能用对应能力吗？</strong>
+只有文件库、推特、健康、交易、话题盒连着 AI 权限。浏览器、日历、书房、单词等装不装不影响。</p>
 
 <div class="pager"><span><a href="#import-undo">← 导入历史与撤回</a></span><span></span></div>
 </section>
 
 </main>
 </div>
-<script id="idx" type="application/json">[{"name":"connect-model","title":"接一个模型","description":"从加一张 API 卡、填 key、拉模型、收藏，到在聊天里选中它，一步步做完。用户问「怎么接 API、怎么填 key、为什么聊天里选不到模型」时看。","area":"开始","tier":"free","platforms":["macos","ios"],"keywords":["API","key","模型","provider","收藏","接入"],"anchors":[{"id":"connect-model--准备","title":"准备"},{"id":"connect-model--步骤","title":"步骤"},{"id":"connect-model--下一步","title":"下一步"}]},{"name":"first-import","title":"导入你的聊天记录","description":"把 ChatGPT 或 Claude 的导出包（zip、文件夹或 json） 导进记忆花园，从选包到看到结果一步步做完。用户问「怎么导入、怎么迁移聊天记录、导出包怎么用」时看。","area":"开始","tier":"free","platforms":["macos","ios"],"keywords":["导入","ChatGPT","Claude","zip","迁移","导出包"],"anchors":[{"id":"first-import--准备","title":"准备"},{"id":"first-import--步骤","title":"步骤"},{"id":"first-import--下一步","title":"下一步"}]},{"name":"main-chat","title":"主对话阅读","description":"切换消息版本、查看工具步骤和想起的记忆，以及选择行内展开或弹出面板。","area":"聊天","tier":"free","platforms":["ios","macos"],"keywords":["聊天","消息","分页","分支","工具调用","想起来了","记忆","加密卡","报错"],"anchors":[{"id":"main-chat--切换消息版本","title":"切换消息版本"},{"id":"main-chat--查看工具步骤","title":"查看工具步骤"},{"id":"main-chat--查看想起的记忆","title":"查看想起的记忆"},{"id":"main-chat--选择展开方式","title":"选择展开方式"},{"id":"main-chat--填写加密卡","title":"填写加密卡"},{"id":"main-chat--回应一条消息","title":"回应一条消息"},{"id":"main-chat--报错与系统通知","title":"报错与系统通知"}]},{"name":"model","title":"模型与 API 卡","description":"API 卡是什么、内置的提供商、自定义地址、key 存在哪、模型列表怎么来、🌞🌛☆ 三个角色、聊天里怎么切模型，以及 key 没填或填错时看到什么。","area":"模型与联网","tier":"free","platforms":["macos","ios"],"keywords":["API","key","Keychain","模型列表","刷新模型","收藏","主对话","副记忆","自定义","OpenAI 兼容","ChatGPT 登录"],"anchors":[{"id":"model--这是什么","title":"这是什么"},{"id":"model--怎么进","title":"怎么进"},{"id":"model--提供商与协议","title":"提供商与协议"},{"id":"model--key-存在哪","title":"Key 存在哪"},{"id":"model--模型列表怎么来","title":"模型列表怎么来"},{"id":"model--三个角色","title":"🌞🌛☆ 三个角色"},{"id":"model--聊天里切模型","title":"聊天里切模型"},{"id":"model--全部选项","title":"全部选项"},{"id":"model--删卡","title":"删卡"},{"id":"model--边界与限制","title":"边界与限制"},{"id":"model--相关页面","title":"相关页面"}]},{"name":"web-search","title":"联网搜索","description":"让 AI 上网查资料：三档权限、搜索服务怎么配、结果数和超时、网页登录态、AI 不读的黑名单。","area":"模型与联网","tier":"free","platforms":["macos","ios"],"keywords":["联网","搜索","搜索服务","黑名单","登录态","Bing","DuckDuckGo","Tavily"],"anchors":[{"id":"web-search--这是什么","title":"这是什么"},{"id":"web-search--怎么用","title":"怎么用"},{"id":"web-search--全部选项","title":"全部选项"},{"id":"web-search--边界与限制","title":"边界与限制"},{"id":"web-search--常见问题","title":"常见问题"},{"id":"web-search--相关页面","title":"相关页面"}]},{"name":"budget","title":"预算","description":"全局花费总闸：默认多少、怎么改、用完了会看到什么、怎么重置。","area":"模型与联网","tier":"free","platforms":["macos","ios"],"keywords":["预算","花费","USD","重置已用","限额"],"anchors":[{"id":"budget--这是什么","title":"这是什么"},{"id":"budget--怎么用","title":"怎么用"},{"id":"budget--全部选项","title":"全部选项"},{"id":"budget--边界与限制","title":"边界与限制"},{"id":"budget--相关页面","title":"相关页面"}]},{"name":"import","title":"导入","description":"导入功能全览：认得哪些导出包、每类内容去哪（对话、文件夹、记忆、文件库）、两个开关是什么意思、同一对话只属于一个楼层的规则、每一种结果说明、出错时看到什么。","area":"数据","tier":"free","platforms":["macos","ios"],"keywords":["导入","叠加导入","复制副本","楼层","跳过","保持本地"],"anchors":[{"id":"import--这是什么","title":"这是什么"},{"id":"import--怎么用","title":"怎么用"},{"id":"import--全部选项","title":"全部选项"},{"id":"import--边界与限制","title":"边界与限制"},{"id":"import--常见问题","title":"常见问题"},{"id":"import--相关页面","title":"相关页面"}]},{"name":"import-undo","title":"导入历史与撤回","description":"每次导入都留一条记录，能整次撤回（连这次建的记忆和文件夹）；撤回会删掉什么、什么情况不能撤回；「清空本楼层 Claude 导入数据」的范围和不可撤销。","area":"数据","tier":"pro","platforms":["macos","ios"],"keywords":["撤回","导入历史","清空","Claude 数据","不可撤销"],"anchors":[{"id":"import-undo--这是什么","title":"这是什么"},{"id":"import-undo--怎么用","title":"怎么用"},{"id":"import-undo--全部选项","title":"全部选项"},{"id":"import-undo--边界与限制","title":"边界与限制"},{"id":"import-undo--常见问题","title":"常见问题"},{"id":"import-undo--相关页面","title":"相关页面"}]},{"name":"home-screen","title":"手机主屏","description":"在 Page 2 自由摆放图标和小组件、更换壁纸与图标，以及保留旧桌面的配置。","area":"模块","tier":"free","platforms":["ios"],"keywords":["主屏","桌面","图标","小组件","壁纸","自由摆放","Dock"],"anchors":[{"id":"home-screen--这是什么","title":"这是什么"},{"id":"home-screen--怎么用","title":"怎么用"},{"id":"home-screen--全部选项","title":"全部选项"},{"id":"home-screen--边界与限制","title":"边界与限制"}]}]</script>
+<script id="idx" type="application/json">[{"name":"connect-model","title":"接一个模型","description":"从加一张 API 卡、填 key、拉模型、收藏，到在聊天里选中它，一步步做完。用户问「怎么接 API、怎么填 key、为什么聊天里选不到模型」时看。","area":"开始","tier":"free","platforms":["macos","ios"],"keywords":["API","key","模型","provider","收藏","接入"],"anchors":[{"id":"connect-model--准备","title":"准备"},{"id":"connect-model--步骤","title":"步骤"},{"id":"connect-model--下一步","title":"下一步"}]},{"name":"first-import","title":"导入你的聊天记录","description":"把 ChatGPT 或 Claude 的导出包（zip、文件夹或 json） 导进记忆花园，从选包到看到结果一步步做完。用户问「怎么导入、怎么迁移聊天记录、导出包怎么用」时看。","area":"开始","tier":"free","platforms":["macos","ios"],"keywords":["导入","ChatGPT","Claude","zip","迁移","导出包"],"anchors":[{"id":"first-import--准备","title":"准备"},{"id":"first-import--步骤","title":"步骤"},{"id":"first-import--下一步","title":"下一步"}]},{"name":"main-chat","title":"主对话阅读","description":"切换消息版本、查看工具步骤和想起的记忆，以及选择行内展开或弹出面板。","area":"聊天","tier":"free","platforms":["ios","macos"],"keywords":["聊天","消息","分页","分支","工具调用","想起来了","记忆","加密卡","报错"],"anchors":[{"id":"main-chat--切换消息版本","title":"切换消息版本"},{"id":"main-chat--查看工具步骤","title":"查看工具步骤"},{"id":"main-chat--查看想起的记忆","title":"查看想起的记忆"},{"id":"main-chat--选择展开方式","title":"选择展开方式"},{"id":"main-chat--填写加密卡","title":"填写加密卡"},{"id":"main-chat--回应一条消息","title":"回应一条消息"},{"id":"main-chat--报错与系统通知","title":"报错与系统通知"}]},{"name":"model","title":"模型与 API 卡","description":"API 卡是什么、内置的提供商、自定义地址、key 存在哪、模型列表怎么来、🌞🌛☆ 三个角色、聊天里怎么切模型，以及 key 没填或填错时看到什么。","area":"模型与联网","tier":"free","platforms":["macos","ios"],"keywords":["API","key","Keychain","模型列表","刷新模型","收藏","主对话","副记忆","自定义","OpenAI 兼容","ChatGPT 登录"],"anchors":[{"id":"model--这是什么","title":"这是什么"},{"id":"model--怎么进","title":"怎么进"},{"id":"model--提供商与协议","title":"提供商与协议"},{"id":"model--key-存在哪","title":"Key 存在哪"},{"id":"model--模型列表怎么来","title":"模型列表怎么来"},{"id":"model--三个角色","title":"🌞🌛☆ 三个角色"},{"id":"model--聊天里切模型","title":"聊天里切模型"},{"id":"model--全部选项","title":"全部选项"},{"id":"model--删卡","title":"删卡"},{"id":"model--边界与限制","title":"边界与限制"},{"id":"model--相关页面","title":"相关页面"}]},{"name":"web-search","title":"联网搜索","description":"让 AI 上网查资料：三档权限、搜索服务怎么配、结果数和超时、网页登录态、AI 不读的黑名单。","area":"模型与联网","tier":"free","platforms":["macos","ios"],"keywords":["联网","搜索","搜索服务","黑名单","登录态","Bing","DuckDuckGo","Tavily"],"anchors":[{"id":"web-search--这是什么","title":"这是什么"},{"id":"web-search--怎么用","title":"怎么用"},{"id":"web-search--全部选项","title":"全部选项"},{"id":"web-search--边界与限制","title":"边界与限制"},{"id":"web-search--常见问题","title":"常见问题"},{"id":"web-search--相关页面","title":"相关页面"}]},{"name":"budget","title":"预算","description":"全局花费总闸：默认多少、怎么改、用完了会看到什么、怎么重置。","area":"模型与联网","tier":"free","platforms":["macos","ios"],"keywords":["预算","花费","USD","重置已用","限额"],"anchors":[{"id":"budget--这是什么","title":"这是什么"},{"id":"budget--怎么用","title":"怎么用"},{"id":"budget--全部选项","title":"全部选项"},{"id":"budget--边界与限制","title":"边界与限制"},{"id":"budget--相关页面","title":"相关页面"}]},{"name":"import","title":"导入","description":"导入功能全览：认得哪些导出包、每类内容去哪（对话、文件夹、记忆、文件库）、两个开关是什么意思、同一对话只属于一个楼层的规则、每一种结果说明、出错时看到什么。","area":"数据","tier":"free","platforms":["macos","ios"],"keywords":["导入","叠加导入","复制副本","楼层","跳过","保持本地"],"anchors":[{"id":"import--这是什么","title":"这是什么"},{"id":"import--怎么用","title":"怎么用"},{"id":"import--全部选项","title":"全部选项"},{"id":"import--边界与限制","title":"边界与限制"},{"id":"import--常见问题","title":"常见问题"},{"id":"import--相关页面","title":"相关页面"}]},{"name":"import-undo","title":"导入历史与撤回","description":"每次导入都留一条记录，能整次撤回（连这次建的记忆和文件夹）；撤回会删掉什么、什么情况不能撤回；「清空本楼层 Claude 导入数据」的范围和不可撤销。","area":"数据","tier":"pro","platforms":["macos","ios"],"keywords":["撤回","导入历史","清空","Claude 数据","不可撤销"],"anchors":[{"id":"import-undo--这是什么","title":"这是什么"},{"id":"import-undo--怎么用","title":"怎么用"},{"id":"import-undo--全部选项","title":"全部选项"},{"id":"import-undo--边界与限制","title":"边界与限制"},{"id":"import-undo--常见问题","title":"常见问题"},{"id":"import-undo--相关页面","title":"相关页面"}]},{"name":"home-screen","title":"手机主屏","description":"在 Page 2 自由摆放图标和小组件、更换壁纸与图标，以及保留旧桌面的配置。","area":"模块","tier":"free","platforms":["ios"],"keywords":["主屏","桌面","图标","小组件","壁纸","自由摆放","Dock"],"anchors":[{"id":"home-screen--这是什么","title":"这是什么"},{"id":"home-screen--怎么用","title":"怎么用"},{"id":"home-screen--全部选项","title":"全部选项"},{"id":"home-screen--边界与限制","title":"边界与限制"},{"id":"home-screen--常见问题","title":"常见问题"}]}]</script>
 <script>
 (function(){
   var idx = JSON.parse(document.getElementById('idx').textContent || '[]');

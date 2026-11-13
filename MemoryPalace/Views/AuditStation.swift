@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -7,9 +8,9 @@ import SwiftData
 
 enum AuditStationID: String, CaseIterable, Hashable, Identifiable {
     case desk     // 整理台：卡片审碎片（人整理）
-    case wiki     // wiki：翻页 + 整理提案
+    case wiki     // wiki：整理提案（翻页 10-24 挪去底栏 wiki 格）
     case trial    // 试写台：测提示词和管线（第 ③ 段点亮）
-    case recall   // 召回测试台：以后做
+    case recall   // 召回测试台：离线回放与出题
 
     var id: String { rawValue }
 }
@@ -56,7 +57,7 @@ struct AuditStation: Identifiable {
                              return deskPulse(unreviewed: MemoryAudit.counts(all, filter: MemoryAudit.Filter())[.unreviewed] ?? 0)
                          }),
             AuditStation(id: .wiki, name: "wiki", icon: "book.closed", surface: .assistantBubble,
-                         note: "整理好的档案和整理提案", isOpen: true, placeholder: "",
+                         note: "整理提案：批了才写进 wiki", isOpen: true, placeholder: "",
                          pulse: { ctx in
                              let pid = ctx.profileId
                              let (tally, pages) = await Task.detached(priority: .utility) {
@@ -70,8 +71,13 @@ struct AuditStation: Identifiable {
                          note: "测提示词和管线准不准", isOpen: false, placeholder: "还在搭",
                          pulse: nil),
             AuditStation(id: .recall, name: "召回测试台", icon: "scope", surface: .outlined,
-                         note: "测召回准不准、注入位置", isOpen: false, placeholder: "以后做",
-                         pulse: nil),
+                         note: "测召回准不准、注入位置", isOpen: true, placeholder: "",
+                         pulse: { ctx in
+                             let pid = ctx.profileId
+                             return await Task.detached(priority: .utility) {
+                                 recallPulse(store: .forMemoryRoot(FileLibraryStore.memoryRoot(profileId: pid)))
+                             }.value
+                         }),
         ]
     }
 
@@ -88,14 +94,11 @@ struct AuditStation: Identifiable {
         return AuditStationPulse(figure: nil, label: pages > 0 ? "\(pages) 页 · 没有待批" : "还没有页")
     }
 
-    /// wiki 台「整理提案」那一段的段名，同一套分开数
-    static func proposalsSegmentTitle(pending: Int, unread: Int) -> String {
-        switch (pending > 0, unread > 0) {
-        case (true, true): return "整理提案 \(pending) · 待阅 \(unread)"
-        case (true, false): return "整理提案 \(pending)"
-        case (false, true): return "整理提案 · 待阅 \(unread)"
-        case (false, false): return "整理提案"
+    static func recallPulse(store: MemoryBenchStore) -> AuditStationPulse {
+        guard let run = store.runs(writer: "recall").first(where: { $0.status == .done }) else {
+            return AuditStationPulse(figure: nil, label: "还没跑")
         }
+        return AuditStationPulse(figure: run.scores.first?.main.map { String(format: "%.2f", $0) } ?? "—", label: "最近一次")
     }
 
     static func proposalTally(_ proposals: [WikiProposal]) -> (pending: Int, unread: Int) {
@@ -158,8 +161,13 @@ struct AuditStationPage: View {
         case .desk:
             MemoryAuditPage(viewState: viewState)
         case .wiki:
-            MemoryWikiPage(viewState: viewState, viewModel: viewModel)
-        case .trial, .recall:
+            // 进去直接是整理提案（粟粟 10-24）；翻页在底栏 wiki 格
+            WikiProposalsView(viewModel: viewModel)
+                .toolPageBackground()
+                .tint(Theme.branchIndicator)
+        case .recall:
+            MemoryRecallBenchPage()
+        case .trial:
             // 灰着点不进来；防万一推进来了也不空白
             MemoryEmptyState(title: "还没开放", message: "以后在这里")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

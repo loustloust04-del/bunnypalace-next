@@ -43,6 +43,22 @@ final class DeathScaleAIToolTests: XCTestCase {
         XCTAssertTrue(disabled.isError)
     }
 
+    /// atrium P3⑥0：开关按层读（层恒空时 = 原来读 `rightPanelTools` 存档）
+    func testGateReadsInstalledPerFloor() {
+        let sandbox = Page2AppsSandbox()
+        defer { sandbox.leave() }
+        let store = DeathScaleStore(root: root)
+        store.grantRead("p1")
+        store.grantRead("p2")
+        XCTAssertFalse(DeathScaleAITool.isAvailable(profileId: "p2", store: store), "默认关（内置表）= 授权了也没有")
+        sandbox.storeDefaults([DeathScaleGate.toolId: true])
+        Page2Apps.setFloor(false, for: DeathScaleGate.toolId, profileId: "p1")
+        XCTAssertFalse(DeathScaleAITool.isAvailable(profileId: "p1", store: store), "A 层卸了 → 不可用")
+        XCTAssertTrue(DeathScaleAITool.isAvailable(profileId: "p2", store: store), "B 层授权且默认开 → 可用")
+        XCTAssertTrue(DeathScaleAITool.execute(inputJSON: #"{"section":"carnet"}"#, profileId: "p1", store: store).isError, "执行时按层再判")
+        XCTAssertFalse(DeathScaleAITool.execute(inputJSON: #"{"section":"carnet"}"#, profileId: "p2", store: store).isError)
+    }
+
     func testReadsAllSectionsInShanghaiTime() throws {
         let saved = NSTimeZone.default
         defer { NSTimeZone.default = saved }

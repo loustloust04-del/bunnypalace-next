@@ -1,9 +1,4 @@
 import SwiftUI
-#if os(macOS)
-import AppKit
-#else
-import UIKit
-#endif
 
 /// Anthropic server-side web search 收集到的 sources，气泡底部横排 chip。
 /// 点击 chip 打开真实 URL；超过 maxVisible 条折叠成「+N 更多」。
@@ -80,10 +75,6 @@ struct WebSearchSourcesChipRow: View {
 
     private func openURL(_ s: String) {
         guard let url = URL(string: s) else { return }
-        #if os(macOS)
-        NSWorkspace.shared.open(url)
-        #else
-        UIApplication.shared.open(url)
-        #endif
+        openWebLink(url)
     }
 }

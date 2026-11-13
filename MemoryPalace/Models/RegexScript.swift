@@ -45,10 +45,6 @@ struct RegexScript: Identifiable, Codable, Hashable {
 
 struct RegexEngine {
 
-    /// 酒馆 placement 常量
-    static let placementUserInput = 1
-    static let placementAIOutput = 2
-
     /// 对文本应用正则脚本
     ///
     /// - messagePlacement: 1=用户消息, 2=AI消息

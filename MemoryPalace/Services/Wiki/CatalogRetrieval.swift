@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// C3 两种写手共用的检索；只带值快照，f 编号始终来自原快照。
@@ -37,6 +38,11 @@ struct CatalogRetrieval: Sendable {
             }
         }
 
+        var keywords: [String] {
+            if case .aline(let hit) = self { return hit.keywords }
+            return []
+        }
+
         var weight: Double {
             switch self {
             case .original: 1.2
@@ -73,7 +79,7 @@ struct CatalogRetrieval: Sendable {
             var documents: [[String]] = []
             for candidate in candidates {
                 if cancel?.isCancelled == true { break }
-                documents.append(MemoryBM25.document(content: candidate.body, keywords: []))
+                documents.append(MemoryBM25.document(content: candidate.body, keywords: candidate.keywords))
             }
             let scores = MemoryBM25.scores(documents: documents, query: aline.terms.joined(separator: "\n"), cancel: cancel)
             let order = (cancel?.isCancelled == true ? [] : Array(candidates.indices)).sorted {

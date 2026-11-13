@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -368,7 +369,6 @@ private final class TidyNode {
 
     var x: Double = 0
     var y: Double = 0
-    var subtreeWidth: Double = 0  // v8 banded layout：measure 阶段算出来
 
     init(id: String, lastNodeId: String, originalNode: MessageNode?, isCollapsed: Bool, foldedCount: Int, isPinned: Bool, role: String, timestamp: Date?, collapsedNodeIds: [String], isExpandedChainHead: Bool = false) {
         self.id = id

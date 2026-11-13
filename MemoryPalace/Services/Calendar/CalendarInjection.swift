@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 // MARK: - 日历进 prompt（plan-calendar §八；实施偏差见 plan「P5 注入」注）
@@ -64,19 +65,33 @@ enum CalendarInjection {
         var timeline: String?
         /// 这一轮注进去的时间轴单位（一天的主调行 / 一项 / 一条老条目；发送时记账用）
         var units: [TimelineStore.Unit]
+        /// 这一轮注进去的待续（每窗一行；发送时记账用）
+        var pendingUnits: [TimelineStore.PendingUnit] = []
+        /// 快到的纪念日整段（发送时记账用）；nil = 不带
+        var anniversaryUnit: String? = nil
+        /// 仅因来源窗已删 / 关参与被挡掉的项 + 老条目 + 待续窗条数
+        var hiddenCount: Int = 0
     }
 
     /// 时间轴插槽：A4 一天一条（今天、昨天带各时段，再往前只带主调；当前窗口还在历史窗口里的项不注，见 `TimelineStore.injection`）
-    /// + 待续一段 + 快到的纪念日。返回文字和注进去的单位，实发与检查器同一行代码；文字和时间轴页那几行一字不差
+    /// + 待续一段 + 快到的纪念日（纪念日也随参与开关：`timeline || pending`）。返回文字和注进去的单位，实发与检查器同一行代码；文字和时间轴页那几行一字不差
     static func timelineSlot(profileId: String, currentConversationId: String = "", windowIds: Set<String> = [],
-                             now: Date = MemoryClock.now) -> TimelineSlot {
-        // v5【开窗口】A4 那一勾（没写过跟 mem_content_timeline = 今天）。
+                             now: Date = MemoryClock.now, participation: EffectiveMemoryParticipation,
+                             hiddenSources: Set<String> = []) -> TimelineSlot {
         // 待续：迁移过的楼层带 PendingStore 里「没做完」的；没迁移照读老条目里的老字段。组 prompt 在主线程：只读缓存不碰盘
-        let injection = MemoryOpenWindow.injects(.a4)
-            ? TimelineStore.injection(profileId: profileId, now: now, currentConversationId: currentConversationId, windowIds: windowIds,
-                                      openPending: { PendingStore.openByConversationCached(profileId: profileId) })
+        // 段④：本窗纸条把时间轴 / 待续拆成两项；nil = 老窗，待续跟时间轴一起（= 今天）
+        // 关参与（master / 本窗 memoryEnabled）由值闸住：时间轴 / 待续 / 纪念日都不带（plan-memory-participation §2.2）
+        // 来源窗已删 / 关参与（hiddenSources）：那窗的时间轴项 / 老条目 / 待续都在包里 `TimelineStore.injection` 挡
+        //（待续只从注进去的窗里出，这里不再过滤一遍）
+        let injection = participation.timeline || participation.pending
+            ? TimelineStore.injection(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), now: now, currentConversationId: currentConversationId, windowIds: windowIds,
+                                      openPending: { participation.pending ? PendingStore.openByConversationCached(profileId: profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: profileId)) : [:] },
+                                      timelineLines: participation.timeline, hiddenConversations: hiddenSources)
             : TimelineStore.Injection(text: nil, units: [])
-        let parts = [injection.text, anniversaryText(profileId: profileId)].compactMap { $0 }
-        return TimelineSlot(text: parts.isEmpty ? nil : parts.joined(separator: "\n\n"), timeline: injection.text, units: injection.units)
+        let anniversary = participation.anniversary ? anniversaryText(profileId: profileId) : nil
+        let parts = [injection.text, anniversary].compactMap { $0 }
+        return TimelineSlot(text: parts.isEmpty ? nil : parts.joined(separator: "\n\n"), timeline: injection.text,
+                            units: injection.units, pendingUnits: injection.pendingUnits,
+                            anniversaryUnit: anniversary, hiddenCount: injection.hiddenCount)
     }
 }

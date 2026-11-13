@@ -13,6 +13,7 @@ import UniformTypeIdentifiers
 struct MermaidCardView: View {
     let code: String
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+    @Environment(\.themeScope) private var themeScope
     @State private var result: Keyed?
     @State private var retry = 0
     @State private var showFull = false
@@ -37,8 +38,9 @@ struct MermaidCardView: View {
     private var profileId: String { profileManager?.currentProfile.id ?? "" }
 
     var body: some View {
-        // 读 ThemeManager：换主题 → 键变 → 重画
-        let request = MermaidRenderer.request(code: code)
+        // 读 ThemeManager：换主题 → 键变 → 重画。聊天里跟聊天主题，文件库等 `.global` 作用域跟界面主题
+        let tokens = themeScope == .chat ? ThemeManager.shared.currentChatTokenSet : ThemeManager.shared.currentTokenSet
+        let request = MermaidRenderer.request(code: code, tokens: tokens)
         let outcome = result?.key == request.key ? result?.outcome : MermaidRenderer.shared.immediateOutcome(for: request)
         VStack(alignment: .leading, spacing: 0) {
             content(outcome, key: request.key)

@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -55,7 +56,7 @@ final class CatalogRetrievalBudgetTests: XCTestCase {
     func testAutomaticWriterReceivesGlobalBudgetWithHighRankA2AndLateFragmentF31() async throws {
         let (fragments, fake) = try corpus()
         let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
-        let topic = CatalogSorter.Topic(path: "楼层/主题/航线", title: query, kind: .topic, existing: false)
+        let topic = CatalogSorter.Topic(path: "主题/航线", title: query, kind: .topic, existing: false)
         let originals = weakOriginals()
         let material = await CatalogWriter.material(topic, fragments: [], floorPrompt: "", wiki: wiki, memoryRoot: root,
                                                      now: now, snapshot: fragments, embedder: fake, originalSearch: { _, _, _ in originals })
@@ -63,7 +64,7 @@ final class CatalogRetrievalBudgetTests: XCTestCase {
         var actual = ""
         let result = try await CatalogWriter.write(material, names: .init(userName: "{u}", assistantName: "{c}"), wiki: wiki, caller: { _, user in
             actual = user
-            return "{\"items\":[{\"type\":\"new_page\",\"path\":\"楼层/主题/航线\",\"kind\":\"主题\",\"title\":\"航线\",\"records\":[{\"text\":\"北湾航线\",\"fragments\":[\"f31\"],\"aline\":[{\"layer\":\"A2\",\"window\":\"targeta2\",\"segment\":1}]}]}]}"
+            return "{\"items\":[{\"type\":\"new_page\",\"path\":\"主题/航线\",\"kind\":\"主题\",\"title\":\"航线\",\"records\":[{\"text\":\"北湾航线\",\"fragments\":[\"f31\"],\"aline\":[{\"layer\":\"A2\",\"window\":\"targeta2\",\"segment\":1}]}]}]}"
         }, drafts: nil, run: run)
         XCTAssertTrue(actual.contains(a2Body))
         let fragmentLine = try XCTUnwrap(actual.components(separatedBy: "\n").first { $0.hasPrefix("- f31 · ") })
@@ -82,7 +83,7 @@ final class CatalogRetrievalBudgetTests: XCTestCase {
 
     func testManualWriterReceivesSameGlobalBudgetAndCanCiteBothLateSources() async throws {
         let (fragments, fake) = try corpus()
-        let submit = "{\"items\":[{\"type\":\"new_page\",\"path\":\"楼层/主题/航线\",\"kind\":\"主题\",\"title\":\"航线\",\"records\":[{\"text\":\"北湾航线\",\"fragments\":[\"f31\"],\"aline\":[{\"layer\":\"A2\",\"window\":\"targeta2\",\"segment\":1}]}]}]}"
+        let submit = "{\"items\":[{\"type\":\"new_page\",\"path\":\"主题/航线\",\"kind\":\"主题\",\"title\":\"航线\",\"records\":[{\"text\":\"北湾航线\",\"fragments\":[\"f31\"],\"aline\":[{\"layer\":\"A2\",\"window\":\"targeta2\",\"segment\":1}]}]}]}"
         let backend = FakeCatalogBackend { round, _ in
             .toolCalls([round == 1 ? CatalogTestKit.call("search_aline", "{\"terms\":[\"solarship\"],\"before\":\"2026-10-18\"}") : CatalogTestKit.call(CatalogAgentTools.submit, submit)])
         }
@@ -129,7 +130,7 @@ final class CatalogRetrievalBudgetTests: XCTestCase {
                                                day: MemoryDay.key(start)), in: TimelineStore.dir(root: root))
         let fake = CatalogFakeEmbedder.unavailable()
         let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
-        let material = await CatalogWriter.material(.init(path: "楼层/主题/云桥", title: word, kind: .topic, existing: false),
+        let material = await CatalogWriter.material(.init(path: "主题/云桥", title: word, kind: .topic, existing: false),
                                                      fragments: [], floorPrompt: "", wiki: wiki, memoryRoot: root, now: now, embedder: fake)
         let run = CatalogRunRecord(wiki: wiki, topic: word, kind: "正文边界回归")
         _ = try await CatalogWriter.write(material, names: .init(userName: "{u}", assistantName: "{c}"), wiki: wiki,

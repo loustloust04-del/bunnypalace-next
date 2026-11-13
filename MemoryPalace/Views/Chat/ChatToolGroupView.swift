@@ -31,7 +31,7 @@ struct ChatToolGroupView: View {
                         Image(systemName: expanded && mode == .inline ? "chevron.down" : "chevron.right")
                             .font(.system(size: 10, weight: .medium))
                     }
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Theme.chat.textSecondary)
                     .padding(.vertical, 8)
                     .contentShape(Rectangle())
                 }
@@ -46,7 +46,7 @@ struct ChatToolGroupView: View {
                 }
             }
             .sheet(isPresented: $showSheet) {
-                DisclosureSheet(title: "工具调用") { stepList }
+                DisclosureSheet(title: "工具调用", scope: .chat) { stepList }
             }
         }
     }
@@ -61,16 +61,16 @@ struct ChatToolGroupView: View {
                                 .font(.system(size: 16))
                                 .frame(width: 28, height: 28)
                             if index < steps.count - 1 {
-                                Rectangle().fill(Theme.textMuted.opacity(0.18)).frame(width: 1, height: 18)
+                                Rectangle().fill(Theme.chat.textMuted.opacity(0.18)).frame(width: 1, height: 18)
                             }
                         }
                         VStack(alignment: .leading, spacing: 3) {
                             Text(step.action)
                                 .font(.system(size: 14))
-                                .foregroundStyle(Theme.textPrimary)
+                                .foregroundStyle(Theme.chat.textPrimary)
                             Text(step.name + " · " + step.status)
                                 .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(step.isError ? Theme.danger : Theme.textMuted)
+                                .foregroundStyle(step.isError ? Theme.chat.danger : Theme.chat.textMuted)
                         }
                         .padding(.top, 4)
                         Spacer(minLength: 0)
@@ -78,7 +78,7 @@ struct ChatToolGroupView: View {
                             .font(.system(size: 10))
                             .padding(.top, 9)
                     }
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Theme.chat.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
@@ -88,7 +88,7 @@ struct ChatToolGroupView: View {
         }
         .sheet(item: $selectedStep) { step in
             let current = steps.first { $0.id == step.id } ?? step
-            DisclosureSheet(title: current.action) {
+            DisclosureSheet(title: current.action, scope: .chat) {
                 ToolCallCardView(name: current.name, inputJSON: current.inputJSON, resultText: current.result,
                                  isError: current.isError, integration: current.integration, icon: current.icon,
                                  profileId: node.profileId, forceDetail: true)

@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import Observation
 import SwiftData
@@ -7,8 +8,8 @@ import SwiftData
 actor SessionCloseout {
     static let shared = SessionCloseout()
 
-    /// 静默多久算这个窗口聊完（v5 粟粟 10-15：30 分钟太短 → 12 小时）；A3 / A4 各自「停 N 分钟」的默认值
-    static let idleInterval: TimeInterval = 12 * 3600
+    /// A3 默认静默 24 小时；显式触发设置由 MemoryTriggers 读取。
+    static let idleInterval: TimeInterval = 24 * 3600
     /// 新建对话时：最近多久聊过的对话立刻收尾（不等静默；跟着改 12 小时，Q-b）
     static let recentInterval: TimeInterval = 12 * 3600
     /// 巡检只看最近几天动过的对话（上线第一天不把几百个老对话从头补一遍）
@@ -30,6 +31,8 @@ actor SessionCloseout {
         var writerModels: [Writer: ProviderModel] = [:]
         /// 手动「现在写」：不等静默、不看冷却、不看写入预算（Q10）
         var manual = false
+        /// P2-d：占到窗口后复查本窗参与要重读 Conversation；nil = 调用方拿不到 container，不复查（这些路径各有自己的重查）
+        var container: ModelContainer? = nil
 
         /// 人设 = 系统提示 + 角色描述（和第二刀提取同一个口径）
         init(profile: Profile, model: ProviderModel, writerModels: [Writer: ProviderModel] = [:]) {
@@ -93,7 +96,7 @@ actor SessionCloseout {
     /// 确认落盘了才覆盖文件；保不住就抛、这次不存（不调模型、不看 A4 开关）
     static func saveA2(_ s: SessionSummary, profileId: String) throws {
         try TimelineDaily.preserveBeforeSave(s, profileId: profileId)
-        try SessionSummaryStore.save(s, profileId: profileId)
+        try SessionSummaryStore.save(s, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
     }
 
     static func gated(_ writer: Writer, _ caller: @escaping SessionSegmentWriter.Caller) -> SessionSegmentWriter.Caller {
@@ -107,11 +110,14 @@ actor SessionCloseout {
     private var retryAfter: [String: [String: () async -> Void]] = [:]
     /// 「写手|窗口」→ 冷却到什么时候（格式两次不合格）
     private var cooldown: [String: Date] = [:]
-    /// CC 巡检记过的（窗口 → 当时的更新时间 + 那天）：没新消息、没跨过 05:00 就不再读节点
-    private var ccChecked: [String: (updated: Date, day: String)] = [:]
-    /// CC 窗口上次没写成：到这个时间以后再查
-    private var ccRetryAt: [String: Date] = [:]
-    /// 重新生成（DEBUG）进行中：日常写手都先停
+    /// 日切巡检记过的（窗口 → 更新时间 + 记忆日 + 来源）；API 当天 settled 后不再查今天的新消息。
+    private var dayChecked: [String: (updated: Date, day: String, isCC: Bool)] = [:]
+    /// 日切上次没写成：到这个时间以后再查。
+    private var dayRetryAt: [String: Date] = [:]
+    #if DEBUG
+    private(set) var dailyWorkCounts = (claims: 0, pathFetches: 0)
+    #endif
+    /// 手动重写 / 搬迁 / 恢复进行中：日常写手先停。
     private(set) var regenerating = false
     /// A2「停 N 分钟」：这个窗口最近一轮的快照（每轮回复后换新），静默够了巡检时压
     private var idleCompress: [String: IdleCompress] = [:]
@@ -218,17 +224,23 @@ actor SessionCloseout {
                                          ctx: ctx, caller: caller)
         }) else { return nil }
         defer { release(conversationId) }
+        // P2-d：占到窗口后按当前窗复查本窗参与（补跑闭包也走这里——窗口被「收尾」/「搬迁」占着时关参与，释放后不再写）
+        if let container = ctx.container,
+           Self.windowParticipation(conversationId: conversationId, profileId: ctx.profileId, container: container)?.a2Write != true {
+            CacheDiagLog.shared.log("📝 上下文摘要: 窗口已关参与，放弃 \(conversationId)")
+            return nil
+        }
 
         return try await MemoryWriteLog.metered {
-            var s = SessionSummaryStore.loadOrSeed(conversationId: conversationId, profileId: ctx.profileId, title: title)
+            var s = SessionSummaryStore.loadOrSeed(conversationId: conversationId, memoryRoot: FileLibraryStore.memoryRoot(profileId: ctx.profileId), title: title)
             let notBefore = MemoryStartDay.firstAllowedIndex(messages.map(\.date), startDay: MemoryStartDay.current)
             guard let plan = Self.compressPlan(s, pathIds: messages.map(\.id), dates: messages.map(\.date), oldCount: oldCount, notBefore: notBefore) else { return nil }
-            let parts = plan.ranges.flatMap { Self.chunks($0) }
+            let parts = Self.contextParts(plan.ranges, dates: messages.map(\.date))
             let before = s.segments.filter { !$0.isTail }.count
             let finished: Bool
             do {
                 finished = try await Self.writeContextParts(parts, messages: messages, into: &s, title: title,
-                                                            persona: ctx.persona, speakers: ctx.speakers, caller: Self.gated(.context, caller)) {
+                                                            persona: ctx.persona, speakers: ctx.speakers, profileId: ctx.profileId, caller: Self.gated(.context, caller)) {
                     try Self.saveA2($0, profileId: ctx.profileId)
                 }
             } catch {
@@ -275,7 +287,7 @@ actor SessionCloseout {
     /// 返回 false = 写手跳过（预算闸 / 空输出），后面的不写。onPart(第几截, 一共几截) 在每截动笔前喊一声（10-16 搬迁进度用）
     static func writeContextParts(_ parts: [Range<Int>], messages: [SessionSegmentWriter.Message], into s: inout SessionSummary,
                                   title: String, persona: String, speakers: SessionSegmentWriter.Speakers,
-                                  caller: SessionSegmentWriter.Caller, save: (SessionSummary) throws -> Void,
+                                  profileId: String = "", memoryRoot: URL? = nil, caller: SessionSegmentWriter.Caller, save: (SessionSummary) throws -> Void,
                                   onPart: (Int, Int) -> Void = { _, _ in }) async throws -> Bool {
         // v5 D1：尾段被正式压缩后换成正式段——要写正式段了就先拿掉尾段（下次收尾整段重写）
         if !parts.isEmpty { s.segments.removeAll { $0.isTail } }
@@ -284,7 +296,8 @@ actor SessionCloseout {
             let at = insertionIndex(s, chunkStart: messages[part.lowerBound].date)
             guard let segment = try await SessionSegmentWriter.write(
                 .init(messages: Array(messages[part]), kind: .rolling, from: part.lowerBound, persona: persona,
-                      speakers: speakers, previous: s.segments[..<at].last(where: { $0.kind != .closeout })),
+                      speakers: speakers, previous: s.segments[..<at].last(where: { $0.kind != .closeout }),
+                      profileId: profileId, windowTitle: title, memoryRoot: memoryRoot),
                 caller: caller) else { return false }
             s.segments.insert(segment, at: at)
             s.title = title
@@ -292,6 +305,26 @@ actor SessionCloseout {
             try save(s)
         }
         return true
+    }
+
+    /// A2 一律先切记忆日，再按既有60条上限切；API、尾段和迁移补段共用。
+    static func contextParts(_ ranges: [Range<Int>], dates: [Date?], calendar: Calendar = .current) -> [Range<Int>] {
+        ranges.flatMap { range in
+            MemoryDay.split(Array(dates[range]), calendar: calendar).flatMap { day in
+                chunks((range.lowerBound + day.lowerBound)..<(range.lowerBound + day.upperBound))
+            }
+        }
+    }
+
+    /// API 巡检只补已结束的记忆日；当天不因条数触发，且不推进滑窗锚点。
+    static func apiDayRanges(_ s: SessionSummary, pathIds: [String], dates: [Date?], notBefore: Int,
+                             now: Date, calendar: Calendar = .current) -> [Range<Int>] {
+        guard !skipsSummary(messageCount: pathIds.count) else { return [] }
+        let today = MemoryDay.key(now, calendar: calendar)
+        let ranges = pendingRanges(s, pathIds: pathIds, dates: dates, notBefore: notBefore)
+        return contextParts(ranges, dates: dates, calendar: calendar).filter { part in
+            dates[part].lazy.compactMap { $0 }.first.map { MemoryDay.key($0, calendar: calendar) < today } ?? false
+        }
     }
 
     // MARK: - W2 上下文摘要 · CC（回复落地 + 巡检）
@@ -332,31 +365,52 @@ actor SessionCloseout {
     @discardableResult
     func compressCC(conversationId: String, ctx: Context, container: ModelContainer, providerManager: ProviderManager,
                     now: Date = Date(), caller testCaller: SessionSegmentWriter.Caller? = nil) async -> CCResult {
+        await compressDaily(conversationId: conversationId, ctx: ctx, container: container, providerManager: providerManager,
+                            now: now, isCC: true, caller: testCaller)
+    }
+
+    @discardableResult
+    func compressAPIDay(conversationId: String, ctx: Context, container: ModelContainer, providerManager: ProviderManager,
+                        now: Date = Date(), caller testCaller: SessionSegmentWriter.Caller? = nil) async -> CCResult {
+        await compressDaily(conversationId: conversationId, ctx: ctx, container: container, providerManager: providerManager,
+                            now: now, isCC: false, caller: testCaller)
+    }
+
+    private func compressDaily(conversationId: String, ctx: Context, container: ModelContainer, providerManager: ProviderManager,
+                               now: Date, isCC expectedCC: Bool?, caller testCaller: SessionSegmentWriter.Caller?) async -> CCResult {
         guard !regenerating else { return .retry(at: nil) }
         // v5 A8：A2 选了「只手动」就不自动写（CC 楼层也一样，只剩对话 ⋯「现在写」）
         guard Self.enabled, ctx.manual || MemoryTriggers.mode(.a2) != .manual else { return .nothingToWrite }
         if !ctx.manual, let until = cooldown["\(Writer.context.rawValue)|\(conversationId)"], until > now { return .retry(at: until) }
-        guard claim(conversationId, job: "CC 上下文摘要", retry: { [self] in
-            await self.compressCC(conversationId: conversationId, ctx: ctx, container: container, providerManager: providerManager,
-                                  caller: testCaller)
+        #if DEBUG
+        dailyWorkCounts.claims += 1
+        #endif
+        guard claim(conversationId, job: "日切上下文摘要", retry: { [self] in
+            await self.compressDaily(conversationId: conversationId, ctx: ctx, container: container, providerManager: providerManager,
+                                     now: Date(), isCC: expectedCC, caller: testCaller)
         }) else { return .retry(at: nil) }
         defer { release(conversationId) }
 
-        let context = ModelContext(container)
-        context.autosaveEnabled = false
+        let source = SwiftDataConversationSource(container: container)
         let cid = conversationId, pid = ctx.profileId
-        guard let conv = try? context.fetch(FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> {
-            $0.id == cid && $0.profileId == pid
-        })).first, conv.memoryEnabled, !conv.isTrashed else { return .nothingToWrite }
-        let nodes = Self.mainPathNodes(conv, profileId: pid, context: context)
-        guard Self.isCCPath(nodes) else { return .nothingToWrite }
+        guard let conv = try? source.window(profileId: pid, idOrPrefix: cid), conv.memoryEnabled else { return .nothingToWrite }
+        #if DEBUG
+        dailyWorkCounts.pathFetches += 1
+        #endif
+        let nodes = Self.mainPathNodes(conv, source: source)
+        let isCC = Self.isCCPath(nodes)
+        if let expectedCC, expectedCC != isCC { return .nothingToWrite }
+        let updated = conv.updateTime
         let caller = testCaller ?? Self.modelCaller(.context, ctx: ctx, providerManager: providerManager, conversationId: cid)
-        switch await writeCC(conversationId: cid, title: conv.title, messages: nodes.map(Self.message), ctx: ctx, caller: caller, now: now) {
-        case .wrote: return .wrote
-        case .nothing: return .nothingToWrite
-        case .skipped: return .retry(at: nil)   // 预算闸 / 空输出：下次巡检再来
-        case .failed(let at): return .retry(at: at)
+        let result: CCResult
+        switch await writeDaily(conversationId: cid, title: conv.title, messages: nodes.map(Self.message), ctx: ctx, caller: caller, now: now, isCC: isCC) {
+        case .wrote: result = .wrote
+        case .nothing: result = .nothingToWrite
+        case .skipped: result = .retry(at: nil)   // 预算闸 / 空输出：下次巡检再来
+        case .failed(let at): result = .retry(at: at)
         }
+        if result.settled { dayChecked[cid] = (updated, MemoryDay.key(now), isCC) }
+        return result
     }
 
     /// CC 窗口写一趟的结果（巡检、「现在写」各自翻译）
@@ -367,57 +421,56 @@ actor SessionCloseout {
         case failed(retryAt: Date?)
     }
 
-    /// CC 窗口 A2 的正文（已经占住窗口）：水位线之后满 60 条 / 跨过 05:00 的写成上下文摘要段
-    private func writeCC(conversationId cid: String, title: String, messages: [SessionSegmentWriter.Message], ctx: Context,
-                         caller: @escaping SessionSegmentWriter.Caller, now: Date) async -> CCWrite {
+    /// 已占住窗口：CC 写满份或昨日；API 只写昨日。两者都不推 compressedCount。
+    private func writeDaily(conversationId cid: String, title: String, messages: [SessionSegmentWriter.Message], ctx: Context,
+                         caller: @escaping SessionSegmentWriter.Caller, now: Date, isCC: Bool = true) async -> CCWrite {
         let pid = ctx.profileId
-        var s = SessionSummaryStore.loadOrSeed(conversationId: cid, profileId: pid, title: title)
+        var s = SessionSummaryStore.loadOrSeed(conversationId: cid, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), title: title)
         let notBefore = MemoryStartDay.firstAllowedIndex(messages.map(\.date), startDay: MemoryStartDay.current)
-        let parts = Self.ccCompressRanges(s, pathIds: messages.map(\.id), dates: messages.map(\.date), notBefore: notBefore, now: now)
+        let parts = isCC
+            ? Self.ccCompressRanges(s, pathIds: messages.map(\.id), dates: messages.map(\.date), notBefore: notBefore, now: now)
+            : Self.apiDayRanges(s, pathIds: messages.map(\.id), dates: messages.map(\.date), notBefore: notBefore, now: now)
         guard !parts.isEmpty else { return .nothing }
         let before = s.segments.filter { !$0.isTail }.count
         return await MemoryWriteLog.metered {
             do {
                 let done = try await Self.writeContextParts(parts, messages: messages, into: &s, title: title,
-                                                            persona: ctx.persona, speakers: ctx.speakers, caller: Self.gated(.context, caller), save: {
+                                                            persona: ctx.persona, speakers: ctx.speakers, profileId: pid, caller: Self.gated(.context, caller), save: {
                     try Self.saveA2($0, profileId: pid)
                 })
                 await MainActor.run { NotificationCenter.default.post(name: .memoryDidChange, object: nil) }
                 guard done else { return .skipped }
                 MemoryHealthStore.recordOK(.context, profileId: pid, modelName: ctx.model(.context).name,
                                            note: Self.contextNote(added: parts.count, title: title))
-                CacheDiagLog.shared.log("📝 上下文摘要（CC）: ✅ \(title)（\(parts.count) 份）")
+                CacheDiagLog.shared.log("📝 上下文摘要（\(isCC ? "CC" : "API日切")）: ✅ \(title)（\(parts.count) 份）")
                 return .wrote(max(0, s.segments.filter { !$0.isTail }.count - before))
             } catch {
-                CacheDiagLog.shared.log("📝 上下文摘要（CC）: ❌ \(title) — \(error.localizedDescription)")
+                CacheDiagLog.shared.log("📝 上下文摘要（\(isCC ? "CC" : "API日切")）: ❌ \(title) — \(error.localizedDescription)")
                 _ = noteFailure(error, writer: .context, conversationId: cid, ctx: ctx)
                 return .failed(retryAt: cooldown["\(Writer.context.rawValue)|\(cid)"])
             }
         }
     }
 
-    /// 巡检时把最近动过的 CC 窗口查一遍（凌晨聊完、早上回来，昨天剩的那截也会写）。
-    /// 写成了 / 确认不用写的，没新消息、也没跨过 05:00 就不再读节点；没写成的到重试时间以后再查
-    private func sweepCC(ctx: Context, container: ModelContainer, providerManager: ProviderManager, now: Date) async {
-        let context = ModelContext(container)
-        context.autosaveEnabled = false
+    /// 最近动过的所有窗口补日切；失败、冷却、占用都不算已查过。
+    private func sweepA2Windows(ctx: Context, container: ModelContainer, providerManager: ProviderManager, now: Date,
+                                caller: SessionSegmentWriter.Caller? = nil) async {
         let pid = ctx.profileId
         guard let since = Calendar.current.date(byAdding: .day, value: -Self.lookbackDays, to: now) else { return }
-        let convs = (try? context.fetch(FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> {
-            $0.profileId == pid && $0.isTrashed == false && $0.updateTime >= since
-        }))) ?? []
+        let source = SwiftDataConversationSource(container: container)
+        let convs = (try? source.windows(profileId: pid, updatedSince: since, includeTrashed: false)) ?? []
         let today = MemoryDay.key(now)
-        for conv in convs where conv.memoryEnabled && conv.ccBridgeSessionName != nil {
-            if let seen = ccChecked[conv.id], seen.updated == conv.updateTime, seen.day == today { continue }
-            if let at = ccRetryAt[conv.id], at > now { continue }
-            let id = conv.id, updated = conv.updateTime
-            let result = await compressCC(conversationId: id, ctx: ctx, container: container, providerManager: providerManager, now: now)
+        for conv in convs where conv.memoryEnabled {
+            if let seen = dayChecked[conv.id], seen.day == today, !seen.isCC || seen.updated == conv.updateTime { continue }
+            if let at = dayRetryAt[conv.id], at > now { continue }
+            let id = conv.id
+            let result = await compressDaily(conversationId: id, ctx: ctx, container: container, providerManager: providerManager,
+                                             now: now, isCC: nil, caller: caller)
             if result.settled {
-                ccChecked[id] = (updated, today)
-                ccRetryAt[id] = nil
+                dayRetryAt[id] = nil
             } else if case .retry(let at) = result {
-                ccChecked[id] = nil
-                ccRetryAt[id] = at
+                dayChecked[id] = nil
+                dayRetryAt[id] = at
             }
         }
     }
@@ -454,16 +507,17 @@ actor SessionCloseout {
             sweepAgain = false
             let batch = queuedSweeps
             queuedSweeps = []
+            var seen: Set<String> = []
             for r in batch {
+                if Self.enabled, seen.insert(r.ctx.profileId).inserted {
+                    await sweepA2Windows(ctx: r.ctx, container: r.container, providerManager: r.providerManager, now: Date(),
+                                         caller: r.callers?(.context))
+                }
                 await runSweep(ctx: r.ctx, container: r.container, providerManager: r.providerManager, force: r.force,
                                active: r.active, callers: r.callers)
             }
             if Self.enabled, let first = batch.first {
-                await runIdleCompress(providerManager: first.providerManager, now: Date())
-                var seen: Set<String> = []
-                for r in batch where seen.insert(r.ctx.profileId).inserted {
-                    await sweepCC(ctx: r.ctx, container: r.container, providerManager: r.providerManager, now: Date())
-                }
+                await runIdleCompress(providerManager: first.providerManager, now: Date(), container: first.container)
             }
         } while sweepAgain
     }
@@ -494,11 +548,18 @@ actor SessionCloseout {
 
     /// 静默够了的压掉。确认压到目标（锚点到了 oldCount）才出队；预算拦下 / 被占 / 暂时失败留着，下次巡检再试（astra #9）。
     /// 冷却中 compress 直接跳过不调模型；别的错（非断网、非格式）退避 30 分钟，免得每次巡检都打一遍。caller 只给测试换假写手
-    func runIdleCompress(providerManager: ProviderManager, now: Date,
+    /// 排队期间窗口可能被关参与 / 删掉：给 `container` 时每个任务开压前按当前窗复查，关了就出队、不调模型
+    func runIdleCompress(providerManager: ProviderManager, now: Date, container: ModelContainer? = nil,
                          caller testCaller: ((Context, String) -> SessionSegmentWriter.Caller)? = nil) async {
         guard MemoryTriggers.mode(.a2) == .idle else { idleCompress = [:]; return }
         let idle = MemoryTriggers.idle(.a2)
         for (cid, job) in idleCompress where now.timeIntervalSince(job.at) >= idle && (job.retryAt ?? .distantPast) <= now {
+            // 入队时开参与，之后点了「不记了」/ 对话菜单关参与：到点也不压（真值表「本窗关参与 · A2 写 = 否（idle）」）
+            if let container, Self.windowParticipation(conversationId: cid, profileId: job.ctx.profileId, container: container)?.a2Write != true {
+                idleCompress[cid] = nil
+                CacheDiagLog.shared.log("📝 A2 停 N 分钟: 窗口已关参与或已不存在，跳过 \(cid)")
+                continue
+            }
             let caller = testCaller?(job.ctx, cid) ?? Self.modelCaller(.context, ctx: job.ctx, providerManager: providerManager, conversationId: cid)
             var failed = false
             do {
@@ -509,7 +570,7 @@ actor SessionCloseout {
             }
             // 等模型时又来了一轮：快照已经换新，别动它
             guard idleCompress[cid]?.at == job.at else { continue }
-            let covered = SessionSummaryStore.load(conversationId: cid, profileId: job.ctx.profileId)?.compressedCount ?? 0
+            let covered = SessionSummaryStore.load(conversationId: cid, memoryRoot: FileLibraryStore.memoryRoot(profileId: job.ctx.profileId))?.compressedCount ?? 0
             if covered >= job.oldCount {
                 idleCompress[cid] = nil
             } else if failed {
@@ -521,6 +582,21 @@ actor SessionCloseout {
     /// 测试用：还排着的 A2「停 N 分钟」
     var idleCompressPending: Set<String> { Set(idleCompress.keys) }
 
+    /// 本窗现在还在不在参与记忆（P2-d）：按 cid 现取当前窗（trashed 视同不存在 → nil）。
+    /// `compress` / `closeout` 占到窗口后与 idle 队列复查共用这一份，别各抄一遍谓词。
+    /// 谓词里留 `isTrashed == false`：`resolve` 也挡回收站，结果一样，这里只是少取一行。
+    static func windowParticipation(conversationId: String, profileId: String, container: ModelContainer) -> EffectiveMemoryParticipation? {
+        let pid = profileId, cid = conversationId
+        let context = ModelContext(container)
+        context.autosaveEnabled = false
+        var descriptor = FetchDescriptor<Conversation>(predicate: #Predicate {
+            $0.profileId == pid && $0.id == cid && $0.isTrashed == false
+        })
+        descriptor.fetchLimit = 1
+        guard let conv = try? context.fetch(descriptor).first else { return nil }
+        return EffectiveMemoryParticipation.resolve(profileId: pid, conversation: conv, preset: nil)
+    }
+
     struct Candidate {
         let conversationId: String
         let title: String
@@ -531,7 +607,8 @@ actor SessionCloseout {
 
     private static func candidates(profileId: String, container: ModelContainer, now: Date, force newConvId: String?,
                                    active: String?) -> [Candidate] {
-        queue(profileId: profileId, container: container, now: now, force: newConvId, includeWaiting: false, active: active)
+        queue(profileId: profileId, source: SwiftDataConversationSource(container: container), now: now,
+              force: newConvId, includeWaiting: false, active: active)
             .filter { $0.state == .due }
             .map { Candidate(conversationId: $0.conversationId, title: $0.title, messages: $0.messages, writers: $0.writers) }
     }
@@ -620,19 +697,15 @@ actor SessionCloseout {
     /// 最近 lookbackDays 天动过、开着记忆参与的对话里，窗口总结还有没写到的那些。
     /// includeWaiting = false（巡检）：还没静默够的先用 updateTime 便宜地跳过，不读节点（每轮回复后都巡检，别每次全读）；
     /// 「每 N 回合」只看刚回完一轮的那个窗口（active）
-    static func queue(profileId: String, container: ModelContainer, now: Date, force newConvId: String?,
+    static func queue(profileId: String, source: any ConversationSource, now: Date, force newConvId: String?,
                       includeWaiting: Bool, active: String? = nil) -> [QueueEntry] {
         guard windowEnabled else { return [] }
         let triggers: [Writer: Trigger] = [.window: .current(.window)]
         let idleTriggers = triggers.values.filter { $0.mode == .idle }
         let minIdle = idleTriggers.map(\.idle).min()
         let anyRounds = triggers.values.contains { $0.mode == .rounds }
-        let context = ModelContext(container)
-        context.autosaveEnabled = false
         guard let since = Calendar.current.date(byAdding: .day, value: -lookbackDays, to: now) else { return [] }
-        let convs = (try? context.fetch(FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> {
-            $0.profileId == profileId && $0.isTrashed == false && $0.updateTime >= since
-        }))) ?? []
+        let convs = (try? source.windows(profileId: profileId, updatedSince: since, includeTrashed: false)) ?? []
         // 「记忆从哪天开始」：最后一条消息早于起点的窗口不进队列（和「最近 7 天动过」两个条件都要满足）
         let startDay = MemoryStartDay.current
         var out: [QueueEntry] = []
@@ -643,9 +716,9 @@ actor SessionCloseout {
                 if !roundsHere && !quietEnough { continue }
             }
             if let d = startDay, conv.updateTime < d { continue }
-            let window = WindowSummaryStore.load(conversationId: conv.id, profileId: profileId)
+            let window = WindowSummaryStore.load(conversationId: conv.id, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
             if let c = window?.updatedAt, c.addingTimeInterval(120) >= conv.updateTime { continue }
-            let messages = mainPath(conv, profileId: profileId, context: context)
+            let messages = mainPath(conv, source: source)
             guard let last = messages.last, let lastDate = last.date else { continue }
             if let d = startDay, lastDate < d { continue }
             let ids = messages.map(\.id)
@@ -730,7 +803,7 @@ actor SessionCloseout {
     }
 
     /// 一个窗口收尾：A3 窗口总结（A2 开着时先把尾段收进 A2，再整个窗口重压）。
-    /// container 非空（巡检）：占到窗口后按当前路径重读一遍再写——巡检开头取的快照可能已经旧了（astra #2）。
+    /// container 非空（巡检）：占到窗口后按当前窗复查本窗参与、按当前路径重读一遍再写——巡检开头取的快照可能已经旧了（astra #2）。
     /// 返回 true = 断网 / 被掐断，这一轮停下
     func closeout(_ item: Candidate, ctx: Context, container: ModelContainer? = nil,
                   callers: @escaping (Writer) -> SessionSegmentWriter.Caller) async -> Bool {
@@ -741,7 +814,13 @@ actor SessionCloseout {
         defer { release(item.conversationId) }
         var item = item
         if let container {
-            guard let path = Self.currentPath(item.conversationId, profileId: ctx.profileId, container: container) else { return false }
+            // P2-d：巡检快照里 `memoryEnabled` 是旧的；补跑闭包也走这里——占到窗口后按当前窗复查
+            guard Self.windowParticipation(conversationId: item.conversationId, profileId: ctx.profileId, container: container)?.participates == true else {
+                CacheDiagLog.shared.log("📝 收尾: 窗口已关参与，放弃 \(item.conversationId)")
+                return false
+            }
+            guard let path = Self.currentPath(item.conversationId, profileId: ctx.profileId,
+                                              source: SwiftDataConversationSource(container: container)) else { return false }
             item = Candidate(conversationId: item.conversationId, title: path.title, messages: path.messages, writers: item.writers)
         }
         return await closeoutBody(item, ctx: ctx, callers: callers).stop
@@ -808,7 +887,7 @@ actor SessionCloseout {
            notBefore < item.messages.count,
            window?.closedThrough != item.messages.last?.id,
            !Self.wouldRegress(mark: window?.closedThrough, markDate: window?.updatedAt, snapshot: item.messages) {
-            var s = SessionSummaryStore.loadOrSeed(conversationId: item.conversationId, profileId: ctx.profileId, title: item.title)
+            var s = SessionSummaryStore.loadOrSeed(conversationId: item.conversationId, memoryRoot: FileLibraryStore.memoryRoot(profileId: ctx.profileId), title: item.title)
             // D1：A2 写着 → 尾段收进 A2（整段重写）；写不成照样往下，A3 用原文那截。
             // A2「只手动」/ 冷却中不自动写尾段（astra #7）
             if Self.writesTail(manual: ctx.manual, a2On: Self.enabled, a2Mode: MemoryTriggers.mode(.a2),
@@ -816,9 +895,11 @@ actor SessionCloseout {
                 await MemoryWriteLog.metered {
                     do {
                         if let t = try await Self.writeTail(context: s, messages: item.messages, notBefore: notBefore, persona: ctx.persona,
-                                                            speakers: ctx.speakers, caller: callers(.context)) {
+                                                            speakers: ctx.speakers, profileId: ctx.profileId, title: item.title, save: {
+                            try Self.saveA2($0, profileId: ctx.profileId)
+                            s = $0
+                        }, caller: callers(.context)) {
                             s = t
-                            try Self.saveA2(s, profileId: ctx.profileId)
                             result.tail = true
                             MemoryHealthStore.recordOK(.context, profileId: ctx.profileId, modelName: ctx.model(.context).name,
                                                        note: "尾段 · 《\(item.title)》")
@@ -835,7 +916,8 @@ actor SessionCloseout {
             await MemoryWriteLog.metered {
                 do {
                     if let w = try await Self.recompressWindow(context: s, messages: item.messages, title: item.title, notBefore: notBefore,
-                                                               persona: ctx.persona, speakers: ctx.speakers, caller: callers(.window)) {
+                                                               persona: ctx.persona, speakers: ctx.speakers, caller: callers(.window),
+                                                               profileId: ctx.profileId, memoryRoot: root) {
                         try WindowSummaryStore.save(w, in: root)
                         result.window = true
                         let chars = w.segments.first?.story.count ?? 0
@@ -871,7 +953,8 @@ actor SessionCloseout {
         guard !regenerating, busy[cid] == nil else { return CloseoutResult(busy: true) }
         var ctx = ctx
         ctx.manual = true
-        guard let path = Self.currentPath(cid, profileId: ctx.profileId, container: container), !path.messages.isEmpty else {
+        guard let path = Self.currentPath(cid, profileId: ctx.profileId,
+                                          source: SwiftDataConversationSource(container: container)), !path.messages.isEmpty else {
             return CloseoutResult()
         }
         guard claim(cid, job: "现在写", retry: {}) else { return CloseoutResult(busy: true) }
@@ -881,7 +964,7 @@ actor SessionCloseout {
             ?? { Self.modelCaller($0, ctx: manualCtx, providerManager: providerManager, conversationId: cid) }
         var result = CloseoutResult()
         if Self.enabled, path.isCC {
-            switch await writeCC(conversationId: cid, title: path.title, messages: path.messages, ctx: ctx, caller: callers(.context), now: now) {
+            switch await writeDaily(conversationId: cid, title: path.title, messages: path.messages, ctx: ctx, caller: callers(.context), now: now) {
             case .wrote(let n): result.context = n
             case .nothing: break
             case .skipped: result.skipped = true
@@ -899,14 +982,10 @@ actor SessionCloseout {
     }
 
     /// 这个窗口现在的主线路径（对话不在 / 关了记忆 / 进了回收站 = nil）。isCC = 回复是从 CC 那条路落地的
-    static func currentPath(_ cid: String, profileId pid: String, container: ModelContainer)
+    static func currentPath(_ cid: String, profileId pid: String, source: any ConversationSource)
         -> (title: String, messages: [SessionSegmentWriter.Message], isCC: Bool)? {
-        let context = ModelContext(container)
-        context.autosaveEnabled = false
-        guard let conv = try? context.fetch(FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> {
-            $0.id == cid && $0.profileId == pid
-        })).first, conv.memoryEnabled, !conv.isTrashed else { return nil }
-        let nodes = mainPathNodes(conv, profileId: pid, context: context)
+        guard let conv = try? source.window(profileId: pid, idOrPrefix: cid), conv.memoryEnabled else { return nil }
+        let nodes = mainPathNodes(conv, source: source)
         return (conv.title, nodes.map(message), isCCPath(nodes))
     }
 
@@ -923,7 +1002,8 @@ actor SessionCloseout {
     /// nil = 没有要写的（没新消息 / 尾段已经写到最后一条）或写手跳过
     static func writeTail(context s: SessionSummary, messages: [SessionSegmentWriter.Message], notBefore: Int,
                           persona: String, speakers: SessionSegmentWriter.Speakers,
-                          caller: SessionSegmentWriter.Caller) async throws -> SessionSummary? {
+                          profileId: String = "", title: String = "", memoryRoot: URL? = nil,
+                          save: (SessionSummary) throws -> Void, caller: SessionSegmentWriter.Caller) async throws -> SessionSummary? {
         let formal = s.segments.filter { $0.kind != .closeout }
         let start = windowTailStart(context: formal, pathIds: messages.map(\.id), notBefore: notBefore)
         guard start < messages.count else { return nil }
@@ -932,31 +1012,37 @@ actor SessionCloseout {
             // astra #2：旧尾段已经写到这份快照之后了，不倒退
             if wouldRegress(mark: old.lastNodeId, markDate: old.end, snapshot: messages) { return nil }
         }
-        guard var tail = try await SessionSegmentWriter.write(
-            .init(messages: Array(messages[start...]), kind: .closeout, from: start, persona: persona,
-                  speakers: speakers, previous: formal.last),
-            caller: caller) else { return nil }
-        tail.isTail = true
         var out = s
         out.segments.removeAll { $0.isTail }
-        out.segments.append(tail)
-        out.updatedAt = Date()
+        let parts = contextParts([start..<messages.count], dates: messages.map(\.date))
+        for (i, part) in parts.enumerated() {
+            let isLast = i == parts.count - 1
+            guard var segment = try await SessionSegmentWriter.write(
+                .init(messages: Array(messages[part]), kind: isLast ? .closeout : .rolling, from: part.lowerBound, persona: persona,
+                      speakers: speakers, previous: out.segments.last(where: { $0.kind != .closeout }),
+                      profileId: profileId, windowTitle: title, memoryRoot: memoryRoot),
+                caller: caller) else { return nil }
+            segment.isTail = isLast
+            out.segments.append(segment)
+            out.updatedAt = Date()
+            try save(out)
+        }
         return out
     }
 
-    /// D2：A3 = 读 A2 全部段 + 尾段（老收尾段不算；A2 没盖到的最后那截给原文），整个窗口重压约 N 字，存成一段。nil = 写手跳过 / 没东西
+    /// D2：全部 A2 + 未覆盖原文全压成一段 A3。nil = 写手跳过 / 没东西。
     static func recompressWindow(context s: SessionSummary, messages: [SessionSegmentWriter.Message], title: String, notBefore: Int,
                                  persona: String, speakers: SessionSegmentWriter.Speakers, caller: SessionSegmentWriter.Caller,
-                                 chars: Int = MemoryWriterSettings.a3Chars) async throws -> SessionSummary? {
+                                 profileId: String = "", memoryRoot: URL? = nil) async throws -> SessionSummary? {
         guard let first = messages.first, let last = messages.last else { return nil }
         let segments = s.segments.filter { $0.kind != .closeout || $0.isTail }
         let start = windowTailStart(context: segments, pathIds: messages.map(\.id), notBefore: notBefore)
         let raw = start < messages.count ? Array(messages[start...]) : []
         guard !segments.isEmpty || !raw.isEmpty else { return nil }
         guard let seg = try await WindowSummaryWriter.write(
-            title: title, segments: segments, rawTail: raw, persona: persona, speakers: speakers, chars: chars,
+            title: title, segments: segments, rawTail: raw, persona: persona, speakers: speakers,
             start: segments.first?.start ?? first.date ?? Date(), end: last.date ?? Date(), to: messages.count, lastNodeId: last.id,
-            caller: caller) else { return nil }
+            profileId: profileId, memoryRoot: memoryRoot, caller: caller) else { return nil }
         return SessionSummary(conversationId: s.conversationId, title: title, compressedCount: s.compressedCount,
                               segments: [seg], updatedAt: last.date ?? Date(), closedThrough: last.id)
     }
@@ -965,45 +1051,40 @@ actor SessionCloseout {
     /// 尾段算 A2 的（tailCaller），重压算 A3 的（windowCaller）——各用各的模型、记各的账（三代搬迁 M3）
     static func composeWindowSummary(context s: SessionSummary, messages: [SessionSegmentWriter.Message], title: String,
                                      notBefore: Int, persona: String, speakers: SessionSegmentWriter.Speakers,
-                                     tailCaller: SessionSegmentWriter.Caller, windowCaller: SessionSegmentWriter.Caller) async throws -> (context: SessionSummary, window: SessionSummary)? {
+                                     profileId: String = "", memoryRoot: URL? = nil, tailCaller: SessionSegmentWriter.Caller, windowCaller: SessionSegmentWriter.Caller) async throws -> (context: SessionSummary, window: SessionSummary)? {
         var ctx = s
         if let t = try await writeTail(context: s, messages: messages, notBefore: notBefore, persona: persona,
-                                       speakers: speakers, caller: tailCaller) {
+                                       speakers: speakers, profileId: profileId, title: title, memoryRoot: memoryRoot, save: { _ in }, caller: tailCaller) {
             ctx = t
         }
         guard let w = try await recompressWindow(context: ctx, messages: messages, title: title, notBefore: notBefore,
-                                                 persona: persona, speakers: speakers, caller: windowCaller) else { return nil }
+                                                 persona: persona, speakers: speakers, caller: windowCaller,
+                                                 profileId: profileId, memoryRoot: memoryRoot) else { return nil }
         return (ctx, w)
     }
 
-    // MARK: - 主线路径（和 recall 同一个求法）
+    // MARK: - 主线路径（和 recall 同一个口径：包里的 `visiblePath`）
 
-    static func mainPathNodes(_ conv: Conversation, profileId: String, context: ModelContext) -> [MessageNode] {
-        (try? mainPathNodesStrict(conv, profileId: profileId, context: context)) ?? []
+    static func mainPathNodes(_ conv: ConversationWindow, source: any ConversationSource) -> [ConversationMessage] {
+        (try? mainPathNodesStrict(conv, source: source)) ?? []
     }
 
     /// 同上，取不出就抛（A4 读窗口：读不全要明说，不当成「没消息」）
-    static func mainPathNodesStrict(_ conv: Conversation, profileId: String, context: ModelContext) throws -> [MessageNode] {
-        let cid = conv.id
-        let nodes = try context.fetch(FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> {
-            $0.conversationId == cid && $0.profileId == profileId && $0.isTrashed == false
-        }))
-        let mainSet = ConversationViewModel.computeMainPathSet(nodes: nodes, currentNodeId: conv.currentNodeId, selectionData: conv.branchSelectionData)
-        return nodes
-            .filter { mainSet.contains($0.id) && ($0.role == "user" || $0.role == "assistant") && !$0.content.isEmpty }
-            .sorted { ($0.createTime ?? .distantPast) < ($1.createTime ?? .distantPast) }
+    static func mainPathNodesStrict(_ conv: ConversationWindow, source: any ConversationSource) throws -> [ConversationMessage] {
+        let nodes = try source.nodes(profileId: conv.profileId, conversationId: conv.id)
+        return visiblePath(window: conv, nodes: nodes)
     }
 
-    static func message(_ node: MessageNode) -> SessionSegmentWriter.Message {
-        .init(id: node.id, role: node.role, content: ContentCleaner.clean(node.content, cacheKey: node.id), date: node.createTime)
+    static func message(_ node: ConversationMessage) -> SessionSegmentWriter.Message {
+        .init(id: node.id, role: node.role, content: CatalogOriginalText.body(of: node, cacheKey: node.id), date: node.createTime)
     }
 
-    static func mainPath(_ conv: Conversation, profileId: String, context: ModelContext) -> [SessionSegmentWriter.Message] {
-        mainPathNodes(conv, profileId: profileId, context: context).map(message)
+    static func mainPath(_ conv: ConversationWindow, source: any ConversationSource) -> [SessionSegmentWriter.Message] {
+        mainPathNodes(conv, source: source).map(message)
     }
 
     /// CC 窗口：主线上最后一条 assistant 带 ccMessageId（回复是从 CC 那条路落地的）
-    static func isCCPath(_ nodes: [MessageNode]) -> Bool {
+    static func isCCPath(_ nodes: [ConversationMessage]) -> Bool {
         nodes.last { $0.role == "assistant" }?.ccMessageId != nil
     }
 }
@@ -1020,7 +1101,8 @@ final class SessionCloseoutTrigger {
     func attach(profileManager: ProfileManager, providerManager: ProviderManager) {
         self.profileManager = profileManager
         self.providerManager = providerManager
-        PendingStore.warm(profileId: profileManager.currentProfile.id)   // v5：组 prompt 只读待续缓存，启动时后台先读好
+        let pendingProfileId = profileManager.currentProfile.id
+        PendingStore.warm(profileId: pendingProfileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pendingProfileId))   // v5：组 prompt 只读待续缓存，启动时后台先读好
     }
 
     /// 哪个线程都能喊（VM 不是 MainActor 隔离的）；真正干活在主线程上拿 manager。
@@ -1062,15 +1144,19 @@ final class SessionCloseoutTrigger {
     }
 
     /// 收尾 / CC 写手用的上下文：各写手单选的模型（v5 A7，没选 = 提取模型）。chat = 退回用的对话模型（nil = 全局选的）
-    nonisolated static func context(profile: Profile, providers: ProviderManager, chat: ProviderModel? = nil) -> SessionCloseout.Context {
-        let chat = chat ?? providers.resolveModel(conversationModelId: nil, globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
+    /// container：占到窗口后复查本窗参与（P2-d）；调用方拿不到就留 nil = 不复查
+    nonisolated static func context(profile: Profile, providers: ProviderManager, chat: ProviderModel? = nil,
+                                    container: ModelContainer? = nil) -> SessionCloseout.Context {
+        let chat = chat ?? providers.resolveModel(conversationModelId: nil, profileModelId: nil, globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
         let memory = ConversationViewModel.memoryModel(providerManager: providers, fallback: chat)
         let available = FragmentModelRoute.remoteCredentials(providers.enabledProviders).flatMap(\.models)
         var models: [SessionCloseout.Writer: ProviderModel] = [:]
         for w in SessionCloseout.Writer.allCases {
             models[w] = MemoryWriterModels.resolve(choice: MemoryWriterModels.choice(w.id), memoryModel: memory, available: available)
         }
-        return SessionCloseout.Context(profile: profile, model: memory, writerModels: models)
+        var context = SessionCloseout.Context(profile: profile, model: memory, writerModels: models)
+        context.container = container
+        return context
     }
 
     /// CC 回复落地（`insertProactiveAssistantMessage` 末尾）：这个 CC 窗口满 60 条 / 跨过 05:00 的写成上下文摘要。
@@ -1109,7 +1195,7 @@ final class SessionCloseoutTrigger {
         if PerfHarness.strictMeasure { PerfGuardrails.suppress("memoryExtract"); return }
         #endif
         let profile = pm.profiles.first { $0.id == profileId } ?? pm.currentProfile
-        let chat = providers.resolveModel(conversationModelId: nil, globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
+        let chat = providers.resolveModel(conversationModelId: nil, profileModelId: nil, globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
         let route = FragmentModelRoute.resolve(providerManager: providers, chatFallback: chat)
         let caller = FragmentModelRoute.caller(for: route.route, providerManager: providers, conversationId: conversationId, profileId: profileId)
         let names = MemoryExtractor.Names(userName: profile.userName, assistantName: profile.assistantName)
@@ -1118,15 +1204,14 @@ final class SessionCloseoutTrigger {
             let context = ModelContext(container)
             context.autosaveEnabled = false
             let cid = conversationId, pid = profileId
-            guard let conv = try? context.fetch(FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> {
-                $0.id == cid && $0.profileId == pid
-            })).first, conv.memoryEnabled, !conv.isTrashed else { return }
-            let nodes = SessionCloseout.mainPathNodes(conv, profileId: pid, context: context)
+            let source = SwiftDataConversationSource(container: container)
+            guard let conv = try? source.window(profileId: pid, idOrPrefix: cid), conv.memoryEnabled else { return }
+            let nodes = SessionCloseout.mainPathNodes(conv, source: source)
             guard let claim = await FragmentWatch.shared.due(conversationId: cid, pathIds: nodes.map(\.id), dates: nodes.map(\.createTime),
                                                             threshold: FragmentWatch.every())
             else { return }
             let msgs = nodes[claim.range].map {
-                FragmentPool.Message(id: $0.id, role: $0.role, content: ContentCleaner.clean($0.content, cacheKey: $0.id), date: $0.createTime)
+                FragmentPool.Message(id: $0.id, role: $0.role, content: CatalogOriginalText.body(of: $0, cacheKey: $0.id), date: $0.createTime)
             }
             let outcome = await MemoryWriteLog.metered {
                 await FragmentPool.process(msgs, names: names, caller: caller,
@@ -1209,7 +1294,7 @@ final class SessionCloseoutTrigger {
 
     /// A4 的模型 / 楼层 / 读窗口（主线程取好）：默认本机轻巧款，没装 / 在后台退回提取模型；manual 不看写入预算。账记在 A4 名下
     static func timelineInput(profile: Profile, providers: ProviderManager, container: ModelContainer, manual: Bool) -> TimelineDaily.Input {
-        let chat = providers.resolveModel(conversationModelId: nil, globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
+        let chat = providers.resolveModel(conversationModelId: nil, profileModelId: nil, globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
         let route = TimelineModelRoute.resolve(providerManager: providers, chatFallback: chat)
         let pid = profile.id
         func remote(_ model: ProviderModel) -> SessionSegmentWriter.Caller {
@@ -1229,9 +1314,10 @@ final class SessionCloseoutTrigger {
         }
         if let note = route.fallbackNote { CacheDiagLog.shared.log("📝 时间轴: \(note)") }
         let root = FileLibraryStore.memoryRoot(profileId: pid)
+        let source = SwiftDataConversationSource(container: container)
         return TimelineDaily.Input(profileId: pid, memoryRoot: root, startDay: MemoryStartDay.current,
                                    caller: caller, fallback: fallback, modelName: route.displayName,
-                                   load: { TimelineDaily.windows(profileId: pid, container: container, memoryRoot: root, in: $0) })
+                                   load: { TimelineDaily.windows(profileId: pid, source: source, memoryRoot: root, in: $0) })
     }
 }
 /// 收尾巡检正在整理哪个对话（窗口总结格「正在记」显示「正在整理…」用）。只给界面看，不参与收尾逻辑
@@ -1240,8 +1326,14 @@ final class SessionCloseoutTrigger {
 final class SessionCloseoutStatus {
     static let shared = SessionCloseoutStatus()
     private(set) var runningConversationId: String?
+    private(set) var runningProfileId: String?
+    private(set) var runningTitle: String?
 
-    nonisolated static func set(running conversationId: String?) async {
-        await MainActor.run { shared.runningConversationId = conversationId }
+    nonisolated static func set(running conversationId: String?, profileId: String? = nil, title: String? = nil) async {
+        await MainActor.run {
+            shared.runningConversationId = conversationId
+            shared.runningProfileId = profileId
+            shared.runningTitle = title
+        }
     }
 }

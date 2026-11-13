@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
@@ -8,6 +9,25 @@ import AppKit
 import UIKit
 import SwiftStreamingMarkdown   // Phase 6 article mode 3 处 Markdown 切 fork
 
+#endif
+
+#if os(macOS)
+/// 对话正文区的落点：带文件的当附件，只带文字 id 的当贴纸
+private struct TranscriptDropDelegate: DropDelegate {
+    @Binding var fileTargeted: Bool
+    let acceptFiles: ([NSItemProvider]) -> Bool
+    let acceptSticker: ([NSItemProvider], CGPoint) -> Bool
+
+    func validateDrop(info: DropInfo) -> Bool { info.hasItemsConforming(to: [.fileURL, .plainText]) }
+    func dropEntered(info: DropInfo) { fileTargeted = info.hasItemsConforming(to: [.fileURL]) }
+    func dropExited(info: DropInfo) { fileTargeted = false }
+
+    func performDrop(info: DropInfo) -> Bool {
+        fileTargeted = false
+        if info.hasItemsConforming(to: [.fileURL]) { return acceptFiles(info.itemProviders(for: [.fileURL])) }
+        return acceptSticker(info.itemProviders(for: [.plainText]), info.location)
+    }
+}
 #endif
 
 /// 反转列表 modifier（学 Stream Chat SwiftUI `ChatChannelHelpers.swift:7-18`）。
@@ -458,9 +478,23 @@ struct CardFlowView: View {
     @AppStorage("blurRadius") private var blurRadius = 1.3
     @AppStorage("bubbleSpacing") private var bubbleSpacing: Double = 31
     @AppStorage("gardenSceneEnabled") private var gardenSceneEnabled = true
-    /// pop-tuner：行级弹入只在气泡模式（文章模式粟粟拍了不弹）
-    @AppStorage("chatBubbleMode") private var chatBubbleMode = false
-    private var messageSpacing: Double { chatBubbleMode ? 0 : bubbleSpacing }
+    /// pop-tuner：行级弹入只在气泡模式（文章模式粟粟拍了不弹）。模式是当前对话自己的，只从 viewModel 读
+    private var chatBubbleMode: Bool { viewModel.isBubbleMode }
+    private var messageSpacing: Double { tutuSkinActive ? 0 : (chatBubbleMode ? 0 : bubbleSpacing) }
+    private var tutuSkinActive: Bool {
+        #if PERSONAL_APPS && os(iOS)
+        return SkinState.shared.active
+        #else
+        return false
+        #endif
+    }
+    #if PERSONAL_APPS && os(iOS)
+    @AppStorage("assistantName") private var tutuAssistantName = "助手"
+    @AppStorage("userName") private var tutuFloorUserName = "你"
+    @AppStorage("recallDisplayMode") private var tutuRecallMode = ""
+    @AppStorage("mem_recall_card") private var tutuLegacyRecallVisible = true
+    @State private var tutuSnapshotCache = TutuChatSnapshotCache()
+    #endif
     /// 「隐藏时间戳」现在管列表中间的时间分割线（TASK page1-消息-20）
     @AppStorage("hideTimestamp") private var hideTimestamp: Bool = false
     #if os(iOS)
@@ -483,6 +517,24 @@ struct CardFlowView: View {
     @State private var fileDropTargetedOuter = false
     @State private var fileDropError: String?
     #endif
+    /// 等确认删除的那条消息：悬停按钮、右键 / 长按菜单的「删除」都先到这（粟粟：有时误触）
+    @State private var pendingDeleteNode: MessageNode?
+    private var confirmingDelete: Binding<Bool> {
+        Binding(get: { pendingDeleteNode != nil }, set: { if !$0 { pendingDeleteNode = nil } })
+    }
+    /// 删除确认的挂点：单独一个透明层，不往正文那条长修饰链上加东西（iOS 上那条链再长就超出类型检查时限）
+    private var deleteConfirmHost: some View {
+        Color.clear
+            .allowsHitTesting(false)
+            .confirmationDialog("删除这条消息？", isPresented: confirmingDelete, titleVisibility: .visible) {
+                Button("删除", role: .destructive, action: deletePendingNode)
+            }
+    }
+    private func deletePendingNode() {
+        guard let node = pendingDeleteNode else { return }
+        MessageDust.vanish(key: node.id) { viewModel.softDelete(node) }   // 散成灰再删（§12）
+        ToastCenter.shared.show("已移入回收站")
+    }
     /// 聊天 ScrollView 视口高（气泡渐变整屏锚定用，见 UserBubbleFill）；0 = 还没量到
     @State private var chatViewportHeight: CGFloat = 0
     /// 在上面翻历史时来了新回复/生成完成 → 回底按钮亮徽章；回到底自动熄灭
@@ -528,7 +580,8 @@ struct CardFlowView: View {
     }
 
     @ViewBuilder
-    private func makeBubbleView(for node: MessageNode, display: ChatDisplaySnapshot?, isLastInRun: Bool) -> some View {
+    private func makeBubbleView(for node: MessageNode, display: ChatDisplaySnapshot?, isLastInRun: Bool, showRead: Bool = false,
+                                latestAssistantId: String? = nil) -> some View {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         let _ = AirPerfProbe.enabled ? PerfCount.hit("chatRowBody") : ()
         let _ = PerfHarness.noteBubble(node.id)
@@ -562,12 +615,16 @@ struct CardFlowView: View {
             isSearchMatch: isNodeSearchMatch,
             onToggleFavorite: { viewModel.toggleFavorite(node) },
             onTogglePin: { viewModel.togglePin(node) },
-            onSoftDelete: { MessageDust.vanish(key: node.id) { viewModel.softDelete(node) } },   // 散成灰再删（§12）
+            onSoftDelete: { pendingDeleteNode = node },
             onSwitchBranch: { nodeId, idx in viewModel.switchBranch(at: nodeId, to: idx) },
             onRegenerate: makeRegenerateAction(for: node),
             onEdit: makeEditAction(for: node),
             isBeingEdited: viewModel.editingMessage?.nodeId == node.id,
             isLastInRun: isLastInRun,
+            isLatestAssistant: node.id == latestAssistantId,
+            onContinue: node.id == latestAssistantId ? makeContinueAction() : nil,
+            outcomeDetail: outcomeDetail(for: node),
+            showRead: showRead,
             onQuoteText: { txt in
                 #if os(iOS)
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -585,20 +642,65 @@ struct CardFlowView: View {
         // 对话内查找：只给命中的气泡注入词（没命中的恒为空，词变了不牵动它们）
         .environment(\.chatSearchTerms, viewModel.inConvHitIds.contains(node.id) ? viewModel.inConvTerms : [])
     }
+    #if PERSONAL_APPS && os(iOS)
+    private func tutuDisplayPath(context: TutuChatSnapshotCache.Context, dividers: [String: Date]) -> [TutuChatMessageSnapshot] {
+        return viewModel.currentPath.filter { $0.role == "user" || $0.role == "assistant" }.map { node in
+            var snapshot = context.snapshot(for: node)
+            snapshot.hasDate = dividers[node.id] != nil
+            snapshot.nativeHeight = TutuChatTimeline.shared.nativeHeights[node.id] ?? 0
+            snapshot.dateLabel = dividers[node.id].map { ChatTimeDivider.label($0) } ?? ""
+            return snapshot
+        }
+    }
+    #endif
+
 
     @ViewBuilder
     private func messageRows(display: ChatDisplaySnapshot?, dividers: [String: Date]) -> some View {
         let bubbleRuns: [String: ChatBubbleRunCache.Layout] = chatBubbleMode
             ? viewModel.bubbleRunCache.layouts(for: viewModel.currentPath, dividers: dividers,
-                                              includesTimeDividers: !hideTimestamp)
+                                              includesTimeDividers: !hideTimestamp, gap: ChatTimeDivider.bubbleGap)
             : [:]
+        // Read 回执：只算一次（O(n)），不进每行。粟粟最后一条消息 + AI 正在回这条对话 → 显示
+        let convId = viewModel.selectedConversation?.id ?? ""
+        let aiReplying = chatBubbleMode && viewModel.assistantTurnInFlight && viewModel.activeConversationId == convId
+        let lastUserId: String? = aiReplying ? viewModel.currentPath.last(where: { $0.role == "user" })?.id : nil
+        // 结局胶囊的按钮只给这条对话最新那条 assistant
+        let latestAssistantId: String? = viewModel.currentPath.last(where: { $0.role == "assistant" })?.id
+        #if PERSONAL_APPS && os(iOS)
+        // Names/rules/recall settings form one configuration revision per list pass.
+        // Legacy recall is read as well, so its unmigrated setting remains observable.
+        let _ = tutuRecallMode
+        let _ = tutuLegacyRecallVisible
+        let rowDisplay = tutuSkinActive ? (display ?? makeRowDisplay()) : display
+        let tutuContext = tutuSkinActive ? tutuSnapshotCache.context(
+            scripts: rowDisplay?.regexScripts ?? [],
+            userName: viewModel.personaDisplayName(profile: profileManager?.currentProfile) ?? tutuFloorUserName,
+            assistantName: tutuAssistantName,
+            scope: "\(profileManager?.currentProfile.id ?? ""):\(convId)") : nil
+        let tutuPath = tutuContext.map { tutuDisplayPath(context: $0, dividers: dividers) } ?? []
+        let tutuSpacing = Dictionary(uniqueKeysWithValues: tutuPath.enumerated().map { index, item in
+            let previous = index > 0 ? tutuPath[index - 1] : nil
+            let spacing: CGFloat = item.hasDate ? 0
+                : previous.map { TutuChatStyle.spacing(beforeUser: $0.isUser, afterUser: item.isUser) } ?? 0
+            return (item.id, item.hasDate ? 0 : (item.hasRecall ? (previous?.isUser == true ? 16 : 0) : spacing))
+        })
+        let tutuDateSpacing = Dictionary(uniqueKeysWithValues: tutuPath.map {
+            ($0.id, CGFloat($0.isUser ? 36 : ($0.hasRecall ? 0 : 24)))
+        })
+        #else
+        let tutuDateSpacing: [String: CGFloat] = [:]
+        let rowDisplay = display
+        #endif
         ForEach(viewModel.currentPath.reversed(), id: \.id) { node in
             let run = bubbleRuns[node.id]
             VStack(spacing: 0) {
                 if let time = dividers[node.id] {
-                    ChatTimeDividerView(date: time, spacing: messageSpacing, bubbleMode: chatBubbleMode)
+                    ChatTimeDividerView(date: time, spacing: messageSpacing, bubbleMode: chatBubbleMode,
+                                        tutuFollowingSpacing: tutuDateSpacing[node.id, default: 24])
                 }
-                makeBubbleView(for: node, display: display, isLastInRun: run?.hasTail ?? true)
+                makeBubbleView(for: node, display: rowDisplay, isLastInRun: run?.hasTail ?? true,
+                               showRead: node.id == lastUserId, latestAssistantId: latestAssistantId)
                     #if (DEBUG || PERF_BENCH) && os(macOS)
                     .background {
                         if PerfHarnessMac.enabled {
@@ -609,7 +711,11 @@ struct CardFlowView: View {
                     // 多选气泡：行只读「是否在多选」，选中与否只有勾选圆 / 选中底两个叶子读
                     .modifier(selectionRow(for: node))
             }
+            #if PERSONAL_APPS && os(iOS)
+            .padding(.top, tutuSkinActive ? tutuSpacing[node.id, default: 0] : (run?.spacingBefore ?? 0))
+            #else
             .padding(.top, run?.spacingBefore ?? 0)
+            #endif
             .id(node.id)
             // pop-tuner v7：行级不再弹整行（整行弹入视觉过重，
             // 调音台与真实差距主因）——弹泡下沉 BubbleModeRow 内（popPending），
@@ -640,6 +746,10 @@ struct CardFlowView: View {
             .background(MessageDustAnchor(key: node.id))
             #endif
         }
+        #if PERSONAL_APPS && os(iOS)
+        .environment(\.tutuChatPath, tutuPath)
+        .environment(\.tutuChatSnapshotContext, tutuContext)
+        #endif
     }
 
     /// 多选气泡的行修饰（research-multi-select-bubbles §9-3）
@@ -649,7 +759,7 @@ struct CardFlowView: View {
             selection: viewModel.messageSelection,
             nodeId: node.id,
             isUser: node.role == "user",
-            bubbleMode: chatBubbleMode,
+            bubbleMode: tutuSkinActive || chatBubbleMode,
             selectable: selectable,
             rowSpacing: messageSpacing,
             onTap: { handleSelectionTap(node) },
@@ -677,6 +787,40 @@ struct CardFlowView: View {
         selection.toggle(node.id)
     }
 
+    /// 结局胶囊的「继续」：走正常发送链发一条看得见的「继续」，和她自己打字一样（plan-reply-error-report-1106 §5 第 1 条）
+    private func makeContinueAction() -> (() -> Void)? {
+        guard let pm = providerManager else { return nil }
+        return {
+            guard let prof = self.profileManager?.currentProfile else { return }
+            let preset = self.presetManager?.preset(byId: prof.presetId) ?? Preset.balanced
+            let model = pm.resolveModel(
+                conversationModelId: self.viewModel.selectedConversation?.selectedModelId,
+                profileModelId: prof.preferredModel,
+                globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
+            self.viewModel.selectedConversation?.selectedModelId = model.id
+            _ = self.viewModel.sendMessage("继续", model: model, profile: prof, preset: preset,
+                                           providerManager: pm, context: self.modelContext)
+        }
+    }
+
+    /// 结局胶囊详情：上游原样的 finish_reason + host + 模型名，方便以后查（§1.4）
+    private func outcomeDetail(for node: MessageNode) -> String? {
+        guard node.replyOutcome != nil else { return nil }
+        var parts: [String] = []
+        if let reason = node.finishReason, !reason.isEmpty { parts.append("上游返回：\(reason)") }
+        if let pm = providerManager {
+            let model = pm.resolveModel(
+                conversationModelId: viewModel.selectedConversation?.selectedModelId,
+                profileModelId: profileManager?.currentProfile.preferredModel,
+                globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
+            if let provider = pm.provider(for: model) {
+                let host = URL(string: provider.baseURL)?.host ?? provider.baseURL
+                parts.append("\(host) · \(model.modelId)")
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+    }
+
     private func makeRegenerateAction(for node: MessageNode) -> (() -> Void)? {
         guard node.role == "assistant" || node.role == "user", let pm = providerManager else { return nil }
         return {
@@ -684,6 +828,7 @@ struct CardFlowView: View {
             let preset = self.presetManager?.preset(byId: prof.presetId) ?? Preset.balanced
             let model = pm.resolveModel(
                 conversationModelId: self.viewModel.selectedConversation?.selectedModelId,
+                profileModelId: prof.preferredModel,
                 globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
             self.viewModel.selectedConversation?.selectedModelId = model.id
             if node.role == "assistant" {
@@ -834,12 +979,12 @@ struct CardFlowView: View {
             VStack {
                 Spacer()
                 ProgressView("加载中...")
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(Theme.chat.textMuted)
                 Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             #if os(macOS)
-            .background(macChatCarded ? Color.clear : Theme.mainBg)
+            .background(macChatCarded ? Color.clear : Theme.chat.mainBg)
             #endif
             // iOS 下路线 C chat page 有 wallpaper，loading 区透明让 wallpaper 可见
         } else {
@@ -889,23 +1034,25 @@ struct CardFlowView: View {
                                 if let request = PermissionPromptCenter.shared.pendingRequest, request.inline,
                                    request.approval?.conversationId == viewModel.selectedConversation?.id {
                                     ApprovalCardView(request: request)
-                                        .padding(.top, chatBubbleMode ? 10 : 0)
+                                        .padding(.top, chatBubbleMode ? ChatBubbleRunCache.speakerChangeSpacing : 0)
                                         .id(request.id)
                                         .flippedUpsideDown()
                                 }
                                 // 进度卡（粟粟 10-03）：API 模型连调工具时在审批卡上面；读 VM 都在 Host 里
                                 if let cid = viewModel.selectedConversation?.id {
                                     TurnActivityHost(viewModel: viewModel, conversationId: cid,
-                                                     spacingBefore: chatBubbleMode ? 10 : 0,
+                                                     spacingBefore: chatBubbleMode ? ChatBubbleRunCache.speakerChangeSpacing : 0,
                                                      onStop: { viewModel.cancelAssistantTurn(context: modelContext) })
                                         .flippedUpsideDown()
                                 }
                                 // CC 等待泡（收口即发）：该对话发出未回时垫底显示。
                                 // 反转列表：物理最前 = 视觉最底，所以放 ForEach 前面。
                                 // 进度卡 B（粟粟 10-03）：hub 推了 CC 状态就出状态卡（干活中 / 等你 / 做完了），没有就照旧三个点
-                                if let cid = viewModel.selectedConversation?.id {
+                                if let conversation = viewModel.selectedConversation {
+                                    let cid = conversation.id
                                     CCPhaseHost(conversationId: cid, waitingForReply: viewModel.ccWaitingSince[cid] != nil,
-                                                spacingBefore: chatBubbleMode ? 10 : 0)
+                                                spacingBefore: chatBubbleMode ? ChatBubbleRunCache.speakerChangeSpacing : 0, bubbleMode: chatBubbleMode,
+                                                hubId: CCHubRegistry.hubId(of: conversation))
                                         .flippedUpsideDown()
                                 }
                                 #if (DEBUG || PERF_BENCH) && os(iOS)
@@ -922,11 +1069,11 @@ struct CardFlowView: View {
                                 #if (DEBUG || PERF_BENCH) && os(iOS)
                                 let dividers = hideTimestamp ? [:] : (AirPerfProbe.enabled
                                     ? AirPerfProbe.measure("dividerBuild") {
-                                        viewModel.timeDividerCache.dividers(for: viewModel.currentPath)
+                                        viewModel.timeDividerCache.dividers(for: viewModel.currentPath, gap: chatBubbleMode ? ChatTimeDivider.bubbleGap : ChatTimeDivider.articleGap)
                                     }
-                                    : viewModel.timeDividerCache.dividers(for: viewModel.currentPath))
+                                    : viewModel.timeDividerCache.dividers(for: viewModel.currentPath, gap: chatBubbleMode ? ChatTimeDivider.bubbleGap : ChatTimeDivider.articleGap))
                                 #else
-                                let dividers = hideTimestamp ? [:] : viewModel.timeDividerCache.dividers(for: viewModel.currentPath)
+                                let dividers = hideTimestamp ? [:] : viewModel.timeDividerCache.dividers(for: viewModel.currentPath, gap: chatBubbleMode ? ChatTimeDivider.bubbleGap : ChatTimeDivider.articleGap)
                                 #endif
                                 messageRows(display: rowDisplay, dividers: dividers)
                             }
@@ -937,7 +1084,8 @@ struct CardFlowView: View {
                                 chatBubbleMode && BubblePopTuning.enabled && !viewModel.popNodeIds.isEmpty ? BubblePopTuning.pushAnimation : nil,
                                 value: viewModel.currentPath.count
                             )
-                            .padding(.horizontal, chatBubbleMode ? 16 : metrics.listInsetH)
+                            .padding(.leading, tutuSkinActive ? 50 : (chatBubbleMode ? 16 : metrics.listInsetH))
+                            .padding(.trailing, tutuSkinActive ? 15 : (chatBubbleMode ? 16 : metrics.listInsetH))
                             .padding(.vertical, metrics.listInsetV)
                             .frame(maxWidth: Theme.contentMaxWidth)
                             .frame(maxWidth: .infinity)
@@ -953,13 +1101,17 @@ struct CardFlowView: View {
                         .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "transcript") } }
                         #endif
                         #if os(macOS)
-                        // 拖文件 = 上传成附件（plan-mac-code-mode-gaps §6）。挂在贴纸 drop 里面一层：Finder 拖文件
-                        // 可能也带纯文字，让贴纸那层先接到会吞掉；贴纸拖动不带 fileURL，照旧穿到下面那层
-                        .onDrop(of: FileDrop.types, isTargeted: $fileDropTargeted, perform: acceptFileDrop)
-                        #endif
+                        // 拖文件 = 上传成附件（plan-mac-code-mode-gaps §6），拖贴纸 = 贴到画布。原来是两层 onDrop 叠着
+                        //（文件在里、贴纸在外），粟粟 11-11 报 mac 贴纸拖不出来：并成一层按内容分派，不再靠「穿透」
+                        .onDrop(of: [UTType.fileURL, UTType.plainText],
+                                delegate: TranscriptDropDelegate(fileTargeted: $fileDropTargeted, acceptFiles: acceptFileDrop) { providers, location in
+                                    handleStickerDrop(providers: providers, location: location)
+                                })
+                        #else
                         .onDrop(of: [UTType.plainText], isTargeted: nil) { providers, location in
                             handleStickerDrop(providers: providers, location: location)
                         }
+                        #endif
                         #if os(iOS)
                         // 反转列表副作用：点状态栏默认会滚到物理顶 = 视觉底，要关。
                         // 状态栏 tap 区由下面 .overlay(alignment: .top) 区自己接管。
@@ -1085,16 +1237,18 @@ struct CardFlowView: View {
                     .overlay {
                         scrollToBottomOverlay(proxy: proxy)
                         chatScrubberOverlay()
+                        deleteConfirmHost
                     }
                     .animation(.easeInOut(duration: 0.25), value: stickerVM.showStickerPanel)
                     .animation(.easeInOut(duration: 0.25), value: stickerVM.isEditingStickers)
                     #else
                     // 卡内让开：卡自己画了底（可能还带壁纸），这里再画一层就是补丁（R-FS S1.4）
-                    .background(macChatCarded ? Color.clear : Theme.mainBg)
+                    .background(macChatCarded ? Color.clear : Theme.chat.mainBg)
                     .overlay(alignment: .bottomTrailing) { scrollToBottomOverlay(proxy: proxy) }
                     // 正文那层之外（输入条）拖文件也收
                     .onDrop(of: FileDrop.types, isTargeted: $fileDropTargetedOuter, perform: acceptFileDrop)
                     .overlay { fileDropHint }
+                    .overlay { deleteConfirmHost }
                     .alert("附件读取失败", isPresented: Binding(get: { fileDropError != nil }, set: { if !$0 { fileDropError = nil } })) {
                         Button("好") { fileDropError = nil }
                     } message: {
@@ -1193,6 +1347,30 @@ struct CardFlowView: View {
 
 
             }
+            #if PERSONAL_APPS && os(iOS)
+            .background { if SkinState.shared.active { TutuChatBackgroundView().ignoresSafeArea() } }
+            .overlay { if SkinState.shared.active { TutuChatTopFade().ignoresSafeArea() } }
+            .overlay { if SkinState.shared.active { TutuChatTableLight() } }
+            .overlay { if SkinState.shared.active { TutuChatIntroShades().ignoresSafeArea() } }
+            .overlay {
+                if SkinState.shared.active {
+                    TutuChatRabbitView(responding: viewModel.isCurrentConvResponding,
+                        conversationID: viewModel.selectedConversation?.id ?? "")
+                        .opacity(TutuChatIntroPresentation.shared.phase.chromeOpacity)
+                        .ignoresSafeArea()
+                }
+            }
+            .modifier(TutuChatLifecycle(viewModel: viewModel))
+            #if DEBUG
+            .overlay(alignment: .topTrailing) {
+                if SkinState.shared.active {
+                    TutuChatDebugCounterStrip()
+                        .padding(.top, 64)
+                        .padding(.trailing, 8)
+                }
+            }
+            #endif
+            #endif
             .animation(.easeInOut(duration: 0.25), value: stickerVM.isEditingStickers)
             #if os(macOS)
             .animation(.easeInOut(duration: 0.25), value: stickerVM.showStickerPanel)
@@ -1229,6 +1407,11 @@ struct CardFlowView: View {
             // 审批卡只出在正看着的对话里；切走 / 离开聊天页时挂着的卡改走弹窗（粟粟 10-03）
             .onChange(of: viewModel.selectedConversation?.id, initial: true) { _, id in
                 PermissionPromptCenter.shared.visibleConversationId = id
+                #if os(iOS)
+                // 浏览器「让 AI 看这页」：放进当前对话的输入框（plan-ai-browser-operate §1.3）
+                let vm = viewModel
+                BrowserOperator.shared.attachToChat = id == nil ? nil : { [weak vm] att in vm?.selectedAttachments.append(att) }
+                #endif
             }
             .onDisappear {
                 if PermissionPromptCenter.shared.visibleConversationId == viewModel.selectedConversation?.id {
@@ -1261,7 +1444,7 @@ struct CardFlowView: View {
                 }
             }
             #if os(iOS)
-            .toolbarBackground(Theme.mainBg, for: .navigationBar)
+            .toolbarBackground(Theme.chat.mainBg, for: .navigationBar)
             #endif
             .overlay(alignment: .top) {
                 // B20 part 2: transient toast (e.g. "已切换到分支")
@@ -1281,6 +1464,8 @@ struct CardFlowView: View {
             }
             // 计时器卡到点自动告诉模型（research-chat-cards §8.2 / §8.5）；store 在这里首次懒加载
             .timerDelivery(viewModel: viewModel)
+            // 表情包点即发：➕ 面板开着时输入条只剩占位，发送挂在聊天页（plan-bubble-sticker-send §1.3）
+            .memeSending(viewModel: viewModel, stickerVM: stickerVM)
             #if os(macOS)
             // 切到别的对话时音乐继续放：顶上一个小玻璃胶囊，点回去（粟粟 09-27）。iOS 挂在顶栏下面（ContentView.iOSChatTopBar）
             .overlay(alignment: .top) { MusicNowPlayingCapsule(viewModel: viewModel).padding(.top, 6) }
@@ -1346,6 +1531,7 @@ struct CardFlowView: View {
                 presetManager: presetManager,
                 currentModel: pm.resolveModel(
                     conversationModelId: viewModel.selectedConversation?.selectedModelId,
+                    profileModelId: profileManager?.currentProfile.preferredModel,
                     globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel")),
                 nativeCallID: NativeCallCoordinator.shared.current?.call_id
             )
@@ -1382,15 +1568,15 @@ struct CardFlowView: View {
 
     private var fileDropHint: some View {
         RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .fill(Theme.branchIndicator.opacity(0.10))
+            .fill(Theme.chat.branchIndicator.opacity(0.10))
             .overlay {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Theme.branchIndicator, style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                    .strokeBorder(Theme.chat.branchIndicator, style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
             }
             .overlay {
                 Label("松手上传", systemImage: "arrow.down.doc")
                     .font(.system(size: Theme.F.body, weight: .medium))
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Theme.chat.textSecondary)
             }
             .padding(12)
             .opacity(fileDropTargeted || fileDropTargetedOuter ? 1 : 0)
@@ -1410,6 +1596,7 @@ struct CardFlowView: View {
                       let convId = viewModel.selectedConversation?.id,
                       let pid = profileManager?.currentProfile.id else { return }
 
+                stickerVM.noteAssetUsed(assetId)
                 let nearestId = findNearestMessageId(y: location.y)
                 print("[贴纸定位] drop y=\(location.y), bubblePositions=\(stickerVM.bubblePositions.count)条, nearest=\(nearestId ?? "nil")")
 
@@ -1472,7 +1659,7 @@ struct InConversationSearchBar: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 12))
-                .foregroundColor(Theme.textMuted)
+                .foregroundColor(Theme.chat.textMuted)
 
             TextField("搜索当前对话...", text: $keyword)
                 .textFieldStyle(.plain)
@@ -1490,38 +1677,38 @@ struct InConversationSearchBar: View {
             if !viewModel.inConvMatches.isEmpty {
                 Text("\(viewModel.inConvMatchIndex + 1)/\(viewModel.inConvMatches.count)")
                     .font(.caption2)
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(Theme.chat.textMuted)
                     .monospacedDigit()
 
                 Button(action: { viewModel.navigateInConvMatch(direction: -1) }) {
                     Image(systemName: "chevron.up")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(Theme.branchIndicator)
+                        .foregroundColor(Theme.chat.branchIndicator)
                 }
                 .buttonStyle(.plain)
 
                 Button(action: { viewModel.navigateInConvMatch(direction: 1) }) {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(Theme.branchIndicator)
+                        .foregroundColor(Theme.chat.branchIndicator)
                 }
                 .buttonStyle(.plain)
             } else if !keyword.isEmpty && viewModel.inConvMatchIndex == -1 {
                 Text("无结果")
                     .font(.caption2)
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(Theme.chat.textMuted)
             }
 
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(Theme.chat.textMuted)
             }
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(Theme.sidebarBg)
+        .background(Theme.chat.sidebarBg)
     }
 }
 
@@ -1541,6 +1728,9 @@ struct ChatInputBar: View {
 
     @AppStorage("selectedChatModel") private var selectedModelId = ""
     @State private var showModelPicker = false
+    @State private var showContextLens = false
+    /// 链接直读：草稿里的链接先读好，发送时当附件带上（plan-link-direct-read）
+    @StateObject private var linkReads = LinkReadSession()
     /// 当前对话的语音正在转文字 → 输入条行内显示「转文字中…」（M5b；不再占附件条，输入条不跳高）。
     /// 忙状态在 VoiceNoteTranscribing 单例上（sol P1-2：输入条重挂不丢）
     private var isTranscribingVoice: Bool {
@@ -1568,13 +1758,15 @@ struct ChatInputBar: View {
     /// chip 行（引用/附件/排队）可见性——barGrowth 的 chip 分量开关，与 body 内渲染条件同源
     private var hasChipRow: Bool {
         viewModel.quotingPreview != nil || !selectedAttachments.isEmpty || !viewModel.pendingSends.isEmpty
-            || !pendingCardEvents.isEmpty
+            || !pendingCardEvents.isEmpty || !linkReads.items.isEmpty
     }
 
-    /// §13 待捎带箱里这个对话的事件（下次发消息带给模型）
+    private var isCCBridge: Bool { providerManager.credential(for: currentModel)?.type == .ccBridge }
+
+    /// §13 待捎带箱里这个对话、她看得见的事件（下次发消息整箱带给模型，AI 贴表情的记录不显示）
     private var pendingCardEvents: [ChatCardEvent] {
         guard let id = viewModel.selectedConversation?.id else { return [] }
-        return viewModel.cardEventOutbox.events(for: id)
+        return viewModel.cardEventOutbox.visibleEvents(for: id)
     }
 
     private var isEditingMessage: Bool { viewModel.editingMessage != nil }
@@ -1610,7 +1802,7 @@ struct ChatInputBar: View {
             if let missing = viewModel.editingMessage?.restored.missingCount, missing > 0 {
                 Text("\(missing) 个附件找不到了，发送后不会带上")
                     .font(.system(size: 11))
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(Theme.chat.textMuted)
                     .padding(.leading, 10)
                     .padding(.bottom, 4)
             }
@@ -1627,7 +1819,7 @@ struct ChatInputBar: View {
             Button { endEditing() } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(Theme.chat.textMuted)
                     .frame(width: 36, height: 30)
                     .contentShape(Rectangle())
             }
@@ -1637,10 +1829,31 @@ struct ChatInputBar: View {
             .help("取消编辑（Esc）")
             #endif
         }
-        .foregroundColor(Theme.textPrimary)
+        .foregroundColor(Theme.chat.textPrimary)
         .padding(.leading, 10)
         .padding(.trailing, 2)
         .padding(.vertical, 2)
+    }
+
+    /// 10-29 贴表情立刻生效（10-30 去防抖，点了就发）：由这里拿模型 / 楼层 / 预设去发。
+    /// 输入框有字 = 她在打字：不单独触发，表情留在箱里跟她这条一起走
+    private func registerReactionTrigger() {
+        ChatReactionTrigger.shared.deliver = { [viewModel, modelContext, profileManager, presetManager, providerManager] cid in
+            guard let conv = viewModel.selectedConversation, conv.id == cid else { return .unsupported }
+            #if os(iOS)
+            let typed = ChatInputHandle.shared.liveText ?? conv.draftText
+            #else
+            let typed = conv.draftText
+            #endif
+            guard typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .typing }
+            let prof = profileManager?.currentProfile ?? Profile(name: "", emoji: "", description: "", userName: "你", assistantName: "AI")
+            let preset = presetManager?.preset(byId: prof.presetId) ?? Preset.balanced
+            let model = providerManager.resolveModel(conversationModelId: conv.selectedModelId,
+                                                     profileModelId: prof.preferredModel,
+                                                     globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
+            return viewModel.triggerReactionReply(model: model, profile: prof, preset: preset,
+                                                  providerManager: providerManager, context: modelContext)
+        }
     }
 
     /// 输入框里现在的真文字（iOS 真相在 UITextView，先定稿组字再读）
@@ -1820,13 +2033,21 @@ struct ChatInputBar: View {
     private var currentModel: ProviderModel {
         providerManager.resolveModel(
             conversationModelId: viewModel.selectedConversation?.selectedModelId,
+            profileModelId: profileManager?.currentProfile.preferredModel,
             globalFallbackId: selectedModelId)
+    }
+
+    /// 这条 CC 对话连的那台用不了（plan-multi-hub B4.4）：输入框上方提示 +「换一台」、输入框禁用。只是连不上 = nil
+    private var ccHubBlocker: CCHubRegistry.Unavailable? {
+        guard providerManager.credential(for: currentModel)?.type == .ccBridge, let conv = viewModel.selectedConversation else { return nil }
+        return CCHubTitle.blocker(for: conv)
     }
 
     /// 底部模型胶囊要的那一项：cc-bridge 卡且对话已绑会话才有。只取对象、不读模型（读在 ModelCapsule 里，审查 R1-6）
     private var capsuleModelEntry: CCSessionModelEntry? {
         ModelCapsule.entry(isCCBridge: providerManager.credential(for: currentModel)?.type == .ccBridge,
-                           sessionName: viewModel.selectedConversation?.ccBridgeSessionName)
+                           sessionName: viewModel.selectedConversation?.ccBridgeSessionName,
+                           hubId: viewModel.selectedConversation.map(CCHubRegistry.hubId(of:)) ?? CCHubRegistry.primaryId)
     }
 
     private var systemPrompt: String? {
@@ -1872,7 +2093,11 @@ struct ChatInputBar: View {
             #endif
         }()
         #endif
+        let hubBlocker = ccHubBlocker
         return VStack(spacing: metrics.composerStackSpacing) {
+            if let hubBlocker, let conv = viewModel.selectedConversation {
+                CCHubBlockedBanner(conversation: conv, blocker: hubBlocker, viewModel: viewModel)
+            }
             // A4：引用 + 附件同一横排（AttachmentChipRow 里引用排第一个）。✕ 取消引用。
             // 排队消息也在这排（⏳ chip，✕ = 取消排队写回输入框）。
             if hasChipRow {
@@ -1890,6 +2115,9 @@ struct ChatInputBar: View {
                         viewModel.cardEventOutbox.remove(id: id, conversationId: convId)
                     },
                     voiceProfileId: viewModel.selectedConversation?.profileId ?? "",
+                    linkReads: isEditingMessage ? [] : linkReads.items,
+                    onApproveLink: { linkReads.approve($0) },
+                    onRemoveLink: { linkReads.dismiss($0) },
                     onCancelPending: { id in
                         guard let p = viewModel.cancelPendingSend(id: id) else { return }
                         #if os(iOS)
@@ -1946,7 +2174,7 @@ struct ChatInputBar: View {
                 onSend: { text in send(text) },
                 onCancelStream: { viewModel.cancelAssistantTurn(context: modelContext) },
                 onStickerTap: onStickerTap,
-                isCCBridge: providerManager.credential(for: currentModel)?.type == .ccBridge,
+                isCCBridge: isCCBridge,
                 stopWhileResponding: isEditingMessage,
                 voiceEnabled: true,
                 voiceTranscribing: isTranscribingVoice,
@@ -1964,11 +2192,13 @@ struct ChatInputBar: View {
             #endif
             }
             .padding(isEditingMessage ? 4 : 0)
+            .disabled(hubBlocker != nil)
+            .opacity(hubBlocker != nil ? 0.5 : 1)
             .background {
                 if isEditingMessage {
                     RoundedRectangle(cornerRadius: editCardRadius)
-                        .fill(Theme.textPrimary.opacity(0.05))
-                        .overlay(RoundedRectangle(cornerRadius: editCardRadius).strokeBorder(Theme.textPrimary.opacity(0.08), lineWidth: 1))
+                        .fill(Theme.chat.textPrimary.opacity(0.05))
+                        .overlay(RoundedRectangle(cornerRadius: editCardRadius).strokeBorder(Theme.chat.textPrimary.opacity(0.08), lineWidth: 1))
                         .transition(.opacity)
                 }
             }
@@ -2041,7 +2271,7 @@ struct ChatInputBar: View {
         .padding(.horizontal, macChatCarded ? MacShellMetrics.shared.composerInset : 0)
         .padding(.top, macChatCarded ? MacShellMetrics.shared.composerGap : 0)
         .frame(maxWidth: .infinity)
-        .background(macChatCarded ? Color.clear : Theme.mainBg)
+        .background(macChatCarded ? Color.clear : Theme.chat.mainBg)
         #endif
         #if os(iOS)
         .sheet(isPresented: $showModelPicker) {
@@ -2074,8 +2304,13 @@ struct ChatInputBar: View {
         .onAppear {
             providerManager.resolveStaleSelectedModel()
             providerManager.resolveStaleFavorites()
+            registerReactionTrigger()
         }
         .onChange(of: viewModel.editingMessage?.token, initial: true) { _, _ in applyEditingIfNeeded() }
+        .onChange(of: draftText, initial: true) { _, text in
+            linkReads.draftChanged(isEditingMessage ? "" : text, isCC: isCCBridge,
+                                   profileId: viewModel.selectedConversation?.profileId ?? profileManager?.currentProfile.id)
+        }
         .onChange(of: viewModel.composerInsert?.token) { _, _ in applyComposerInsert() }
         .onChange(of: viewModel.cardSendRequest?.token) { _, _ in applyCardSend() }
         .onChange(of: viewModel.modelPickerRequested, initial: true) { _, requested in
@@ -2119,6 +2354,20 @@ struct ChatInputBar: View {
             DeathScaleUnlock.post()
             return true
         }
+        #if os(iOS)
+        if TutuSkinUnlock.matches(text) {
+            if viewModel.editingMessage == nil {
+                viewModel.selectedConversation?.draftText = ""
+                viewModel.selectedConversation?.draftAttachmentsData = nil
+                viewModel.selectedConversation?.draftQuotePreview = ""
+                viewModel.selectedConversation?.draftQuoteReplyTo = ""
+                selectedAttachments = []
+                viewModel.clearQuoting()
+            }
+            TutuSkinUnlock.post()
+            return true
+        }
+        #endif
         #endif
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !selectedAttachments.isEmpty else { return false }
@@ -2139,7 +2388,16 @@ struct ChatInputBar: View {
             DispatchQueue.main.async { endEditing() }
             return true
         }
-        let modelInput = ChatAttachmentPromptBuilder.modelInput(text: trimmed, attachments: selectedAttachments)
+        // 链接还在读：先等（最多 6 秒，再点发送就不等），读完自动发这一条
+        if linkReads.holdSend(then: {
+            guard send(text) else { return }
+            draftText = ""
+            #if os(iOS)
+            ChatInputHandle.shared.issueText("")
+            #endif
+        }) { return false }
+        let outgoing = selectedAttachments + linkReads.attachments(for: trimmed)
+        let modelInput = ChatAttachmentPromptBuilder.modelInput(text: trimmed, attachments: outgoing)
 
         // 预算 pre-check：被拦时返回 false，子 view 保留 text
         guard viewModel.preCheckBudget(
@@ -2153,16 +2411,36 @@ struct ChatInputBar: View {
         // 认领：把这条消息实际用的模型记到对话上（点1：下次打开=最后一条消息的模型）
         viewModel.selectedConversation?.selectedModelId = currentModel.id
         // globalWorldBookEntries 已由 ContentView 同步
-        viewModel.sendMessage(
+        #if PERSONAL_APPS && os(iOS)
+        let tutuExistingIDs = SkinState.shared.active ? Set(viewModel.currentPath.map(\.id)) : nil
+        let tutuEmpty = SkinState.shared.active && viewModel.currentPath.isEmpty
+            && (viewModel.selectedConversation?.nodeCount ?? 0) == 0
+        let tutuSentAt = tutuExistingIDs == nil ? 0 : CACurrentMediaTime()
+        #endif
+        let sent = viewModel.sendMessage(
             trimmed,
             model: currentModel,
             profile: prof,
             preset: preset,
             providerManager: providerManager,
             context: modelContext,
-            attachments: selectedAttachments
+            attachments: outgoing
         )
+        #if PERSONAL_APPS && os(iOS)
+        if sent, let existing = tutuExistingIDs, let conversationID = viewModel.selectedConversation?.id {
+            let added = viewModel.currentPath.filter { !existing.contains($0.id) }
+            if let user = added.first(where: { $0.role == "user" }) {
+                let intro = tutuEmpty && TutuChatIntroPresentation.shared.start(conversationID: conversationID, at: tutuSentAt)
+                TutuChatAnimationTimeline.shared.sent(conversationID: conversationID, existingIDs: existing,
+                    userID: user.id, assistantIDs: added.filter { $0.role == "assistant" }.map(\.id),
+                    at: tutuSentAt, intro: intro)
+            }
+        }
+        #else
+        _ = sent
+        #endif
         selectedAttachments = []
+        linkReads.reset()
         // 发送后清空该对话的草稿持久化（draftText 由子 view 清空）
         viewModel.selectedConversation?.draftText = ""
         viewModel.selectedConversation?.draftAttachmentsData = nil
@@ -2173,13 +2451,32 @@ struct ChatInputBar: View {
 
     private var bottomControlRow: some View {
         HStack(spacing: 8) {
+            // 窗口透视（plan-窗口透视）：两端都在左下角；「+」在输入框里
             #if os(macOS)
-            // 「+」进面板态：附件 / 相册 / 贴纸 / 便签 / 画板 / 风格都在面板里，底排只剩它和模型胶囊——跟 iOS（面 4.1b，⧫1）
-            Button { onStickerTap?() } label: {
-                MacShellLabel(symbol: "plus").fixedSize()
+            Button { showContextLens.toggle() } label: {
+                MacShellLabel(symbol: "square.3.layers.3d").fixedSize()
             }
             .buttonStyle(MacShellButton(compact: true, horizontalPadding: 7))
-            .help("附件、相册、贴纸、风格")
+            .help("窗口透视：这一轮带了什么")
+            .popover(isPresented: $showContextLens, arrowEdge: .top) {
+                contextLensContent.frame(width: 440, height: 560)
+            }
+            #else
+            Button { showContextLens = true } label: {
+                Image(systemName: "square.3.layers.3d")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(Theme.chat.textMuted.opacity(0.6))
+                    .frame(width: 32, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 8)
+            .accessibilityLabel("窗口透视")
+            .sheet(isPresented: $showContextLens) {
+                contextLensContent
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+            }
             #endif
 
             Spacer()
@@ -2192,6 +2489,11 @@ struct ChatInputBar: View {
         .padding(.horizontal, 4)
     }
 
+    private var contextLensContent: some View {
+        ContextLensView(viewModel: viewModel, modelContext: modelContext, profileManager: profileManager,
+                        providerManager: providerManager, presetManager: presetManager)
+    }
+
     /// 模型选择器正文两端同一份（面 0.2 去重）：iOS 走 .sheet(+detents)，mac 走 .popover
     @ViewBuilder
     private var modelPickerContent: some View {
@@ -2199,13 +2501,14 @@ struct ChatInputBar: View {
             providerManager: providerManager,
             selectedModelId: currentModel.id,
             onSelect: { model in
+                // 只改这个对话（P3 附 b）：不写全局 🌞、不写人，人页「模型」才是这个人的默认
                 viewModel.selectedConversation?.selectedModelId = model.id
-                selectedModelId = model.id
                 // 切到 Codex 模型时自动配一个 codex 会话（防呆：没绑 mp-codex-* 就发消息
                 // 会经 hub fallback 落到 claude 默认会话——引擎和会话必须成对）
                 if model.credentialId == "codex-bridge",
                    let conv = viewModel.selectedConversation,
                    !(conv.ccBridgeSessionName?.hasPrefix("mp-codex") ?? false) {
+                    CCHubRegistry.shared.bindNewCCConversation(conv)
                     conv.ccBridgeSessionName = "mp-codex-1"
                 }
                 try? modelContext.save()
@@ -2215,13 +2518,15 @@ struct ChatInputBar: View {
             presetManager: presetManager,
             profileManager: profileManager,
             ccBridgeConversation: viewModel.selectedConversation,
-            onCCSessionPick: { newSession in
-                if let conv = viewModel.selectedConversation {
+            onCCSessionPick: { newSession, hub in
+                // 会话是那台上的：对话已经换到别台（选台时迟到的回包）就不写（b4 #2）
+                if let conv = viewModel.selectedConversation, CCHubRegistry.hubId(of: conv) == hub {
                     conv.ccBridgeSessionName = newSession
                     try? modelContext.save()
                 }
                 showModelPicker = false
-            }
+            },
+            ccChoosesHub: viewModel.isDraftConversation
         )
     }
 
@@ -2266,11 +2571,16 @@ private struct AttachmentChipRow: View {
     var onRemoveCardEvent: ((String) -> Void)? = nil
     /// 语音小签试听：storedRef 相对这个楼层的文件库解析
     var voiceProfileId: String = ""
+    /// 链接直读（plan-link-direct-read）：问 / 读取中 / 已读取 / 读不到，✕ 不读
+    var linkReads: [LinkReadSession.Item] = []
+    var onApproveLink: ((String) -> Void)? = nil
+    var onRemoveLink: ((String) -> Void)? = nil
     var onCancelPending: ((UUID) -> Void)? = nil
 
     private let thumbH: CGFloat = 72
     #if os(iOS)
     @State private var previewIndex: IdentifiableInt?
+    @State private var linkPreview: PendingChatAttachment?
     #else
     @State private var previewRequest: AttachmentPreviewRequest?
     #endif
@@ -2292,6 +2602,9 @@ private struct AttachmentChipRow: View {
                         fileChip(att: att)
                     }
                 }
+                ForEach(linkReads) { item in
+                    linkChip(item)
+                }
                 ForEach(pendingSends, id: \.id) { pending in
                     pendingChip(pending.id, preview: pending.preview)
                 }
@@ -2307,6 +2620,13 @@ private struct AttachmentChipRow: View {
         // 预发送附件预览：复用已发送那套 AttachmentPreviewSheet（图片全屏缩放 / 文件 QuickLook）
         .sheet(item: $previewIndex) { wrapper in
             AttachmentPreviewSheet(items: bubbleItems, initialIndex: wrapper.value)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(.black)
+                .presentationCornerRadius(20)
+        }
+        .sheet(item: $linkPreview) { att in
+            AttachmentPreviewSheet(items: [.file(name: att.name, type: att.typeDescription, content: att.extractedText)], initialIndex: 0)
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
                 .presentationBackground(.black)
@@ -2362,6 +2682,79 @@ private struct AttachmentChipRow: View {
         .offset(x: -3, y: 3)
     }
 
+    /// 链接小方块：和文件 chip 同尺寸。问 = 点一下读；已读取 = 点开看 AI 收到的全文
+    private func linkChip(_ item: LinkReadSession.Item) -> some View {
+        let host = item.url.host.map { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 } ?? item.url.absoluteString
+        let (name, type, dim): (String, String, Bool) = {
+            switch item.state {
+            case .ask: return (host, "点一下读取", false)
+            case .loading: return (host, "读取中…", false)
+            case .done(let r): return (r.title, r.source.rawValue, false)
+            case .failed(let msg): return (host, "读不到 · \(msg)", true)
+            }
+        }()
+        return ZStack(alignment: .topTrailing) {
+            VStack(spacing: 4) {
+                if item.state == .loading {
+                    ProgressView().controlSize(.small).frame(height: 24)
+                } else {
+                    Image(systemName: item.state == .ask ? "link.badge.plus" : "link")
+                        .font(.system(size: 20))
+                        .foregroundColor(Theme.chat.textMuted.opacity(0.6))
+                }
+                Text(name)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(Theme.chat.textPrimary)
+                    .lineLimit(item.state.isDone ? 2 : 1)
+                    .truncationMode(.middle)
+                    .multilineTextAlignment(.center)
+                Text(type)
+                    .font(.system(size: 8))
+                    .foregroundColor(Theme.chat.textMuted.opacity(0.5))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 4)
+            .frame(width: thumbH, height: thumbH)
+            .attachmentFileBlockStyle(cornerRadius: 10)
+            .opacity(dim ? 0.6 : 1)
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .onTapGesture {
+                switch item.state {
+                case .ask: onApproveLink?(item.id)
+                case .done(let r):
+                    guard let att = LinkRead.attachments(for: r).first else { return }
+                    #if os(iOS)
+                    linkPreview = att
+                    #else
+                    previewRequest = AttachmentPreviewRequest(att)
+                    #endif
+                case .failed:
+                    // 多半是要登录（IG）：在 app 内浏览器打开，登录完小条回到「点一下读取」
+                    openWebLink(item.url)
+                    onApproveLink?(item.id)
+                case .loading: break
+                }
+            }
+
+            Button {
+                #if os(iOS)
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                #endif
+                onRemoveLink?(item.id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 18))
+                    .foregroundStyle(.white, .black.opacity(0.5))
+                    .frame(width: 36, height: 36, alignment: .topTrailing)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .offset(x: -3, y: 3)
+            .accessibilityLabel("不读这个链接")
+        }
+    }
+
     /// 图片缩略图两端一份（面 2.3，`PlatformImage` 工厂）；点图预览两端（iOS sheet / mac QuickLook，面 3b）
     private func imageThumb(att: PendingChatAttachment, data: Data) -> some View {
         ZStack(alignment: .topTrailing) {
@@ -2384,11 +2777,11 @@ private struct AttachmentChipRow: View {
         ZStack(alignment: .topTrailing) {
             HStack(spacing: 5) {
                 RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Theme.branchIndicator.opacity(0.6))
+                    .fill(Theme.chat.branchIndicator.opacity(0.6))
                     .frame(width: 2.5)
                 Text(text)
                     .font(.system(size: 9))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
                     .lineLimit(4)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -2422,14 +2815,14 @@ private struct AttachmentChipRow: View {
                 HStack(spacing: 3) {
                     Image(systemName: "clock")
                         .font(.system(size: 8))
-                        .foregroundColor(Theme.textMuted)
+                        .foregroundColor(Theme.chat.textMuted)
                     Text("已排队")
                         .font(.system(size: 8))
-                        .foregroundColor(Theme.textMuted)
+                        .foregroundColor(Theme.chat.textMuted)
                 }
                 Text(preview)
                     .font(.system(size: 9))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
                     .lineLimit(3)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -2463,14 +2856,14 @@ private struct AttachmentChipRow: View {
                 HStack(spacing: 3) {
                     Image(systemName: "paperclip")
                         .font(.system(size: 8))
-                        .foregroundColor(Theme.textMuted)
+                        .foregroundColor(Theme.chat.textMuted)
                     Text("捎带")
                         .font(.system(size: 8))
-                        .foregroundColor(Theme.textMuted)
+                        .foregroundColor(Theme.chat.textMuted)
                 }
                 Text(event.text)
                     .font(.system(size: 9))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
                     .lineLimit(3)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -2503,16 +2896,16 @@ private struct AttachmentChipRow: View {
             VStack(spacing: 4) {
                 Image(systemName: attachmentFileIcon(for: att.name))
                     .font(.system(size: 20))
-                    .foregroundColor(Theme.textMuted.opacity(0.6))
+                    .foregroundColor(Theme.chat.textMuted.opacity(0.6))
                 Text(att.name)
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
                 if !att.typeDescription.isEmpty {
                     Text(att.typeDescription)
                         .font(.system(size: 8))
-                        .foregroundColor(Theme.textMuted.opacity(0.5))
+                        .foregroundColor(Theme.chat.textMuted.opacity(0.5))
                         .lineLimit(1)
                 }
             }
@@ -2535,14 +2928,14 @@ private struct AttachmentChipRow: View {
             VStack(spacing: 4) {
                 Image(systemName: playing ? "pause.fill" : "mic.fill")
                     .font(.system(size: 20))
-                    .foregroundColor(Theme.textMuted.opacity(0.6))
+                    .foregroundColor(Theme.chat.textMuted.opacity(0.6))
                 Text(VoiceWave.clock(att.audioDuration ?? 0))
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .monospacedDigit()
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
                 Text("语音")
                     .font(.system(size: 8))
-                    .foregroundColor(Theme.textMuted.opacity(0.5))
+                    .foregroundColor(Theme.chat.textMuted.opacity(0.5))
             }
             .padding(.horizontal, 4)
             .frame(width: thumbH, height: thumbH)
@@ -2580,15 +2973,15 @@ private struct AttachmentChipRow: View {
                     }
                 }())
                     .font(.system(size: 20))
-                    .foregroundColor(Theme.textMuted.opacity(0.6))
+                    .foregroundColor(Theme.chat.textMuted.opacity(0.6))
                 Text(card.title)
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
                 Text(card.kindLabel)
                     .font(.system(size: 8))
-                    .foregroundColor(Theme.textMuted.opacity(0.5))
+                    .foregroundColor(Theme.chat.textMuted.opacity(0.5))
                     .lineLimit(1)
             }
             .padding(.horizontal, 4)
@@ -2662,11 +3055,11 @@ extension View {
         self
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Theme.mainBg.opacity(0.96))
+                    .fill(Theme.chat.mainBg.opacity(0.96))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(Theme.accent.opacity(0.72), lineWidth: 1)
+                    .stroke(Theme.chat.accent.opacity(0.72), lineWidth: 1)
             )
     }
 }
@@ -2779,6 +3172,10 @@ struct InputFieldContainer: View {
     @State private var fieldWidth: CGFloat = 0
     /// input-jank C3：打字空闲态（键入后 600ms 无新键入）——驱动液态金属环暂停
     @State private var typingIdle = true
+    #if os(iOS)
+    /// 上面盖着 sheet / 弹窗：金属环看不见，暂停逐帧重画
+    @State private var coveredByPresentation = false
+    #endif
     @State private var showExpand = false
     @State private var isMultiline = false
     private var inputUIFont: UIFont { FontManager.uiFont(size: inputFontBase) }
@@ -2822,7 +3219,7 @@ struct InputFieldContainer: View {
         if isCCBridge && text.hasPrefix("/") {
             return Color(red: 0.22, green: 0.94, blue: 0.49)
         }
-        return Theme.textPrimary
+        return Theme.chat.textPrimary
     }
 
     /// L3：是否显示斜杠命令浮板
@@ -2947,10 +3344,10 @@ struct InputFieldContainer: View {
             fieldBox
                 #if os(macOS)
                 .padding(10)
-                .background(Theme.mainBg, in: RoundedRectangle(cornerRadius: 11))
+                .background(Theme.chat.mainBg, in: RoundedRectangle(cornerRadius: 11))
                 .overlay {
                     RoundedRectangle(cornerRadius: 11)
-                        .strokeBorder(isFocused ? Theme.branchIndicator : ShellStyle.hairline, lineWidth: 1)
+                        .strokeBorder(isFocused ? Theme.chat.branchIndicator : ShellStyle.hairline, lineWidth: 1)
                         .allowsHitTesting(false)
                 }
                 #else
@@ -3032,7 +3429,7 @@ struct InputFieldContainer: View {
                 } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(Theme.textMuted)
+                        .foregroundColor(Theme.chat.textMuted)
                         .frame(width: 28, height: 28)
                         .contentShape(Rectangle())
                 }
@@ -3079,15 +3476,27 @@ struct InputFieldContainer: View {
         .overlay {
             ZStack {
                 if isFocused && liquidMetalRingEnabled {
-                    LiquidMetalRing(cornerRadius: 20, paused: !typingIdle).transition(.opacity)
+                    LiquidMetalRing(cornerRadius: 20, paused: !typingIdle || coveredByPresentation).transition(.opacity)
                 }
             }
             .animation(.easeOut(duration: 0.25), value: isFocused)
         }
+        .background(PresentationCoverProbe(covered: $coveredByPresentation))
     }
     #else
     private var fieldBox: some View {
         HStack(alignment: .bottom, spacing: 8) {
+            if let onStickerTap {
+                Button(action: onStickerTap) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(Theme.chat.textMuted)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("附件、相册、贴纸、风格")
+            }
             TextField("发消息…", text: $text, axis: .vertical)
                 // 复现器定位锚：气泡正文在 XCUI 树里同为 TextView，无 id 时 firstMatch 会抓错
                 .accessibilityIdentifier("chat-input-field")
@@ -3122,7 +3531,7 @@ struct InputFieldContainer: View {
         Button(action: { onStickerTap?() }) {
             Image(systemName: "plus")
                 .font(.system(size: 18, weight: .medium))
-                .foregroundColor(Theme.textMuted.opacity(0.5))
+                .foregroundColor(Theme.chat.textMuted.opacity(0.5))
                 .frame(width: 32, height: 32)
                 .contentShape(Rectangle())
         }
@@ -3148,17 +3557,23 @@ struct InputFieldContainer: View {
         let capturing = false
         #endif
         let mintSend = canSend || previewing
+        // mac 没有按住录语音：空着时也画发送箭头（灰的），不画点不动的波形
+        #if os(iOS)
+        let idleIcon = "waveform"
+        #else
+        let idleIcon = "arrow.up"
+        #endif
         return Button(action: { triggerSend() }) {
             // 空闲没打字 = 按住录语音条（waveform）；打字/有附件 = 薄荷发送；busy 态 stop/排队不变。
-            Image(systemName: showStopButton ? "stop.fill" : (mintSend ? "arrow.up" : "waveform"))
+            Image(systemName: showStopButton ? "stop.fill" : (mintSend ? "arrow.up" : idleIcon))
                 .font(.system(size: metrics.sendIconSize, weight: .semibold))
-                .foregroundColor(mintSend ? .white : Theme.textMuted.opacity(0.55))
+                .foregroundColor(mintSend ? .white : Theme.chat.textMuted.opacity(0.55))
                 .frame(width: metrics.sendFrame, height: metrics.sendFrame)
                 .background(
                     Circle().fill(
                         showStopButton
-                            ? Theme.danger
-                            : mintSend ? Theme.branchIndicator : Color.clear
+                            ? Theme.chat.danger
+                            : mintSend ? Theme.chat.branchIndicator : Color.clear
                     )
                 )
                 .scaleEffect(capturing ? 0.3 : 1)
@@ -3171,7 +3586,7 @@ struct InputFieldContainer: View {
                             .font(.system(size: 8, weight: .bold))
                             .foregroundColor(.white)
                             .padding(2)
-                            .background(Circle().fill(Theme.textMuted))
+                            .background(Circle().fill(Theme.chat.textMuted))
                             .offset(x: 3, y: 3)
                     }
                 }
@@ -3273,7 +3688,9 @@ struct ModelPickerPopover: View {
     /// L2：当前对话；非 nil + 当前 model 是 ccBridge 时，popover 顶部显示 CC Session section
     var ccBridgeConversation: Conversation? = nil
     /// L2：CC session 选定回调（写 conversation.ccBridgeSessionName + dismiss popover）
-    var onCCSessionPick: ((String?) -> Void)? = nil
+    var onCCSessionPick: ((String?, String) -> Void)? = nil
+    /// 当前对话还是新建的草稿：CC Session 上面先选在哪台电脑（plan-multi-hub B4.4）
+    var ccChoosesHub = false
 
     /// M4：永远只显示 ☆ 收藏模型。收藏空时给空态引导（去设置加 ☆）；不再 fallback 全部 enabled。
     private var groupedSource: [(APICredential, [ProviderModel])] {
@@ -3314,7 +3731,7 @@ struct ModelPickerPopover: View {
                         .font(.system(size: Theme.F.caption))
                     Spacer()
                 }
-                .foregroundColor(Theme.branchIndicator)
+                .foregroundColor(Theme.chat.branchIndicator)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .contentShape(Rectangle())
@@ -3330,10 +3747,10 @@ struct ModelPickerPopover: View {
                         HStack(spacing: 8) {
                             Image(systemName: "star")
                                 .font(.system(size: Theme.F.caption))
-                                .foregroundColor(Theme.textMuted.opacity(0.6))
+                                .foregroundColor(Theme.chat.textMuted.opacity(0.6))
                             Text(model.name)
                                 .font(.system(size: Theme.F.body))
-                                .foregroundColor(Theme.textSecondary)
+                                .foregroundColor(Theme.chat.textSecondary)
                             Spacer()
                         }
                         .padding(.leading, 24)
@@ -3368,7 +3785,7 @@ struct ModelPickerPopover: View {
                 if isCurrentModelCCBridge,
                    let conv = ccBridgeConversation,
                    let pick = onCCSessionPick {
-                    CCSessionPickerContent(conversation: conv, engine: currentBridgeEngine, onPick: pick)
+                    CCSessionPickerContent(conversation: conv, engine: currentBridgeEngine, choosesHub: ccChoosesHub, onPick: pick)
                     Divider()
                         .padding(.vertical, 4)
                 }
@@ -3392,10 +3809,10 @@ struct ModelPickerPopover: View {
 
                         HStack(spacing: 4) {
                             ProviderIconView(presetId: credential.presetId, displayName: credential.name,
-                                             size: AppIconSize.mini, tint: Theme.textMuted)
+                                             size: AppIconSize.mini, tint: Theme.chat.textMuted)
                             Text(credential.name)
                                 .font(.system(size: Theme.F.caption, weight: .semibold))
-                                .foregroundColor(Theme.textMuted)
+                                .foregroundColor(Theme.chat.textMuted)
                         }
                         .padding(.horizontal, 10)
                         .padding(.top, 8)
@@ -3409,10 +3826,10 @@ struct ModelPickerPopover: View {
                                 HStack(spacing: 8) {
                                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                                         .font(.system(size: Theme.F.body))
-                                        .foregroundColor(isSelected ? Theme.branchIndicator : Theme.textMuted.opacity(0.5))
+                                        .foregroundColor(isSelected ? Theme.chat.branchIndicator : Theme.chat.textMuted.opacity(0.5))
                                     Text(model.name)
                                         .font(.system(size: Theme.F.body))
-                                        .foregroundColor(Theme.textPrimary)
+                                        .foregroundColor(Theme.chat.textPrimary)
                                     Spacer()
                                 }
                                 .padding(.horizontal, 10)
@@ -3420,7 +3837,7 @@ struct ModelPickerPopover: View {
                                 .contentShape(Rectangle())
                                 .background(
                                     RoundedRectangle(cornerRadius: 8)
-                                        .fill(isSelected ? Theme.accent.opacity(0.4) : Color.clear)
+                                        .fill(isSelected ? Theme.chat.accent.opacity(0.4) : Color.clear)
                                 )
                             }
                             .buttonStyle(.plain)
@@ -3451,16 +3868,16 @@ struct ModelPickerPopover: View {
             HStack(spacing: 6) {
                 Image(systemName: "star")
                     .font(.system(size: Theme.F.body))
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(Theme.chat.textMuted)
                 Text(hasAnyCredentialWithKey ? "还没有收藏的模型" : "还没有 API")
                     .font(.system(size: Theme.F.body, weight: .medium))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
             }
             Text(hasAnyCredentialWithKey
                  ? "去 设置 → 模型和API → 全部模型，收藏几个常用的，这里就显示了。"
                  : "去 设置 → 模型和API 加一张 API key 卡，再到「全部模型」里收藏几个模型。")
                 .font(.system(size: Theme.F.caption))
-                .foregroundColor(Theme.textMuted)
+                .foregroundColor(Theme.chat.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 10)
@@ -3518,15 +3935,15 @@ private struct ReasoningPickerRow: View {
             HStack(spacing: 5) {
                 Image(systemName: "brain.head.profile")
                     .font(.system(size: 10))
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(Theme.chat.textMuted)
                 Text("思考强度")
                     .font(.system(size: Theme.F.body))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
                 Text("·")
-                    .foregroundColor(Theme.textMuted.opacity(0.3))
+                    .foregroundColor(Theme.chat.textMuted.opacity(0.3))
                 Text(subtitle)
                     .font(.system(size: 10))
-                    .foregroundColor(Theme.textMuted.opacity(0.5))
+                    .foregroundColor(Theme.chat.textMuted.opacity(0.5))
             }
 
             DiscreteTrackSlider(
@@ -3571,13 +3988,13 @@ private struct DiscreteTrackSlider: View {
                 ZStack {
                     // inactive track (full)
                     Capsule()
-                        .fill(Theme.textMuted.opacity(0.12))
+                        .fill(Theme.chat.textMuted.opacity(0.12))
                         .frame(height: trackH)
 
                     // active track (left of thumb, with gap)
                     HStack(spacing: 0) {
                         Capsule()
-                            .fill(Theme.branchIndicator.opacity(0.5))
+                            .fill(Theme.chat.branchIndicator.opacity(0.5))
                             .frame(width: max(0, thumbX - gapW - inset + 8), height: trackH)
                         Spacer(minLength: 0)
                     }
@@ -3587,14 +4004,14 @@ private struct DiscreteTrackSlider: View {
                     ForEach(0..<count, id: \.self) { i in
                         let x = inset + CGFloat(i) * step
                         Circle()
-                            .fill(i <= selectedIndex ? Theme.branchIndicator.opacity(0.6) : Theme.textMuted.opacity(0.25))
+                            .fill(i <= selectedIndex ? Theme.chat.branchIndicator.opacity(0.6) : Theme.chat.textMuted.opacity(0.25))
                             .frame(width: stopDot, height: stopDot)
                             .position(x: x, y: geo.size.height / 2)
                     }
 
                     // thumb — vertical pill
                     RoundedRectangle(cornerRadius: thumbW / 2)
-                        .fill(Theme.branchIndicator)
+                        .fill(Theme.chat.branchIndicator)
                         .frame(width: thumbW, height: thumbH)
                         .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
                         .position(x: thumbX, y: geo.size.height / 2)
@@ -3618,7 +4035,7 @@ private struct DiscreteTrackSlider: View {
                 ForEach(0..<count, id: \.self) { i in
                     Text(labels[i])
                         .font(.system(size: 11, weight: i == selectedIndex ? .medium : .regular))
-                        .foregroundColor(i == selectedIndex ? Theme.branchIndicator : Theme.textMuted.opacity(0.5))
+                        .foregroundColor(i == selectedIndex ? Theme.chat.branchIndicator : Theme.chat.textMuted.opacity(0.5))
                         .frame(maxWidth: .infinity)
                         .onTapGesture {
                             #if os(iOS)
@@ -3736,16 +4153,16 @@ struct BubbleAttachmentStrip: View {
         VStack(spacing: 4) {
             Image(systemName: attachmentFileIcon(for: name))
                 .font(.system(size: 20))
-                .foregroundColor(Theme.textMuted.opacity(0.6))
+                .foregroundColor(Theme.chat.textMuted.opacity(0.6))
             Text(name)
                 .font(.system(size: 9, weight: .medium))
-                .foregroundColor(Theme.textPrimary)
+                .foregroundColor(Theme.chat.textPrimary)
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
             if let type, !type.isEmpty {
                 Text(type)
                     .font(.system(size: 8))
-                    .foregroundColor(Theme.textMuted.opacity(0.5))
+                    .foregroundColor(Theme.chat.textMuted.opacity(0.5))
                     .lineLimit(1)
             }
         }
@@ -3789,8 +4206,20 @@ struct BubbleView: View {
     /// 输入框正在编辑这条：气泡变透明 + 圆角虚线
     var isBeingEdited: Bool = false
     var isLastInRun: Bool = true
+    /// 这条是不是当前对话最新的 assistant 回复：只有最新那条的结局胶囊带按钮
+    var isLatestAssistant: Bool = false
+    /// 结局胶囊的「继续」：发一条看得见的「继续」（plan-reply-error-report-1106 §5 第 1 条）
+    var onContinue: (() -> Void)? = nil
+    /// 结局胶囊详情里的上游原样信息（finish_reason / host / 模型）
+    var outcomeDetail: String? = nil
+    /// 气泡模式 Read 回执：粟粟最后一条消息且 AI 正在回 → 消息下方右对齐小字 Read
+    var showRead: Bool = false
     var onQuoteText: ((String) -> Void)? = nil   // A4：长按「引用」，传被引用文字（气泡模式=单 block，文章模式=整条）
     var regexScripts: [RegexScript] = []
+    #if PERSONAL_APPS && os(iOS)
+    @Environment(\.tutuChatSnapshotContext) private var tutuSnapshotContext
+    @State private var tutuStandaloneSnapshotCache = TutuChatSnapshotCache()
+    #endif
 
     @Environment(\.modelContext) private var modelContext
     @Environment(ProviderManager.self) private var providerManager: ProviderManager?
@@ -3826,7 +4255,8 @@ struct BubbleView: View {
     @AppStorage("paragraphSpacingScale") private var paragraphSpacingScale: Double = 1.65
     @AppStorage("hideTimestamp") private var hideTimestamp: Bool = false
     @AppStorage("hideActionBar") private var hideActionBar: Bool = false
-    @AppStorage("chatBubbleMode") private var chatBubbleMode = false
+    /// 模式是当前对话自己的，只从 viewModel 读（没有 vm = 文章）
+    private var chatBubbleMode: Bool { viewModel?.isBubbleMode ?? false }
     @AppStorage("bubbleModeCornerRadius") private var bubbleModeCornerRadius: Double = 20
     @State private var showBranchPicker = false
     @State private var showTagPicker = false
@@ -3843,15 +4273,15 @@ struct BubbleView: View {
     private var messageError: String? {
         guard !isUser else { return nil }
         if case .text(let text)? = ChatDisplaySnapshot.segments(of: node)?.last,
-           let error = ChatSystemMessage.split(text).error { return error }
-        return ChatSystemMessage.split(node.content).error
+           let error = ChatSystemMessage.split(text, legacy: node.usesLegacyErrorMarker).error { return error }
+        return ChatSystemMessage.split(node.content, legacy: node.usesLegacyErrorMarker).error
     }
 
     private var messageNotice: String? {
         guard !isUser else { return nil }
         if case .text(let text)? = ChatDisplaySnapshot.segments(of: node)?.last,
-           let notice = ChatSystemMessage.split(text).notice { return notice }
-        return ChatSystemMessage.split(node.content).notice
+           let notice = ChatSystemMessage.split(text, legacy: node.usesLegacyErrorMarker).notice { return notice }
+        return ChatSystemMessage.split(node.content, legacy: node.usesLegacyErrorMarker).notice
     }
 
     private var hasMessageBody: Bool {
@@ -3859,12 +4289,12 @@ struct BubbleView: View {
         if let segments = ChatDisplaySnapshot.segments(of: node), !segments.isEmpty {
             // 普通回复挂思考：正文看 content；只剩报错 / 已停止时只画思考行，思考隐藏就整个不画（不出空正文泡）
             if segments.isAttachedThinkingReply {
-                return !ChatSystemMessage.split(node.content).body.isEmpty
+                return !ChatSystemMessage.split(node.content, legacy: node.usesLegacyErrorMarker).body.isEmpty
                     || (segments.attachedThinkingText != nil && DisclosureKind.thinking.mode != .hidden)
             }
-            return !ChatSystemMessage.removingTrailingError(from: segments).isEmpty
+            return !ChatSystemMessage.removingTrailingError(from: segments, legacy: node.usesLegacyErrorMarker).isEmpty
         }
-        return !ChatSystemMessage.split(node.content).body.isEmpty
+        return !ChatSystemMessage.split(node.content, legacy: node.usesLegacyErrorMarker).body.isEmpty
     }
 
     /// 卡库第二批「edited」浮层里的卡名：当前楼层绑定的卡（只在有 cardEditedAt 时读）
@@ -3889,7 +4319,7 @@ struct BubbleView: View {
         ChatMarkdownView(
             text: MessageHTMLSegments.markdownPromotingHTML(text),   // 卡库 ⑦：明确 HTML 交给网页卡
             fontName: selectedFont,
-            scale: CGFloat(fontScale > 0 ? fontScale : 1.0),
+            scale: CGFloat(fontScale > 0 ? fontScale : 1.2),
             animated: animated,
             nodeId: node.id,
             profileId: node.profileId,
@@ -3903,9 +4333,9 @@ struct BubbleView: View {
     /// simple 消息静态正文（thinking 条 + 正文渲染）。L2-T2 后流式走 ArticleStreamingBody，
     /// 这里只服务定稿/用户/vm 缺失路径；抽出供 iOS/macOS 两分支复用（顺带治 type-check）。
     @ViewBuilder
-    private func simpleStaticBody(thinkingResult: ContentCleaner.ThinkingResult?, cleaned: String) -> some View {
+    private func simpleStaticBody(thinking: String?, displayText: String) -> some View {
         // Thinking block (collapsible)：[thinking] 标签提取 或 CC 思考链回传（ccThinking）或原生思考摘要（thinking 回传 §3.8，回复完成后出现）
-        if let thinking = thinkingResult?.thinking ?? (showCCThinking ? node.ccThinking : nil)
+        if let thinking = thinking ?? (showCCThinking ? node.ccThinking : nil)
             ?? (isStreaming ? nil : ChatDisplaySnapshot.segments(of: node)?.nativeThinkingText), !thinking.isEmpty {
             ThinkingDisclosure(text: thinking, nodeId: node.id, profileId: node.profileId,
                                summary: node.thinkingSummary,
@@ -3914,10 +4344,6 @@ struct BubbleView: View {
                                })
         }
 
-        // Assistant content — 正则脚本渲染替换
-        let displayText = RegexPipeline.run(regexScripts, text: cleaned, phase: .display,
-                                            placement: RegexPipeline.placement(forRole: node.role),
-                                            userName: userName, charName: assistantName)
         if displayText.isEmpty && isStreaming {
             TypingDotsView()
         } else if !displayText.isEmpty {
@@ -3939,7 +4365,7 @@ struct BubbleView: View {
                 fontScale: fontScale,
                 lineSpacingScale: lineSpacingScale,
                 paragraphSpacingScale: paragraphSpacingScale,
-                regexScripts: regexScripts,
+                regexScripts: regexScripts, userName: userName, charName: assistantName,
                 onQuoteText: onQuoteText
             )
         } else {
@@ -3949,7 +4375,7 @@ struct BubbleView: View {
                 fontScale: fontScale,
                 lineSpacingScale: lineSpacingScale,
                 paragraphSpacingScale: paragraphSpacingScale,
-                regexScripts: regexScripts,
+                regexScripts: regexScripts, userName: userName, charName: assistantName,
                 profileId: node.profileId,
                 nodeId: node.id,
                 onQuoteText: onQuoteText,
@@ -3972,6 +4398,9 @@ struct BubbleView: View {
     /// 没语音段的消息照旧复制正文（手打的 [语音 0:07] 行原样）
     private var copyableContent: String {
         if isUser, let voice = ChatDisplaySnapshot.segments(of: node)?.userVoiceCopyText { return voice }
+        if let memeId = MemeToken.match(node.content) {
+            return MemeToken.promptText(name: MemeStore.fetch(memeId, in: node.modelContext)?.name, detail: nil)
+        }
         return ContentCleaner.clean(node.content, cacheKey: node.id)
     }
 
@@ -4081,10 +4510,10 @@ struct BubbleView: View {
                         .font(.system(size: 10, weight: .medium))
                         .lineLimit(1)
                 }
-                .foregroundColor(Theme.branchIndicator)
+                .foregroundColor(Theme.chat.branchIndicator)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
-                .background(Theme.accent.opacity(0.6))
+                .background(Theme.chat.accent.opacity(0.6))
                 .clipShape(Capsule())
             }
             .buttonStyle(.plain)
@@ -4115,6 +4544,16 @@ struct BubbleView: View {
                                       } })
                 } else if let messageNotice {
                     ChatSystemCapsule(text: messageNotice, symbol: "pause.circle")
+                } else if let raw = node.replyOutcome, let outcome = ReplyOutcome(rawValue: raw), outcome.isAbnormal {
+                    let presentation = ReplyOutcomePresentation.make(outcome: outcome, isLatestAssistant: isLatestAssistant,
+                                                                     isStreaming: isStreaming)
+                    let primary = outcome == .truncatedLength ? onContinue : onRegenerate
+                    ChatSystemCapsule(text: presentation.text,
+                                      actionTitle: presentation.actionTitle,
+                                      action: presentation.actionTitle == nil ? nil : primary,
+                                      secondaryTitle: presentation.secondaryTitle,
+                                      secondaryAction: presentation.secondaryTitle == nil ? nil : onRegenerate,
+                                      detailText: outcomeDetail)
                 }
                 if !hasMessageBody, let branchInfo {
                     BranchIndicator(info: branchInfo, showPicker: $showBranchPicker, onSwitchBranch: onSwitchBranch)
@@ -4123,11 +4562,12 @@ struct BubbleView: View {
             // cc-bridge 送达异常（plan-hub-perf K1 第 4b 步）：没异常就没有 entry，整个不画、不占行。
             // 索引不是 Observable（读它不订阅）；这条的 entry 建 / 删时下面 onReceive 认领、只翻这一条的 tick
             let _ = sendStatusTick
-            if isUser, let entry = CCBridgeWebSocketClient.shared.sendTracker.store.entry(node.id) {
-                CCSendStatusBadge(entry: entry)
+            // 多 hub（research R1）：哪台的账上有这条就用哪台的，重发回那台
+            if isUser, let status = CCHubRegistry.shared.sendStatus(for: node.id) {
+                CCSendStatusBadge(entry: status.entry, client: status.client)
             }
         }
-        .onReceive(CCBridgeWebSocketClient.shared.sendTracker.store.membership) { id in
+        .onReceive(CCHubRegistry.shared.sendMembership) { id in
             if id == node.id { sendStatusTick &+= 1 }
         }
         // 长按浮层的表情条要知道是哪条消息（BubbleMenuMarker 读）。表情回应只属于气泡模式（粟粟 10-02）：
@@ -4142,6 +4582,13 @@ struct BubbleView: View {
         #else
         .background(CellGrowthAnchor(isStreamingCell: !isUser && isStreaming))
         #endif
+        #endif
+        #if PERSONAL_APPS && os(iOS)
+        .onAppear {
+            if SkinState.shared.active, !isUser, isStreaming, let text = viewModel?.streamingText {
+                pacer.seed(text)
+            }
+        }
         #endif
         // 只有流式中的 assistant 泡读 streamingText（非流式泡读常量 nil 不订阅）；initial 兜住滚回来时流已在进行
         .onChange(of: (!isUser && isStreaming) ? viewModel?.streamingText : nil, initial: true) { _, new in
@@ -4160,6 +4607,198 @@ struct BubbleView: View {
 
     @ViewBuilder
     private var innerBody: some View {
+        #if PERSONAL_APPS && os(iOS)
+        if SkinState.shared.active, MemeToken.match(node.content) == nil {
+            tutuMessageBody
+        } else {
+            ordinaryMessageBody
+        }
+        #else
+        ordinaryMessageBody
+        #endif
+    }
+    #if PERSONAL_APPS && os(iOS)
+    private var tutuSnapshot: TutuChatMessageSnapshot {
+        let context = tutuSnapshotContext ?? tutuStandaloneSnapshotCache.context(
+            scripts: regexScripts, userName: userName, assistantName: assistantName,
+            scope: "\(node.profileId):\(node.conversationId)")
+        return context.snapshot(for: node, pacer: !isUser && isStreaming ? pacer : nil)
+    }
+
+    private var tutuMessageBody: some View {
+        let snapshot = tutuSnapshot
+        return VStack(alignment: isUser ? .trailing : .leading, spacing: 0) {
+            if isUser, node.styleIdSnapshot != nil || node.cardEventsData != nil {
+                HStack(spacing: 4) { StyleChip(styleId: node.styleIdSnapshot); CardEventsChip(node: node) }
+                    .padding(.bottom, 6)
+            }
+            if !snapshot.isRich { tutuAttachments }
+            if let quotedPreview {
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 1.5).fill(Theme.chat.branchIndicator.opacity(0.6)).frame(width: 2.5, height: 14)
+                    Text(quotedPreview).font(.system(size: 12)).foregroundStyle(Theme.chat.textMuted).lineLimit(1)
+                }
+                .padding(.bottom, 8)
+            }
+            if !isUser {
+                RecallCardView(node: node).padding(.bottom, snapshot.hasRecall ? 8 : 0)
+                    .modifier(TutuChatRecallEntrance(nodeID: node.id))
+            }
+            if !snapshot.isRich { tutuThinking }
+            BubbleMenuLiftWrapper(isUser: isUser, cornerRadius: 0, actions: nodeMenuSpecs()) {
+                TutuChatMessageView(message: snapshot, isStreaming: isStreaming) {
+                    tutuNativeContent(snapshot: snapshot)
+                } fallbackContent: {
+                    ordinaryMessageBody
+                }
+                .overlay {
+                    if isBeingEdited {
+                        Rectangle().strokeBorder(Theme.chat.branchIndicator, style: EditingBubbleDash.style)
+                    }
+                }
+                .overlay {
+                    Rectangle().fill(Theme.chat.branchIndicator.opacity(0.2 * highlightOpacity)).allowsHitTesting(false)
+                }
+                .overlay {
+                    Rectangle().stroke(Theme.chat.branchIndicator.opacity(isSearchMatch ? 0.6 : 0), lineWidth: 1.5).allowsHitTesting(false)
+                }
+            }
+            .if(chatBubbleMode) { view in view.chatReactionBadge(target: ChatReactionTarget(node: node), isUser: isUser) }
+            .accessibilityLabel(isUser ? userName : assistantName)
+            .onChange(of: isHighlighted, initial: true) { _, highlighted in
+                if highlighted {
+                    withAnimation(.easeIn(duration: 0.3)) { highlightOpacity = 1 }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        withAnimation(.easeOut(duration: 0.5)) { highlightOpacity = 0 }
+                    }
+                }
+            }
+            tutuMessageFooter(snapshot: snapshot)
+            if hasBranches, let info = branchInfo {
+                HStack(spacing: 2) {
+                    BranchIndicator(info: info, showPicker: $showBranchPicker, onSwitchBranch: onSwitchBranch)
+                    if let editedAt = node.cardEditedAt { CardEditedMark(cardName: editedCardName, editedAt: editedAt) }
+                }.padding(.top, 8)
+            } else if let editedAt = node.cardEditedAt {
+                CardEditedMark(cardName: editedCardName, editedAt: editedAt).padding(.top, 8)
+            }
+            if isUser, !isUserVoiceNote, let segments = ChatDisplaySnapshot.segments(of: node) {
+                ForEach(segments.audioRefs, id: \.path) { voice in
+                    UserVoiceNoteView(path: voice.path, duration: voice.duration, script: voice.script,
+                                      nodeId: node.id, profileId: node.profileId,
+                                      speaker: userName, createTime: node.createTime).padding(.top, 8)
+                }
+            }
+            if showRead, chatBubbleMode {
+                Text("Read").font(.system(size: 11)).foregroundStyle(Theme.chat.textMuted).accessibilityLabel("已读").padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+        .sheet(isPresented: $showTagPicker) { FavoriteTagSheet(target: FavoriteTags.Target(node: node)) }
+        .sheet(isPresented: $showTextSelect) { TextSelectSheet(text: textSelectContent, onQuoteText: onQuoteText) }
+    }
+
+    @ViewBuilder private var tutuAttachments: some View {
+        if let segments = ChatDisplaySnapshot.segments(of: node)?.hydratedForDisplay(profileId: node.profileId) {
+            let items: [BubbleAttachmentItem] = segments.compactMap { segment in
+                switch segment {
+                case .image(let name, _, let data): return .image(name: name, data: data)
+                case .attachment(let name, let type, let content): return .file(name: name, type: type, content: content)
+                case .fileData(let name, let mime, let data): return .fileData(name: name, mime: mime, data: data)
+                default: return nil
+                }
+            }
+            if !items.isEmpty { BubbleAttachmentStrip(items: items, isUser: isUser).padding(.bottom, 8) }
+            if !isUser {
+                ForEach(segments.audioRefs, id: \.path) { voice in
+                    VoiceCapsuleView(path: voice.path, duration: voice.duration,
+                                     nodeId: node.id, profileId: node.profileId, isUser: false,
+                                     speaker: assistantName, createTime: node.createTime).padding(.bottom, 8)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var tutuThinking: some View {
+        let raw = !isUser && isStreaming ? pacer.shown : ChatSystemMessage.split(node.content, legacy: node.usesLegacyErrorMarker).body
+        let extracted = ContentCleaner.extractThinking(from: ContentCleaner.clean(raw))
+        if !isUser, let thinking = extracted.thinking ?? (showCCThinking ? node.ccThinking : nil)
+            ?? (isStreaming ? nil : ChatDisplaySnapshot.segments(of: node)?.nativeThinkingText), !thinking.isEmpty {
+            ThinkingDisclosure(text: thinking, nodeId: node.id, profileId: node.profileId,
+                               summary: node.thinkingSummary,
+                               onNeedSummary: { [node, providerManager] in
+                                   ThinkingSummarizer.request(node, thinking: thinking, providerManager: providerManager)
+                               }).padding(.bottom, 8)
+        }
+    }
+
+    private func tutuNativeContent(snapshot: TutuChatMessageSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            tutuAttachments
+            tutuNativeBody(snapshot: snapshot)
+        }
+    }
+
+    @ViewBuilder private func tutuNativeBody(snapshot: TutuChatMessageSnapshot) -> some View {
+        if isUser, isUserVoiceNote, let segments = ChatDisplaySnapshot.segments(of: node) {
+            ForEach(segments.audioRefs, id: \.path) { voice in
+                UserVoiceNoteView(path: voice.path, duration: voice.duration, script: voice.script,
+                                  nodeId: node.id, profileId: node.profileId, ownMenu: false,
+                                  speaker: userName, createTime: node.createTime)
+            }
+        } else if !isUser, node.contentType == "heartvoice" || node.content.hasPrefix("💭 心声\n\n") {
+            let text = node.contentType == "heartvoice" ? node.content : String(node.content.dropFirst("💭 心声\n\n".count))
+            HeartvoiceCardView(text: text, time: node.createTime)
+        } else if let segments = ChatDisplaySnapshot.segments(of: node), segments.hasRenderableSegments {
+            if isUser {
+                MessageSegmentsView(segments: segments, selectedFont: selectedFont, fontScale: fontScale,
+                                    lineSpacingScale: lineSpacingScale, paragraphSpacingScale: paragraphSpacingScale,
+                                    regexScripts: regexScripts, userName: userName, charName: assistantName, isUser: true, profileId: node.profileId,
+                                    nodeId: node.id, onQuoteText: onQuoteText)
+            } else {
+                renderableSegmentsBody(segments)
+            }
+        } else if !isUser, isStreaming, let vm = viewModel {
+            ArticleStreamingBody(node: node, viewModel: vm, conversationId: vm.selectedConversation?.id ?? "", regexScripts: regexScripts, userName: userName, charName: assistantName)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                tutuThinking
+                markdownBody(snapshot.text)
+            }
+        }
+    }
+
+    @ViewBuilder private func tutuMessageFooter(snapshot: TutuChatMessageSnapshot) -> some View {
+        if chatBubbleMode {
+            let blocks = BubbleModeRow.splitBlocks(snapshot.text)
+            ForEach(blocks.indices, id: \.self) { index in
+                let emojis = ChatReactionStore.shared.reactions(for: "\(node.id)#\(index)")
+                if !emojis.isEmpty {
+                    let target = ChatReactionTarget(node: node, blockIndex: index, blockText: blocks[index])
+                    ChatReactionBadge(emojis: emojis, trailsRight: !isUser) { emoji in
+                        ChatReactionStore.shared.toggle(emoji, on: target)
+                    }
+                    .accessibilityLabel("第 \(index + 1) 段的回应")
+                    .padding(.top, 6)
+                }
+            }
+        }
+        if !isUser, !node.webSources.isEmpty { WebSearchSourcesChipRow(sources: node.webSources).padding(.top, 8) }
+        if node.ccEdited {
+            Text("edited").font(.system(size: 10)).foregroundStyle(Theme.chat.textMuted.opacity(0.5))
+                .frame(maxWidth: .infinity, alignment: .trailing).padding(.top, 6)
+        }
+        if !isUser, showMessageUsage, let prompt = node.usagePromptTokens, let completion = node.usageCompletionTokens {
+            Text(usageFooterText(prompt: prompt, completion: completion))
+                .font(.system(size: 10)).foregroundStyle(Theme.chat.textMuted.opacity(0.5))
+                .frame(maxWidth: .infinity, alignment: .trailing).padding(.top, 6)
+        }
+    }
+    #endif
+
+
+    @ViewBuilder
+    private var ordinaryMessageBody: some View {
         if chatBubbleMode {
             BubbleModeRow(
                 node: node, isUser: isUser, isStreaming: isStreaming,
@@ -4188,6 +4827,8 @@ struct BubbleView: View {
                 isHighlighted: isHighlighted,
                 branchInfo: branchInfo,
                 onSwitchBranch: onSwitchBranch,
+                showRead: showRead,
+                quotedPreview: quotedPreview,
                 isBeingEdited: isBeingEdited
             )
             .sheet(isPresented: $showTagPicker) {
@@ -4196,9 +4837,27 @@ struct BubbleView: View {
             .sheet(isPresented: $showTextSelect) {
                 TextSelectSheet(text: textSelectContent, onQuoteText: onQuoteText)
             }
+        } else if let memeId = MemeToken.match(node.content) {
+            memeArticleBody(memeId)
         } else {
             articleModeBody
         }
+    }
+
+    /// 文章模式的表情包：署名照常，下面就是图，不套气泡（plan-bubble-sticker-send §1.4）
+    private func memeArticleBody(_ memeId: UUID) -> some View {
+        VStack(alignment: isUser ? .trailing : .leading, spacing: 8) {
+            Text(isUser ? userName : assistantName)
+                .font(.caption2.weight(.medium))
+                .foregroundColor(Theme.chat.textMuted)
+                .padding(isUser ? .trailing : .leading, 6)
+                .padding(.horizontal, 4)
+            BubbleMenuLiftWrapper(isUser: isUser, cornerRadius: bubbleCornerRadius, actions: nodeMenuSpecs()) {
+                MemeMessageView(memeId: memeId)
+            }
+            if let notice = node.sendNotice { SendNoticeLine(text: notice) }
+        }
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
     }
 
     /// 气泡模式：每个气泡（block）各自的长按菜单。复制 / 选择文本作用于该 block，其余作用于整条。
@@ -4214,7 +4873,7 @@ struct BubbleView: View {
             HStack(spacing: 4) {
                 Text(isUser ? userName : assistantName)
                     .font(.caption2.weight(.medium))
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(Theme.chat.textMuted)
                     .padding(isUser ? .trailing : .leading, 6)
                 if isUser { StyleChip(styleId: node.styleIdSnapshot); CardEventsChip(node: node) }
             }
@@ -4256,11 +4915,11 @@ struct BubbleView: View {
                 if let quotedPreview {
                     HStack(spacing: 6) {
                         RoundedRectangle(cornerRadius: 1.5)
-                            .fill(Theme.branchIndicator.opacity(0.6))
+                            .fill(Theme.chat.branchIndicator.opacity(0.6))
                             .frame(width: 2.5, height: 14)
                         Text(quotedPreview)
                             .font(.system(size: 12))
-                            .foregroundColor(Theme.textMuted)
+                            .foregroundColor(Theme.chat.textMuted)
                             .lineLimit(1)
                     }
                     .padding(.bottom, 1)
@@ -4269,11 +4928,9 @@ struct BubbleView: View {
                 // 静态/用户路径（Phase 5 断链后流式中 node.content 是上次值/空，无妨——
                 // 流式分支不再从这条链取数）
                 // 卡开场的 {{char}}/{{user}} 只在显示副本展开（③b），存储原文不动
-                let displayContent = isUser ? node.content : ChatSystemMessage.split(node.content).body
-                let rawCleaned = EffectiveCharacterContext(charName: assistantName, userName: userName)
-                    .expand(ContentCleaner.clean(displayContent, cacheKey: "\(node.id)_\(displayContent.count)"))
-                let thinkingResult = isUser ? nil : ContentCleaner.extractThinking(from: rawCleaned)
-                let cleaned = thinkingResult?.content ?? rawCleaned
+                let display = MessageDisplayText.make(node.content, role: node.role, scripts: regexScripts,
+                                                      userName: userName, charName: assistantName, cacheKey: node.id,
+                                                      legacyErrorMarker: node.usesLegacyErrorMarker)
                 #if (DEBUG || PERF_BENCH) && os(iOS)
                 // 渲染账本 consumed（perf P0 §5.2）：静态正文消费的 node.content 快照摘要
                 let _ = PerfHarness.strictMeasure && (isUser || !isStreaming)
@@ -4299,7 +4956,7 @@ struct BubbleView: View {
                                 fontScale: fontScale,
                                 lineSpacingScale: lineSpacingScale,
                                 paragraphSpacingScale: paragraphSpacingScale,
-                                regexScripts: regexScripts,
+                                regexScripts: regexScripts, userName: userName, charName: assistantName,
                                 isUser: true,
                                 profileId: node.profileId,
                                 nodeId: node.id,
@@ -4318,7 +4975,7 @@ struct BubbleView: View {
                         }
                     } else {
                         // B34：见上
-                        markdownBody(userDisplayText(cleaned))
+                        markdownBody(display.body)
                     }
                 } else if node.contentType == "heartvoice" || node.content.hasPrefix("💭 心声\n\n") {
                     // 心声：默认 collapsed 成 💭 chip，点开 = 日记本卡片
@@ -4345,10 +5002,10 @@ struct BubbleView: View {
                             node: node,
                             viewModel: vm,
                             conversationId: vm.selectedConversation?.id ?? "",
-                            regexScripts: regexScripts
+                            regexScripts: regexScripts, userName: userName, charName: assistantName
                         )
                     } else {
-                        simpleStaticBody(thinkingResult: thinkingResult, cleaned: cleaned)
+                        simpleStaticBody(thinking: display.thinking, displayText: display.body)
                     }
                 }
 
@@ -4362,7 +5019,7 @@ struct BubbleView: View {
                 if node.ccEdited {
                     Text("edited")
                         .font(.system(size: 10))
-                        .foregroundColor(Theme.textMuted.opacity(0.5))
+                        .foregroundColor(Theme.chat.textMuted.opacity(0.5))
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
 
@@ -4371,7 +5028,7 @@ struct BubbleView: View {
                 if !isUser, showMessageUsage, let pt = node.usagePromptTokens, let ct = node.usageCompletionTokens {
                     Text(usageFooterText(prompt: pt, completion: ct))
                         .font(.system(size: 10))
-                        .foregroundColor(Theme.textMuted.opacity(0.5))
+                        .foregroundColor(Theme.chat.textMuted.opacity(0.5))
                         .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
@@ -4382,13 +5039,13 @@ struct BubbleView: View {
                 if isBeingEdited {
                     // 输入框正在编辑这条：底色透明 + 圆角虚线（plan-edit-in-composer §6）
                     RoundedRectangle(cornerRadius: bubbleCornerRadius)
-                        .strokeBorder(Theme.branchIndicator, style: EditingBubbleDash.style)
+                        .strokeBorder(Theme.chat.branchIndicator, style: EditingBubbleDash.style)
                 } else if !userVoiceNote {
                     // 文章模式你的消息卡也走气泡渐变（粟粟：气泡和文章都）；列表反转同上
                     UserBubbleFill(
                         shape: RoundedRectangle(cornerRadius: bubbleCornerRadius),
-                        base: isUser ? Theme.userBubble : Theme.assistantBubble,
-                        gradient: isUser ? Theme.userBubbleGradient : nil,
+                        base: isUser ? Theme.chat.userBubble : Theme.chat.assistantBubble,
+                        gradient: isUser ? Theme.chat.userBubbleGradient : nil,
                         anchor: .scrollView(flipped: true)
                     )
                 }
@@ -4397,12 +5054,12 @@ struct BubbleView: View {
             }
             .overlay(
                 RoundedRectangle(cornerRadius: bubbleCornerRadius)
-                    .fill(Theme.branchIndicator.opacity(0.2 * highlightOpacity))
+                    .fill(Theme.chat.branchIndicator.opacity(0.2 * highlightOpacity))
                     .allowsHitTesting(false)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: bubbleCornerRadius)
-                    .stroke(Theme.branchIndicator.opacity(isSearchMatch ? 0.6 : 0), lineWidth: 1.5)
+                    .stroke(Theme.chat.branchIndicator.opacity(isSearchMatch ? 0.6 : 0), lineWidth: 1.5)
                     .allowsHitTesting(false)
             )
             // initial：跳到很远的命中时气泡是跳过去之后才建出来的，建出来那刻就已经是高亮
@@ -4423,7 +5080,7 @@ struct BubbleView: View {
             #endif
 
             if !isUser {
-                RecallCardView(node: node)
+                MessageRecallCardView(node: node)
                     .padding(.horizontal, bubblePaddingH)
             }
 
@@ -4445,6 +5102,8 @@ struct BubbleView: View {
                 }
             }
 
+            if let notice = node.sendNotice { SendNoticeLine(text: notice) }
+
             // Hover action buttons — isolated to avoid full bubble re-render
             if !hideActionBar {
                 let selecting = viewModel?.messageSelection.isActive ?? false
@@ -4463,7 +5122,8 @@ struct BubbleView: View {
                     onTogglePin: onTogglePin,
                     onSoftDelete: onSoftDelete,
                     onEdit: isUser && !userHasVoice ? onEdit : nil,
-                    onRegenerate: !isUser && !isStreaming ? onRegenerate : nil
+                    // 和右键菜单同口径（menuSpecs）：她自己的消息也能重新生成，语音条除外
+                    onRegenerate: !isStreaming && !userHasVoice ? onRegenerate : nil
                 )
                 // 多选期间藏掉（只改透明度不撤位：撤位会让每条文章卡变矮、反转列表整体重排）
                 .opacity(selecting ? 0 : 1)
@@ -4507,7 +5167,7 @@ struct TextSelectSheet: View {
                     }
                 }
             )
-            .background(Theme.mainBg)
+            .background(Theme.chat.mainBg)
             .navigationTitle("选择文本")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -4528,7 +5188,7 @@ struct TextSelectSheet: View {
                         .padding(.vertical, 10)
                         .background(
                             Capsule()
-                                .fill(Theme.branchIndicator)
+                                .fill(Theme.chat.branchIndicator)
                                 .shadow(color: Theme.cardShadow, radius: 8, y: 2)
                         )
                         .padding(.top, 8)
@@ -4573,7 +5233,6 @@ struct HoverButtons: View {
     var onEdit: (() -> Void)? = nil
     var onRegenerate: (() -> Void)? = nil
     @State private var isHovered = false
-    @State private var showDeleteConfirm = false
     /// 与气泡内文字左右线对齐（粟粟：按钮行出格）——同气泡内边距
     @AppStorage("bubblePaddingH") private var bubblePaddingH: Double = 18
 
@@ -4621,7 +5280,7 @@ struct HoverButtons: View {
             }) {
                 Image(systemName: isFavorite ? "star.fill" : "star")
                     .font(.system(size: 13))
-                    .foregroundColor(isFavorite ? Theme.favorite : Theme.textMuted)
+                    .foregroundColor(isFavorite ? Theme.chat.favorite : Theme.chat.textMuted)
             }
             .buttonStyle(.plain)
 
@@ -4632,24 +5291,18 @@ struct HoverButtons: View {
             }) {
                 Image(systemName: isPinned ? "pin.fill" : "pin")
                     .font(.system(size: 13))
-                    .foregroundColor(isPinned ? Theme.branchIndicator : Theme.textMuted)
+                    .foregroundColor(isPinned ? Theme.chat.branchIndicator : Theme.chat.textMuted)
             }
             .buttonStyle(.plain)
 
-            // 删除二次确认（粟粟：有时误触）
-            Button(action: tap { showDeleteConfirm = true }) {
+            // 删除的二次确认在列表那层（CardFlowView.pendingDeleteNode），和菜单里的删除同一个
+            Button(action: tap { onSoftDelete() }) {
                 Image(systemName: "trash")
                     .font(.system(size: 13))
             }
             .buttonStyle(.plain)
-            .confirmationDialog("删除这条消息？", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
-                Button("删除", role: .destructive) {
-                    onSoftDelete()
-                    ToastCenter.shared.show("已移入回收站")
-                }
-            }
         }
-        .foregroundColor(Theme.textMuted)
+        .foregroundColor(Theme.chat.textMuted)
         .padding(.horizontal, CGFloat(bubblePaddingH))
         .padding(.top, 2)
         #if os(macOS)
@@ -4693,7 +5346,7 @@ struct BranchIndicator: View {
             Button { showPicker = true } label: {
                 Text("\(info.currentIndex + 1) / \(info.branchCount)")
                     .font(.system(size: 13).monospacedDigit())
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(Theme.chat.textMuted)
                     .frame(minWidth: 44, minHeight: 30)
                     .contentShape(Rectangle())
             }
@@ -4706,7 +5359,7 @@ struct BranchIndicator: View {
             BranchPickerList(info: info, onPick: pick)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
-                .presentationBackground(Theme.mainBg)
+                .presentationBackground(Theme.chat.mainBg)
         }
         #else
         .popover(isPresented: $showPicker, arrowEdge: .bottom) {
@@ -4721,7 +5374,7 @@ struct BranchIndicator: View {
         return Button { pick(index) } label: {
             Image(systemName: symbol)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundColor(Theme.textMuted.opacity(enabled ? 1 : 0.3))
+                .foregroundColor(Theme.chat.textMuted.opacity(enabled ? 1 : 0.3))
                 .frame(width: 30, height: 30)
                 .contentShape(Rectangle())
         }
@@ -4754,7 +5407,7 @@ struct BranchPickerList: View {
         VStack(spacing: 0) {
             Text("\(info.branchCount) 条分支")
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(Theme.textPrimary)
+                .foregroundColor(Theme.chat.textPrimary)
                 .padding(.top, 16)
                 .padding(.bottom, 10)
             ScrollView {
@@ -4768,7 +5421,7 @@ struct BranchPickerList: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .background(Theme.mainBg)
+        .background(Theme.chat.mainBg)
     }
 
     private func row(_ branch: (index: Int, node: MessageNode, isMainPath: Bool)) -> some View {
@@ -4779,14 +5432,14 @@ struct BranchPickerList: View {
         return HStack(alignment: .top, spacing: 10) {
             Text("\(branch.index + 1)")
                 .font(.system(size: 12).monospacedDigit())
-                .foregroundColor(Theme.textMuted)
+                .foregroundColor(Theme.chat.textMuted)
                 .frame(width: 18, alignment: .leading)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 2) {
                 Text(String(ConversationTitler.plainText(EffectiveCharacterContext(charName: assistantName, userName: userName)
                     .expand(ContentCleaner.clean(node.content, cacheKey: node.id))).prefix(200)))
                     .font(.system(size: 14))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 HStack(spacing: 6) {
@@ -4794,18 +5447,18 @@ struct BranchPickerList: View {
                     if branch.isMainPath { Label("主线", systemImage: "star.fill") }
                 }
                 .font(.system(size: 11))
-                .foregroundColor(Theme.textMuted)
+                .foregroundColor(Theme.chat.textMuted)
             }
             if isCurrent {
                 Image(systemName: "checkmark")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
                     .padding(.top, 2)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 12).fill(isCurrent ? Theme.accent : Color.clear))
+        .background(RoundedRectangle(cornerRadius: 12).fill(isCurrent ? Theme.chat.accent : Color.clear))
         .contentShape(Rectangle())
         .onTapGesture { onPick(branch.index) }
         .accessibilityAddTraits(.isButton)
@@ -4842,11 +5495,11 @@ struct TagPickerPopover: View {
             HStack {
                 Text("移到文件夹")
                     .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(Theme.chat.textPrimary)
                 Spacer()
                 Button("完成") { dismiss() }
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(Theme.branchIndicator)
+                    .foregroundColor(Theme.chat.branchIndicator)
             }
             .padding(.horizontal, 20)
             .padding(.top, 16)
@@ -4858,13 +5511,13 @@ struct TagPickerPopover: View {
                 VStack(spacing: 12) {
                     Image(systemName: "folder")
                         .font(.system(size: 36))
-                        .foregroundColor(Theme.textMuted.opacity(0.5))
+                        .foregroundColor(Theme.chat.textMuted.opacity(0.5))
                     Text("还没有文件夹")
                         .font(.system(size: 14))
-                        .foregroundColor(Theme.textMuted)
+                        .foregroundColor(Theme.chat.textMuted)
                     Text("去对话列表顶上的 ＋ 新建")
                         .font(.system(size: 12))
-                        .foregroundColor(Theme.textMuted.opacity(0.7))
+                        .foregroundColor(Theme.chat.textMuted.opacity(0.7))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -4880,11 +5533,11 @@ struct TagPickerPopover: View {
                                     FolderIconView(tag: tag, size: 18)
                                     Text(tag.name)
                                         .font(.system(size: 15))
-                                        .foregroundColor(Theme.textPrimary)
+                                        .foregroundColor(Theme.chat.textPrimary)
                                     Spacer()
                                     Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
                                         .font(.system(size: 18))
-                                        .foregroundColor(isOn ? Theme.branchIndicator : Theme.textMuted.opacity(0.4))
+                                        .foregroundColor(isOn ? Theme.chat.branchIndicator : Theme.chat.textMuted.opacity(0.4))
                                 }
                                 .padding(.horizontal, 20)
                                 .padding(.vertical, 12)

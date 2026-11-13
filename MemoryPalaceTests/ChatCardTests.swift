@@ -426,26 +426,6 @@ final class ChatCardTests: XCTestCase {
         XCTAssertNil(HTMLCardView.pageTitle("<title>  </title>"))
     }
 
-    @MainActor
-    func testSnapshotKeyAndPolicy() {
-        let a = ChatHTMLSnapshotter.cacheKey(html: "<p>a</p>", offline: true)
-        XCTAssertEqual(a, ChatHTMLSnapshotter.cacheKey(html: "<p>a</p>", offline: true))
-        XCTAssertNotEqual(a, ChatHTMLSnapshotter.cacheKey(html: "<p>b</p>", offline: true))
-        XCTAssertNotEqual(a, ChatHTMLSnapshotter.cacheKey(html: "<p>a</p>", offline: false))
-        let offline = ChatHTMLSnapshotter.contentSecurityPolicy(offline: true)
-        XCTAssertTrue(offline.contains("script-src 'unsafe-inline';"))
-        XCTAssertFalse(offline.contains("https:"))
-        XCTAssertTrue(offline.contains("connect-src 'none'"))
-        XCTAssertTrue(ChatHTMLSnapshotter.contentSecurityPolicy(offline: false).contains("script-src 'unsafe-inline' https:"))
-    }
-
-    @MainActor
-    func testSnapshotRefusesOversizedHTML() {
-        var result: ChatHTMLSnapshotter.Result?
-        ChatHTMLSnapshotter.shared.snapshot(html: String(repeating: "a", count: ChatHTMLSnapshotter.maxHTMLBytes + 1)) { result = $0 }
-        XCTAssertEqual(result, .failed)
-    }
-
     func testRegistryHTMLStreamingPlaceholder() {
         XCTAssertEqual(ChatCardRegistry.kind(language: "html", code: "<div>", streaming: true), .htmlPlaceholder)
         XCTAssertEqual(ChatCardRegistry.kind(language: "html", code: "<div>", streaming: false), .html)
@@ -457,16 +437,6 @@ final class ChatCardTests: XCTestCase {
     }
 
     // MARK: - 第 2 期终审修复
-
-    /// I3：没有 <head> 但有 <header> 的片段，CSP 必须进真正的 head（否则整页无策略）
-    @MainActor
-    func testCSPInjectionIgnoresHeaderTag() {
-        let out = ChatHTMLSnapshotter.injectingCSP(into: "<header>标题</header><img src=\"https://x.com/a.png\">", offline: true)
-        XCTAssertTrue(out.hasPrefix("<head><meta http-equiv=\"Content-Security-Policy\""), out)
-        let withHead = ChatHTMLSnapshotter.injectingCSP(into: "<html><head lang=\"zh\"><title>t</title></head><body><header>h</header>", offline: true)
-        XCTAssertTrue(withHead.contains("<head lang=\"zh\"><meta http-equiv="), withHead)
-        XCTAssertFalse(withHead.contains("<header><meta"), withHead)
-    }
 
     /// I4：不会抓取的情况（本地模式 / 私网）同步给简版，有缓存给缓存，否则 nil（才显示骨架）
     @MainActor

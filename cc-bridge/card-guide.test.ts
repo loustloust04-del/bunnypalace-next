@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { CARD_GUIDE, CARD_GUIDE_INDEX, CARD_KINDS, cardGuideFor, cardGuideSection } from "./card-guide"
+import { CARD_GUIDE, CARD_GUIDE_INDEX, CARD_KINDS, CC_REACT_GUIDE, MCP_INSTRUCTIONS, cardGuideFor, cardGuideSection } from "./card-guide"
 
 // 卡片说明用到再查（粟粟 10-03：这么长一坨不要全塞系统提示词）；与 app 的 CardGuideToolTests 同口径
 describe("CARD_GUIDE_INDEX", () => {
@@ -12,6 +12,19 @@ describe("CARD_GUIDE_INDEX", () => {
     expect(CARD_GUIDE_INDEX).toContain("回复正文")
     expect(CARD_GUIDE_INDEX).toContain("[附带事件]")
     expect(CARD_GUIDE_INDEX).not.toContain("builtin:slowtide")
+  })
+})
+
+describe("CC_REACT_GUIDE / MCP_INSTRUCTIONS", () => {
+  test("教 react 块：格式对、message_id 写法、短", () => {
+    expect(Buffer.byteLength(CC_REACT_GUIDE)).toBeLessThan(800)
+    for (const s of ["```react", "message_id", "[附带事件]"]) expect(CC_REACT_GUIDE).toContain(s)
+    expect(CC_REACT_GUIDE).toMatch(/^```react$/m)     // 开头一行恰好是 ```react
+    expect(CC_REACT_GUIDE).toMatch(/^```$/m)          // 收尾一行 ```
+    expect(CC_REACT_GUIDE).toContain("不要再包进")
+    expect(CC_REACT_GUIDE).toContain("react-")        // 表情事件的 message_id 不能照抄
+    expect(MCP_INSTRUCTIONS.startsWith(CARD_GUIDE_INDEX)).toBe(true)
+    expect(MCP_INSTRUCTIONS).toContain(CC_REACT_GUIDE)
   })
 })
 

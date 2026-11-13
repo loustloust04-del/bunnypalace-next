@@ -1,9 +1,14 @@
+import MemoryCore
 import Foundation
 
 /// 设置二级页标识，两端可见：mac 进 `MacSettingsPage` 的值驱动 path（页顶 ‹ › 靠它回退），iOS 只当标签，导航仍走 destination。
 /// 新二级页加 case 后在 `MacSettingsPage.swift` 的 `SettingsRoute` 扩展里补 `title` / `macDestination`。
 enum SettingsRoute: String, Hashable {
     case healthPermissions
+    /// atrium P3⑤a：别的设置页的档位点进来 = 这个人的权限表（iOS 推 `PersonPermissionsPage`；mac 推权限页并切「这一层」）
+    case floorPermissions
+    /// 「我 › 权限」某行「N 个人单独设了」；mac 上是哪个域看 `PermissionOverridesSelection`
+    case permissionOverrides
     case memoryExtractPrompt
     /// 记忆 v5：写入编号的二级页（A2 / A3 / A4 / B1 / B4 / C / C2 / C3）
     case memoryWriterA2, memoryWriterA3, memoryWriterA4, memoryWriterB1, memoryWriterB4, memoryWriterC, memoryWriterC2, memoryWriterC3
@@ -11,6 +16,7 @@ enum SettingsRoute: String, Hashable {
     case memoryCatalogStopWords
     /// 记忆 v5：写入预算 / 开窗口带什么 / 待续 / 档案列表 / {助手}的记忆列表 / 审计台
     case memoryWriteBudget, memoryOpenWindow, memoryPending, memoryArchiveList, memorySelfList, memoryAudit
+    case memoryArchiveTrigger, memoryRecallBrowse
     /// 审计台「整理提案」› 一份提案的详情；mac 上打开哪份看 `WikiProposalSelection`
     case memoryProposal
     /// 一份提案 › 一个目录项的详情和原料；mac 上打开哪一项看 `WikiProposalSelection.item`
@@ -18,6 +24,8 @@ enum SettingsRoute: String, Hashable {
     case themeLibrary
     case themeColors
     case chatBackground
+    /// 聊天主题（这一层）：只 mac 有入口（iOS 在人页），atrium P3④a
+    case chatThemeLibrary
     case appearanceFont
     case appearanceWaiting
     case appearanceAdvanced

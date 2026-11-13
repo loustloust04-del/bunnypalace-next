@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -136,7 +137,8 @@ final class SelfMemoryInjectionTests: XCTestCase {
         let pid = "xctest-self-inj-meter"
         MemoryInjectionMeter.clear(profileId: pid)
         defer { MemoryInjectionMeter.clear(profileId: pid) }
-        MemoryInjectionMeter.record(profileId: pid, hits: [], memories: [], selfTokens: 120, selfCount: 3)
+        MemoryInjectionMeter.record(profileId: pid, record: MemoryInjectionRecord(
+            tokens: 0, stableCount: 0, hitCount: 0, at: Date(), selfTokens: 120, selfCount: 3))
         let r = MemoryInjectionMeter.load(profileId: pid)
         XCTAssertEqual(r?.selfTokens, 120)
         XCTAssertEqual(r?.selfCount, 3)

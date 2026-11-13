@@ -148,6 +148,7 @@ struct BookChatDrawer: View {
 
         let model = pm.resolveModel(
             conversationModelId: viewModel.selectedConversation?.selectedModelId,
+            profileModelId: prof.preferredModel,
             globalFallbackId: nil
         )
         let preset = psm.preset(byId: prof.presetId) ?? .balanced

@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -378,6 +379,9 @@ struct MemoryPage: View {
     @AppStorage("memoryExplanationExpanded") private var memoryExplanationExpanded = true
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.settingsMetrics) private var m
+    #if os(iOS)
+    @State private var memorySearchRoute: SettingsRoute?
+    #endif
 
     var body: some View {
         // 搜索锚点：命中叶子条目时滚到那一行
@@ -417,6 +421,9 @@ struct MemoryPage: View {
 
             // 共用核：六组 Section
             MemoryPageContent()
+                #if os(iOS)
+                .environment(\.settingsRoutePush) { memorySearchRoute = $0 }
+                #endif
 
             #if os(macOS)
             // A5：mac 独有的条目 CRUD（第 2 类例外），接在共用核之后
@@ -425,6 +432,14 @@ struct MemoryPage: View {
         }
         #if os(iOS)
         .listStyle(.insetGrouped)
+        .navigationDestination(item: $memorySearchRoute) { route in
+            switch route {
+            case .memoryArchiveTrigger: ArchiveTriggerPage(searchTarget: SettingsSearchRouter.shared.flashingAnchor)
+            case .memoryRecallBrowse: RecallBrowsePage(searchTarget: SettingsSearchRouter.shared.flashingAnchor)
+            case .memoryOpenWindow: MemoryOpenWindowPage(searchTarget: SettingsSearchRouter.shared.flashingAnchor)
+            default: EmptyView()
+            }
+        }
         .scrollContentBackground(.hidden)
         .background(Theme.sidebarBg)
         .scrollDismissesKeyboard(.immediately)

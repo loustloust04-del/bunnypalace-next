@@ -818,3 +818,155 @@ extension Page2HomeStoreTests {
         XCTAssertEqual(store.layout, renamed); XCTAssertEqual(writes, renamedWrites)
     }
 }
+
+/// atrium P3⑥b：主屏摆法按层，写时复制（plan-atrium-p3-page2 §4.3）。老文件 = 默认主屏，只读
+extension Page2HomeStoreTests {
+    private struct FloorFixture {
+        let defaults: UserDefaults
+        let dir: URL
+        var fallback: URL { dir.appendingPathComponent("home-layout-v1.json") }
+        func floor(_ id: String) -> URL { dir.appendingPathComponent("floors/\(id)/home-layout-v1.json") }
+        @MainActor func store(_ id: String) -> Page2HomeStore { Page2HomeStore(defaults: defaults, fileURL: floor(id), fallbackURL: fallback) }
+        func cleanup() {
+            try? FileManager.default.removeItem(at: dir)
+            defaults.removePersistentDomain(forName: dir.lastPathComponent)
+        }
+    }
+
+    /// 默认主屏（老文件）先按老逻辑建好：日历 + 记忆，Dock 单词
+    private func floorFixture(seedDefault: Bool = true) -> FloorFixture {
+        let (defaults, url) = fixture()
+        defaults.set(Data("[]".utf8), forKey: "dashboardWidgets_v2")
+        let f = FloorFixture(defaults: defaults, dir: url.deletingLastPathComponent())
+        if seedDefault { Page2HomeStore(defaults: defaults, fileURL: f.fallback).bootstrap(toolIDs: ["calendar", "memory"], dockIDs: ["vocab"]) }
+        return f
+    }
+
+    private func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
+
+    func testFloorWithoutOwnFileReadsDefault() throws {
+        let f = floorFixture(); defer { f.cleanup() }
+        let store = f.store("a")
+        XCTAssertTrue(store.isInitialized)
+        XCTAssertFalse(store.recoveryRequired)
+        XCTAssertEqual(store.layout, Page2HomeStore(defaults: f.defaults, fileURL: f.fallback).layout)
+        store.bootstrap(toolIDs: ["reading"], dockIDs: [])
+        XCTAssertFalse(exists(f.floor("a")), "只读不写：没动手就没有自己的文件")
+    }
+
+    func testFirstSaveWritesFloorFileAndNeverTouchesDefaultBytes() throws {
+        let f = floorFixture(); defer { f.cleanup() }
+        let before = try Data(contentsOf: f.fallback)
+        let defaultLayout = f.store("b").layout
+        let store = f.store("a")
+        XCTAssertTrue(store.insert(.app("reading"), capacity: "4x6"))
+        XCTAssertTrue(exists(f.floor("a")))
+        XCTAssertEqual(try Data(contentsOf: f.fallback), before, "层写不改老文件一个字节")
+        XCTAssertEqual(f.store("a").layout, store.layout, "重读拿到这一层自己的")
+        XCTAssertEqual(f.store("b").layout, defaultLayout, "别的层照旧是默认主屏")
+        store.setDock(["memory"])
+        store.undo()
+        XCTAssertEqual(try Data(contentsOf: f.fallback), before)
+        XCTAssertFalse(exists(f.floor("b")))
+    }
+
+    func testCorruptFloorFileRecoversOnFloorOnly() throws {
+        let f = floorFixture(); defer { f.cleanup() }
+        let before = try Data(contentsOf: f.fallback)
+        try FileManager.default.createDirectory(at: f.floor("a").deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{坏".utf8).write(to: f.floor("a"))
+        let store = f.store("a")
+        XCTAssertTrue(store.recoveryRequired, "层文件坏了标层文件，不退回默认主屏")
+        XCTAssertFalse(store.isInitialized)
+        store.retryLoad()
+        XCTAssertTrue(store.recoveryRequired)
+        store.recover(toolIDs: ["calendar"], dockIDs: [])
+        XCTAssertTrue(store.isInitialized)
+        let floorDir = try FileManager.default.contentsOfDirectory(atPath: f.floor("a").deletingLastPathComponent().path)
+        XCTAssertTrue(floorDir.contains { $0.hasPrefix("home-layout-backup-") }, "坏的层文件备份在层目录")
+        XCTAssertEqual(try Data(contentsOf: f.fallback), before)
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: f.dir.path).contains { $0.hasPrefix("home-layout-backup-") })
+    }
+
+    func testCorruptDefaultWithoutFloorFileBootstrapsFloorFile() throws {
+        let f = floorFixture(); defer { f.cleanup() }
+        let broken = Data("{坏".utf8)
+        try broken.write(to: f.fallback)
+        let store = f.store("a")
+        XCTAssertTrue(store.recoveryRequired)
+        store.recover(toolIDs: ["calendar"], dockIDs: ["vocab"])
+        XCTAssertTrue(store.isInitialized)
+        XCTAssertTrue(exists(f.floor("a")), "在层文件上重建")
+        XCTAssertEqual(try Data(contentsOf: f.fallback), broken, "默认主屏不动，坏的也原样留着")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.floor("a").deletingLastPathComponent().path), ["home-layout-v1.json"], "没有层文件可备份")
+        XCTAssertEqual(f.store("a").layout, store.layout)
+    }
+
+    func testResetDeletesFloorFileBackToDefault() throws {
+        let f = floorFixture(); defer { f.cleanup() }
+        let before = try Data(contentsOf: f.fallback)
+        let store = f.store("a")
+        let defaultLayout = store.layout
+        store.setDock(["memory"])
+        XCTAssertTrue(exists(f.floor("a")))
+        store.reset(toolIDs: ["reading"])
+        XCTAssertFalse(exists(f.floor("a")), "恢复成默认主屏 = 删这一层自己的文件")
+        XCTAssertEqual(store.layout, defaultLayout)
+        XCTAssertEqual(f.defaults.stringArray(forKey: "page2DockTools_v1"), ["vocab"], "Dock 镜像跟着回默认")
+        XCTAssertEqual(f.store("a").layout, defaultLayout)
+        store.undo()
+        XCTAssertEqual(store.layout.dockIDs, ["memory"], "可撤销：撤销写回这一层自己的文件")
+        XCTAssertEqual(f.store("a").layout.dockIDs, ["memory"])
+        XCTAssertEqual(try Data(contentsOf: f.fallback), before)
+    }
+
+    func testFreshInstallBootstrapsAndResetsOnFloorFile() throws {
+        let f = floorFixture(seedDefault: false); defer { f.cleanup() }
+        let store = f.store("a")
+        XCTAssertFalse(store.isInitialized)
+        store.bootstrap(toolIDs: ["calendar"], dockIDs: ["vocab"])
+        XCTAssertTrue(store.isInitialized)
+        XCTAssertTrue(exists(f.floor("a")), "全新安装：建档写进这一层")
+        XCTAssertFalse(exists(f.fallback), "不凭空造默认主屏")
+        store.reset(toolIDs: ["memory"])
+        XCTAssertEqual(store.layout.migrationSource, "reset", "没有默认主屏 → 退回按装了的 App 重排")
+        XCTAssertEqual(store.layout.rootItems.compactMap(\.toolID), ["memory"])
+        XCTAssertFalse(exists(f.fallback))
+    }
+
+    func testActivateSwapsPerFloorInstanceAndMirrorsDock() throws {
+        let f = floorFixture(); defer { f.cleanup() }
+        let before = try Data(contentsOf: f.fallback)
+        let (directory, defaults) = (Page2HomeStore.storageDirectory, Page2HomeStore.storageDefaults)
+        Page2HomeStore.storageDirectory = f.dir
+        Page2HomeStore.storageDefaults = f.defaults
+        Page2HomeStore.dropInstances()
+        defer {
+            Page2HomeStore.storageDirectory = directory
+            Page2HomeStore.storageDefaults = defaults
+            Page2HomeStore.dropInstances()
+        }
+        f.defaults.set(["stale"], forKey: "page2DockTools_v1")
+        Page2HomeStore.activate(profileId: "a")
+        let a = Page2HomeStore.shared
+        XCTAssertTrue(a.isInitialized)
+        XCTAssertEqual(f.defaults.stringArray(forKey: "page2DockTools_v1"), ["vocab"], "激活刷 Dock 镜像")
+        a.setDock(["memory"])
+        XCTAssertTrue(exists(f.floor("a")))
+        Page2HomeStore.activate(profileId: "b")
+        let b = Page2HomeStore.shared
+        XCTAssertFalse(a === b, "换层换实例")
+        XCTAssertEqual(b.layout.dockIDs, ["vocab"], "B 没碰过 → 默认主屏")
+        XCTAssertEqual(f.defaults.stringArray(forKey: "page2DockTools_v1"), ["vocab"])
+        Page2HomeStore.activate(profileId: "b")
+        XCTAssertTrue(Page2HomeStore.shared === b, "同 id 不重建")
+        Page2HomeStore.activate(profileId: "a")
+        XCTAssertTrue(Page2HomeStore.shared === a, "来回切层用缓存的实例")
+        XCTAssertEqual(f.defaults.stringArray(forKey: "page2DockTools_v1"), ["memory"])
+        Page2HomeStore.removeFloor("b")
+        Page2HomeStore.activate(profileId: "b")
+        XCTAssertFalse(Page2HomeStore.shared === b, "删层丢掉缓存")
+        XCTAssertFalse(exists(f.floor("b")))
+        XCTAssertEqual(try Data(contentsOf: f.fallback), before)
+    }
+}

@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -68,6 +69,26 @@ final class CatalogDirectionTests: XCTestCase {
         return "{\"items\":[{\"type\":\"new_page\",\"path\":\"\(path)\",\"kind\":\"主题\",\"title\":\"x\",\"records\":[\(lines)]}]}"
     }
 
+    func testLateDirectionResultAfterWithdrawalDoesNotReattachContentProposal() async throws {
+        let item = WikiProposal.Item(state: .approved, change: .direction(.init(
+            path: "主题/港口", title: "港口", action: .newPage, reason: "虚构", mode: .seed)))
+        let p = WikiProposal(origin: .seed, createdAt: Date(), items: [item])
+        try store.save(p)
+        let result = try await WikiProposalReview.withdraw(p.id, store: store, profileId: pid, context: ModelContext(container))
+        XCTAssertEqual(result.succeeded, 1, result.message)
+        let contentId = UUID().uuidString
+        do {
+            try await WikiProposalReview.recordDirection(p.id, itemId: item.id, result: "交了正文", contentProposalId: contentId, store: store)
+            XCTFail("撤授权后的结果必须明确报错")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("方向已撤授权"))
+        }
+        let saved = try XCTUnwrap(store.load(p.id)?.items.first)
+        XCTAssertEqual(saved.state, .pending)
+        XCTAssertNil(saved.change.direction?.contentProposalId)
+        XCTAssertTrue(saved.change.direction?.result?.contains("正文提案 \(contentId) 悬空") == true)
+    }
+
     // MARK: - 自动：方向待批零模型，第一次批不落页，第二次批才落页
 
     func testAutoDirectionMakesNoModelRequestAndPageLandsOnlyAfterSecondApproval() async throws {
@@ -78,7 +99,7 @@ final class CatalogDirectionTests: XCTestCase {
         var j = job(caller: { _, _ in
             writerCalls += 1
             return """
-            {"items":[{"type":"new_page","path":"楼层/主题/灯塔航线","kind":"主题","title":"灯塔航线","records":[
+            {"items":[{"type":"new_page","path":"主题/灯塔航线","kind":"主题","title":"灯塔航线","records":[
             {"text":"2026-10-12 改成三轮领航","fragments":["f1","f2"]}]}],"covered":["f3"]}
             """
         }, backend: backend)
@@ -93,7 +114,7 @@ final class CatalogDirectionTests: XCTestCase {
         let first = try directionProposal()
         XCTAssertEqual(first.origin, .scheduled)
         let d = try XCTUnwrap(first.items.first?.change.direction)
-        XCTAssertEqual(d.path, "楼层/主题/灯塔航线")
+        XCTAssertEqual(d.path, "主题/灯塔航线")
         XCTAssertEqual(d.action, .newPage)
         XCTAssertEqual(d.mode, .daily)
         XCTAssertEqual(d.clues, ids)
@@ -109,7 +130,7 @@ final class CatalogDirectionTests: XCTestCase {
         XCTAssertEqual(writerCalls, 1, "批了才写，日常一次写手")
         XCTAssertFalse(embedder.calls.isEmpty, "批了才搜")
         XCTAssertEqual(run.proposals, 1)
-        XCTAssertFalse(wiki.pageExists("楼层/主题/灯塔航线"), "第一次批不落页")
+        XCTAssertFalse(wiki.pageExists("主题/灯塔航线"), "第一次批不落页")
         for id in ids { XCTAssertNil(try memory(id)?.organizedAt, "正文没批不打标") }
         let content = try XCTUnwrap(contentProposals().first)
         XCTAssertEqual(content.directionRef, .init(proposalId: first.id, itemId: first.items[0].id))
@@ -120,8 +141,8 @@ final class CatalogDirectionTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(done.result).hasPrefix("交了 1 条正文等批"))
 
         try await approve(content.id)
-        XCTAssertTrue(wiki.pageExists("楼层/主题/灯塔航线"), "第二次批才落页")
-        for id in ids { XCTAssertEqual(try memory(id)?.organizedPage, "楼层/主题/灯塔航线", "引用的和 covered 的一起标") }
+        XCTAssertTrue(wiki.pageExists("主题/灯塔航线"), "第二次批才落页")
+        for id in ids { XCTAssertEqual(try memory(id)?.organizedPage, "主题/灯塔航线", "引用的和 covered 的一起标") }
     }
 
     // MARK: - 逐条批；驳回方向不伤线索；没新证据不重提
@@ -140,7 +161,7 @@ final class CatalogDirectionTests: XCTestCase {
         XCTAssertEqual(Set(items.keys), ["甲", "乙"])
 
         try await approve(p.id, [items["甲"]!])
-        try await WikiProposalReview.reject(p.id, itemIds: [items["乙"]!], store: store, context: ModelContext(container))
+        try await WikiProposalReview.reject(p.id, itemIds: [items["乙"]!], store: store, profileId: pid, context: ModelContext(container))
         _ = await CatalogSession(job: j).directions(p.id)
 
         XCTAssertEqual(writerUsers.count, 1, "只执行批了的那条")
@@ -199,7 +220,7 @@ final class CatalogDirectionTests: XCTestCase {
         let backend = FakeCatalogBackend { n, _ in
             n == 1 ? .toolCalls([CatalogTestKit.call("search_fragments", "{\"terms\":[\"电影\"]}")])
                 : .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, """
-                {"items":[{"type":"new_page","path":"楼层/事/电影","kind":"事","title":"电影","records":[{"text":"2026-10-12 一起看了电影","fragments":["f1"]}]}]}
+                {"items":[{"type":"new_page","path":"事/电影","kind":"事","title":"电影","records":[{"text":"2026-10-12 一起看了电影","fragments":["f1"]}]}]}
                 """)])
         }
         let report = await CatalogSession(job: job(backend: backend)).organizeTopic("电影")
@@ -211,25 +232,44 @@ final class CatalogDirectionTests: XCTestCase {
         XCTAssertNil(p.items.first { $0.change.direction != nil }, "不出现重复批方向")
         XCTAssertEqual(p.request?.text, "整理一个主题：电影")
         XCTAssertEqual(p.request?.profileId, pid)
-        XCTAssertFalse(wiki.pageExists("楼层/事/电影"), "正文没批不落页")
+        XCTAssertFalse(wiki.pageExists("事/电影"), "正文没批不落页")
         XCTAssertNil(try memory(m.id)?.organizedAt)
 
         try await approve(p.id)
-        XCTAssertTrue(wiki.pageExists("楼层/事/电影"))
-        XCTAssertEqual(try memory(m.id)?.organizedPage, "楼层/事/电影")
+        XCTAssertTrue(wiki.pageExists("事/电影"))
+        XCTAssertEqual(try memory(m.id)?.organizedPage, "事/电影")
     }
 
     // MARK: - {助手}的建议：先批方向
+
+    /// 主聊天的 suggest_wiki_direction：定义（直接下发、更多工具的 inspect 都经注册表）按楼层名字写本人那组；
+    /// 名字写的路径落回 {{user}}，回执显示名字
+    func testSuggestToolSchemaShowsNameAndStoresUserBranch() throws {
+        func description(_ d: ToolDefinition?) -> String { ((d?.properties["path"] as? [String: Any])?["description"] as? String) ?? "" }
+        let own = description(WikiSuggestTool.definition(userName: "星砚"))
+        XCTAssertTrue(own.contains("星砚 / 人 / 物") && !own.contains("{{user}}"), own)
+        if WikiSuggestTool.enabled {
+            let ctx = ToolGateContext(family: .openAI, deferMCP: false, userName: "星砚")
+            let all = ToolRegistry.enabledDefinitions(ctx) + ToolRegistry.tuckedDefinitions(ctx)
+            XCTAssertEqual(description(all.first { $0.name == WikiSuggestTool.toolName }), own, "注册表下发的就是按名字生成的那份")
+        }
+        let r = WikiSuggestTool.execute(inputJSON: #"{"path":"星砚/品味","reason":"聊到审美"}"#, wiki: wiki, profileId: pid, userName: "星砚")
+        XCTAssertFalse(r.isError, r.text)
+        XCTAssertFalse(r.text.contains("{{user}}"), r.text)
+        XCTAssertEqual(try directionProposal().items.first?.change.direction?.path, "{{user}}/品味")
+        let bad = WikiSuggestTool.execute(inputJSON: #"{"path":"岚舟/品味","reason":"x"}"#, wiki: wiki, profileId: pid, userName: "星砚")
+        XCTAssertTrue(bad.isError && bad.text.contains("星砚 / 人"), "被拒时列的组是当前名字：\(bad.text)")
+    }
 
     func testAssistantSuggestionNeedsDirectionApprovalFirst() async throws {
         try fragment("云桥城地图画好了", subject: "云桥城")
         let backend = FakeCatalogBackend { n, _ in
             n == 1 ? .toolCalls([CatalogTestKit.call("search_fragments", "{\"terms\":[\"云桥城\"]}")])
                 : .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, """
-                {"items":[{"type":"new_page","path":"楼层/地点/云桥城","kind":"地点","title":"云桥城","records":[{"text":"2026-10-12 地图画好了","fragments":["f1"]}]}]}
+                {"items":[{"type":"new_page","path":"地点/云桥城","kind":"地点","title":"云桥城","records":[{"text":"2026-10-12 地图画好了","fragments":["f1"]}]}]}
                 """)])
         }
-        let args = "{\"path\":\"/楼层/地点/云桥城.md\",\"reason\":\"刚聊到新地图\"}"
+        let args = "{\"path\":\"/地点/云桥城.md\",\"reason\":\"刚聊到新地图\"}"
 
         let r = WikiSuggestTool.execute(inputJSON: args, wiki: wiki, profileId: pid)
         XCTAssertFalse(r.isError, r.text)
@@ -237,7 +277,7 @@ final class CatalogDirectionTests: XCTestCase {
         let p = try directionProposal()
         XCTAssertEqual(p.origin, .assistant)
         let d = try XCTUnwrap(p.items.first?.change.direction)
-        XCTAssertEqual(d.path, "楼层/地点/云桥城")
+        XCTAssertEqual(d.path, "地点/云桥城")
         XCTAssertEqual(d.action, .newPage)
         XCTAssertEqual(d.mode, .agent)
         XCTAssertEqual(d.reason, "刚聊到新地图")
@@ -246,7 +286,7 @@ final class CatalogDirectionTests: XCTestCase {
         XCTAssertFalse(WikiSuggestTool.execute(inputJSON: args, wiki: wiki, profileId: pid).isError)
         XCTAssertEqual(store.list().count, 1, "同一页有待批方向不重复交")
         XCTAssertTrue(WikiSuggestTool.execute(inputJSON: "{\"path\":\"随便/页\",\"reason\":\"x\"}", wiki: wiki, profileId: pid).isError)
-        XCTAssertTrue(WikiSuggestTool.execute(inputJSON: "{\"path\":\"楼层/地点/别处\"}", wiki: wiki, profileId: pid).isError)
+        XCTAssertTrue(WikiSuggestTool.execute(inputJSON: "{\"path\":\"地点/别处\"}", wiki: wiki, profileId: pid).isError)
 
         let j = job(backend: backend)
         _ = await CatalogSession(job: j).directions(p.id)
@@ -260,17 +300,17 @@ final class CatalogDirectionTests: XCTestCase {
         let content = try XCTUnwrap(contentProposals().first)
         XCTAssertEqual(content.origin, .assistant)
         XCTAssertEqual(content.directionRef?.proposalId, p.id)
-        XCTAssertFalse(wiki.pageExists("楼层/地点/云桥城"))
+        XCTAssertFalse(wiki.pageExists("地点/云桥城"))
         try await approve(content.id)
-        XCTAssertTrue(wiki.pageExists("楼层/地点/云桥城"))
+        XCTAssertTrue(wiki.pageExists("地点/云桥城"))
     }
 
     // MARK: - covered-only：不改正文，批了才打标；stale
 
     func testCoveredOnlyDoesNotTouchPageAndMarksOnlyAfterApproval() async throws {
-        try wiki.save(WikiPage(path: "楼层/地点/云桥城", kind: .place, triggers: ["云桥城"], hook: "提到云桥城时", title: "云桥城",
+        try wiki.save(WikiPage(path: "地点/云桥城", kind: .place, triggers: ["云桥城"], hook: "提到云桥城时", title: "云桥城",
                                now: "画了地图（自 2026-10 起）。"))
-        let raw = try XCTUnwrap(wiki.readRaw("楼层/地点/云桥城"))
+        let raw = try XCTUnwrap(wiki.readRaw("地点/云桥城"))
         let m = try fragment("云桥城地图画好了", subject: "云桥城夜市")
         let j = job(caller: { _, _ in "{\"items\":[],\"covered\":[\"f1\"]}" })
         _ = await CatalogSession(job: j).daily(now: Date())
@@ -280,34 +320,34 @@ final class CatalogDirectionTests: XCTestCase {
         try await approve(p.id)
         _ = await CatalogSession(job: j).directions(p.id)
         let content = try XCTUnwrap(contentProposals().first)
-        XCTAssertEqual(content.items.map(\.change), [.confirmCovered(path: "楼层/地点/云桥城")])
+        XCTAssertEqual(content.items.map(\.change), [.confirmCovered(path: "地点/云桥城")])
         XCTAssertNil(try memory(m.id)?.organizedAt, "待批时不打标")
         XCTAssertTrue(CatalogMaterial.pendingFragmentIds(store).contains(m.id), "待批不重复发现")
 
         try await approve(content.id)
-        XCTAssertEqual(wiki.readRaw("楼层/地点/云桥城"), raw, "不改页正文")
-        XCTAssertEqual(try memory(m.id)?.organizedPage, "楼层/地点/云桥城")
+        XCTAssertEqual(wiki.readRaw("地点/云桥城"), raw, "不改页正文")
+        XCTAssertEqual(try memory(m.id)?.organizedPage, "地点/云桥城")
     }
 
     func testContentGoesStaleWhenPageChangesBeforeSecondApproval() async throws {
-        try wiki.save(WikiPage(path: "楼层/地点/云桥城", kind: .place, triggers: ["云桥城"], hook: "", title: "云桥城"))
+        try wiki.save(WikiPage(path: "地点/云桥城", kind: .place, triggers: ["云桥城"], hook: "", title: "云桥城"))
         let m = try fragment("云桥城地图画好了", subject: "云桥城")
         let n = try fragment("云桥城夜市开张", subject: "云桥城", day: 13)
         let j = job(caller: { _, _ in
-            "{\"items\":[{\"type\":\"append\",\"path\":\"楼层/地点/云桥城\",\"records\":[{\"text\":\"2026-10-12 地图画好了\",\"fragments\":[\"f1\"]}]}],\"covered\":[\"f2\"]}"
+            "{\"items\":[{\"type\":\"append\",\"path\":\"地点/云桥城\",\"records\":[{\"text\":\"2026-10-12 地图画好了\",\"fragments\":[\"f1\"]}]}],\"covered\":[\"f2\"]}"
         })
         _ = await CatalogSession(job: j).daily(now: Date())
         try await approve(try directionProposal().id)
         _ = await CatalogSession(job: j).directions(try directionProposal().id)
         let content = try XCTUnwrap(contentProposals().first)
 
-        var hand = try XCTUnwrap(wiki.read("楼层/地点/云桥城"))
+        var hand = try XCTUnwrap(wiki.read("地点/云桥城"))
         hand.now = "她手改了"
-        try wiki.saveRaw(hand.markdown, path: "楼层/地点/云桥城")
+        try wiki.saveRaw(hand.markdown, path: "地点/云桥城")
         let out = try await approve(content.id)
 
         XCTAssertEqual(out.items.first?.state, .stale, "页已变，不硬盖")
-        XCTAssertEqual(wiki.read("楼层/地点/云桥城")?.now, "她手改了")
+        XCTAssertEqual(wiki.read("地点/云桥城")?.now, "她手改了")
         XCTAssertNil(try memory(m.id)?.organizedAt)
         XCTAssertNil(try memory(n.id)?.organizedAt)
     }
@@ -340,13 +380,13 @@ final class CatalogDirectionTests: XCTestCase {
         let again = try XCTUnwrap(store.list().first { $0.id != p.id })
         XCTAssertEqual(Set(again.items.first?.change.direction?.clues ?? []), Set(first + [fresh.id]), "新证据把单条就够的带回来重新归组")
         reply = """
-        {"items":[{"type":"new_page","path":"楼层/主题/纸帆船","kind":"主题","title":"纸帆船","records":[
+        {"items":[{"type":"new_page","path":"主题/纸帆船","kind":"主题","title":"纸帆船","records":[
         {"text":"2026-10-12 喜欢纸帆船","fragments":["f1","f2","f3"]},{"text":"2026-10-15 换了蓝色帆","fragments":["f4"]}]}]}
         """
         try await approve(again.id)
         _ = await CatalogSession(job: j).directions(again.id)
         try await approve(try XCTUnwrap(contentProposals().first).id)
-        for id in first + [fresh.id] { XCTAssertEqual(try memory(id)?.organizedPage, "楼层/主题/纸帆船", "有新证据时能归进页") }
+        for id in first + [fresh.id] { XCTAssertEqual(try memory(id)?.organizedPage, "主题/纸帆船", "有新证据时能归进页") }
     }
 
     // MARK: - 确实没材料：不造假提案、不打标、释放占用
@@ -375,7 +415,7 @@ final class CatalogDirectionTests: XCTestCase {
         let j = job(caller: { _, _ in
             calls += 1
             await MainActor.run { session.cancel() }
-            return "{\"items\":[{\"type\":\"new_page\",\"path\":\"楼层/主题/戊\",\"records\":[{\"text\":\"戊\",\"fragments\":[\"f1\"]}]}]}"
+            return "{\"items\":[{\"type\":\"new_page\",\"path\":\"主题/戊\",\"records\":[{\"text\":\"戊\",\"fragments\":[\"f1\"]}]}]}"
         })
         _ = await CatalogSession(job: j).daily(now: Date())
         let p = try directionProposal()
@@ -409,8 +449,8 @@ final class CatalogDirectionTests: XCTestCase {
 
     func testAgentFailureAndGiveUpRecordResultWithoutProposal() async throws {
         for (path, backend, expected) in [
-            ("楼层/地点/坏了", FakeCatalogBackend { _, _ in .failed("后端坏了") }, "出错：后端坏了"),
-            ("楼层/地点/不交", FakeCatalogBackend { _, _ in .finished("我不想交") }, "到顶了也没交，没出正文"),
+            ("地点/坏了", FakeCatalogBackend { _, _ in .failed("后端坏了") }, "出错：后端坏了"),
+            ("地点/不交", FakeCatalogBackend { _, _ in .finished("我不想交") }, "到顶了也没交，没出正文"),
         ] {
             XCTAssertFalse(WikiSuggestTool.execute(inputJSON: "{\"path\":\"\(path)\",\"reason\":\"测试\"}", wiki: wiki, profileId: pid).isError)
             let p = try XCTUnwrap(store.list().first { $0.items.first?.change.direction?.path == path })
@@ -425,12 +465,12 @@ final class CatalogDirectionTests: XCTestCase {
     // MARK: - 旧数据：非种子旧正文提案照常当第二批审
 
     func testLegacyContentProposalStillApprovesAsSecondBatch() async throws {
-        try wiki.save(WikiPage(path: "楼层/人/小慧", kind: .person, triggers: ["小慧"], hook: "", title: "小慧"))
-        let version = try XCTUnwrap(wiki.version(of: "楼层/人/小慧"))
+        try wiki.save(WikiPage(path: "人/小慧", kind: .person, triggers: ["小慧"], hook: "", title: "小慧"))
+        let version = try XCTUnwrap(wiki.version(of: "人/小慧"))
         let id = UUID().uuidString
         let json = """
         {"id":"\(id)","origin":"manual","createdAt":1800000000,"incomplete":false,"items":[{"id":"\(UUID().uuidString)","state":"pending",
-        "change":{"appendRecords":{"path":"楼层/人/小慧","lines":["2026-10-12 搬家（出处：碎片 1）"]}},"fragmentIds":[],"cites":[],"baseVersion":"\(version)"}]}
+        "change":{"appendRecords":{"path":"人/小慧","lines":["2026-10-12 搬家（出处：碎片 1）"]}},"fragmentIds":[],"cites":[],"baseVersion":"\(version)"}]}
         """
         try FileManager.default.createDirectory(at: store.folder, withIntermediateDirectories: true)
         try Data(json.utf8).write(to: store.folder.appendingPathComponent(id + ".json"))
@@ -440,7 +480,7 @@ final class CatalogDirectionTests: XCTestCase {
 
         let out = try await approve(id)
         XCTAssertEqual(out.items.first?.state, .approved)
-        XCTAssertEqual(wiki.read("楼层/人/小慧")?.records, ["2026-10-12 搬家（出处：碎片 1）"])
+        XCTAssertEqual(wiki.read("人/小慧")?.records, ["2026-10-12 搬家（出处：碎片 1）"])
     }
 
     // MARK: - 返工 ③：写模块拿完整底图
@@ -449,7 +489,7 @@ final class CatalogDirectionTests: XCTestCase {
     func testDailyContentFailingHardChecksTwiceReachesReviewFlagged() async throws {
         try (12...14).forEach { try fragment("灯塔第\($0)天", subject: "灯塔", day: $0) }
         let long = "2026-10-12 第一次跟着领航员把灯塔航线从头到尾走完一整圈，还记下了每个浮标的编号"
-        let reply = page("楼层/主题/灯塔", records: [long])
+        let reply = page("主题/灯塔", records: [long])
         var calls = 0
         let j = job(caller: { _, _ in
             calls += 1
@@ -466,14 +506,14 @@ final class CatalogDirectionTests: XCTestCase {
         XCTAssertEqual(store.load(content.id)?.items.first?.checks, flags, "存盘带着标记")
         XCTAssertEqual(content.revision, "重写一次后仍有没过的", "标明修订实际走到哪一步")
         try await approve(content.id)
-        XCTAssertTrue(try XCTUnwrap(wiki.read("楼层/主题/灯塔")?.records.first).hasPrefix(long + "（出处："))
+        XCTAssertTrue(try XCTUnwrap(wiki.read("主题/灯塔")?.records.first).hasPrefix(long + "（出处："))
     }
 
     /// 整稿只剩一条关系不对的连线：照样成提案，连线原样挂在来源页上给她看，不执行
     func testDailyHeldLinkAloneStillReachesReview() async throws {
-        try wiki.save(WikiPage(path: "楼层/人/小慧", kind: .person, triggers: ["小慧"], hook: "", title: "小慧", now: "室友（自 2026-09 起）。"))
+        try wiki.save(WikiPage(path: "人/小慧", kind: .person, triggers: ["小慧"], hook: "", title: "小慧", now: "室友（自 2026-09 起）。"))
         try (12...14).forEach { try fragment("灯塔第\($0)天", subject: "灯塔", day: $0) }
-        let reply = "{\"items\":[{\"type\":\"link\",\"path\":\"楼层/人/小慧\",\"to\":\"楼层/主题/灯塔\",\"relation\":\"取代\",\"why\":\"常一起去\"}]}"
+        let reply = "{\"items\":[{\"type\":\"link\",\"path\":\"人/小慧\",\"to\":\"主题/灯塔\",\"relation\":\"取代\",\"why\":\"常一起去\"}]}"
         var calls = 0
         let j = job(caller: { _, _ in
             calls += 1
@@ -486,11 +526,11 @@ final class CatalogDirectionTests: XCTestCase {
         XCTAssertEqual(calls, 2)
         let content = try XCTUnwrap(contentProposals().first)
         XCTAssertEqual(content.items, [])
-        XCTAssertEqual(content.unapplied?.map(\.page), ["楼层/人/小慧"])
+        XCTAssertEqual(content.unapplied?.map(\.page), ["人/小慧"])
         XCTAssertTrue(content.unapplied?.first?.raw.contains(#""relation":"取代""#) == true)
         XCTAssertEqual(content.status, .pending, "没看过就算待阅")
         XCTAssertEqual(content.revision, "重写一次后仍有没过的")
-        XCTAssertEqual(wiki.read("楼层/人/小慧")?.links, [], "只展示，不执行")
+        XCTAssertEqual(wiki.read("人/小慧")?.links, [], "只展示，不执行")
     }
 
     func testWriterAndAgentReceiveFullFloorBaseBeyondOldTruncation() async throws {
@@ -529,23 +569,23 @@ final class CatalogDirectionTests: XCTestCase {
     // MARK: - 返工 ④：手动入口的 covered-only 与 single
 
     func testManualTopicCoveredOnlyLinksTheReadPage() async throws {
-        try wiki.save(WikiPage(path: "楼层/地点/云桥城", kind: .place, triggers: ["云桥城"], hook: "", title: "云桥城", now: "地图画好了。"))
-        let raw = try XCTUnwrap(wiki.readRaw("楼层/地点/云桥城"))
+        try wiki.save(WikiPage(path: "地点/云桥城", kind: .place, triggers: ["云桥城"], hook: "", title: "云桥城", now: "地图画好了。"))
+        let raw = try XCTUnwrap(wiki.readRaw("地点/云桥城"))
         let m = try fragment("云桥城地图画好了", subject: "云桥城")
         let backend = FakeCatalogBackend { n, _ in
-            n == 1 ? .toolCalls([CatalogTestKit.call("read_wiki", "{\"path\":\"楼层/地点/云桥城\"}"),
+            n == 1 ? .toolCalls([CatalogTestKit.call("read_wiki", "{\"path\":\"地点/云桥城\"}"),
                                  CatalogTestKit.call("search_fragments", "{\"terms\":[\"云桥城\"]}")])
                 : .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, "{\"items\":[],\"covered\":[\"f1\"]}")])
         }
         _ = await CatalogSession(job: job(backend: backend)).organizeTopic("云桥城")
 
         let content = try XCTUnwrap(store.list().first)
-        XCTAssertEqual(content.items.map(\.change), [.confirmCovered(path: "楼层/地点/云桥城")], "点名入口没有预分配页，covered 挂在实际读过的页上")
+        XCTAssertEqual(content.items.map(\.change), [.confirmCovered(path: "地点/云桥城")], "点名入口没有预分配页，covered 挂在实际读过的页上")
         XCTAssertEqual(content.items.first?.covered, [m.id])
         XCTAssertNil(try memory(m.id)?.organizedAt)
         try await approve(content.id)
-        XCTAssertEqual(wiki.readRaw("楼层/地点/云桥城"), raw)
-        XCTAssertEqual(try memory(m.id)?.organizedPage, "楼层/地点/云桥城")
+        XCTAssertEqual(wiki.readRaw("地点/云桥城"), raw)
+        XCTAssertEqual(try memory(m.id)?.organizedPage, "地点/云桥城")
     }
 
     func testSingleCountsFragmentsActuallyProvidedToTheAgent() async throws {
@@ -562,7 +602,7 @@ final class CatalogDirectionTests: XCTestCase {
         XCTAssertNil(try memory(other.id)?.organizedAt, "没给过它的编号不认")
 
         let fresh = try fragment("纸帆船换了新帆", subject: "纸帆船", day: 14)
-        XCTAssertFalse(WikiSuggestTool.execute(inputJSON: "{\"path\":\"楼层/物/纸帆船\",\"reason\":\"测试\"}", wiki: wiki, profileId: pid).isError)
+        XCTAssertFalse(WikiSuggestTool.execute(inputJSON: "{\"path\":\"物/纸帆船\",\"reason\":\"测试\"}", wiki: wiki, profileId: pid).isError)
         let p = try directionProposal()
         XCTAssertEqual(p.items.first?.change.direction?.clues, [], "助手方向是空线索")
         try await approve(p.id)
@@ -610,7 +650,7 @@ final class CatalogDirectionTests: XCTestCase {
 
     func testNotRunBeforeExecutionRecordsReasonAndConsumes() async throws {
         let floorStore = WikiProposalStore(wiki: WikiStore(profileId: pid))
-        let d = WikiProposal.Direction(path: "楼层/主题/甲", title: "甲", action: .newPage, reason: "测试", mode: .daily)
+        let d = WikiProposal.Direction(path: "主题/甲", title: "甲", action: .newPage, reason: "测试", mode: .daily)
         let item = WikiProposal.Item(state: .approved, change: .direction(d))
         let p = WikiProposal(origin: .scheduled, createdAt: Date(), items: [item])
         try floorStore.save(p)
@@ -646,7 +686,7 @@ final class CatalogDirectionTests: XCTestCase {
     func testColdStartFinishesInterruptedDirectionsWithoutRerunning() async throws {
         let launch = Date()
         func direction(_ title: String, ranAt: Date) -> WikiProposal.Item {
-            var d = WikiProposal.Direction(path: "楼层/主题/\(title)", title: title, action: .newPage, reason: "测试", mode: .daily)
+            var d = WikiProposal.Direction(path: "主题/\(title)", title: title, action: .newPage, reason: "测试", mode: .daily)
             d.ranAt = ranAt
             return WikiProposal.Item(state: .approved, change: .direction(d))
         }
@@ -656,11 +696,11 @@ final class CatalogDirectionTests: XCTestCase {
         let p = WikiProposal(origin: .scheduled, createdAt: launch.addingTimeInterval(-120), items: [delivered, lost, current])
         try store.save(p)
         let content = WikiProposal(origin: .scheduled, createdAt: launch.addingTimeInterval(-30), title: "已交",
-                                   items: [.init(change: .confirmCovered(path: "楼层/主题/已交"), baseVersion: "v")],
+                                   items: [.init(change: .confirmCovered(path: "主题/已交"), baseVersion: "v")],
                                    directionRef: .init(proposalId: p.id, itemId: delivered.id))
         try store.save(content)
 
-        let fixed = try await WikiProposalReview.finishInterrupted(store: store, before: launch)
+        let fixed = try await WikiProposalReview.finishInterrupted(store: store, before: launch, profileId: pid, context: ModelContext(container))
 
         XCTAssertEqual(fixed, 2)
         let after = try XCTUnwrap(store.load(p.id)).items.map { $0.change.direction! }
@@ -677,15 +717,15 @@ final class CatalogDirectionTests: XCTestCase {
     // MARK: - 返工 ⑦：改过的钩子是写模块的硬输入
 
     func testEditedHookReachesWriterAndAgentAndLandsInContent() async throws {
-        try wiki.save(WikiPage(path: "楼层/地点/云桥城", kind: .place, triggers: ["云桥城"], hook: "旧钩子", title: "云桥城"))
+        try wiki.save(WikiPage(path: "地点/云桥城", kind: .place, triggers: ["云桥城"], hook: "旧钩子", title: "云桥城"))
         try (12...14).forEach { try fragment("甲事\($0)", subject: "甲", day: $0) }
         try fragment("云桥城夜市", subject: "云桥城", day: 15)
         var writerUsers: [String] = []
         let j = job(caller: { _, user in
             writerUsers.append(user)
             return user.contains("标题：甲")
-                ? "{\"items\":[{\"type\":\"new_page\",\"path\":\"楼层/主题/甲\",\"kind\":\"主题\",\"title\":\"甲\",\"hook\":\"模型自己写的\",\"records\":[{\"text\":\"2026-10-12 甲\",\"fragments\":[\"f1\"]}]}]}"
-                : "{\"items\":[{\"type\":\"append\",\"path\":\"楼层/地点/云桥城\",\"records\":[{\"text\":\"2026-10-15 夜市\",\"fragments\":[\"f4\"]}]}]}"
+                ? "{\"items\":[{\"type\":\"new_page\",\"path\":\"主题/甲\",\"kind\":\"主题\",\"title\":\"甲\",\"hook\":\"模型自己写的\",\"records\":[{\"text\":\"2026-10-12 甲\",\"fragments\":[\"f1\"]}]}]}"
+                : "{\"items\":[{\"type\":\"append\",\"path\":\"地点/云桥城\",\"records\":[{\"text\":\"2026-10-15 夜市\",\"fragments\":[\"f4\"]}]}]}"
         })
         _ = await CatalogSession(job: j).daily(now: Date())
         let p = try directionProposal()
@@ -701,15 +741,15 @@ final class CatalogDirectionTests: XCTestCase {
         XCTAssertTrue(writerUsers.contains { $0.contains("【定好的钩子】说云桥城夜市时先看") })
         let changes = contentProposals().flatMap { $0.items.map(\.change) }
         XCTAssertTrue(changes.contains { if case .newPage(let page) = $0 { page.hook == "提到甲的时候先看" } else { false } }, "新开页用定好的钩子")
-        XCTAssertTrue(changes.contains(.retag(path: "楼层/地点/云桥城", oldHook: "旧钩子", newHook: "说云桥城夜市时先看",
+        XCTAssertTrue(changes.contains(.retag(path: "地点/云桥城", oldHook: "旧钩子", newHook: "说云桥城夜市时先看",
                                               oldTriggers: ["云桥城"], newTriggers: ["云桥城"])), "已有页补一条改钩子，照样等批")
 
         let backend = FakeCatalogBackend { n, _ in
             n == 1 ? .toolCalls([CatalogTestKit.call("search_fragments", "{\"terms\":[\"甲\"]}")]) : .toolCalls([CatalogTestKit.call(CatalogAgentTools.submit, """
-            {"items":[{"type":"new_page","path":"楼层/物/纸帆船","kind":"物","title":"纸帆船","hook":"模型的","records":[{"text":"2026-10-12 甲","fragments":["f1"]}]}]}
+            {"items":[{"type":"new_page","path":"物/纸帆船","kind":"物","title":"纸帆船","hook":"模型的","records":[{"text":"2026-10-12 甲","fragments":["f1"]}]}]}
             """)])
         }
-        XCTAssertFalse(WikiSuggestTool.execute(inputJSON: "{\"path\":\"楼层/物/纸帆船\",\"reason\":\"测试\"}", wiki: wiki, profileId: pid).isError)
+        XCTAssertFalse(WikiSuggestTool.execute(inputJSON: "{\"path\":\"物/纸帆船\",\"reason\":\"测试\"}", wiki: wiki, profileId: pid).isError)
         let suggestion = try XCTUnwrap(store.list().first { $0.origin == .assistant && $0.items.first?.change.direction != nil })
         let item = try XCTUnwrap(suggestion.items.first)
         var draft = WikiProposalDraft(item.change)

@@ -78,7 +78,7 @@ final class VoiceEffectsTests: XCTestCase {
         defer { (VoiceMessageWriter.serviceProvider, VoiceMessageWriter.serviceKeyProvider, VoiceMessageWriter.proactiveEnabledProvider) = saved }
         VoiceMessageWriter.serviceProvider = { $0 == "svc" ? VoiceService(id: $0, name: "服务", kind: .elevenLabs) : nil }
         VoiceMessageWriter.serviceKeyProvider = { _ in "k" }
-        VoiceMessageWriter.proactiveEnabledProvider = { true }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in true }
         var p = Profile(id: "p", name: "楼", emoji: "🌿", description: "", userName: "你", assistantName: "助手")
         p.voiceServiceId = "svc"; p.voiceId = "v"
         let base = VoicePromptInjector.ccInstructionsBlock(profile: p)

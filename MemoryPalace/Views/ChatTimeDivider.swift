@@ -3,11 +3,13 @@ import SwiftUI
 /// 聊天时间分割线（TASK page1-消息-20，粟粟 10-02：学 OA / Anth，隔几个小时才出；样式 A 两侧线改波浪线）。
 /// 判断和样子都是独立小块：SwiftUI 列表把它放在那条消息顶上，UIKit 新页也能直接拿去用
 enum ChatTimeDivider {
-    /// 两条消息隔这么久以上才出分割线
-    static let gap: TimeInterval = 3 * 3600
+    /// 文章模式：两条消息隔这么久以上才出分割线（保持原行为，测试锁定）
+    static let articleGap: TimeInterval = 3 * 3600
+    /// 气泡模式：iMessage 口径，隔 1 小时以上出分割线
+    static let bubbleGap: TimeInterval = 3600
 
     /// 按时间顺序的消息 → 哪几条顶上要出分割线（id → 那条的时间）。对话第一条（有时间的）一定出；没时间的跳过、不打断比较
-    static func dividers(for nodes: [(id: String, time: Date?)]) -> [String: Date] {
+    static func dividers(for nodes: [(id: String, time: Date?)], gap: TimeInterval = articleGap) -> [String: Date] {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         let probeStart = AirPerfProbe.enabled ? AirPerfProbe.beginTimed("timeDividers") : nil
         defer { if let probeStart { AirPerfProbe.endTimed("timeDividers", since: probeStart) } }
@@ -20,6 +22,30 @@ enum ChatTimeDivider {
             previous = time
         }
         return result
+    }
+
+    /// 气泡模式英文 iMessage 格式。返回（日子 / 时间），调用方日子加粗、时间常规：
+    /// 今天「Today 9:23 AM」、昨天「Yesterday 9:05 PM」、6 天内「Wednesday 2:10 PM」、更早「Oct 3 9:00 AM」
+    static func bubbleLabel(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> (day: String, time: String) {
+        let time = bubbleClock(date, calendar: calendar)
+        if calendar.isDate(date, inSameDayAs: now) { return ("Today", time) }
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: calendar.startOfDay(for: now)).day ?? 0
+        if days == 1 { return ("Yesterday", time) }
+        if (2...6).contains(days) {
+            let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+            return (names[calendar.component(.weekday, from: date) - 1], time)
+        }
+        let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        let c = calendar.dateComponents([.month, .day], from: date)
+        return ("\(months[(c.month ?? 1) - 1]) \(c.day ?? 0)", time)
+    }
+
+    /// 12 小时制「9:23 AM」，小时不补零
+    static func bubbleClock(_ date: Date, calendar: Calendar) -> String {
+        let c = calendar.dateComponents([.hour, .minute], from: date)
+        let h24 = c.hour ?? 0
+        let h12 = h24 % 12 == 0 ? 12 : h24 % 12
+        return "\(h12):\(String(format: "%02d", c.minute ?? 0)) \(h24 < 12 ? "AM" : "PM")"
     }
 
     /// 今天「09:12」、昨天「昨天 23:41」、6 天内「周三 14:20」、今年「9月25日 14:20」、更早带年份
@@ -52,13 +78,15 @@ enum ChatTimeDivider {
 /// 否则才重读每条的 id / createTime。存强引用，免得节点释放后地址复用撞上旧结果
 struct ChatTimeDividerCache {
     private var nodes: [MessageNode] = []
+    private var gap: TimeInterval = ChatTimeDivider.articleGap
     private var result: [String: Date] = [:]
     private(set) var builds = 0
 
-    mutating func dividers(for path: [MessageNode]) -> [String: Date] {
-        if path.count == nodes.count, zip(path, nodes).allSatisfy({ $0 === $1 }) { return result }
-        result = ChatTimeDivider.dividers(for: path.map { ($0.id, $0.createTime) })
+    mutating func dividers(for path: [MessageNode], gap: TimeInterval = ChatTimeDivider.articleGap) -> [String: Date] {
+        if self.gap == gap, path.count == nodes.count, zip(path, nodes).allSatisfy({ $0 === $1 }) { return result }
+        result = ChatTimeDivider.dividers(for: path.map { ($0.id, $0.createTime) }, gap: gap)
         nodes = path
+        self.gap = gap
         builds += 1
         return result
     }
@@ -72,6 +100,9 @@ struct ChatTimeDividerCache {
 
 /// 与时间分割线同口径：只在路径节点或时间显示开关变化时重算，行内只查表。
 struct ChatBubbleRunCache {
+    /// 换说话人的间距（10-29 粟粟：iMessage 原值 10 看着挤，拉到 16；同一人连发 4 不动）
+    static let speakerChangeSpacing: CGFloat = 16
+
     struct Layout: Equatable {
         let spacingBefore: CGFloat
         var hasTail: Bool
@@ -79,12 +110,13 @@ struct ChatBubbleRunCache {
 
     private var nodes: [MessageNode] = []
     private var includesTimeDividers = false
+    private var gap: TimeInterval = ChatTimeDivider.articleGap
     private var result: [String: Layout] = [:]
     private(set) var builds = 0
 
     mutating func layouts(for path: [MessageNode], dividers: [String: Date],
-                          includesTimeDividers: Bool) -> [String: Layout] {
-        if self.includesTimeDividers == includesTimeDividers,
+                          includesTimeDividers: Bool, gap: TimeInterval = ChatTimeDivider.articleGap) -> [String: Layout] {
+        if self.includesTimeDividers == includesTimeDividers, self.gap == gap,
            path.count == nodes.count, zip(path, nodes).allSatisfy({ $0 === $1 }) {
             return result
         }
@@ -99,12 +131,13 @@ struct ChatBubbleRunCache {
                 && (role == "user" || role == "assistant") && !hasDivider
             if continuesRun, let previous { result[previous.id]?.hasTail = false }
             result[id] = Layout(
-                spacingBefore: previous == nil || hasDivider ? 0 : (continuesRun ? 4 : 10),
+                spacingBefore: previous == nil || hasDivider ? 0 : (continuesRun ? 4 : Self.speakerChangeSpacing),
                 hasTail: true)
             previous = (id, role)
         }
         nodes = path
         self.includesTimeDividers = includesTimeDividers
+        self.gap = gap
         builds += 1
         return result
     }
@@ -155,15 +188,54 @@ struct ChatTimeDividerView: View {
     let date: Date
     let spacing: CGFloat
     var bubbleMode: Bool = false
+    var tutuFollowingSpacing: CGFloat = 24
 
     var body: some View {
-        Text(ChatTimeDivider.label(date))
-            .font(bubbleMode ? .system(size: 11) : .caption2)
-            .foregroundColor(Theme.textMuted)
-            .frame(maxWidth: .infinity)
-            .padding(.top, bubbleMode ? 16 : 0)
-            .padding(.bottom, bubbleMode ? 6 : spacing)
-            .accessibilityLabel(ChatTimeDivider.label(date))
+        Group {
+            #if PERSONAL_APPS && os(iOS)
+            if SkinState.shared.active {
+                let label = ChatTimeDivider.label(date)
+                Text(label)
+                    .font(.system(size: TutuChatStyle.isCJK(label) ? 10.5 : 9.5,
+                                  weight: TutuChatStyle.isCJK(label) ? .regular : .medium))
+                    .tracking(TutuChatStyle.isCJK(label) ? 1.05 : 2.85)
+                    .monospacedDigit()
+                    .foregroundStyle(Color(red: 107 / 255, green: 103 / 255, blue: 99 / 255))
+                    .accessibilityLabel(label)
+                    .opacity(TutuChatIntroPresentation.shared.phase.dateOpacity)
+            } else {
+                ordinaryLabel
+            }
+            #else
+            ordinaryLabel
+            #endif
+        }
+        .foregroundColor(Theme.chat.textMuted)
+        .frame(maxWidth: .infinity)
+        .padding(.top, tutuSkinActive ? 0 : (bubbleMode ? 16 : 0))
+        .padding(.bottom, tutuSkinActive ? tutuFollowingSpacing : (bubbleMode ? 6 : spacing))
+    }
+
+    private var tutuSkinActive: Bool {
+        #if PERSONAL_APPS && os(iOS)
+        return SkinState.shared.active
+        #else
+        return false
+        #endif
+    }
+
+    @ViewBuilder private var ordinaryLabel: some View {
+            if bubbleMode {
+                // iMessage 英文格式：日子加粗、时间常规
+                let parts = ChatTimeDivider.bubbleLabel(date)
+                (Text(parts.day).fontWeight(.semibold) + Text(" \(parts.time)"))
+                    .font(.system(size: 11))
+                    .accessibilityLabel("\(parts.day) \(parts.time)")
+            } else {
+                Text(ChatTimeDivider.label(date))
+                    .font(.caption2)
+                    .accessibilityLabel(ChatTimeDivider.label(date))
+            }
     }
 }
 

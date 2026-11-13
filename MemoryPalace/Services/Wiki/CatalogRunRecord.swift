@@ -1,9 +1,6 @@
+import MemoryCore
 import Foundation
 
-struct CatalogRunLink: Codable, Equatable, Sendable {
-    var path: String
-    var anchor: String?
-}
 
 final class CatalogRunRecord: @unchecked Sendable {
     static let folderName = ".runs"

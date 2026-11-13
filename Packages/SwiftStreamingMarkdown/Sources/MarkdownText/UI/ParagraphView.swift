@@ -10,6 +10,10 @@ struct ParagraphView: UIViewRepresentable {
   @Environment(\.openURL) var openURL
   @Environment(\.markdownConfig) var config: MarkdownRenderConfig
   @Environment(\.markdownController) var markdownController: MarkdownController?
+  #if DEBUG
+  @Environment(\.markdownProbeTag) var probeTag
+  @Environment(\.markdownProbeBlock) var probeBlock
+  #endif
 
   var contents: NSMutableAttributedString
   var lineSpacing: CGFloat?
@@ -26,6 +30,10 @@ struct ParagraphView: UIViewRepresentable {
     view.setTextContextMenu(config.textContextMenu)
     view.setMarkdownController(markdownController)
     view.setTextHighlights(config.textHighlights)
+    #if DEBUG
+    view.probeTag = probeTag
+    view.probeBlock = probeBlock
+    #endif
 
     if config.shouldAnimateText {
       view.alpha = 0
@@ -45,6 +53,10 @@ struct ParagraphView: UIViewRepresentable {
     view.setTextContextMenu(config.textContextMenu)
     view.setMarkdownController(markdownController)
     view.setTextHighlights(config.textHighlights)
+    #if DEBUG
+    view.probeTag = probeTag
+    view.probeBlock = probeBlock
+    #endif
   }
 
   // MP fork perf L1 ①：拆掉时只计数（R14-05：P1a 前不回池）

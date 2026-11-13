@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import Combine
 
@@ -7,6 +8,10 @@ import Combine
 struct ToolDrawerPage: View {
     /// 聊天里进来才有；设置页进来是 nil（能改，但不显示这一轮的数字）
     var viewModel: ConversationViewModel?
+    /// 人页「权限」tab（plan-atrium P2）：只看本楼层；改全局的（工具总开关、MCP）都不露，组头档位改这个人的（P3⑤a）
+    var floorOnly = false
+    /// 嵌进人页时排在最前面的那几节（人页头部 + tab 切换）
+    var leading: AnyView? = nil
 
     @Environment(\.settingsMetrics) private var m
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
@@ -16,7 +21,7 @@ struct ToolDrawerPage: View {
     @AppStorage("userName") private var userName = "你"
 
     private enum Scope: String, Hashable { case global, floor }
-    @State private var scope: Scope = .global
+    @State private var scope: Scope
     @State private var preview: ToolDrawerPreview?
     /// 上游开关（权限档位 / 记忆 / 搜索服务）的快照：别处（或组头档位控件）改了才变，行状态和顶部数字跟着重算。
     /// 只比快照不数通知：页面自己算数字时碰到的 defaults 写入不会触发重算（不会自己绕圈）
@@ -25,8 +30,20 @@ struct ToolDrawerPage: View {
 
     private var store: ToolDrawerStore { ToolDrawerStore.shared }
 
+    init(viewModel: ConversationViewModel? = nil, floorOnly: Bool = false, leading: AnyView? = nil) {
+        self.viewModel = viewModel
+        self.floorOnly = floorOnly
+        self.leading = leading
+        _scope = State(initialValue: floorOnly ? .floor : .global)
+    }
+
     private var profileId: String? {
         viewModel?.selectedConversation?.profileId ?? profileManager?.currentProfile.id
+    }
+
+    private var profileModelId: String? {
+        guard let profileId else { return nil }
+        return profileManager?.profiles.first { $0.id == profileId }?.preferredModel
     }
 
     private var floorName: String {
@@ -43,8 +60,8 @@ struct ToolDrawerPage: View {
         let mcpTools: Int
     }
 
-    private static func upstreamSnapshotNow() -> [String] {
-        PermissionDomain.allCases.map { "\($0.rawValue)=\(PermissionCenter.level($0).rawValue)" }
+    private static func upstreamSnapshotNow(profileId: String?) -> [String] {
+        PermissionDomain.allCases.map { "\($0.rawValue)=\(PermissionCenter.level($0, profileId: profileId).rawValue)" }
             + ["mem=\(SelfMemoryTool.enabled)", "recall=\(RecallTool.enabled)", "voice=\(InnerVoice.enabled)",
                "search=\(WebSearchSettings.shared.selected != nil)"]
     }
@@ -53,11 +70,22 @@ struct ToolDrawerPage: View {
         let ctx = gateContext
         let upstream = Dictionary(ToolRegistry.all.map { ($0.definition.name, $0.enabledIf(ctx)) }, uniquingKeysWith: { a, b in a || b })
         SettingsSectionList(.list) {
-            // 工具总开关（粟粟 10-15：抽屉页最上面也放一个，和设置 · 权限 / MCP 里的是同一个）
-            Section {
-                PermissionDomainRow(domain: .toolsMaster)
+            if let leading { leading }
+
+            if floorOnly {
+                Section {
+                    Text("MCP 目前所有人共用，在「我 → MCP」改")
+                        .font(m.caption)
+                        .foregroundColor(Theme.textMuted)
+                }
+                .listRowBackground(Theme.mainBg)
+            } else {
+                // 工具总开关（粟粟 10-15：抽屉页最上面也放一个，和设置 · 权限 / MCP 里的是同一个）
+                Section {
+                    PermissionDomainRow(domain: .toolsMaster)
+                }
+                .listRowBackground(Theme.mainBg)
             }
-            .listRowBackground(Theme.mainBg)
 
             Section {
                 summaryBlock
@@ -79,7 +107,7 @@ struct ToolDrawerPage: View {
                 }
             }
 
-            mcpSections
+            if !floorOnly { mcpSections }
 
             Section {
                 Button(scope == .global ? "全部恢复默认" : "本楼层全部恢复跟随全局") { confirmReset = true }
@@ -97,16 +125,16 @@ struct ToolDrawerPage: View {
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(Theme.sidebarBg)
-        .navigationTitle("工具抽屉")
+        .navigationTitle(floorOnly ? "" : "工具抽屉")
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .confirmationDialog(scope == .global ? "全局全部恢复默认？" : "本楼层全部恢复跟随全局？", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("恢复", role: .destructive) { resetScope() }
             Button("取消", role: .cancel) {}
         }
-        .onAppear { upstreamSnapshot = Self.upstreamSnapshotNow() }
+        .onAppear { upstreamSnapshot = Self.upstreamSnapshotNow(profileId: profileId) }
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification).receive(on: RunLoop.main)) { _ in
-            let now = Self.upstreamSnapshotNow()
+            let now = Self.upstreamSnapshotNow(profileId: profileId)
             if now != upstreamSnapshot { upstreamSnapshot = now }
         }
         .task(id: RefreshKey(version: store.version, model: selectedChatModelId, profileId: profileId,
@@ -114,7 +142,7 @@ struct ToolDrawerPage: View {
                              mcpTools: MCPProvider.shared.enabledTools(for: MCPProvider.shared.activeServerIds).count)) {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled, let pm = providerManager else { return }
-            preview = viewModel?.previewTools(providerManager: pm, globalModelId: selectedChatModelId)
+            preview = viewModel?.previewTools(providerManager: pm, profileModelId: profileModelId, globalModelId: selectedChatModelId)
         }
     }
 
@@ -123,12 +151,14 @@ struct ToolDrawerPage: View {
     @ViewBuilder
     private var summaryBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("范围", selection: $scope) {
-                Text("全局").tag(Scope.global)
-                Text(floorName.isEmpty ? "本楼层" : "本楼层 · \(floorName)").tag(Scope.floor)
+            if !floorOnly {
+                Picker("范围", selection: $scope) {
+                    Text("全局").tag(Scope.global)
+                    Text(floorName.isEmpty ? "本楼层" : "本楼层 · \(floorName)").tag(Scope.floor)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
 
             if let preview {
                 if let reason = preview.absentReason {
@@ -153,7 +183,7 @@ struct ToolDrawerPage: View {
                     }
                 }
             } else if viewModel?.selectedConversation == nil {
-                Text("设置页没有绑定对话——到聊天右栏「Prompt 工具」看这一轮实发")
+                Text("设置页没有绑定对话——在聊天页输入框左下角的「窗口透视」里看这一轮实发")
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -177,10 +207,16 @@ struct ToolDrawerPage: View {
                 Text("权限")
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
-                PermissionLevelPicker(domain: domain)
+                PermissionLevelPicker(domain: domain, target: permissionTarget)
                     .fixedSize()
             }
         }
+    }
+
+    /// 组头档位改谁（atrium P3⑤a）：人页 / 本楼层 = 这个人；全局 = 默认。组头三个域（文件库 / 推特 / 联网搜索）都能按人
+    private var permissionTarget: PermissionTarget {
+        guard scope == .floor, let profileId else { return .defaults }
+        return .floor(profileId)
     }
 
     // MARK: 一行
@@ -319,7 +355,8 @@ struct ToolDrawerPage: View {
     /// 这一轮的卡是哪一家（决定 search_web / browse_url 和服务端 web_search 谁有份）
     private var family: ToolGateContext.Family {
         guard let pm = providerManager else { return .openAI }
-        let model = pm.resolveModel(conversationModelId: viewModel?.selectedConversation?.selectedModelId, globalFallbackId: selectedChatModelId)
+        let model = pm.resolveModel(conversationModelId: viewModel?.selectedConversation?.selectedModelId, profileModelId: profileModelId,
+                                    globalFallbackId: selectedChatModelId)
         return pm.provider(for: model)?.type == .anthropic ? .anthropic : .openAI
     }
 
@@ -360,14 +397,14 @@ struct ToolDrawerPage: View {
         if item.gate == .auto { return Upstream(on: true, reason: nil) }
         if item.name == ToolRegistry.serverWebSearchName {
             if ctx.family != .anthropic { return Upstream(on: false, reason: "这一轮用不到（只有 Anthropic 卡用服务端搜索）") }
-            return PermissionCenter.capabilityEnabled(.webSearch)
+            return PermissionCenter.capabilityEnabled(.webSearch, profileId: profileId)
                 ? Upstream(on: true, reason: nil) : Upstream(on: false, reason: "\(ToolDrawerCatalog.gateLabel(item.gate)) 关着")
         }
         if upstream[item.name] == true { return Upstream(on: true, reason: nil) }
         if [WebSearchToolService.toolName, BrowseURLTool.toolName].contains(item.name), ctx.family == .anthropic {
             return Upstream(on: false, reason: "这一轮用不到（Anthropic 卡用服务端搜索）")
         }
-        if item.name == WebSearchToolService.toolName, PermissionCenter.capabilityEnabled(.webSearch) {
+        if item.name == WebSearchToolService.toolName, PermissionCenter.capabilityEnabled(.webSearch, profileId: profileId) {
             return Upstream(on: false, reason: "没选搜索服务（设置 · 联网搜索）")
         }
         return Upstream(on: false, reason: "\(ToolDrawerCatalog.gateLabel(item.gate)) 关着，开了才按这里生效")
@@ -384,7 +421,11 @@ struct ToolDrawerPage: View {
         }
         if item.name == ToolRegistry.serverWebSearchName { parts.append("这个工具不能收起") }
         if case .permission(let domain) = item.gate, item.group.permissionDomain == nil {
-            parts.append("权限：\(PermissionCenter.level(domain).displayName)")
+            if let app = PermissionCenter.blockingApp(domain, profileId: profileId) {
+                parts.append(PermissionCenter.notInstalledLabel(app))   // atrium P3⑥a：被没装的 App 挡住
+            } else {
+                parts.append("权限：\(PermissionCenter.level(domain, profileId: profileId).displayName)")
+            }
         }
         if scope == .floor, let profileId, store.state.floorOverride(item.name, profileId: profileId) == nil {
             parts.append("跟随全局")

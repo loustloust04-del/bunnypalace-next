@@ -440,6 +440,10 @@ struct MyComputerSettingsPage: View {
     @State private var reconnecting = false
     /// 改干活目录的结果（hub 拒了的原因 / 已改成）
     @State private var workdirNote: String?
+    /// 再接一台（sheet 挂在页面上，B7.2 B2）
+    @State private var addingHub = false
+    /// 扫到的不是主电脑 / 认不出：弹落点（b4 #1）
+    @State private var pairingCheck: CCHubRegistry.PrimaryPairingCheck?
 
     private var client: CCBridgeWebSocketClient { .shared }
     private var connected: Bool { client.isConnected }
@@ -447,6 +451,10 @@ struct MyComputerSettingsPage: View {
 
     var body: some View {
         SettingsSectionList(.list) {
+            // 多台电脑（plan-multi-hub B4.3）：一行行的电脑跳管理这台；下面原来那些只管主电脑
+            if paired || CCHubRegistry.shared.hubs.count >= 2 {
+                HubListSection(primaryPaired: paired, adding: $addingHub)
+            }
             statusSection
             workdirSection
             toolsSection
@@ -467,10 +475,24 @@ struct MyComputerSettingsPage: View {
             if !Task.isCancelled { reconnecting = false }
         }
         .fullScreenCover(isPresented: $showScanner) {
-            CCPairScannerSheet { payload in pairResult = CCPairingApply.apply(payload, providerManager: providerManager) }
+            CCPairScannerSheet { payload in applyPairing(payload) }
         }
         .sheet(isPresented: $showDirPicker) {
             HubDirectoryPickerSheet(start: client.currentHubInfo?.dirs.agentWorkdir) { path in applyWorkdir(path) }
+        }
+        .sheet(isPresented: $addingHub) { HubPairingSheet(target: nil) }
+        .sheet(item: $pairingCheck) { HubPairingSheet(target: CCHubRegistry.primaryId, check: $0) }
+    }
+
+    private func applyPairing(_ payload: CCPairPayload) {
+        pairResult = CCPairingApply.checking
+        Task {
+            switch await CCPairingApply.apply(payload, providerManager: providerManager) {
+            case .done(let line): pairResult = line
+            case .confirm(let check):
+                pairResult = nil
+                pairingCheck = check
+            }
         }
     }
 

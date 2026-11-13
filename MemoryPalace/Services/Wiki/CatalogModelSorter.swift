@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// 模型分拣（C3 页「分拣：模型」，默认是代码）：模型读碎片和此刻实际的 wiki 索引，逐条判归哪页 / 开新页 / 单条就够 / 暂存。
@@ -75,14 +76,14 @@ enum CatalogModelSorter {
 
         用户 / 人 / 物 / 地点 / 时间 / 事 / 项目 / 主题
 
-        用户 = \(u) 本人。页挂在 楼层/\(u)/ 下，怎么分页看索引里现有的页；没有合适的就提开新页，按这条说的方面自己起页名。
+        用户 = \(u) 本人。页挂在 {{user}}/ 下，怎么分页看索引里现有的页；没有合适的就提开新页，按这条说的方面自己起页名。
         人 = \(u) 认识的人。一人一页。
         项目 = \(u) 在做的事。一个项目一页。
-        事 = 跨很多天的一件事（一场 drama、一次搬家），有起因经过结果。
-        主题 = \(u) 关注的领域（学日语、投资）。
+        事 = 跨很多天的一件事（比如北塔停灯那一阵），有起因经过结果。
+        主题 = \(u) 关注的领域（比如星图测绘、模型船）。
         物 / 地点 / 时间 = 字面意思。
 
-        路径写成「支 / 分组 / 页名」，第一段只能是「工程」或「楼层」：工程 = 项目、代码、app；楼层 = \(u) 本人、你们之间、生活里的人事物。
+        路径写成「组 / 页名」（中间可以再分组），第一段只能是这九组之一：\(WikiStore.branchesText)。用户 = \(u) 本人；工程 = 代码工程、app；别的按类放（人放 人/，地点放 地点/……）。
 
 
         ## 分拣决策树（每条碎片按顺序走，命中就停）
@@ -94,15 +95,15 @@ enum CatalogModelSorter {
         → 说的就是索引里某一页的那个东西 / 话题 → 归到那一页。结束。
         → 没有对应的页 → 走第二步。
 
-        ⚠ 按「说的是谁 / 什么」归，不按 content 里碰巧出现的某个词归（见正反例「饼干」）。
+        ⚠ 按「说的是谁 / 什么」归，不按 content 里碰巧出现的某个词归（见正反例「星砚」）。
         ⚠ 说的是 \(u) 本人 → 走第二步。
 
         ### 第二步：\(u) 本人的页
 
-        subject 指向 \(u) 本人时，对照索引里现有的 楼层/\(u)/ 下的页，用 tags 和 content 判断这条说的是哪一方面：
+        subject 指向 \(u) 本人时，对照索引里现有的 {{user}}/ 下的页，用 tags 和 content 判断这条说的是哪一方面：
 
         → 索引里有讲这一方面的页 → 归到那一页。结束。
-        → 没有合适的页 → 这是一个新东西（kind = 用户，path = 楼层/\(u)/页名），走第三步。
+        → 没有合适的页 → 这是一个新东西（kind = 用户，path = {{user}}/页名），走第三步。
 
         ⚠ 有更具体的页就归更具体的，不要全堆到一页。
 
@@ -116,14 +117,14 @@ enum CatalogModelSorter {
         ### 第四步：single 还是暂存？
 
         同时满足以下三条 → single（单条就够，不进 wiki）：
-        1. 几乎不变的事实（生日、血型、"喜欢蓝色"这种）
+        1. 几乎不变的事实（生日、天生左手比右手凉、"喜欢雾蓝色"这种）
         2. 自己就完整（不需要其他碎片补充上下文）
         3. 不属于任何已有页的话题范围
 
         三条有任何一条不满足 → 暂存（攒到同一个东西凑够 3 条再开页）。
 
         ⚠ 宁可暂存不要乱 single。
-        ⚠ 如果碎片说的是「会变的状态」（在吃的药、项目进度、当前住址），不能 single——它需要进某页的「现在」段，以后会被更新。
+        ⚠ 如果碎片说的是「会变的状态」（在戒的东西、项目进度、眼下守哪座塔），不能 single——它需要进某页的「现在」段，以后会被更新。
 
 
         ## 时间轴提案
@@ -139,46 +140,46 @@ enum CatalogModelSorter {
         ## 正反例
 
         ### 归到已有页
-        碎片 subject="饼干" content="又胖了半斤" → wiki 索引有"楼层/人/饼干" → 说的是饼干 → 归到 楼层/人/饼干 ✓
-        ✗ 看到"胖"就归到 楼层/\(u)/身体（那是 \(u) 的身体页，饼干是猫）
+        碎片 subject="星砚" content="被月光晒了又打喷嚏" → wiki 索引有"人/星砚" → 说的是星砚 → 归到 人/星砚 ✓
+        ✗ 看到"打喷嚏"就归到 {{user}}/月光体质（那是 \(u) 的体质页，星砚是云貂）
 
-        碎片 subject="橘子" content="饼干（大名橘子）今天又胖了" → 索引里"楼层/人/饼干"的别名、钩子说的是同一只猫 → 归到 楼层/人/饼干 ✓
-        ✗ 因为 subject 不等于"饼干"就当成新东西暂存
+        碎片 subject="银耳朵" content="星砚（小名银耳朵）今天又偷灯芯" → 索引里"人/星砚"的别名、钩子说的是同一只云貂 → 归到 人/星砚 ✓
+        ✗ 因为 subject 不等于"星砚"就当成新东西暂存
 
         ### \(u) 本人的页
-        索引里 楼层/\(u)/ 下有：楼层/\(u)/概要、楼层/\(u)/身体
-        碎片 subject="\(u)" content="对花生过敏" tags=["过敏","身体"]
-        → subject 是 \(u) → 对照现有的页 → 说的是身体 → 归到 楼层/\(u)/身体 ✓
-        ✗ 归到 楼层/\(u)/概要（有更具体的页）
-        ✗ 开新页"过敏"（不是新话题，是身体页的内容）
+        索引里 {{user}}/ 下有：{{user}}/概要、{{user}}/月光体质
+        碎片 subject="\(u)" content="一晒月光就打喷嚏" tags=["月光","体质"]
+        → subject 是 \(u) → 对照现有的页 → 说的是月光体质 → 归到 {{user}}/月光体质 ✓
+        ✗ 归到 {{user}}/概要（有更具体的页）
+        ✗ 开新页"打喷嚏"（不是新话题，是月光体质页的内容）
 
         ### 开新页
-        碎片 f1 subject="田中老师" content="日语课老师"
-        碎片 f2 subject="田中老师" content="每周三上课"
-        碎片 f3 subject="田中老师" content="布置了 N2 模拟题"
-        → wiki 索引无"田中老师" → 这批同 subject 3 条 → f1、f2、f3 都写 new 楼层/人/田中老师 ✓
+        碎片 f1 subject="岚舟" content="教星图测绘的师傅"
+        碎片 f2 subject="岚舟" content="每周三上课"
+        碎片 f3 subject="岚舟" content="布置了等高线描图"
+        → wiki 索引无"岚舟" → 这批同 subject 3 条 → f1、f2、f3 都写 new 人/岚舟 ✓
         ✗ 只有 f1、f2 两条时就开页（不到 3 条，暂存）
 
         ### single
-        碎片 subject="\(u)" content="生日是 12 月 3 日" tags=["生日"]
+        碎片 subject="\(u)" content="生在第七个潮汛的夜里" tags=["生日"]
         → 几乎不变 ✓ 自己完整 ✓ 不属于已有页话题？
-        → 检查：索引里有 楼层/\(u)/概要 → 生日属于概要话题 → 不满足第三条 → 归到 楼层/\(u)/概要，不 single ✓
+        → 检查：索引里有 {{user}}/概要 → 生日属于概要话题 → 不满足第三条 → 归到 {{user}}/概要，不 single ✓
         ✗ 标 single（生日应该写进概要页）
 
-        碎片 subject="\(u)" content="血型是 O 型" tags=["血型"]
+        碎片 subject="\(u)" content="天生左手比右手凉" tags=["体温"]
         → 几乎不变 ✓ 自己完整 ✓ 索引里没有讲 \(u) 基本情况的页 ✓
         → single ✓
 
         ### 时间轴提案
-        时间轴：10-20 毕设、10-21 毕设进度、10-22 毕设赶工
-        wiki 索引：无"毕设"相关页
-        → 连续 3 天 → 提案 timeline_proposals: 楼层/项目/毕设，days 写 10-20、10-21、10-22 三天 ✓
+        时间轴：10-20 雾灯台、10-21 雾灯台灯架、10-22 雾灯台调灯芯
+        wiki 索引：无"雾灯台"相关页
+        → 连续 3 天 → 提案 timeline_proposals: 项目/雾灯台，days 写 10-20、10-21、10-22 三天 ✓
 
         ### 同 subject 分到 \(u) 的不同页
-        索引里有：楼层/\(u)/身体、楼层/\(u)/偏好、楼层/\(u)/计划
-        碎片 f1 subject="\(u)" content="花生过敏" tags=["过敏","身体"]  → 楼层/\(u)/身体
-        碎片 f2 subject="\(u)" content="喜欢侘寂风" tags=["审美","偏好"]  → 楼层/\(u)/偏好
-        碎片 f3 subject="\(u)" content="想跳槽做产品" tags=["计划","工作"]  → 楼层/\(u)/计划
+        索引里有：{{user}}/月光体质、{{user}}/偏好、{{user}}/计划
+        碎片 f1 subject="\(u)" content="一晒月光就打喷嚏" tags=["月光","体质"]  → {{user}}/月光体质
+        碎片 f2 subject="\(u)" content="喜欢雾玻璃灯罩" tags=["审美","偏好"]  → {{user}}/偏好
+        碎片 f3 subject="\(u)" content="想搬去云桥城守南塔" tags=["计划","守塔"]  → {{user}}/计划
         → 三条都是 subject="\(u)"，但说的方面不同，分到三页 ✓
         ✗ 全归到一页（索引里有更具体的页时不要堆在一起）
 
@@ -187,21 +188,21 @@ enum CatalogModelSorter {
 
         只输出一个 JSON 对象，不要别的字：
         {"fragments":[
-          {"f":"f1","page":"楼层/\(u)/身体","why":"说的是 \(u) 的花生过敏"},
-          {"f":"f2","new":{"kind":"人","title":"田中老师","path":"楼层/人/田中老师","aliases":["田中","日语老师"]},"why":"日语课老师，第 3 条了"},
+          {"f":"f1","page":"{{user}}/月光体质","why":"说的是 \(u) 一晒月光就打喷嚏"},
+          {"f":"f2","new":{"kind":"人","title":"岚舟","path":"人/岚舟","aliases":["岚师傅","星图师傅"]},"why":"教星图测绘的师傅，第 3 条了"},
           {"f":"f3","single":true},
-          {"f":"f4","stash":"饼干"}
+          {"f":"f4","stash":"银鳞果"}
         ],
         "timeline_proposals":[
-          {"kind":"项目","title":"毕设","path":"楼层/项目/毕设","days":["2026-10-20","2026-10-21","2026-10-22"],"reason":"时间轴连续3天出现毕设但wiki无此页"}
+          {"kind":"项目","title":"雾灯台","path":"项目/雾灯台","days":["2026-10-20","2026-10-21","2026-10-22"],"reason":"时间轴连续3天出现雾灯台但wiki无此页"}
         ]}
 
         - 每条碎片必须有 f 编号 + page / new / single / stash 四选一
         - page 照抄 wiki 索引里的路径
-        - new 必须有 kind / title / path（aliases 可选）；kind 是八类之一，path 第一段是 工程 或 楼层；同一个 path 的几条 new，kind 和 title 写成一样
+        - new 必须有 kind / title / path（aliases 可选）；kind 是八类之一，path 第一段是九组之一；同一个 path 的几条 new，kind 和 title 写成一样
         - why 可选：一句话说为什么这样判（归页、开新页时写），给 \(u) 审批时看
         - stash 的值 = 这个新东西的名字（暂存到凑够 3 条）
-        - timeline_proposals 可以为空数组；每条要有 kind / title / path / days，kind 是八类之一、path 第一段是 工程 或 楼层、索引里还没有这页；days 照抄时间轴里依据的那几天日期
+        - timeline_proposals 可以为空数组；每条要有 kind / title / path / days，kind 是八类之一、path 第一段是九组之一、索引里还没有这页；days 照抄时间轴里依据的那几天日期
         - 同一个主题只用一个目标：碎片归的页 / 开的新页和 timeline_proposals 说的是同一个东西时，用同一个 path，标题写成一样
 
         ## 检查清单
@@ -209,8 +210,8 @@ enum CatalogModelSorter {
         □ JSON 能 parse？
         □ 每条碎片都有判断（page / new / single / stash）？没有遗漏的碎片？
         □ page 指向的路径在 wiki 索引里存在？
-        □ new 的 kind 是八类之一（用户 / 人 / 物 / 地点 / 时间 / 事 / 项目 / 主题）、path 第一段是 工程 或 楼层？
-        □ subject 是 \(u) 名字的碎片都对照了 楼层/\(u)/ 下现有的页？没有全堆到一页？
+        □ new 的 kind 是八类之一（用户 / 人 / 物 / 地点 / 时间 / 事 / 项目 / 主题）、path 第一段是九组之一？
+        □ subject 是 \(u) 名字的碎片都对照了 {{user}}/ 下现有的页？没有全堆到一页？
         □ single 的碎片同时满足三条（不变+完整+不属于已有页）？
         □ 「会变的状态」没有被标 single？
         """
@@ -234,11 +235,13 @@ enum CatalogModelSorter {
     }
 
     /// 只查代码判得准的；不过把每条原因一起交回（重写时回灌给模型）
+    /// user = 楼层用户名：取出对象后按分拣的路径位置把名字还原成 {{user}}，再校验
     static func check(_ raw: String, pool: [CatalogFragment], pages: [WikiInjectionSnapshot.Page],
-                      timeline: [CatalogTimeline.Day] = []) -> Result<Sorted, CatalogJSON.Failure> {
+                      timeline: [CatalogTimeline.Day] = [], user: String? = nil) -> Result<Sorted, CatalogJSON.Failure> {
         let reply: Reply
         do {
-            reply = try CatalogJSON.decodeValue(Reply.self, FragmentPool.strictObjectText(raw) ?? raw)
+            let object = FragmentPool.strictObjectText(raw) ?? raw
+            reply = try CatalogJSON.decodeValue(Reply.self, user.map { WikiStore.storedJSON(object, fields: .sorter, user: $0) } ?? object)
         } catch {
             return .failure(.init(message: "不是合格的 JSON 对象：" + ((error as? CatalogJSON.Failure)?.message ?? error.localizedDescription)))
         }
@@ -279,7 +282,7 @@ enum CatalogModelSorter {
                     problems.append("\(label)：new 的 kind「\(new.kind)」不是八类之一（用户 / 人 / 物 / 地点 / 时间 / 事 / 项目 / 主题）")
                     continue
                 }
-                guard WikiStore.isValidPagePath(path) else { problems.append("\(label)：new 的 path「\(new.path)」不合法（第一段只能是工程或楼层）"); continue }
+                guard WikiStore.isValidPagePath(path) else { problems.append("\(label)：new 的 path「\(new.path)」不合法（第一段只能是 \(WikiStore.branchesText)）"); continue }
                 guard byPath[path] == nil else { problems.append("\(label)：「\(path)」已经有这页，应该写 page"); continue }
                 let title = new.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !title.isEmpty else { problems.append("\(label)：new 缺 title"); continue }
@@ -314,7 +317,7 @@ enum CatalogModelSorter {
                 problems.append("\(at)：kind「\(tp.kind)」不是八类之一（用户 / 人 / 物 / 地点 / 时间 / 事 / 项目 / 主题）")
                 continue
             }
-            guard WikiStore.isValidPagePath(path) else { problems.append("\(at)：path「\(tp.path)」不合法（第一段只能是工程或楼层）"); continue }
+            guard WikiStore.isValidPagePath(path) else { problems.append("\(at)：path「\(tp.path)」不合法（第一段只能是 \(WikiStore.branchesText)）"); continue }
             guard byPath[path] == nil else { problems.append("\(at)：「\(path)」已经有这页，不用提开页"); continue }
             let title = tp.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !title.isEmpty else { problems.append("\(at)：缺 title"); continue }
@@ -390,12 +393,13 @@ enum CatalogModelSorter {
             try cancel?.check()
             let round = "模型分拣 · 第 \(attempt + 1) 次"
             let reply = try await CatalogJSON.request(system: system, user: attempt == 0 ? user : user + CatalogJSON.retryNote + "\n" + note,
-                                                      caller: caller, run: run, name: round)
+                                                      caller: caller, run: run, name: round, userName: names.user)
             try cancel?.check()
             guard let raw = reply else { return nil }
+            let user = names.user
             let checked = await Task.detached(priority: .utility) {
                 drafts?.save(raw, name: attempt == 0 ? "模型分拣" : "模型分拣-重写")
-                return check(raw, pool: pool, pages: pages, timeline: timeline)
+                return check(raw, pool: pool, pages: pages, timeline: timeline, user: user)
             }.value
             switch checked {
             case .success(let sorted):

@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 import CryptoKit
@@ -343,10 +344,10 @@ actor TimelineDaily {
         let legacyMonths = Set(days.map { String($0.prefix(7)) }).filter { m in
             (try? TimelineStore.monthStrict(m, in: dir).entries.isEmpty) == false
         }
-        let needLegacy = (try? PendingStore.needsLegacyImport(profileId: input.profileId, memoryRoot: input.pendingRoot)) ?? true
+        let needLegacy = (try? PendingStore.needsLegacyImport(profileId: input.profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: input.profileId), memoryRoot: input.pendingRoot)) ?? true
         // 安全：动待续本子、或往有老条目的月份里加日记录之前——先备份原始 timeline / pending 并核过；再严格读、补齐老待续、搬 A2 待续
         var safe = true
-        let retry = PendingStore.hasRetry(profileId: input.profileId, memoryRoot: input.pendingRoot)
+        let retry = PendingStore.hasRetry(profileId: input.profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: input.profileId), memoryRoot: input.pendingRoot)
         var harvested = harvest.isEmpty && !needLegacy && !retry
         if !harvest.isEmpty || retry || needLegacy || (readable && !legacyMonths.isEmpty) {
             do {
@@ -360,8 +361,8 @@ actor TimelineDaily {
             do {
                 try TimelineStore.withWriteLock {
                     guard gate.valid(epoch) else { throw Invalidated() }
-                    if needLegacy { try PendingStore.importLegacyStrict(profileId: input.profileId, memoryRoot: input.pendingRoot) }
-                    report.pendingAdded = try PendingStore.addCandidatesFlushingRetry(harvest, profileId: input.profileId,
+                    if needLegacy { try PendingStore.importLegacyStrict(profileId: input.profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: input.profileId), memoryRoot: input.pendingRoot) }
+                    report.pendingAdded = try PendingStore.addCandidatesFlushingRetry(harvest, profileId: input.profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: input.profileId),
                                                                                       memoryRoot: input.pendingRoot).count
                 }
                 harvested = true
@@ -593,9 +594,9 @@ actor TimelineDaily {
         let root = memoryRoot ?? FileLibraryStore.memoryRoot(profileId: profileId)
         return try TimelineStore.withWriteLock {
             guard !gate.isPaused else { throw Invalidated() }
-            guard try PendingStore.needsLegacyImport(profileId: profileId, memoryRoot: memoryRoot) else { return nil }
+            guard try PendingStore.needsLegacyImport(profileId: profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), memoryRoot: memoryRoot) else { return nil }
             let backup = try ensureBackup(memoryRoot: root, profileId: profileId, defaults: defaults, now: now)
-            try PendingStore.importLegacyStrict(profileId: profileId, memoryRoot: memoryRoot)
+            try PendingStore.importLegacyStrict(profileId: profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), memoryRoot: memoryRoot)
             return backup
         }
     }
@@ -638,17 +639,17 @@ actor TimelineDaily {
             let added = try TimelineStore.withWriteLock { () -> [PendingItem] in
                 guard !gate.isPaused else { throw Invalidated() }
                 if memoryRoot == nil { _ = try ensureBackup(memoryRoot: root, profileId: profileId, defaults: defaults, now: now) }
-                if try PendingStore.needsLegacyImport(profileId: profileId, memoryRoot: memoryRoot) {
-                    try PendingStore.importLegacyStrict(profileId: profileId, memoryRoot: memoryRoot)
+                if try PendingStore.needsLegacyImport(profileId: profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), memoryRoot: memoryRoot) {
+                    try PendingStore.importLegacyStrict(profileId: profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), memoryRoot: memoryRoot)
                 }
-                return try PendingStore.addCandidatesFlushingRetry(list, profileId: profileId, memoryRoot: memoryRoot)
+                return try PendingStore.addCandidatesFlushingRetry(list, profileId: profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), memoryRoot: memoryRoot)
             }
             if !added.isEmpty {
                 CacheDiagLog.shared.log("📌 待续: 从上下文摘要搬了 \(added.count) 条")
                 Task { @MainActor in NotificationCenter.default.post(name: .memoryDidChange, object: nil) }
             }
         } catch {
-            do { try PendingStore.enqueueRetry(list, profileId: profileId, memoryRoot: memoryRoot) } catch let queueError {
+            do { try PendingStore.enqueueRetry(list, profileId: profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), memoryRoot: memoryRoot) } catch let queueError {
                 throw PendingNotPreserved(why: "本子没写成（\(error.localizedDescription)），待补也没记上（\(queueError.localizedDescription)）")
             }
             CacheDiagLog.shared.log("📌 待续: 这次没搬进本子（\(error.localizedDescription)），记进待补，下次再搬")
@@ -658,7 +659,7 @@ actor TimelineDaily {
     /// 看 / 改待续之前（时间轴页、待续页、记忆页、pending_notes）：迁好老待续 + 本子每行都认得，才能改。失败抛，界面照实说、不许改
     static func preparePendingForEdit(profileId: String, defaults: UserDefaults = .standard) throws {
         try ensurePendingMigrated(profileId: profileId, defaults: defaults)
-        try PendingStore.checkReadable(profileId: profileId)
+        try PendingStore.checkReadable(profileId: profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
     }
 
     /// 界面 / 工具上那句话
@@ -705,23 +706,16 @@ actor TimelineDaily {
 
     /// 碰到这段时间、开着记忆参与、没进回收站的窗口：主线消息（只要 id 和时间）+ 已落盘的 A2（严格读）。后台调。
     /// 对话 / 消息取不出 = 整体没读全；某个窗口的 A2 读不了 = 那个窗口标出来，它碰到的日子不拼
-    static func windows(profileId: String, container: ModelContainer, memoryRoot: URL, in interval: DateInterval) -> TimelineSkeleton.Source {
+    static func windows(profileId: String, source: any ConversationSource, memoryRoot: URL, in interval: DateInterval) -> TimelineSkeleton.Source {
         let pid = profileId, start = interval.start, end = interval.end
         do {
-            let list = ModelContext(container)
-            list.autosaveEnabled = false
-            let convs = try list.fetch(FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> {
-                $0.profileId == pid && $0.isTrashed == false && $0.updateTime >= start
-            })).filter { $0.memoryEnabled && $0.createTime < end }.map { ($0.id, $0.title) }
+            let convs = try source.windows(profileId: pid, updatedSince: start, includeTrashed: false)
+                .filter { $0.memoryEnabled && $0.createTime < end }.map { ($0.id, $0.title) }
             let sessions = SessionSummaryStore.dir(root: memoryRoot)
             var out: [TimelineSkeleton.Window] = []
             for (id, title) in convs {
-                let context = ModelContext(container)
-                context.autosaveEnabled = false
-                guard let conv = try context.fetch(FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> {
-                    $0.id == id && $0.profileId == pid
-                })).first else { continue }
-                let messages = try SessionCloseout.mainPathNodesStrict(conv, profileId: pid, context: context)
+                guard let conv = try source.window(profileId: pid, idOrPrefix: id) else { continue }
+                let messages = try SessionCloseout.mainPathNodesStrict(conv, source: source)
                     .map { TimelineSkeleton.Message(id: $0.id, date: $0.createTime) }
                 guard messages.contains(where: { ($0.date ?? .distantPast) >= start && ($0.date ?? .distantFuture) < end }) else { continue }
                 var summary: SessionSummary?

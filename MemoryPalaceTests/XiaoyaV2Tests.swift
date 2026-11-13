@@ -51,7 +51,7 @@ final class XiaoyaV2Tests: XCTestCase {
         await f.answer(.picked("newbie"))
         await f.answerFaces(user: "栗子", ta: "阿梨")
 
-        f.profiles.renameCurrent(userName: " 宝 ", assistantName: "阿洛")
+        try f.profiles.renameCurrent(userName: " 宝 ", assistantName: "阿洛")
         let floor = f.profiles.currentProfile
         XCTAssertEqual(floor.userName, "宝")
         XCTAssertEqual(floor.assistantName, "阿洛")
@@ -69,7 +69,7 @@ final class XiaoyaV2Tests: XCTestCase {
         XCTAssertEqual(f.defaults.string(forKey: "userName"), "宝")
 
         // 空 = 不改
-        f.profiles.renameCurrent(userName: "", assistantName: "  ")
+        try f.profiles.renameCurrent(userName: "", assistantName: "  ")
         XCTAssertEqual(f.profiles.currentProfile.userName, "宝")
         XCTAssertEqual(f.profiles.currentProfile.assistantName, "阿洛")
         XCTAssertEqual(DefaultUserName.value(f.defaults), "宝")

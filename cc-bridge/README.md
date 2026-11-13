@@ -89,6 +89,36 @@ iOS MP 设置页填：
 - 手机和 Mac 必须在同一个 WiFi
 - 出门怎么办？v2 见 Tailscale 章节（暂未做）
 
+## 设备钥鉴权 / 别这样暴露端口 / 备份（plan-hub-keypair-auth K1）
+
+hub 现在除了口令，还认「设备钥」：每台设备一把自己的 P-256 钥，hub 有自己的身份钥（`secrets/hub-key.pem`），连接时双向证明，口令原文不再进 URL（新 app 才这么连；老 app 照旧带口令，照样能用）。配对三条任一能成：扫码 / 地址 + 一次性配对码 / 地址 + 口令。`/pair` 和二维码同时带新旧两套字段。
+
+**这台 hub 认哪些设备**（端口不是 7890 就加 `--port N`）：
+
+```bash
+bun cc-bridge/devices.ts pair                     # 重新打印二维码 + 手填配对码 + 口令
+bun cc-bridge/devices.ts list                     # 认的设备
+bun cc-bridge/devices.ts revoke ABCD1234          # 移除（id 前缀看 list）
+bun cc-bridge/devices.ts rename ABCD1234 小手机    # 改名
+```
+
+它只调 hub 的本机管理接口，hub 没在跑就报错，不碰任何文件。移除一台后它如果还记着口令仍能重新连上——要彻底不让它连，换口令。
+
+**不能拿来把 hub 端口暴露出去的方式**：`tailscale serve --tcp`、`tailscale serve --tls-terminated-tcp`、socat / `ssh -R` / frp tcp 等任何把外面流量转进 `127.0.0.1` 的东西。在 hub 看来它们是本机进程，**免一切鉴权**（口令和设备钥都不查）。要远程连：用 `MP_CC_HUB_EXTRA_HOSTS` 让 hub 直接听具体地址（LAN / Tailscale 默认就会听），或者走自建中继（`relay/README.md`）。
+
+**中继**：中继是你自己信任的机器，它能看到明文流量。新协议下设备私钥不出设备，中继截到的认证材料不能拿去开新连接；但中继能实时转发 / 篡改已经建立的会话。
+
+**备份**：备份 hub 就备份整个 `secrets/`（不要提交进仓库）。要点：
+
+| 情况 | 结果 | 怎么办 |
+|---|---|---|
+| `devices.json` 丢了 | 设备被当成不认识：记着口令的 app 自动重新登记；只靠配对码配的要重新配；吊销记录也一起丢了 | 无需操作 |
+| `devices.json` 坏了 | 不当成空表：设备钥 / 配对码登录回「暂不可用」，口令照常；原文件不动 | 修好 / 从备份恢复；或停 hub 后挪走它（= 丢了） |
+| `hub-key.pem` 丢了 | 下次启动生成新身份钥：记着口令的设备自动重新确认，只靠配对码配的要重扫 | 无需操作 |
+| `hub-key.pem` 坏了 / 写不进 | 这次不开新协议（日志 error 写清），口令照常；见过新协议的设备连不上 | 从备份恢复；或停 hub 后挪走它（= 丢了）；写不进的修权限 / 磁盘后重启 |
+| 整套 `secrets/` 迁到新机、旧机停用 | 身份不变，设备无感 | — |
+| 整套 `secrets/` 克隆、两台同时跑 | 两台密码学身份相同 | 别这么做 |
+
 ## L2：多 CC 并行（一个对话一个 CC）
 
 让 MP 每个对话框对应**独立的** tmux/CC 进程，多个对话同时跟不同 CC 聊互不串味。
@@ -299,6 +329,8 @@ pkill -f "bun run hub.ts"
 |---|---|
 | `hub.ts` | WebSocket 服务器，端口 7890，桥接 MP ↔ tmux ↔ MCP |
 | `mcp-server.ts` | MCP stdio server，提供 `reply` 工具给 CC |
+| `device-auth.ts` | 设备密钥对鉴权：transcript / 验签 / hub 身份钥 / 设备表 / 配对码 / 限速（字节格式金样 `fixtures/hub-auth-v2.json`） |
+| `devices.ts` | 设备管理 CLI（只调 hub 本机管理接口） |
 | `mcp.template.json` | MCP 配置模板（启动时 render 成 `.mcp.json`） |
 | `start_hub.sh` | 起 hub |
 | `start_cc.sh` | 起 CC（在 tmux 里，加载 MCP 配置） |

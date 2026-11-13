@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 // MARK: - Tagged Segment（上下文检查器用）
@@ -12,7 +13,7 @@ enum SegmentSource: Equatable {
     case fileLibrary
     case userProfile
     case timeline
-    case volatileContext   // cacheFriendly：易变内容（命中记忆/触发世界书/摘要/时间宏）下沉的伪 user 段
+    case volatileContext   // 非记忆动态内容的伪 user 段（世界书 / 状态 / 时间宏等）
     case style              // 写作风格：贴在最后一条 user message 末尾的隐藏提示词（<style>…</style>）
     case cardGuide          // 聊天卡片格式说明（ChatCardPromptGuide），固定文字放历史之前
     case folder             // 对话所在文件夹的说明（ConversationTag.instructions），紧跟角色描述
@@ -68,7 +69,7 @@ struct PromptMessage {
         return result
     }
 
-    /// 与改前 assemble() 同形：所有 system 并成前缀，其余按序；imageMap 由附件按正文派生（给还没迁的调用方）
+    /// 旧发送形状：所有 system 并成前缀，其余按序；imageMap 由附件按正文派生（给还没迁的调用方）
     static func legacyShape(_ ordered: [PromptMessage]) -> (systemPrompt: String?, messages: [(role: String, content: String)], imageMap: [String: [PendingChatAttachment]]) {
         let systems = ordered.filter { $0.role == "system" }.map(\.content)
         var imageMap: [String: [PendingChatAttachment]] = [:]
@@ -82,6 +83,14 @@ struct PromptMessage {
 }
 
 extension SegmentSource {
+    /// 记忆派生的 Z/X 段必须保留 system 权限，不受插槽角色或提供商交错能力影响。
+    var requiresSystemRole: Bool {
+        switch self {
+        case .memory, .contextSummary, .userProfile, .timeline: return true
+        default: return false
+        }
+    }
+
     var displayName: String {
         switch self {
         case .slot(_, let name): return name
@@ -101,6 +110,16 @@ extension SegmentSource {
     }
 }
 
+/// 本轮已选载荷；组装只消费结果，不推进召回状态。
+struct RecallMemoryLayers {
+    let stable: String
+    let volatile: String
+    let hits: [InjectionHit]
+    let pages: [WikiPageHit]
+    /// 生产者旁录的保留单位（plan-memory-receipt §2.2）；面板旧算法 `memoryLayers` 不填
+    var units: [RecallDeliveryUnit] = []
+}
+
 // MARK: - Prompt Assembler
 
 struct PromptAssembler {
@@ -109,58 +128,6 @@ struct PromptAssembler {
         nodes.filter { !$0.isSyntheticRoot && !$0.isSourceHidden }
     }
 
-
-    /// 组装最终发给 API 的 system prompt + messages（原有接口，加 styleContent 后向兼容）
-    static func assemble(
-        preset: Preset,
-        profile: Profile,
-        memories: [Memory],
-        chatHistory: [(role: String, content: String)],
-        worldBooks: [WorldBook] = [],
-        globalEntries: [WorldBookEntry] = [],
-        contextSummary: String? = nil,
-        userProfile: String? = nil,
-        timelineSummary: String? = nil,
-        healthSummary: String = "",
-        tradingSummary: String = "",
-        fileLibrary: String? = nil,
-        styleContent: String? = nil,
-        folderInstructions: String? = nil,
-        volatileNote: String? = nil,
-        selfMemory: String? = nil,
-        memoryBudget: Int? = nil
-    ) -> (systemPrompt: String?, messages: [(role: String, content: String)], memoryHits: [InjectionHit]) {
-        let assembled = assembleTagged(
-            preset: preset, profile: profile, memories: memories,
-            chatHistory: chatHistory, worldBooks: worldBooks,
-            globalEntries: globalEntries, contextSummary: contextSummary,
-            userProfile: userProfile, timelineSummary: timelineSummary,
-            healthSummary: healthSummary, tradingSummary: tradingSummary, fileLibrary: fileLibrary,
-            styleContent: styleContent, folderInstructions: folderInstructions,
-            volatileNote: volatileNote, selfMemory: selfMemory, memoryBudget: memoryBudget
-        )
-        let tagged = assembled.segments
-        let systemSegments = tagged.filter { $0.role == "system" }
-        let systemPrompt = systemSegments.isEmpty ? nil : systemSegments.map(\.content).joined(separator: "\n\n")
-        // 合并 .style 段到最后一条 user，避免 user+user 连排发到模型
-        var nonSystem = tagged.filter { $0.role != "system" }
-        if let styleIdx = nonSystem.lastIndex(where: { if case .style = $0.source { return true } else { return false } }) {
-            let styleSeg = nonSystem.remove(at: styleIdx)
-            if let lastUserIdx = nonSystem.lastIndex(where: { $0.role == "user" }) {
-                let merged = nonSystem[lastUserIdx]
-                nonSystem[lastUserIdx] = TaggedSegment(
-                    source: merged.source, role: "user",
-                    template: merged.template + "\n" + styleSeg.template,
-                    content: merged.content + "\n" + styleSeg.content
-                )
-            } else {
-                // 没 user 历史（首轮），单独作 user 段发
-                nonSystem.append(styleSeg)
-            }
-        }
-        let messages = nonSystem.map { (role: $0.role, content: $0.content) }
-        return (systemPrompt: systemPrompt, messages: messages, memoryHits: assembled.memoryHits)
-    }
 
     /// ④b 有序输出：顺序 = 检查器逻辑顺序，system 不再整体抽成前缀（前缀怎么定、非前缀怎么降级归 provider adapter）。
     /// historyNodeIds 与 chatHistory 一一对应时，历史段带上节点 id（附件 / 写作风格靠它定位真实消息）。
@@ -230,7 +197,7 @@ struct PromptAssembler {
     ///
     /// 每段同时保留 template（宏未展开）和 content（宏已展开），
     /// 组装 tab 显示 template，请求 tab 显示 content。
-    /// styleContent 非空时,末尾追加一个 .style 段；assemble() wrapper 合并到 last user。
+    /// styleContent 非空时,末尾追加一个 .style 段；orderedMessages 并进最后一条真实 user。
     static func assembleTagged(
         preset: Preset,
         profile: Profile,
@@ -265,9 +232,11 @@ struct PromptAssembler {
         /// C 档案（`RoundInputs.wiki`）：根索引进记忆槽常驻层，触发词命中的页进命中层；nil = 不带
         wiki: WikiInjectionSnapshot? = nil,
         /// 追加合成消息前的最近 4 条真实消息；实发与检查器共用，不占用历史窗口。
-        wikiScanMessages: [String]? = nil
+        wikiScanMessages: [String]? = nil,
+        /// 主聊天传入本轮已准备的选择，两个缓存模式都不得重新检索。
+        recallLayers: RecallMemoryLayers? = nil
     ) -> (segments: [TaggedSegment], memoryHits: [InjectionHit]) {
-        // 本轮注入命中（召回卡片 + S1 检查器）——cacheFriendly 分支和 marker 老路都会填
+        // 本轮命中只取已准备载荷；无载荷的独立调用方才走无状态选取。
         var memoryHits: [InjectionHit] = []
 
         // 截断只是兜底：实际窗口由 CV.buildWindowedAPIMessages 控制（摘要边界锚定，可达 depth×2），
@@ -309,6 +278,7 @@ struct PromptAssembler {
         // 收集到这里，最后并成一条伪 user 段插在当前消息之前
         let cacheFriendly = preset.sampling.cacheFriendly == true
         var volatileParts: [String] = []
+        var volatileMemory = ""
 
         // ── 世界书预扫描（B27）：before/after 桶由 World Info 插槽承载，按插槽位排序。
         // marker 存在 → 桶归插槽（disabled 时槽不进 activeSlots = 整桶不注入，对齐酒馆）；
@@ -371,15 +341,13 @@ struct PromptAssembler {
                 sawSummarySlot = true
                 if let summary = contextSummary, !summary.isEmpty {
                     let text = "[上下文摘要]\n\(summary)"
-                    let seg = TaggedSegment(source: .contextSummary, role: slot.role, template: text, content: text)
+                    let seg = TaggedSegment(source: .contextSummary, role: "system", template: text, content: text)
                     if slot.isAbsolute {
                         depthInjections.append((depth: slot.injectionDepth, order: slot.injectionOrder, segment: seg))
                     } else if isAfterHistory {
                         postHistorySystem.append(seg)
-                    } else if slot.role == "system" {
-                        preHistorySystem.append(seg)
                     } else {
-                        preHistoryMessages.append(seg)
+                        preHistorySystem.append(seg)
                     }
                 }
                 continue
@@ -388,15 +356,13 @@ struct PromptAssembler {
             // 时间轴插槽（M6）：最新一篇楼层日记，天级稳定，进前缀，位置粟粟排
             if slot.isMarker && slot.id == PromptSlot.timelineId {
                 if let timeline = timelineSummary, !timeline.isEmpty {
-                    let seg = TaggedSegment(source: .timeline, role: slot.role, template: timeline, content: timeline)
+                    let seg = TaggedSegment(source: .timeline, role: "system", template: timeline, content: timeline)
                     if slot.isAbsolute {
                         depthInjections.append((depth: slot.injectionDepth, order: slot.injectionOrder, segment: seg))
                     } else if isAfterHistory {
                         postHistorySystem.append(seg)
-                    } else if slot.role == "system" {
-                        preHistorySystem.append(seg)
                     } else {
-                        preHistoryMessages.append(seg)
+                        preHistorySystem.append(seg)
                     }
                 }
                 continue
@@ -407,42 +373,37 @@ struct PromptAssembler {
                 sawProfileSlot = true
                 if let portrait = userProfile, !portrait.isEmpty {
                     let text = "[用户画像]\n\(portrait)"
-                    let seg = TaggedSegment(source: .userProfile, role: slot.role, template: text, content: text)
+                    let seg = TaggedSegment(source: .userProfile, role: "system", template: text, content: text)
                     if slot.isAbsolute {
                         depthInjections.append((depth: slot.injectionDepth, order: slot.injectionOrder, segment: seg))
                     } else if isAfterHistory {
                         postHistorySystem.append(seg)
-                    } else if slot.role == "system" {
-                        preHistorySystem.append(seg)
                     } else {
-                        preHistoryMessages.append(seg)
+                        preHistorySystem.append(seg)
                     }
                 }
                 continue
             }
 
-            // 记忆槽拆两层：常驻层留原位（稳定），命中/兜底层下沉（每轮可变）
-            if cacheFriendly && slot.isMarker && slot.id == PromptSlot.memoryInjectionId {
-                let layers = memoryLayers(profile: profile, selfMemory: selfMemory, memories: memories,
-                                          recentMessages: trimmedHistory.map { $0.content }, budget: memoryBudget, wiki: wiki,
-                                          wikiScanMessages: wikiScan)
+            // Z/X 独立于泛用动态上下文：常驻层保留槽位，缓存模式的本轮命中独立 system 下沉。
+            if slot.isMarker && slot.id == PromptSlot.memoryInjectionId {
+                let layers = recallLayers ?? memoryLayers(profile: profile, selfMemory: selfMemory, memories: memories,
+                                                           recentMessages: trimmedHistory.map { $0.content }, budget: memoryBudget, wiki: wiki,
+                                                           wikiScanMessages: wikiScan)
                 memoryHits = layers.hits
-                if !layers.stable.isEmpty {
-                    let text = layers.stable
-                    let seg = TaggedSegment(source: .memory, role: slot.role, template: text, content: text)
+                let text = cacheFriendly ? layers.stable
+                    : [layers.stable, layers.volatile].filter { !$0.isEmpty }.joined(separator: "\n\n")
+                if !text.isEmpty {
+                    let seg = TaggedSegment(source: .memory, role: "system", template: text, content: text)
                     if slot.isAbsolute {
                         depthInjections.append((depth: slot.injectionDepth, order: slot.injectionOrder, segment: seg))
                     } else if isAfterHistory {
                         postHistorySystem.append(seg)
-                    } else if slot.role == "system" {
-                        preHistorySystem.append(seg)
                     } else {
-                        preHistoryMessages.append(seg)
+                        preHistorySystem.append(seg)
                     }
                 }
-                if !layers.volatile.isEmpty {
-                    volatileParts.append(layers.volatile)
-                }
+                if cacheFriendly { volatileMemory = layers.volatile }
                 continue
             }
 
@@ -471,7 +432,7 @@ struct PromptAssembler {
             }
 
             if slot.isMarker && slot.id == PromptSlot.dialogueExamplesId {
-                let pair = resolveSlotContentPair(slot, profile: profile, preset: preset, memories: memories, chatHistory: trimmedHistory, health: healthSummary, trading: tradingSummary, selfMemory: selfMemory, memoryBudget: memoryBudget)
+                let pair = resolveSlotContentPair(slot, profile: profile, preset: preset, health: healthSummary, trading: tradingSummary)
                 if let p = pair {
                     preHistoryMessages.append(TaggedSegment(source: .dialogueExample, role: "_examples_marker_", template: "", content: ""))
                     let examples = parseChatExamples(p.expanded, profile: profile)
@@ -483,12 +444,10 @@ struct PromptAssembler {
                 continue
             }
 
-            guard let pair = resolveSlotContentPair(slot, profile: profile, preset: preset, memories: memories, chatHistory: trimmedHistory, health: healthSummary, trading: tradingSummary, selfMemory: selfMemory, memoryBudget: memoryBudget, wiki: wiki, wikiScanMessages: wikiScan, hitsSink: { memoryHits = $0 }),
+            guard let pair = resolveSlotContentPair(slot, profile: profile, preset: preset, health: healthSummary, trading: tradingSummary),
                   !pair.expanded.isEmpty else { continue }
 
-            let source: SegmentSource = slot.id == PromptSlot.memoryInjectionId
-                ? .memory
-                : .slot(id: slot.id, name: slot.name)
+            let source: SegmentSource = .slot(id: slot.id, name: slot.name)
 
             let seg = TaggedSegment(source: source, role: slot.role, template: pair.template, content: pair.expanded)
 
@@ -649,6 +608,12 @@ struct PromptAssembler {
             allMessages.insert(seg, at: lastHistory ?? max(0, allMessages.count - 1))
         }
 
+        if !volatileMemory.isEmpty {
+            let seg = TaggedSegment(source: .memory, role: "system", template: volatileMemory, content: volatileMemory)
+            let lastHistory = allMessages.lastIndex { $0.source == .chatHistory }
+            allMessages.insert(seg, at: lastHistory ?? allMessages.count)
+        }
+
         // 文件库注入（独立来源「文件库」，放 system 段最后，离生成点近）
         // content 过宏展开（{{user}}/{{char}}——「正在读的书」语境用；通用 app 禁止硬编码人称），
         // template 保留原文与其他 slot 的 (template, expanded) 口径一致
@@ -700,23 +665,23 @@ struct PromptAssembler {
         return s
     }
 
-    /// cacheFriendly 记忆槽两层：常驻层 =「我的记忆」+ C 档案根索引 + 档案常驻，命中层 = 触发词命中的页 + 档案本轮相关。
+    /// 记忆槽两层：常驻层 =「我的记忆」+ C 档案根索引 + 档案常驻，命中层 = 触发词命中的页 + 档案本轮相关。
     /// 实发组装和记忆面板「下一轮会想起什么」预览共用（预览 = 实发）
     static func memoryLayers(profile: Profile, selfMemory: String?, memories: [Memory], recentMessages: [String], budget: Int?,
                              wiki: WikiInjectionSnapshot? = nil, now: Date = MemoryClock.now, wikiScanMessages: [String]? = nil)
-        -> (stable: String, volatile: String, hits: [InjectionHit], pages: [WikiPageHit]) {
+        -> RecallMemoryLayers {
         let pages = wikiHits(wiki, profile: profile, recentMessages: wikiScanMessages ?? recentMessages)
-        let (stable, volatile, hits) = MemoryInjector.buildInjectionSplit(memories: WikiInjection.dedup(memories, against: pages),
-                                                                          recentMessages: recentMessages,
-                                                                          budget: budget ?? MemoryInjector.tokenBudget, now: now)
-        let stableText = [selfMemory ?? "", wiki.map(WikiInjection.indexBlock) ?? "",
-                          stable.isEmpty ? "" : "[\(archiveLabel(profile))]\n\(stable)"]
+        let split = MemoryInjector.buildInjectionSplit(memories: WikiInjection.dedup(memories, against: pages),
+                                                       recentMessages: recentMessages,
+                                                       budget: budget ?? MemoryInjector.tokenBudget, now: now)
+        let stableText = [selfMemory ?? "", wiki.map { WikiInjection.indexBlock($0, user: profile.userName) } ?? "",
+                          split.stable.isEmpty ? "" : "[\(archiveLabel(profile))]\n\(split.stable)"]
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
-        let volatileText = [WikiInjection.hitsBlock(pages, now: now), volatile.isEmpty ? "" : "[\(archiveLabel(profile))·本轮相关]\n\(volatile)"]
+        let volatileText = [WikiInjection.hitsBlock(pages, now: now, user: profile.userName), split.volatile.isEmpty ? "" : "[\(archiveLabel(profile))·本轮相关]\n\(split.volatile)"]
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
-        return (stableText, volatileText, hits, pages)
+        return RecallMemoryLayers(stable: stableText, volatile: volatileText, hits: split.hits, pages: pages)
     }
 
     /// 这一轮触发词命中的页：用户名、助手名不触发
@@ -737,14 +702,8 @@ struct PromptAssembler {
     /// 解析插槽内容，同时返回模板（宏未展开）和最终文本（宏已展开）
     private static func resolveSlotContentPair(
         _ slot: PromptSlot, profile: Profile, preset: Preset,
-        memories: [Memory], chatHistory: [(role: String, content: String)],
         health: String = "",
-        trading: String = "",
-        selfMemory: String? = nil,
-        memoryBudget: Int? = nil,
-        wiki: WikiInjectionSnapshot? = nil,
-        wikiScanMessages: [String] = [],
-        hitsSink: (([InjectionHit]) -> Void)? = nil
+        trading: String = ""
     ) -> (template: String, expanded: String)? {
 
         guard slot.isMarker else {
@@ -789,21 +748,6 @@ struct PromptAssembler {
             let raw = preset.scenarioFormat
                 .replacingOccurrences(of: "{{scenario}}", with: profile.scenario)
             return (template: raw, expanded: applyMacros(raw, profile: profile, health: health, trading: trading))
-
-        case PromptSlot.memoryInjectionId:
-            let recent = chatHistory.map { $0.content }
-            let pages = wikiHits(wiki, profile: profile, recentMessages: wikiScanMessages)
-            let now = MemoryClock.now
-            let (stable, volatile, hits) = MemoryInjector.buildInjectionSplit(memories: WikiInjection.dedup(memories, against: pages), recentMessages: recent,
-                                                                              budget: memoryBudget ?? MemoryInjector.tokenBudget, now: now)
-            let injection = [stable, volatile].filter { !$0.isEmpty }.joined(separator: "\n")
-            let parts = [selfMemory ?? "", wiki.map(WikiInjection.indexBlock) ?? "",
-                         injection.isEmpty ? "" : "[\(archiveLabel(profile))]\n\(injection)",
-                         WikiInjection.hitsBlock(pages, now: now)].filter { !$0.isEmpty }
-            guard !parts.isEmpty else { return nil }
-            hitsSink?(hits)
-            let text = parts.joined(separator: "\n\n")
-            return (template: text, expanded: text)
 
         case PromptSlot.dialogueExamplesId:
             guard !profile.chatExamples.isEmpty else { return nil }

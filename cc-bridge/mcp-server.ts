@@ -8,7 +8,7 @@ import {
 import { WebSocket, type RawData } from "ws"
 import { readFileSync, readdirSync } from "node:fs"
 import { rollDice } from "./dice"
-import { CARD_GUIDE_INDEX, CARD_KINDS, cardGuideFor } from "./card-guide"
+import { CARD_KINDS, MCP_INSTRUCTIONS, cardGuideFor } from "./card-guide"
 
 const HUB_URL_BASE = process.env.MP_CC_HUB_URL ?? "ws://127.0.0.1:7890/mcp"
 const PING_INTERVAL_MS = 15_000
@@ -236,7 +236,7 @@ function connectHub(): Promise<WebSocket> {
 
 const server = new Server(
   { name: "cc-bridge-mcp", version: "0.2.0" },
-  { capabilities: { tools: {} }, instructions: CARD_GUIDE_INDEX }  // 聊天卡片目录进 CC 系统提示；完整写法走 card_guide 工具（粟粟 10-03）
+  { capabilities: { tools: {} }, instructions: MCP_INSTRUCTIONS }  // 卡片目录 + 贴表情进 CC 系统提示；完整写法走 card_guide 工具（粟粟 10-03）
 )
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({

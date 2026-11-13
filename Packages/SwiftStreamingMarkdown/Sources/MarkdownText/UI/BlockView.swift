@@ -12,6 +12,9 @@ struct BlockView: View {
   #if os(macOS)
   // MP fork mac: mac 的排版滑杆经 config 覆盖块距；iOS 不订阅 config，保持上游常量 30
   @Environment(\.markdownConfig) var config: MarkdownRenderConfig
+  #elseif DEBUG
+  // 段尾丢字探针 B：外层已给过块序号（列表 / 折叠块里嵌套的 BlockView）就沿用外层的
+  @Environment(\.markdownProbeBlock) var outerProbeBlock
   #endif
 
   init(renderables: [MarkdownRenderable]) {
@@ -29,6 +32,9 @@ struct BlockView: View {
     VStack(alignment: .leading, spacing: 30) {
       ForEach(renderables) { renderable in
         SingleBlockView(renderable: renderable)
+          #if DEBUG
+          .environment(\.markdownProbeBlock, outerProbeBlock ?? renderables.firstIndex { $0.id == renderable.id })
+          #endif
       }
     }
     #endif

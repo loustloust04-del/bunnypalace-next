@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -37,11 +38,11 @@ final class MemoryTimelineListTests: XCTestCase {
         try Data("x".utf8).write(to: dir.appendingPathComponent("说明.md"))
         try Data("x".utf8).write(to: dir.appendingPathComponent("2026-07.txt"))
 
-        XCTAssertEqual(TimelineStore.months(profileId: pid), ["2026-10", "2026-09", "2026-08", "2025-12"])
+        XCTAssertEqual(TimelineStore.months(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)), ["2026-10", "2026-09", "2026-08", "2025-12"])
     }
 
     func testMonthsMissingFolderIsEmpty() {
-        XCTAssertEqual(TimelineStore.months(profileId: pid), [])
+        XCTAssertEqual(TimelineStore.months(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)), [])
     }
 
     func testMonthNamesFiltersAndSorts() {
@@ -131,7 +132,7 @@ final class MemoryTimelineListTests: XCTestCase {
                                                   hasPending: true, now: now, force: false), .none)
     }
 
-    /// v5：默认静默改 12 小时，这里显式传 30 分钟测规则本身
+    /// A3 默认静默 24 小时，这里显式传 30 分钟测规则本身
     func testQueueStateWaitsThirtyMinutesFromUpdate() {
         let upd = date(2026, 10, 11, 11, 50)
         let now = date(2026, 10, 11, 12, 0)

@@ -157,7 +157,7 @@ final class HealthLogStoreTests: XCTestCase {
         XCTAssertFalse(HealthLogStore.medsGateEnabled)
         HealthLogStore.medsGateEnabled = true
         XCTAssertTrue(HealthLogStore.medsGateEnabled)
-        XCTAssertEqual(PermissionCenter.level(.healthMeds), .bypass, "setter 委托必须写穿档位")
+        XCTAssertEqual(PermissionCenter.defaultLevel(.healthMeds), .bypass, "setter 委托必须写穿档位")
         HealthLogStore.medsGateEnabled = false
         UserDefaults.standard.removeObject(forKey: PermissionDomain.healthMeds.storageKey)
     }

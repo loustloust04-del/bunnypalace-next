@@ -23,14 +23,6 @@ final class MCPProvider {
         requestTimeout = savedTimeout > 0 ? savedTimeout : 30
     }
 
-    var connectedServers: [MCPServerConfig] {
-        servers.filter { status(for: $0.id) == .connected }
-    }
-
-    var hasAnyEnabled: Bool {
-        servers.contains(where: \.enabled)
-    }
-
     /// 全局启用的 server id —— enabled 的 server 对所有对话生效（不再按对话隔离）。
     /// enabledTools(for:) 会进一步只取 connected + tool.enabled 的工具。
     var activeServerIds: [String] {

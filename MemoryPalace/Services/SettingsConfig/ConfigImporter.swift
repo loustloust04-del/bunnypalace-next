@@ -30,6 +30,7 @@ enum ConfigImporter {
     struct Result {
         /// 写回 Keychain 的 key 条数（明文文件恒为 0）
         var restoredKeys = 0
+        var ignoredNameMirrors = false
     }
 
     /// 口令解开后的明文 bundle。只有经 unlock 得到的才会写 Keychain。
@@ -86,6 +87,8 @@ enum ConfigImporter {
 
         // 1) 标量 keys
         for entry in ConfigSchema.allScalarEntries {
+            // 名字以 Profile 为真相；旧导出中的两个派生镜像不能覆盖当前楼层。
+            guard entry.key != "userName", entry.key != "assistantName" else { continue }
             guard let sectionDict = root[entry.section.rawValue] as? [String: Any] else { continue }
             guard let raw = sectionDict[entry.key] else { continue }
             switch entry.kind {
@@ -142,7 +145,8 @@ enum ConfigImporter {
         }
 
         // 3) API key：只认口令解开的 bundle；明文文件里的 secrets 段一律忽略
-        var result = Result()
+        let general = root[ConfigSchema.Section.general.rawValue] as? [String: Any]
+        var result = Result(ignoredNameMirrors: general?["userName"] != nil || general?["assistantName"] != nil)
         if allowSecrets,
            let secretSection = root["secrets"] as? [String: Any],
            let keys = secretSection["api_keys"] as? [String: String] {
@@ -163,7 +167,7 @@ enum ConfigImporter {
     }
 
     /// 记忆总开关两份对齐（v5 · 0.2）：开关读 `perm.memory`，旧读点读 `mem_master`，导入时各写各的会「显示开、实际关」。
-    /// 文件里有 `perm.memory` 以它为准（同 `PermissionCenter.setLevel` 的投影）；只有 `mem_master` 时按它补 `perm.memory`
+    /// 文件里有 `perm.memory` 以它为准（同 `PermissionCenter.setDefaultLevel` 的投影）；只有 `mem_master` 时按它补 `perm.memory`
     static func syncMemoryMaster(_ root: [String: Any], defaults: UserDefaults) {
         let domain = PermissionDomain.memory
         let perm = (root[ConfigSchema.Section.permissions.rawValue] as? [String: Any])?[domain.storageKey]

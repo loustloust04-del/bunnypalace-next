@@ -362,7 +362,7 @@ final class CCBridgeTransportA1R1Tests: XCTestCase {
             client.sendTracker.didReceive(CCSendStatus(chatId: "C1", messageId: "m-pending", sessionName: "s", state: .uncertain, reason: nil))
             let chat = "stale-\(UUID().uuidString.prefix(8))"
             var replies: [String] = []
-            client.onProactiveMessage = { _, _, _, _, _, _, ccId, _, _ in replies.append(ccId ?? "-") }
+            client.onProactiveMessage = { _, _, _, _, _, _, ccId, _, _ in replies.append(ccId ?? "-"); return true }
             let rid = "r5-\(UUID().uuidString.prefix(8))"
             client.didReceive(.success(frame(["type": "hello"])), on: a)
             client.didReceive(.success(frame(["type": "send_status_snapshot", "statuses": []])), on: a)
@@ -459,9 +459,9 @@ final class CCBridgeTransportA1R1Tests: XCTestCase {
             let (client, _) = makeClient(a1: a1)
             let a = openTask(client)
             var seen: [String] = []
-            client.onProactiveMessage = { _, _, _, _, _, _, ccId, _, _ in seen.append("reply:\(ccId ?? "-")") }
+            client.onProactiveMessage = { _, _, _, _, _, _, ccId, _, _ in seen.append("reply:\(ccId ?? "-")"); return true }
             client.onEditMessage = { _, id, _, _ in seen.append("edit:\(id)") }
-            client.onThinking = { _, id, _ in seen.append("think:\(id)") }
+            client.onThinking = { _, id, _ in seen.append("think:\(id)"); return true }
             let rid = "r6-\(UUID().uuidString.prefix(8))"
             let release = client.holdHandlersForTesting()
             client.didReceive(.success(replyFrame(rid)), on: a)
@@ -487,6 +487,7 @@ final class CCBridgeTransportA1R1Tests: XCTestCase {
         client.onProactiveMessage = { _, _, _, _, _, _, ccId, _, _ in
             let snap = client.sendTracker.store.entry("m-pending")?.state == .failed
             seen.append("reply:\(ccId ?? "-"):conn=\(client.isConnected):hello=\(client.hubInfoIsCurrent):snap=\(snap)")
+            return true
         }
         client.onEditMessage = { _, id, _, _ in seen.append("edit:\(id):conn=\(client.isConnected)") }
         let rid = "r11-\(UUID().uuidString.prefix(8))"

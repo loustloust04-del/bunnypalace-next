@@ -1,156 +1,283 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
 
-/// 修复第一刀·刀6 集成测试：复现 9/30「搜昨天的对话」——内存库造两场昨天的对话 + 当前对话，
-/// 走真实 RecallTool.execute（SwiftData 检索路径）。
-final class RecallYesterdayTests: XCTestCase {
-
-    let pid = "xctest-recall-yesterday"
-    var container: ModelContainer!
-    var context: ModelContext!
-    var yesterday: Date!
-    var today: Date!
-    var memoryRoot: URL!
-    private var defaults: UserDefaults!
-    private var defaultsSuite: String!
-
-    override func setUp() {
-        super.setUp()
-        defaultsSuite = "RecallYesterdayTests.\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: defaultsSuite)!
-        defaults.removePersistentDomain(forName: defaultsSuite)
-        container = try! ModelContainer(for: Conversation.self, MessageNode.self, Memory.self,
-                                        configurations: ModelConfiguration(isStoredInMemoryOnly: true))
-        context = ModelContext(container)
-        today = Calendar.current.startOfDay(for: Date())
-        yesterday = Calendar.current.date(byAdding: .day, value: -1, to: today)!
-        memoryRoot = FileManager.default.temporaryDirectory.appendingPathComponent("recall-\(UUID().uuidString)", isDirectory: true)
-
-        seedConversation(id: "conv-aaaa-theater", title: "剧场", day: yesterday, hour: 10,
-                         lines: [("user", "我们去看了剧场《雷雨》"), ("assistant", "那场戏好看吗"), ("user", "周萍演得特别好")])
-        seedConversation(id: "conv-bbbb-dinner", title: "晚饭", day: yesterday, hour: 21,
-                         lines: [("user", "晚饭吃了焦糖布丁"), ("assistant", "听起来好甜")])
-        seedConversation(id: "conv-cccc-current", title: "当前", day: today, hour: 0,
-                         lines: [("user", "帮我搜一下昨天的对话")])
-        let rel = Memory(content: "我们是彼此的恋人", category: "relationship", profileId: pid)
-        context.insert(rel)
-        try! context.save()
+final class RecallYesterdayTests: RecallToolTestCase {
+    func testDateReturnsA4AndShortEventTargetsOriginalWithoutInventingA2() async throws {
+        try timeline()
+        let result = await run(.init(op: .date, date: "2026-10-31"))
+        assertPage(result, layer: "A4")
+        XCTAssertTrue(result.text.contains("岚舟的云桥城主调"))
+        XCTAssertTrue(result.text.contains("星砚的短窗事件"))
+        XCTAssertEqual(result.targets.map(\.layer), ["window", "messages"])
+        let original = await run(.init(op: .messages, target: try XCTUnwrap(result.targets.last)))
+        XCTAssertTrue(original.text.contains("岚舟准备出发"))
     }
-
-    override func tearDown() {
-        defaults.removePersistentDomain(forName: defaultsSuite)
-        defaults = nil
-        defaultsSuite = nil
-        container = nil
-        try? FileManager.default.removeItem(at: memoryRoot)
-        super.tearDown()
-    }
-
-    private func seedConversation(id: String, title: String, day: Date, hour: Int, lines: [(String, String)]) {
-        let start = day.addingTimeInterval(TimeInterval(hour * 3600))
-        var parent: String? = nil
-        var lastId = ""
-        for (i, (role, text)) in lines.enumerated() {
-            let nid = "\(id)-n\(i)"
-            let node = MessageNode(id: nid, role: role, content: text, contentType: "text",
-                                   createTime: start.addingTimeInterval(TimeInterval(i * 60)), parentId: parent,
-                                   childrenIds: i + 1 < lines.count ? ["\(id)-n\(i + 1)"] : [],
-                                   conversationId: id, profileId: pid)
-            context.insert(node)
-            parent = nid
-            lastId = nid
+    func testGroupedDateEventKeepsCompleteOriginalRangeInsteadOfFirstSegmentOnly() async throws {
+        try a2([segment("岚舟第一段", from: 0, to: 1), segment("星砚第二段", from: 1, to: 3)])
+        let item = TimelineDayRecord.Item(kind: .segment, conversationId: cid, window: "云桥城", title: "连续航图段",
+            start: start, end: start.addingTimeInterval(120), from: "\(cid)-n0", to: "\(cid)-n2")
+        try timeline(items: [item])
+        let date = await run(.init(op: .date, date: "2026-10-31"))
+        assertPage(date, layer: "A4")
+        XCTAssertFalse(date.targets.contains { $0.layer == "segment" })
+        let target = try XCTUnwrap(date.targets.first { $0.layer == "messages" })
+        let original = await run(.init(op: .messages, target: target))
+        XCTAssertFalse(original.isError, original.text)
+        for text in ["岚舟在云桥城画地图", "星砚带来了航图", "岚舟准备出发"] {
+            XCTAssertTrue(original.text.contains(text), original.text)
         }
-        let conv = Conversation(id: id, title: title, createTime: start,
-                                updateTime: start.addingTimeInterval(TimeInterval(lines.count * 60)),
-                                currentNodeId: lastId, profileId: pid)
-        context.insert(conv)
     }
 
-    private func dayString(_ d: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f.string(from: d)
+    func testDateFallsBackToReadOnlyLegacyDailyAndDoesNotCreateMissingDirectory() async throws {
+        let absent = await run(.init(op: .date, date: "2026-10-31"))
+        XCTAssertFalse(absent.isError)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("daily").path))
+        let daily = root.appendingPathComponent("daily")
+        try FileManager.default.createDirectory(at: daily, withIntermediateDirectories: true)
+        let text = FrontmatterCodec.render(meta: [("date", "2026-10-31")], body: "岚舟的旧日记")
+        try Data(text.utf8).write(to: daily.appendingPathComponent("2026-10-31.md"))
+        let result = await run(.init(op: .date, date: "2026-10-31"))
+        assertPage(result, layer: "A4")
+        XCTAssertTrue(result.text.contains("旧时间轴"))
+        XCTAssertTrue(result.text.contains("岚舟的旧日记"))
     }
-
-    private func run(_ args: [String: Any], current: String? = "conv-cccc-current") async -> RecallTool.ExecResult {
-        let json = String(data: try! JSONSerialization.data(withJSONObject: args), encoding: .utf8)!
-        return await RecallTool.execute(inputJSON: json, profileId: pid, currentConversationId: current,
-                                        userName: "禾禾", assistantName: "小克", container: container,
-                                        memoryRoot: memoryRoot, embedder: RecordingMemoryEmbedder(ready: false),
-                                        defaults: defaults)
+    func testDateHidesWholeDayHeadlineWhenAnyWindowIsInvisible() async throws {
+        let foreign = TimelineDayRecord.Item(kind: .short, conversationId: "foreign-window", window: "星砚不可见",
+            title: "不可见内容", start: start, end: start, from: nil, to: nil)
+        let visible = TimelineDayRecord.Item(kind: .short, conversationId: cid, window: "云桥城", title: "岚舟可见事件",
+            start: start, end: start, from: "\(cid)-n0", to: "\(cid)-n0")
+        try timeline(items: [visible, foreign], headline: "主调不可泄露")
+        let result = await run(.init(op: .date, date: "2026-10-31"))
+        XCTAssertTrue(result.text.contains("岚舟可见事件"))
+        XCTAssertFalse(result.text.contains("主调不可泄露"))
+        XCTAssertFalse(result.text.contains("不可见内容"))
     }
-
-    func testBrowseYesterdayListsOtherConversationsNotRequest() async {
-        let r = await run(["date": dayString(yesterday)])
-        XCTAssertFalse(r.isError, r.text)
-        XCTAssertTrue(r.text.contains("翻到 2 个对话"), r.text)
-        XCTAssertTrue(r.text.contains("剧场"), r.text)
-        XCTAssertTrue(r.text.contains("晚饭"), r.text)
-        XCTAssertFalse(r.text.contains("帮我搜一下昨天的对话"), "请求本身不能出现")
-        XCTAssertLessThan(r.text.range(of: "剧场")!.lowerBound, r.text.range(of: "晚饭")!.lowerBound, "按时间先后")
+    func testDateEventPaginationFinishesDayBeforeMovingAcrossMonth() async throws {
+        let items = (0..<13).map { i in
+            TimelineDayRecord.Item(kind: .short, conversationId: cid, window: "云桥城", title: "星砚事件\(i)",
+                start: start.addingTimeInterval(Double(i)), end: start.addingTimeInterval(Double(i)), from: nil, to: nil)
+        }
+        try timeline(items: items)
+        var result = await run(.init(op: .date, after: "2026-10-31", before: "2026-11-02"))
+        var events: [String] = []
+        var pages = 0
+        repeat {
+            assertPage(result, layer: "A4")
+            events += result.text.components(separatedBy: "\n").filter { $0.contains("星砚事件") }
+            pages += 1
+            guard let token = result.cursor else { break }
+            let next = try XCTUnwrap(RecallTool.decodeCursor(token))
+            if next.day == "2026-11-01" { XCTAssertEqual(events.count, 13) }
+            result = await run(.init(op: .date, cursor: token))
+        } while pages < 15
+        XCTAssertEqual(events.count, 13)
+        XCTAssertEqual(Set(events).count, 13)
+        XCTAssertTrue(result.text.contains("2026-11-01"))
     }
-
-    func testOldStyleRangeNowMeansYesterdayOnly() async {
-        // 9/30 小克实际填的参数：after=昨天 before=今天 —— 现在 before 不含当天，只看昨天
-        let r = await run(["after": dayString(yesterday), "before": dayString(today)], current: nil)
-        XCTAssertTrue(r.text.contains("翻到 2 个对话"), r.text)
-        XCTAssertFalse(r.text.contains("帮我搜一下"), "当天的对话被 before 排除")
+    func testMemoryDayRangeStartsAtFiveAndAfterAloneReadsOneDay() throws {
+        let range = try RecallTool.resolveRange(date: nil, after: "2026-10-31", before: nil).get()
+        let boundary = try XCTUnwrap(range.after)
+        XCTAssertEqual(Calendar.current.component(.hour, from: boundary), 5)
+        XCTAssertFalse(RecallTool.inRange(boundary.addingTimeInterval(-1), after: range.after, beforeExclusive: range.beforeExclusive))
+        XCTAssertTrue(RecallTool.inRange(boundary, after: range.after, beforeExclusive: range.beforeExclusive))
+        XCTAssertEqual(range.beforeExclusive, Calendar.current.date(byAdding: .day, value: 1, to: boundary))
     }
-
-    func testKeywordSearchExcludesCurrentConversation() async {
-        let r = await run(["query": "昨天"])
-        XCTAssertFalse(r.text.contains("帮我搜一下昨天的对话"), r.text)
+    func testSearchAStopsAtFirstLayerAndExactOnlySearchesOriginal() async throws {
+        try timeline(headline: "云桥城 A4 主调证据")
+        try a3("云桥城 A3 不该混入")
+        try a2([segment("云桥城 A2 不该混入")])
+        let result = await run(.init(op: .search, query: "云桥城", scope: "a"))
+        assertPage(result, layer: "A4")
+        XCTAssertFalse(result.text.contains("A3 不该混入"))
+        XCTAssertFalse(result.text.contains("A2 不该混入"))
+        XCTAssertFalse(result.text.contains("岚舟在云桥城画地图"))
+        let exact = await run(.init(op: .search, query: "云桥城", scope: "a", exact: true))
+        assertPage(exact, layer: "原文")
+        XCTAssertTrue(exact.text.contains("岚舟在云桥城画地图"))
+        XCTAssertFalse(exact.text.contains("A4 主调证据"))
     }
-
-    func testExplicitConversationIdSearchesCurrent() async {
-        let r = await run(["query": "昨天", "conversation_id": "conv-cccc-current"])
-        XCTAssertTrue(r.text.contains("帮我搜一下昨天的对话"), r.text)
+    func testSearchCStopsAtPageBeforeCardAndUsesVerifiedTargets() async throws {
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        try FileManager.default.createDirectory(at: wiki.root, withIntermediateDirectories: true)
+        let card = SeedNoteCard(path: "memory/cc/星砚.md", version: "v1", name: "星砚", layer: "CC", title: "云桥城",
+            gist: "云桥城卡片下层证据", mentions: [], aboutUser: false, group: "主题", when: [], model: "fictional",
+            madeAt: start, run: .init(path: ".runs/fictional.md"))
+        try SeedNoteStore(wiki: wiki).save(card)
+        try wiki.save(WikiPage(path: "主题/云桥城", title: "云桥城", now: "云桥城页证据", entries: [card.path + "|v1"]))
+        try await readyCatalog()
+        let result = await run(.init(op: .search, query: "云桥城", scope: "c"))
+        assertPage(result, layer: "wiki页")
+        XCTAssertTrue(result.text.contains("云桥城页证据"))
+        XCTAssertFalse(result.text.contains("卡片下层证据"))
+        XCTAssertEqual(result.targets.first?.page?.path, "主题/云桥城")
     }
-
-    func testRelationshipMemorySearchable() async {
-        let r = await run(["query": "恋人"])
-        XCTAssertTrue(r.text.contains("记忆·关系"), r.text)
-        XCTAssertEqual(r.hitMemoryIds.count, 1)
-    }
-
-    func testNoQueryNoDateIsError() async {
-        let r = await run([:])
-        XCTAssertTrue(r.isError)
-    }
-
-    private func seedA2(_ conversationId: String, story: String, day: Date? = nil) throws {
-        let start = (day ?? yesterday).addingTimeInterval(12 * 3600)
-        let segment = SessionSegment(kind: .rolling, title: "航线", start: start, end: start.addingTimeInterval(60),
-                                     from: 0, to: 2, lastNodeId: nil, story: story, quotes: "", pending: "")
-        try SessionSummaryStore.save(SessionSummary(conversationId: conversationId, title: "航线笔记",
-                                                    compressedCount: 2, segments: [segment], updatedAt: start),
-                                     in: SessionSummaryStore.dir(root: memoryRoot))
-    }
-
-    @MainActor
-    func testRecallChineseSubstringFindsMemoryButExactStillSearchesOnlyOriginalText() async throws {
-        let originalMarker = "original-only-cloudbridge"
-        let memoryMarker = "l1-only-cloudbridge"
-        seedConversation(id: "conv-cloudbridge-original", title: "合成原话", day: yesterday, hour: 14,
-                         lines: [("user", "云桥城原话 \(originalMarker)")])
-        let target = Memory(content: "云桥城地图画好了 \(memoryMarker)", category: "fact", profileId: pid)
-        [target, Memory(content: "云", category: "fact", profileId: pid),
-         Memory(content: "桥", category: "fact", profileId: pid)].forEach { context.insert($0) }
+    func testIncludeInvalidOnlyExtendsSoftInvalidLegacyArchives() async throws {
+        let memory = Memory(content: "云桥城旧档案证据", category: "fact", profileId: pid)
+        memory.supersededAt = start
+        memory.sourceConversationId = cid
+        memory.sourceNodeId = "\(cid)-n0"
+        context.insert(memory)
         try context.save()
-        let recalled = await run(["query": "云桥城"])
-        XCTAssertFalse(recalled.isError)
-        XCTAssertEqual(recalled.hitMemoryIds, [target.id])
-        XCTAssertTrue(recalled.text.contains(target.content))
-        let exact = await run(["query": "云桥城", "exact": true])
-        XCTAssertEqual(exact.hitMemoryIds, [])
-        XCTAssertFalse(exact.isError, exact.text)
-        XCTAssertTrue(exact.text.contains(originalMarker), exact.text)
-        XCTAssertTrue(exact.text.contains("云桥城原话"), exact.text)
-        XCTAssertFalse(exact.text.contains(memoryMarker), exact.text)
-        XCTAssertFalse(exact.text.contains(target.content))
+        let normal = await run(.init(op: .search, query: "云桥城", scope: "c"))
+        XCTAssertFalse(normal.text.contains("旧档案证据"))
+        let invalid = await run(.init(op: .search, query: "云桥城", scope: "c", includeInvalid: true))
+        assertPage(invalid, layer: "L1")
+        XCTAssertTrue(invalid.text.contains("已失效"))
+        XCTAssertTrue(invalid.text.contains("旧档案证据"))
+        XCTAssertTrue(invalid.hitMemoryIds.isEmpty)
+        try node("\(cid)-n0").sourceVisibility = "hidden"
+        try context.save()
+        let hidden = await run(.init(op: .search, query: "云桥城", scope: "c", includeInvalid: true))
+        XCTAssertFalse(hidden.text.contains("旧档案证据"))
     }
+    func testSearchDefaultExcludesCurrentAndExplicitIDAllowsIt() async {
+        let excluded = await run(.init(op: .search, query: "云桥城", scope: "a", exact: true), current: cid)
+        XCTAssertFalse(excluded.text.contains("岚舟在云桥城画地图"))
+        let explicit = await run(.init(op: .search, conversationId: cid, query: "云桥城", scope: "a", exact: true), current: cid)
+        XCTAssertTrue(explicit.text.contains("岚舟在云桥城画地图"))
+    }
+    func testMasterDisabledKeepsOriginalsButRejectsDerivedNavigation() async throws {
+        let memory = Memory(content: "云桥城记忆专属证据", category: "fact", profileId: pid)
+        context.insert(memory)
+        try context.save()
+        let enabled = await run(.init(op: .search, query: "云桥城", scope: "c"))
+        XCTAssertEqual(enabled.hitMemoryIds, [memory.id])
+        defaults.set(false, forKey: "mem_master")
+        let search = await run(.init(op: .search, query: "云桥城", scope: "c"))
+        assertPage(search, layer: "原文")
+        XCTAssertTrue(search.text.contains("记忆总开关关闭，只搜原文"))
+        XCTAssertTrue(search.text.contains("岚舟在云桥城画地图"))
+        XCTAssertTrue(search.hitMemoryIds.isEmpty)
+        XCTAssertFalse(search.text.contains(memory.content))
+        let window = await run(.init(op: .window, conversationId: cid))
+        XCTAssertTrue(window.isError)
+        defaults.set(true, forKey: "mem_master")
+        let restored = await run(.init(op: .search, query: "云桥城", scope: "c"))
+        XCTAssertEqual(restored.hitMemoryIds, [memory.id])
+    }
+    func testSearchAContinuationStaysInChosenLayerAndVisitsEverySourceOnce() async throws {
+        try a2((0..<9).map { segment("云桥城证据\($0)", from: $0, to: $0 + 1) })
+        var result = await run(.init(op: .search, query: "云桥城", scope: "a"))
+        var numbers: [Int] = [], pages = 0
+        repeat {
+            assertPage(result, layer: "A2")
+            XCTAssertLessThanOrEqual(result.targets.count, 5)
+            numbers += result.targets.compactMap(\.segment)
+            pages += 1
+            guard let cursor = result.cursor else { break }
+            result = await run(.init(op: .search, cursor: cursor))
+        } while pages < 10
+        XCTAssertEqual(Set(numbers), Set(1...9))
+        XCTAssertEqual(numbers.count, 9)
+    }
+    func testSearchCCardL0PrecedesL1AndBothHaveReaderTargets() async throws {
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        try FileManager.default.createDirectory(at: wiki.root, withIntermediateDirectories: true)
+        let card = SeedNoteCard(path: "memory/cc/星砚.md", version: "v1", name: "星砚", layer: "CC", title: "岚舟",
+            gist: "云桥城的卡片证据", mentions: [], aboutUser: false, group: "主题", when: [], model: "fictional",
+            madeAt: start, run: .init(path: ".runs/fictional.md"))
+        try SeedNoteStore(wiki: wiki).save(card)
+        try wiki.save(WikiPage(path: "主题/星砚", title: "星砚", records: ["记录（\(card.path)）"], entries: [card.path + "|v1"]))
+        let fragment = Memory(content: "岚舟云桥城碎片证据", category: "fact", profileId: pid)
+        fragment.sourceConversationId = cid
+        fragment.sourceNodeId = "\(cid)-n0"
+        fragment.occurredDay = "2026-10-31"
+        context.insert(fragment)
+        try context.save()
+        try await readyCatalog()
+        let l0 = await run(.init(op: .search, query: "岚舟", scope: "c"))
+        assertPage(l0, layer: "L1")
+        XCTAssertTrue(l0.text.contains("卡 L0 定位"))
+        XCTAssertFalse(l0.text.contains(card.gist))
+        XCTAssertFalse(l0.text.contains(fragment.content))
+        let l1 = await run(.init(op: .search, query: "云桥城", scope: "c"))
+        assertPage(l1, layer: "L1")
+        XCTAssertTrue(l1.text.contains(card.gist))
+        XCTAssertTrue(l1.text.contains(fragment.content))
+        let entry = try XCTUnwrap(l1.targets.first { $0.row != nil })
+        let read = await run(.init(op: .wiki, layer: "entry", target: entry))
+        assertPage(read, layer: "L1")
+        XCTAssertTrue(read.text.contains(card.gist))
+        try wiki.saveRaw(WikiPage(path: "主题/星砚", title: "星砚", records: []).markdown, path: "主题/星砚")
+        let revoked = await run(.init(op: .search, query: "云桥城", scope: "c"))
+        XCTAssertFalse(revoked.text.contains(card.gist))
+    }
+
+    func testLegacyDailyRejectsTrashedWindowUpdatedAtTwoInCalendarDay() async throws {
+        let conversation = try XCTUnwrap(context.fetch(FetchDescriptor<Conversation>()).first { $0.id == cid })
+        let midnight = Calendar.current.startOfDay(for: start)
+        conversation.createTime = midnight
+        conversation.updateTime = midnight.addingTimeInterval(2 * 3600)
+        conversation.isTrashed = true
+        try context.save()
+        let daily = root.appendingPathComponent("daily")
+        try FileManager.default.createDirectory(at: daily, withIntermediateDirectories: true)
+        try Data(FrontmatterCodec.render(meta: [("date", "2026-10-31")], body: "岚舟不可读旧日记").utf8)
+            .write(to: daily.appendingPathComponent("2026-10-31.md"))
+        let result = await run(.init(op: .date, date: "2026-10-31"))
+        XCTAssertEqual(result.read?.status, "unavailable")
+        XCTAssertTrue(result.text.contains("旧日记来源无法逐窗核验"))
+        XCTAssertFalse(result.text.contains("岚舟不可读旧日记"))
+    }
+
+    func testLegacyDailySourceIdsMustAllRemainVisibleAndCountsCannotProveSources() async throws {
+        let daily = root.appendingPathComponent("daily")
+        try FileManager.default.createDirectory(at: daily, withIntermediateDirectories: true)
+        for sources in ["1", RecallTool.json([cid, "deleted-window"]), RecallTool.json([cid])] {
+            try Data(FrontmatterCodec.render(meta: [("date", "2026-10-31"), ("sourceConversations", sources)],
+                body: "岚舟旧日记来源证据").utf8).write(to: daily.appendingPathComponent("2026-10-31.md"))
+            let result = await run(.init(op: .date, date: "2026-10-31"))
+            XCTAssertEqual(result.isError, sources != RecallTool.json([cid]), result.text)
+            XCTAssertEqual(result.text.contains("岚舟旧日记来源证据"), sources == RecallTool.json([cid]))
+        }
+    }
+
+    func testDateExcludesCurrentWindowEvenWhenItsA4Exists() async throws {
+        try timeline()
+        let excluded = await run(.init(op: .date, date: "2026-10-31"), current: cid)
+        XCTAssertFalse(excluded.text.contains("星砚的短窗事件"))
+        XCTAssertTrue(excluded.targets.isEmpty)
+        let visible = await run(.init(op: .date, date: "2026-10-31"))
+        XCTAssertTrue(visible.text.contains("星砚的短窗事件"))
+    }
+
+    func testSearchPageDiscardsPrivateSourceOnlyEvidenceAndEmptyTargets() async throws {
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        try FileManager.default.createDirectory(at: wiki.root, withIntermediateDirectories: true)
+        try wiki.save(WikiPage(path: "人/星砚", hook: "岚舟记录", title: "星砚",
+            records: ["航图私源证据（出处：private_fixture/云桥城.md）", "岚舟公开记录"]))
+        try await readyCatalog()
+        let result = await run(.init(op: .search, query: "航图", scope: "c"))
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertFalse(result.text.contains("航图私源证据"))
+        XCTAssertFalse(result.targets.contains { $0.page?.path == "人/星砚" })
+    }
+
+    func testRecallALineUsesBM25AndConversationVisibilityBeforePresentation() async throws {
+        for id in ["current-window", "trashed-window", "foreign-window"] {
+            try seed(id, lines: ["岚舟"], profile: id == "foreign-window" ? "other-floor" : pid)
+        }
+        let deleted = try XCTUnwrap(context.fetch(FetchDescriptor<Conversation>()).first { $0.id == "trashed-window" })
+        deleted.isTrashed = true
+        try context.save()
+        for (id, story) in [(cid, "marble 铜铃航线"), ("current-window", "marble 当前隐藏"),
+                            ("trashed-window", "marble 回收隐藏"), ("foreign-window", "marble 别层隐藏"),
+                            ("orphan-window", "marble 孤立隐藏")] {
+            try SessionSummaryStore.save(.init(conversationId: id, title: "云桥城", compressedCount: 2,
+                segments: [segment(story)], updatedAt: start), in: SessionSummaryStore.dir(root: root))
+        }
+        let result = await run(.init(op: .search, query: "marble separate", scope: "a"), current: "current-window")
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("铜铃航线"), result.text)
+        for hidden in ["当前隐藏", "回收隐藏", "别层隐藏", "孤立隐藏"] { XCTAssertFalse(result.text.contains(hidden), result.text) }
+        XCTAssertEqual(result.targets.compactMap(\.conversationId), [cid])
+        XCTAssertTrue(result.hitMemoryIds.isEmpty)
+    }
+
+    var yesterday: Date { RecallTool.parseDay("2026-10-31")! }
+    var today: Date { RecallTool.parseDay("2026-11-01")! }
 
     func testStructuredL1KeepsProfileValidityDatesAndPriority() throws {
         let low = Memory(content: "marble low", category: "fact", profileId: pid)
@@ -179,67 +306,8 @@ final class RecallYesterdayTests: XCTestCase {
         XCTAssertTrue(embedder.embeddedTexts.isEmpty)
     }
 
-    func testRecallALineUsesBM25AndConversationVisibilityBeforePresentation() async throws {
-        let visible = "conv-aaaa-theater"
-        let current = "conv-cccc-current"
-        let deleted = Conversation(id: "deleted-0001", title: "回收站", createTime: yesterday, updateTime: yesterday, currentNodeId: "", profileId: pid)
-        deleted.isTrashed = true
-        let foreign = Conversation(id: "foreign-0001", title: "别层", createTime: yesterday, updateTime: yesterday, currentNodeId: "", profileId: "other-floor")
-        context.insert(deleted)
-        context.insert(foreign)
-        try context.save()
-        try seedA2(visible, story: "marble 铜铃航线")
-        try seedA2(current, story: "marble 当前隐藏")
-        try seedA2(deleted.id, story: "marble 回收隐藏")
-        try seedA2(foreign.id, story: "marble 别层隐藏")
-        try seedA2("orphan-0001", story: "marble 孤立隐藏")
-        let structured = RecallTool.searchALine(terms: ["marble separate"], memoryRoot: memoryRoot,
-                                                conversationIds: [visible])
-        XCTAssertEqual(structured.hits.map(\.conversationId), [visible])
-        XCTAssertEqual(structured.hits.first?.segment, 1)
-        let result = await run(["query": "marble separate"])
-        XCTAssertFalse(result.isError)
-        XCTAssertTrue(result.text.contains("铜铃航线"), result.text)
-        XCTAssertFalse(result.text.contains("当前隐藏"), result.text)
-        XCTAssertFalse(result.text.contains("回收隐藏"), result.text)
-        XCTAssertFalse(result.text.contains("别层隐藏"), result.text)
-        XCTAssertFalse(result.text.contains("孤立隐藏"), result.text)
-        XCTAssertTrue(result.hitMemoryIds.isEmpty)
-        let exact = await run(["query": "marble separate", "exact": true])
-        XCTAssertFalse(exact.text.contains("铜铃航线"))
-        let dated = RecallTool.searchALine(terms: ["marble"], in: DateInterval(start: today, end: today.addingTimeInterval(86400)),
-                                           memoryRoot: memoryRoot, conversationIds: [visible])
-        XCTAssertTrue(dated.hits.isEmpty)
-    }
-
-    @MainActor
-    func testRecallMasterGateUsesPrivateDefaultsAndKeepsOriginalsSearchable() async throws {
-        let marker = "master-gate-original"
-        seedConversation(id: "conv-master-gate", title: "合成开关原话", day: yesterday, hour: 15,
-                         lines: [("user", "铜鹤 \(marker)")])
-        let memory = Memory(content: "铜鹤 memory-only-gate", category: "fact", profileId: pid)
-        context.insert(memory)
-        try context.save()
-
-        XCTAssertNil(defaults.object(forKey: "mem_master"))
-        let inheritedDefault = await run(["query": "铜鹤"])
-        XCTAssertEqual(inheritedDefault.hitMemoryIds, [memory.id])
-
-        defaults.set(false, forKey: "mem_master")
-        let disabled = await run(["query": "铜鹤"])
-        XCTAssertFalse(disabled.isError, disabled.text)
-        XCTAssertTrue(disabled.text.contains(marker), disabled.text)
-        XCTAssertTrue(disabled.hitMemoryIds.isEmpty)
-        XCTAssertFalse(disabled.text.contains(memory.content), disabled.text)
-
-        defaults.set(true, forKey: "mem_master")
-        let enabled = await run(["query": "铜鹤"])
-        XCTAssertEqual(enabled.hitMemoryIds, [memory.id])
-    }
-
-    @MainActor
     func testRecallL1DropsCommonBigramNoiseBeforePriorityAndFirstFourLimit() async throws {
-        let target = Memory(content: "上次说的旅行计划：到海边看灯塔", category: "fact", profileId: pid)
+        let target = Memory(content: "上次说的旅行计划：到云桥城看航图", category: "fact", profileId: pid)
         target.importance = 3
         context.insert(target)
         var noiseIds = Set<UUID>()
@@ -250,8 +318,7 @@ final class RecallYesterdayTests: XCTestCase {
             noiseIds.insert(noise.id)
         }
         try context.save()
-
-        let result = await run(["query": "上次说的旅行计划"])
+        let result = await run(.init(op: .search, query: "上次说的旅行计划", scope: "c"))
         XCTAssertFalse(result.isError, result.text)
         XCTAssertEqual(result.hitMemoryIds, [target.id], result.text)
         XCTAssertTrue(result.text.contains(target.content), result.text)
@@ -259,20 +326,27 @@ final class RecallYesterdayTests: XCTestCase {
         XCTAssertFalse(result.text.contains("noise-"), result.text)
     }
 
-    @MainActor
     func testRecallL1ShortNameRequiresWholeNameRatherThanSharedSuffix() async throws {
-        let target = Memory(content: "张小明在海边写生", category: "fact", profileId: pid)
+        let target = Memory(content: "岚舟星砚在云桥城画图", category: "fact", profileId: pid)
         target.importance = 3
-        let partial = Memory(content: "小明在山里散步", category: "fact", profileId: pid)
+        let partial = Memory(content: "星砚在云桥城散步", category: "fact", profileId: pid)
         partial.importance = 5
         context.insert(target)
         context.insert(partial)
         try context.save()
-
-        let result = await run(["query": "张小明"])
+        let result = await run(.init(op: .search, query: "岚舟星砚", scope: "c"))
         XCTAssertFalse(result.isError, result.text)
         XCTAssertEqual(result.hitMemoryIds, [target.id], result.text)
         XCTAssertTrue(result.text.contains(target.content), result.text)
         XCTAssertFalse(result.text.contains(partial.content), result.text)
+    }
+
+    func testIncludeInvalidRejectsNonArchiveAndExactCombinations() async {
+        for input in [RecallTool.Input(op: .search, query: "云桥城", scope: "a", includeInvalid: true),
+                      .init(op: .search, query: "云桥城", scope: "c", exact: true, includeInvalid: false)] {
+            let result = await run(input)
+            XCTAssertTrue(result.isError)
+            XCTAssertTrue(result.text.contains("include_invalid"))
+        }
     }
 }

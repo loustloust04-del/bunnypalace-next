@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// 内建工具注册表（plan-pi-style-toolbase P0.2）：
@@ -5,6 +6,9 @@ import Foundation
 /// 不含：MCP 动态工具（MCPProvider 自渲染）/ Anthropic server 搜索工具（形状特殊，toolInjection 特例）。
 /// 新 reflection 风行为走 inner_voice 的 mode 复用，不加新 tool（B-D4）。
 enum ToolRegistry {
+
+    /// 五个记忆写工具（关参与窗不下发）：执行前复查拒绝时文案要说清是「本窗关了记忆参与」，不是抽屉里关着
+    static let memoryWriteNames: Set<String> = SelfMemoryTool.names.union([PendingNotesTool.toolName, WikiSuggestTool.toolName])
 
     struct Entry {
         let definition: ToolDefinition
@@ -15,17 +19,18 @@ enum ToolRegistry {
     @MainActor
     static var all: [Entry] {
         var entries: [Entry] = []
+        entries.append(Entry(definition: TurnStatusTool.definition, enabledIf: { _ in true }))
 
         // 文件库 9 件（fs_* 8 + 资料卡搭车），总开关 fileLibraryEnabled
-        let fileLibraryOn: (ToolGateContext) -> Bool = { _ in
-            PermissionCenter.capabilityEnabled(.fileLibrary)   // askOnce = 下发工具，真调用时问（tool loop 闸）
+        let fileLibraryOn: (ToolGateContext) -> Bool = { ctx in
+            PermissionCenter.capabilityEnabled(.fileLibrary, profileId: ctx.profileId)   // askOnce = 下发工具，真调用时问（tool loop 闸）
         }
         entries += FileLibraryTools.definitions.map { Entry(definition: $0, enabledIf: fileLibraryOn) }
         entries.append(Entry(definition: ProfileCardTool.definition, enabledIf: fileLibraryOn))
 
         // 本地推特（page2 推特子应用）：一个工具 + action，AI 在本楼层推特上发推/刷推；纯本地，默认允许
-        entries.append(Entry(definition: TwitterAITool.definition, enabledIf: { _ in
-            PermissionCenter.capabilityEnabled(.twitter)
+        entries.append(Entry(definition: TwitterAITool.definition, enabledIf: { ctx in
+            PermissionCenter.capabilityEnabled(.twitter, profileId: ctx.profileId)
         }))
 
         #if PERSONAL_APPS
@@ -41,14 +46,14 @@ enum ToolRegistry {
         // recall（SC-B1）
         entries.append(Entry(definition: RecallTool.definition, enabledIf: { _ in RecallTool.enabled }))
 
-        // 自己的记忆（记忆修复第二刀 B2）：remember / edit_memory / forget_memory，受记忆总开关管
-        entries += SelfMemoryTool.definitions.map { d in Entry(definition: d, enabledIf: { _ in SelfMemoryTool.enabled }) }
+        // 自己的记忆（记忆修复第二刀 B2）：remember / edit_memory / forget_memory，受记忆总开关管；关参与窗不下发
+        entries += SelfMemoryTool.definitions.map { d in Entry(definition: d, enabledIf: { ctx in SelfMemoryTool.enabled && ctx.memoryWriteTools }) }
 
-        // 待续（v5 §3-2）：标做完了 / 淡了；总开关 && A4 时间轴开着才给
-        entries.append(Entry(definition: PendingNotesTool.definition, enabledIf: { _ in PendingNotesTool.enabled }))
+        // 待续（v5 §3-2）：标做完了 / 淡了；总开关 && A4 时间轴开着才给；关参与窗不下发
+        entries.append(Entry(definition: PendingNotesTool.definition, enabledIf: { ctx in PendingNotesTool.enabled && ctx.memoryWriteTools }))
 
-        // 给 wiki 提整理方向（C2/C3 v2 第 4 段）：只交待批方向；总开关 && C3 开着才给
-        entries.append(Entry(definition: WikiSuggestTool.definition, enabledIf: { _ in WikiSuggestTool.enabled }))
+        // 给 wiki 提整理方向（C2/C3 v2 第 4 段）：只交待批方向；总开关 && C3 开着才给；关参与窗不下发
+        entries.append(Entry(definition: WikiSuggestTool.definition, enabledIf: { ctx in WikiSuggestTool.enabled && ctx.memoryWriteTools }))
 
         // 问问题（官端 AskUserQuestion 同款）：常开，受 sendToolsEnabled 总开关连坐
         entries.append(Entry(definition: AskUserTool.definition, enabledIf: { _ in true }))
@@ -62,24 +67,36 @@ enum ToolRegistry {
         // 联网搜索 client function：openAI 系 + 配了 backend 才发（anthropic 走 server tool，注入处特例）
         entries.append(Entry(definition: WebSearchToolService.clientDefinition, enabledIf: { ctx in
             ctx.family == .openAI
-                && PermissionCenter.capabilityEnabled(.webSearch)
+                && PermissionCenter.capabilityEnabled(.webSearch, profileId: ctx.profileId)
                 && WebSearchSettings.shared.selected != nil
         }))
 
         // browse_url：开关开就发，不依赖 backend；anthropic 不发（server tool 一站式）
         entries.append(Entry(definition: BrowseURLTool.definition, enabledIf: { ctx in
-            ctx.family == .openAI && PermissionCenter.capabilityEnabled(.webSearch)
+            ctx.family == .openAI && PermissionCenter.capabilityEnabled(.webSearch, profileId: ctx.profileId)
         }))
+
+        // 借 Mac 上 Chrome 登录态（plan-opencli-in-app）：两家都发；主 hub 连着且 Mac 上开了总开关才有
+        entries += ChromeBridgeTools.definitions.map { d in
+            Entry(definition: d, enabledIf: { ctx in ChromeBridgeTools.hubReady && PermissionCenter.capabilityEnabled(.webSearch, profileId: ctx.profileId) })
+        }
+
+        #if os(iOS)
+        // AI 在花园浏览器里动手（plan-ai-browser-operate）：两家都发；门 = 「AI 操作浏览器」不是不允许（每次询问也发，真调用时弹卡）
+        entries += BrowserOperateTools.definitions.map { d in
+            Entry(definition: d, enabledIf: { ctx in PermissionCenter.capabilityEnabled(.browserOperate, profileId: ctx.profileId) })
+        }
+        #endif
 
         // 设备工具 11 件（plan-设备工具 P1）+ macOS run_command（plan-离线沙箱-phase1）：按域档位下发（askOnce 也下发，真调用时 tool loop 弹卡）
         entries += DeviceToolDispatcher.definitions.map { d in
-            Entry(definition: d, enabledIf: { _ in PermissionCenter.capabilityEnabled(PermissionDomain.forTool(named: d.name)) })
+            Entry(definition: d, enabledIf: { ctx in PermissionCenter.capabilityEnabled(PermissionDomain.forTool(named: d.name), profileId: ctx.profileId) })
         }
 
         #if os(macOS)
         // 编程会话 4 件（W-N N5）：只读；默认不允许 = 不下发，askOnce 也下发、真调用时问
         entries += CodingTools.definitions.map { d in
-            Entry(definition: d, enabledIf: { _ in PermissionCenter.capabilityEnabled(.codingSessions) })
+            Entry(definition: d, enabledIf: { ctx in PermissionCenter.capabilityEnabled(.codingSessions, profileId: ctx.profileId) })
         }
         #endif
 
@@ -137,9 +154,10 @@ enum ToolRegistry {
         return b
     }()
 
-    /// 抽屉管不着的：元工具（它们就是「更多工具」的门，Q4）、隐藏子应用（不进抽屉）
+    /// 抽屉管不着的：元工具、只随工具总开关的临时状态、隐藏子应用。
     static var drawerExempt: Set<String> {
         var names = MetaTools.names
+        names.insert(TurnStatusTool.toolName)
         #if PERSONAL_APPS
         names.insert(DeathScaleAITool.toolName)
         #endif
@@ -178,7 +196,8 @@ enum ToolRegistry {
     /// 这一轮能用的全部内建工具（直接给的 + 收在「更多工具」里的）：上游门开 且 抽屉不是关
     @MainActor
     static func enabledDefinitions(_ ctx: ToolGateContext) -> [ToolDefinition] {
-        all.filter { $0.enabledIf(ctx) && mode(of: $0.definition.name, ctx) != .off }.map(\.definition)
+        all.filter { $0.enabledIf(ctx) && mode(of: $0.definition.name, ctx) != .off }
+            .map { $0.definition.name == WikiSuggestTool.toolName ? WikiSuggestTool.definition(userName: ctx.userName) : $0.definition }
     }
 
     /// 放进工具清单直接给模型的
@@ -199,7 +218,7 @@ enum ToolRegistry {
     static func availability(of name: String, _ ctx: ToolGateContext) -> Bool? {
         let entries = all.filter { $0.definition.name == name }
         guard !entries.isEmpty else { return nil }
-        guard PermissionCenter.capabilityEnabled(.toolsMaster) else { return false }
+        guard PermissionCenter.capabilityEnabled(.toolsMaster, profileId: ctx.profileId) else { return false }
         return entries.contains { $0.enabledIf(ctx) && mode(of: name, ctx) != .off }
     }
 }

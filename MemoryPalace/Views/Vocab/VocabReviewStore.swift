@@ -52,11 +52,6 @@ final class VocabReviewStore {
         return cards.first { $0.word == word }
     }
 
-    var currentExercise: VocabExercise {
-        guard let c = currentCard else { return .read }
-        return SM2.exercise(reps: c.reps, intervalDays: c.intervalDays)
-    }
-
     /// 今日已复习张数（完成态成绩感）。
     func reviewedTodayCount(now: Date = Date()) -> Int {
         let startOfDay = Calendar.current.startOfDay(for: now)

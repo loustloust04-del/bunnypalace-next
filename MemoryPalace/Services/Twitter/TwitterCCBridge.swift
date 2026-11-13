@@ -16,13 +16,11 @@ enum TwitterCCBridge {
     @MainActor
     static func handle(_ frame: [String: Any], profiles: [Profile], currentProfileId: String,
                        context: ModelContext, mediaRoot: URL? = nil,
-                       enabled: Bool = PermissionCenter.capabilityEnabled(.twitter)) -> [String: Any] {
+                       level: (String) -> PermissionLevel = { PermissionCenter.level(.twitter, profileId: $0) }) -> [String: Any] {
         let id = frame["id"] as? String ?? ""
         func reply(_ ok: Bool, _ text: String) -> [String: Any] {
             ["type": resultType, "id": id, "ok": ok, "result": text]
         }
-        guard enabled else { return reply(false, "用户在设置-权限里关掉了推特工具") }
-
         var profileId = currentProfileId
         if let chatId = frame["chat_id"] as? String, !chatId.isEmpty {
             let desc = FetchDescriptor<Conversation>(predicate: #Predicate { $0.id == chatId })
@@ -33,6 +31,27 @@ enum TwitterCCBridge {
         }
         guard let profile = profiles.first(where: { $0.id == profileId }) else {
             return reply(false, "找不到楼层 \(profileId)")
+        }
+        // 先找楼层再查那一层的权限（atrium P3⑤0）；电脑那边没法弹卡问，「每次询问」按不允许（⑤a）
+        switch level(profileId) {
+        case .bypass:
+            break
+        case .askOnce:
+            return reply(false, "这个人的推特权限是「每次询问」，电脑那边没法问，按不允许处理")
+        case .notAllowed:
+            // atrium P3⑥a：没装推特 App 挡住的，说清原因
+            if let app = PermissionCenter.blockingApp(.twitter, profileId: profileId) {
+                #if os(macOS)
+                return reply(false, "\(profile.name) 的\(PermissionCenter.notInstalledLabel(app))（设置 → 右栏）")
+                #else
+                return reply(false, "\(profile.name) 的\(PermissionCenter.notInstalledLabel(app))（TA 的人页 › 权限）")
+                #endif
+            }
+            #if os(macOS)
+            return reply(false, "用户没允许 \(profile.name) 用推特（设置 → 权限 → 这一层）")
+            #else
+            return reply(false, "用户没允许 \(profile.name) 用推特（TA 的人页 › 权限）")
+            #endif
         }
 
         let input = frame["input"] as? [String: Any] ?? [:]

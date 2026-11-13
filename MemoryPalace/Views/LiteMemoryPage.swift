@@ -5,7 +5,7 @@ import SwiftData
 // MARK: - Lite 模式「记忆」页
 
 /// Lite 模式的记忆简化页：总开关 + 简要说明 +「管理记忆条目」二级页（画像卡 v5 Q4 下线）。
-/// 总开关与 pro 走同一路径（PermissionCenter.level(.memory) + mem_master）——只是一层简化壳，不动 pro 的任何 UI。
+/// 总开关与 pro 走同一路径（PermissionCenter.defaultLevel(.memory) + mem_master）——只是一层简化壳，不动 pro 的任何 UI。
 struct LiteMemoryPage: View {
     var viewModel: ConversationViewModel?
 
@@ -21,8 +21,8 @@ struct LiteMemoryPage: View {
             // ── 总开关（读写逻辑照抄 MemoryPageContent.sectionPerception）──
             Section {
                 Toggle(isOn: Binding(
-                    get: { PermissionCenter.level(.memory) == .bypass },
-                    set: { PermissionCenter.setLevel($0 ? .bypass : .notAllowed, for: .memory); memMaster = $0 }
+                    get: { PermissionCenter.defaultLevel(.memory) == .bypass },
+                    set: { PermissionCenter.setDefaultLevel($0 ? .bypass : .notAllowed, for: .memory); memMaster = $0 }
                 )) {
                     Text("记住我")
                         .font(.system(size: Theme.SettingsFont.body, weight: .semibold))
@@ -178,7 +178,7 @@ struct LiteMemoryEntriesPage: View {
             onDelete: { deleteMemory(mem) },
             onEdit: { editingMemory = mem },
             onRevive: mem.supersededAt != nil ? { reviveMemory(mem) } : nil,
-            onJumpToSource: mem.sourceConversationId != nil ? { jumpToSource(mem) } : nil
+            onJumpToSource: viewModel != nil && mem.sourceConversationId != nil ? { jumpToSource(mem) } : nil
         )
     }
 
@@ -221,17 +221,9 @@ struct LiteMemoryEntriesPage: View {
     }
 
     private func jumpToSource(_ memory: Memory) {
-        guard let viewModel, let cid = memory.sourceConversationId else { return }
-        let pid = profileManager?.currentProfile.id ?? ""
-        let convDesc = FetchDescriptor<Conversation>(
-            predicate: #Predicate<Conversation> { conv in conv.id == cid && conv.profileId == pid }
-        )
-        guard let conv = try? modelContext.fetch(convDesc).first else { return }
-        if let nodeId = memory.sourceNodeId {
-            viewModel.navigateToSearchResult(nodeId: nodeId, conversation: conv, context: modelContext)
-        } else {
-            viewModel.loadConversation(conv, context: modelContext)
-        }
+        guard let viewModel else { return }
+        MemoryConversationLink.openSource(of: memory, profileId: profileManager?.currentProfile.id ?? "",
+                                          context: modelContext, viewModel: viewModel)
     }
 
     // MARK: - 数据

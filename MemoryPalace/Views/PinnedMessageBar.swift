@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 
 /// 顶部浮动 Pin Bar — 学 Telegram：玻璃胶囊，每次只显示一条 pin，tap 轮换到下一条。

@@ -63,6 +63,8 @@ final class AssistantCloudBackend: AssistantBackend {
     var lastCostUSD: Double? { router.lastUsageRecord?.costUSD }
     /// 上一次工具轮的完整回复（种子 checkpoint 要存、续轮要原样回灌）
     private(set) var lastTurnExtras: AssistantTurnExtras?
+    /// 上一次请求最后是请求超时失败的
+    var lastFailureTimedOut: Bool { router.lastFailureURLErrorCode == NSURLErrorTimedOut }
 
     func run(_ request: AssistantBackendRequest, onEvent: @escaping @MainActor (AssistantBackendEvent) -> Void) {
         lastTurnExtras = nil

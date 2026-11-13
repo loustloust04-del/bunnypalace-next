@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -28,26 +29,26 @@ final class SessionSummaryTests: XCTestCase {
     }
 
     func testSaveAppendDoesNotTouchOldSegments() throws {
-        var s = SessionSummaryStore.loadOrSeed(conversationId: "conv-append-1", profileId: pid, title: "标题")
+        var s = SessionSummaryStore.loadOrSeed(conversationId: "conv-append-1", memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), title: "标题")
         s.segments.append(seg("一", from: 0, to: 10, last: "n10"))
-        try SessionSummaryStore.save(s, profileId: pid)
-        var again = try XCTUnwrap(SessionSummaryStore.load(conversationId: "conv-append-1", profileId: pid))
+        try SessionSummaryStore.save(s, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
+        var again = try XCTUnwrap(SessionSummaryStore.load(conversationId: "conv-append-1", memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)))
         again.segments.append(seg("二", from: 10, to: 20, last: "n20"))
-        try SessionSummaryStore.save(again, profileId: pid)
-        let final = try XCTUnwrap(SessionSummaryStore.load(conversationId: "conv-append-1", profileId: pid))
+        try SessionSummaryStore.save(again, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
+        let final = try XCTUnwrap(SessionSummaryStore.load(conversationId: "conv-append-1", memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)))
         XCTAssertEqual(final.segments.map(\.title), ["一", "二"])
         XCTAssertEqual(final.segments[0], s.segments[0])
     }
 
     func testLegacySummaryBecomesSegmentZero() {
         SummaryFileStore.save(ContextSummary(summary: "老的累计摘要", coveredCount: 30, updatedAt: Date()),
-                              conversationId: "conv-legacy-1", profileId: pid, conversationTitle: "老对话")
-        let s = SessionSummaryStore.loadOrSeed(conversationId: "conv-legacy-1", profileId: pid, title: "老对话")
+                              conversationId: "conv-legacy-1", memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), conversationTitle: "老对话")
+        let s = SessionSummaryStore.loadOrSeed(conversationId: "conv-legacy-1", memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), title: "老对话")
         XCTAssertEqual(s.compressedCount, 30)
         XCTAssertEqual(s.segments.count, 1)
         XCTAssertEqual(s.segments[0].kind, .legacy)
         XCTAssertEqual(s.segments[0].story, "老的累计摘要")
-        XCTAssertNotNil(SummaryFileStore.load(conversationId: "conv-legacy-1", profileId: pid), "老文件不动")
+        XCTAssertNotNil(SummaryFileStore.load(conversationId: "conv-legacy-1", memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)), "老文件不动")
     }
 
     // MARK: - 水位线
@@ -126,15 +127,6 @@ final class SessionSummaryTests: XCTestCase {
                     SessionSegmentWriter.Message(id: "2", role: "assistant", content: "记住了", date: nil)]
         let t = SessionSegmentWriter.transcript(msgs, speakers: .init(userName: "粟粟", assistantName: "小克"))
         XCTAssertEqual(t, "粟粟：下周三复诊\n\n小克：记住了")
-        let sys = SessionSegmentWriter.systemPrompt(persona: "你是小克。", speakers: .init(userName: "粟粟", assistantName: "小克"), kind: .rolling)
-        XCTAssertTrue(sys.hasPrefix("你是小克。"))
-        XCTAssertTrue(sys.contains("【经过】") && sys.contains("【原话】"))
-        XCTAssertTrue(sys.contains("【待续】") && sys.contains("真的没有就写「无」"), "c2c3-v2 第 7 段：A2 恢复写待续（A4 拼日时搬进待续本子）")
-        XCTAssertFalse(sys.contains("【时间轴】"))
-        XCTAssertTrue(sys.contains("接着上一段写") && sys.contains("不要用「这个窗口」开头"))
-        XCTAssertFalse(sys.contains("发生了什么、我当时怎么想"), "10-16 A2 只拍片子：【经过】不再要求写当时怎么想")
-        XCTAssertTrue(sys.contains("只写发生了什么") && sys.contains("不写我当时怎么想、什么感受"))
-        XCTAssertTrue(SessionSegmentWriter.systemPrompt(persona: "", speakers: .init(userName: "", assistantName: ""), kind: .closeout).contains("尾段"), "v5 D1：收尾那截是 A2 的尾段")
     }
 
     /// v4-1 §四：上一段全文进输入、待续不进

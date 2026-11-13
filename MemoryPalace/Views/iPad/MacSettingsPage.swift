@@ -32,21 +32,26 @@ extension SettingsRoute {
     var title: String {
         switch self {
         case .healthPermissions: "健康"
+        case .floorPermissions: "权限"
+        case .permissionOverrides: "单独设了的"
         case .memoryExtractPrompt: "提取提示词"
         case .memoryWriterA2, .memoryWriterA3, .memoryWriterA4, .memoryWriterB1, .memoryWriterB4, .memoryWriterC, .memoryWriterC2, .memoryWriterC3:
             memoryWriterID.map { "\($0.code) \($0.title(assistant: Self.assistantName))" } ?? ""
         case .memoryCatalogStopWords: "不触发的词"
         case .memoryWriteBudget: "写入预算"
         case .memoryOpenWindow: "开窗口带什么"
+        case .memoryArchiveTrigger: "档案触发"
+        case .memoryRecallBrowse: "翻记忆"
         case .memoryPending: "待续"
         case .memoryArchiveList: "从聊天里记住的"
         case .memorySelfList: "\(Self.assistantName)的记忆"
         case .memoryAudit: "整理台"
         case .memoryProposal: "整理提案"
         case .memoryProposalItem: "目录项"
-        case .themeLibrary: "主题库"
+        case .themeLibrary: "界面主题"
         case .themeColors: "主题颜色"
-        case .chatBackground: "聊天背景"
+        case .chatBackground: "聊天背景（这一层）"
+        case .chatThemeLibrary: "聊天主题（这一层）"
         case .appearanceFont: "字体"
         case .appearanceWaiting: "等待动画"
         case .appearanceAdvanced: "高级外观"
@@ -62,6 +67,8 @@ extension SettingsRoute {
     @ViewBuilder var macDestination: some View {
         switch self {
         case .healthPermissions: MacHealthPermissionPage()
+        case .floorPermissions: PermissionsSettingsTab(startsOnFloor: true)
+        case .permissionOverrides: MacPermissionOverridesRoute()
         case .memoryExtractPrompt:
             PromptEditorPage.memoryExtract
         case .memoryWriterA2, .memoryWriterA3, .memoryWriterA4, .memoryWriterB1, .memoryWriterB4, .memoryWriterC, .memoryWriterC2, .memoryWriterC3:
@@ -69,6 +76,8 @@ extension SettingsRoute {
         case .memoryCatalogStopWords: CatalogStopWordsPage()
         case .memoryWriteBudget: WriteBudgetPage()
         case .memoryOpenWindow: MemoryOpenWindowPage()
+        case .memoryArchiveTrigger: ArchiveTriggerPage()
+        case .memoryRecallBrowse: RecallBrowsePage()
         case .memoryPending: PendingListPage()
         case .memoryArchiveList: MemoryArchiveListPage()
         case .memorySelfList: SelfMemoryListPage()
@@ -77,8 +86,9 @@ extension SettingsRoute {
         case .memoryProposalItem: MacWikiProposalItemRoute()
         case .themeLibrary: ThemeLibraryPage()
         case .themeColors: ThemeColorsPage()
-        case .chatBackground: ChatBackgroundPage()
-        case .appearanceFont: FontPickerPage()
+        case .chatBackground: MacCurrentLayerTarget { ChatBackgroundPage(target: $0) }
+        case .chatThemeLibrary: MacCurrentLayerTarget { ThemeLibraryPage(target: $0) }
+        case .appearanceFont: MacCurrentLayerTarget { FontPickerPage(profileId: $0.profileId ?? "") }
         case .appearanceWaiting: WaitingAnimationPage()
         case .appearanceAdvanced: AdvancedAppearancePage()
         case .highlightColors: HighlightColorsPage()
@@ -88,6 +98,16 @@ extension SettingsRoute {
         case .importRecordDetail: MacImportRecordDetailRoute()
         case .toolDrawer: ToolDrawerPage(viewModel: nil)
         }
+    }
+}
+
+/// Mac 没人页：聊天主题 / 聊天背景（atrium P3④a）、字体（④b）几页绑当前层；切层设置窗整棵重建，拿到的就是新层
+private struct MacCurrentLayerTarget<Page: View>: View {
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+    @ViewBuilder let page: (ThemeTarget) -> Page
+
+    var body: some View {
+        page(profileManager.map { .person($0.currentProfile.id) } ?? .interface)
     }
 }
 
@@ -163,6 +183,7 @@ struct MacSettingsPage<Content: View>: View {
         }
         // 整个设置 NavigationStack 作用域（含推入的二级页）都是 route 宿主：`SettingsNavRow` 走值驱动 link
         .environment(\.settingsRouteHost, true)
+        .environment(\.settingsRoutePush) { path.append($0) }
         .font(ShellStyle.bodyFont.weight(.regular))
         .foregroundStyle(ShellStyle.text)
         .tint(Theme.branchIndicator)
@@ -199,17 +220,34 @@ struct MacSettingsPage<Content: View>: View {
 }
 
 /// 权限 › 健康 的 mac 二级页：同一批 `PermissionDomainRow`，套 MacSettingsForm 组卡（iOS 那份 `HealthPermissionSubpage` 不动）
+/// mac 设置窗里 `SettingsRoute.permissionOverrides` 的落点：哪个域从共享选择里取
+private struct MacPermissionOverridesRoute: View {
+    var body: some View {
+        if let domain = PermissionOverridesSelection.shared.domain {
+            PermissionOverridesPage(domain: domain)
+        }
+    }
+}
+
+/// atrium P3⑤a：跟权限页顶的「默认 / 这一层」走（route 不带参数，读 `PermissionMacScope`）
 struct MacHealthPermissionPage: View {
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+
+    private var target: PermissionTarget {
+        if PermissionMacScope.shared.floor, let pid = profileManager?.currentProfile.id { return .floor(pid) }
+        return .defaults
+    }
+
     var body: some View {
         MacSettingsForm {
             Section {
-                PermissionDomainRow(domain: .healthApple)
-                PermissionDomainRow(domain: .healthWeight)
-                PermissionDomainRow(domain: .healthMeds)
-                PermissionDomainRow(domain: .healthCycle)
-                PermissionDomainRow(domain: .healthIntimacy)
+                PermissionDomainRow(domain: .healthApple, target: target)
+                PermissionDomainRow(domain: .healthWeight, target: target)
+                PermissionDomainRow(domain: .healthMeds, target: target)
+                PermissionDomainRow(domain: .healthCycle, target: target)
+                PermissionDomainRow(domain: .healthIntimacy, target: target)
             } footer: {
-                Text("与 设置→健康 里的开关是同一个值，两边改都一样。")
+                Text(HealthPermissionSubpage.footer(target))
             }
         }
     }
@@ -341,6 +379,8 @@ struct MacSettingsForm<Content: View>: View {
             .padding(.bottom, 24)
             .frame(maxWidth: .infinity)
         }
+        // 设置窗以外也有人用这个容器（日历齿轮、右栏 Prompt、小芽设置）：开关样式跟着容器走，不靠设置窗那层
+        .toggleStyle(MacSettingsToggleStyle())
     }
 }
 

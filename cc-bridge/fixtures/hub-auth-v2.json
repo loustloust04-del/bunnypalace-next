@@ -1,0 +1,238 @@
+{
+  "_note": "测试专用：钥 / 口令 / 配对码都是生成金样时现生成的假值，跟任何真 hub / 真设备无关。两端（cc-bridge TS / app Swift）逐字节比 transcript 与 HMAC；ECDSA 签名带随机数，只互验不比字节（sig_dev_swift 是 CryptoKit 用 device.raw_priv 签的 dev key 那条）",
+  "aud_cases": [
+    {
+      "aud": "hub.example.test:80",
+      "url": "ws://Hub.Example.TEST/cc"
+    },
+    {
+      "aud": "hub.example.test:443",
+      "url": "wss://hub.example.test/cc"
+    },
+    {
+      "aud": "hub.example.test:7890",
+      "url": "ws://hub.example.test:7890/cc?v=2"
+    },
+    {
+      "aud": "[::1]:7890",
+      "url": "ws://[::1]:7890/cc"
+    },
+    {
+      "aud": "[fe80::1]:17890",
+      "url": "ws://[FE80::1]:17890/agora"
+    },
+    {
+      "aud": "192.0.2.10:443",
+      "url": "wss://192.0.2.10:443/cc"
+    }
+  ],
+  "cases": [
+    {
+      "fields": {
+        "enrolled": "-",
+        "kind": "-",
+        "path": "/cc",
+        "pub": "-",
+        "result": "-",
+        "role": "hub-challenge"
+      },
+      "name": "hub-challenge /cc",
+      "sig_hub": "_xeEI_CLDX5_EtVpZpRfadCvUGsACujZRVhy6a5Cp5VuHytF8qSZQbgXGThPpDg75_rmt1ygSaPSuGe3j-zoVw",
+      "transcript": "mp-hub-auth/2\nrole=hub-challenge\npath=/cc\nkind=-\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=-\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=-\nenrolled=-\n"
+    },
+    {
+      "fields": {
+        "enrolled": "-",
+        "kind": "-",
+        "path": "/agora",
+        "pub": "-",
+        "result": "-",
+        "role": "hub-challenge"
+      },
+      "name": "hub-challenge /agora",
+      "sig_hub": "WL0_B8CcwnxkApl5T0CXooHFMj5gHs5Oj_nbkzXQhHGbHhFzqHfbER-L82AHhTBVPhfW0G4MPZBOkfy_X7Uv_w",
+      "transcript": "mp-hub-auth/2\nrole=hub-challenge\npath=/agora\nkind=-\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=-\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=-\nenrolled=-\n"
+    },
+    {
+      "fields": {
+        "enrolled": "-",
+        "kind": "key",
+        "path": "/cc",
+        "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+        "result": "-",
+        "role": "dev"
+      },
+      "name": "dev key /cc",
+      "sig_dev": "6XmFWzN7m4YdLqdGluAYaKF_Q21A705gKzvacbw2h_q7euDGizmWdjZGP0bdsg0kpqxBr6CX-OotYYOz-__XGg",
+      "sig_dev_swift": "S0rDHVozfx_yiF1GzpVgT51s0Ajh6fIfYeDf3z9YzeFWD0JpV1mYaWBwtXNWTmp2RxUyIAv5VH3j8LP1Me6nnA",
+      "transcript": "mp-hub-auth/2\nrole=dev\npath=/cc\nkind=key\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=-\nenrolled=-\n"
+    },
+    {
+      "fields": {
+        "enrolled": "-",
+        "kind": "token",
+        "path": "/cc",
+        "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+        "result": "-",
+        "role": "dev"
+      },
+      "name": "dev token /cc",
+      "sig_dev": "eXaiXBNlwD9QGZW9q5ESiBF3tiP__BW-KF3MKnrZ1ZepfDLoffg7GfmpsV9Z1_7yhEO9tAse0NJXs24z3dpv9w",
+      "transcript": "mp-hub-auth/2\nrole=dev\npath=/cc\nkind=token\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=-\nenrolled=-\n"
+    },
+    {
+      "fields": {
+        "enrolled": "-",
+        "kind": "code",
+        "path": "/cc",
+        "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+        "result": "-",
+        "role": "dev"
+      },
+      "name": "dev code /cc",
+      "sig_dev": "DcvCgB-hy74AVptZPscfcJ8uKiLPXAQaexuAwkMY7qlpuPueXfHhFM0ayrpGua0GcjhhEqBuERitCkteDEeaBg",
+      "transcript": "mp-hub-auth/2\nrole=dev\npath=/cc\nkind=code\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=-\nenrolled=-\n"
+    },
+    {
+      "fields": {
+        "enrolled": "-",
+        "kind": "token",
+        "path": "/cc",
+        "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+        "result": "-",
+        "role": "secret-dev"
+      },
+      "hmac": "w5wqCEJeRNBQ3w-n5RzqDYAax4J0aGBGZ-4pmcYrIa4",
+      "name": "secret-dev token /cc",
+      "secret": "token",
+      "transcript": "mp-hub-auth/2\nrole=secret-dev\npath=/cc\nkind=token\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=-\nenrolled=-\n"
+    },
+    {
+      "fields": {
+        "enrolled": "-",
+        "kind": "code",
+        "path": "/cc",
+        "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+        "result": "-",
+        "role": "secret-dev"
+      },
+      "hmac": "4DmbJGqcx91NSWZkfXR1jnBV-alfWHp7OeOy8fRDGwc",
+      "name": "secret-dev code(pc) /cc",
+      "secret": "pc",
+      "transcript": "mp-hub-auth/2\nrole=secret-dev\npath=/cc\nkind=code\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=-\nenrolled=-\n"
+    },
+    {
+      "fields": {
+        "enrolled": "-",
+        "kind": "code",
+        "path": "/cc",
+        "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+        "result": "-",
+        "role": "secret-dev"
+      },
+      "hmac": "vGTVcIWYYc58e6pJwQgz-FgF5WXr0lsxs-Qw3UpM5Zk",
+      "name": "secret-dev code(mc) /cc",
+      "secret": "mc",
+      "transcript": "mp-hub-auth/2\nrole=secret-dev\npath=/cc\nkind=code\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=-\nenrolled=-\n"
+    },
+    {
+      "fields": {
+        "enrolled": "1",
+        "kind": "token",
+        "path": "/cc",
+        "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+        "result": "ok",
+        "role": "secret-hub"
+      },
+      "hmac": "mf3eYwlCox2JkwiH0ugaLCJhaf_ZyKDzd8UI5EoWSnk",
+      "name": "secret-hub token(token) enrolled=1 /cc",
+      "secret": "token",
+      "transcript": "mp-hub-auth/2\nrole=secret-hub\npath=/cc\nkind=token\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=ok\nenrolled=1\n"
+    },
+    {
+      "fields": {
+        "enrolled": "0",
+        "kind": "token",
+        "path": "/cc",
+        "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+        "result": "ok",
+        "role": "secret-hub"
+      },
+      "hmac": "GNmly0AnLXDW8QIsTdx_2xNUuVFn2h5n_8Pa0G7aq18",
+      "name": "secret-hub token(token) enrolled=0 /cc",
+      "secret": "token",
+      "transcript": "mp-hub-auth/2\nrole=secret-hub\npath=/cc\nkind=token\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=ok\nenrolled=0\n"
+    },
+    {
+      "fields": {
+        "enrolled": "1",
+        "kind": "code",
+        "path": "/cc",
+        "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+        "result": "ok",
+        "role": "secret-hub"
+      },
+      "hmac": "XI6GahuHAjcbGs4FUsJ0mUO9ul-Yiyn8I6PMYxPHimI",
+      "name": "secret-hub code(pc) enrolled=1 /cc",
+      "secret": "pc",
+      "transcript": "mp-hub-auth/2\nrole=secret-hub\npath=/cc\nkind=code\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=ok\nenrolled=1\n"
+    },
+    {
+      "fields": {
+        "enrolled": "1",
+        "kind": "code",
+        "path": "/cc",
+        "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+        "result": "ok",
+        "role": "secret-hub"
+      },
+      "hmac": "tse4qNBg8xj93PB6ppqh5TucPg3scL6BvfpoPzjUwgA",
+      "name": "secret-hub code(mc) enrolled=1 /cc",
+      "secret": "mc",
+      "transcript": "mp-hub-auth/2\nrole=secret-hub\npath=/cc\nkind=code\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=ok\nenrolled=1\n"
+    },
+    {
+      "fields": {
+        "enrolled": "-",
+        "kind": "token",
+        "path": "/agora",
+        "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+        "result": "-",
+        "role": "secret-dev"
+      },
+      "hmac": "FiaabudNj8Xl45qlA2OD29VOaVsOIWTpRz3g8-GhgXA",
+      "name": "secret-dev token /agora",
+      "secret": "token",
+      "transcript": "mp-hub-auth/2\nrole=secret-dev\npath=/agora\nkind=token\nhub_id=a1b7a006-9ae9-489d-b16a-7a7c7f216415\nhub_key=yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE\ndevice_id=UxFUCx4Iz5WDkIt8CIAahE\npub=MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg\ncn=w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps\nsn=Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc\naud=hub.example.test:7890\nresult=-\nenrolled=-\n"
+    }
+  ],
+  "conn": {
+    "aud": "hub.example.test:7890",
+    "cn": "w21nQv056Jw5USKTD-EbLBIaDFSXSGn_KXYn-Mkdcps",
+    "sn": "Fw4S4RT_Pe_YA9RakzjCo8NmYVrcOaLDILDISDh8Tvc"
+  },
+  "device": {
+    "did": "UxFUCx4Iz5WDkIt8CIAahE",
+    "pkcs8_pem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgvGkDA53q6VfqX8vm\nNkrAKC5x4rceRmNX/M5HUKZfSbKhRANCAAQ429Bl8Xw7a1hh6L3BwNgHIj0utjzT\nm319gPa9mkvQxzdvCt5lBrvce9DGQm8nad0BQqcrPT/y+Uid+MQOTWhm\n-----END PRIVATE KEY-----\n",
+    "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEONvQZfF8O2tYYei9wcDYByI9LrY805t9fYD2vZpL0Mc3bwreZQa73HvQxkJvJ2ndAUKnKz0_8vlInfjEDk1oZg",
+    "raw_priv": "vGkDA53q6VfqX8vmNkrAKC5x4rceRmNX_M5HUKZfSbI"
+  },
+  "hub": {
+    "hk": "yqfWMbF08PFT8WkBJrjtW6FQ7Fi_tDUeqvF_n1bhafE",
+    "hub_id": "a1b7a006-9ae9-489d-b16a-7a7c7f216415",
+    "pkcs8_pem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgETtwfYrVLPJi3Mfa\n5MELr5WUiyQENCajNmuO9IRgo9ChRANCAAQV4bFWJWRLzjUEYBx85aj1xRGouj0e\ngeuPpweFUqvKPFLWXPlm+xPBkzU4NDZPoJAE+8Jmh2VAVWL98fkenQZN\n-----END PRIVATE KEY-----\n",
+    "pub": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFeGxViVkS841BGAcfOWo9cURqLo9HoHrj6cHhVKryjxS1lz5ZvsTwZM1ODQ2T6CQBPvCZodlQFVi_fH5Hp0GTQ"
+  },
+  "secrets": {
+    "mc_display": "Q10Z1-0KH7M",
+    "mc_secret": "Q10Z10KH7M",
+    "mc_typed": [
+      " q1oz l-oKh7m ",
+      "Q1OZL0KH7M",
+      "qioz1-0kh7m"
+    ],
+    "pc": "7G2gfkj0WQVPmyeky86LmTEYR8dHc2n64ZV4kxaWOhI",
+    "token": "  fixture-口令-T1gsKGybKmY3 \t",
+    "token_secret": "fixture-口令-T1gsKGybKmY3"
+  }
+}

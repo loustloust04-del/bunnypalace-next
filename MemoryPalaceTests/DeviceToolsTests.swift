@@ -69,7 +69,7 @@ final class DeviceToolsTests: XCTestCase {
     func testNewDomainsDefaultOff() {
         for d in [PermissionDomain.calendar, .reminders, .clipboard, .notifications] {
             UserDefaults.standard.removeObject(forKey: d.storageKey)
-            XCTAssertEqual(PermissionCenter.level(d), .notAllowed, "\(d) 新能力默认关")
+            XCTAssertEqual(PermissionCenter.defaultLevel(d), .notAllowed, "\(d) 新能力默认关")
         }
     }
 
@@ -95,14 +95,31 @@ final class DeviceToolsTests: XCTestCase {
                 if let legacy { UserDefaults.standard.set(legacy, forKey: d.legacy.key) } else { UserDefaults.standard.removeObject(forKey: d.legacy.key) }
             }
         }
-        for d in domains { PermissionCenter.setLevel(.bypass, for: d) }
+        for d in domains { PermissionCenter.setDefaultLevel(.bypass, for: d) }
         let on = ToolRegistry.enabledDefinitions(.init(family: .openAI, deferMCP: false)).map(\.name)
         for n in names { XCTAssertTrue(on.contains(n), "\(n) 应在注册表下发") }
         // 域关掉 → 该域工具不下发，其它域不受影响
-        PermissionCenter.setLevel(.notAllowed, for: .calendar)
+        PermissionCenter.setDefaultLevel(.notAllowed, for: .calendar)
         let off = ToolRegistry.enabledDefinitions(.init(family: .openAI, deferMCP: false)).map(\.name)
         XCTAssertFalse(off.contains("calendar_query"))
         XCTAssertTrue(off.contains("reminders_query"))
+    }
+
+    /// atrium P3⑤0：按 ctx.profileId 那一层下发——默认允许、A 层不允许、B 层跟默认
+    @MainActor
+    func testRegistryFollowsFloor() {
+        let sandbox = PermissionSandbox()
+        defer { sandbox.leave() }
+        PermissionCenter.setDefaultLevel(.bypass, for: .calendar)
+        PermissionCenter.setFloorLevel(.notAllowed, for: .calendar, profileId: "xctest-a")
+        let ctxA = ToolGateContext(family: .openAI, deferMCP: false, profileId: "xctest-a")
+        let ctxB = ToolGateContext(family: .openAI, deferMCP: false, profileId: "xctest-b")
+        let namesA = ToolRegistry.enabledDefinitions(ctxA).map(\.name)
+        let namesB = ToolRegistry.enabledDefinitions(ctxB).map(\.name)
+        XCTAssertFalse(namesA.contains { $0.hasPrefix("calendar_") })
+        XCTAssertTrue(namesB.contains("calendar_query"))
+        XCTAssertEqual(ToolRegistry.availability(of: "calendar_query", ctxA), false)
+        XCTAssertEqual(ToolRegistry.availability(of: "calendar_query", ctxB), true)
     }
 
     // MARK: envelope

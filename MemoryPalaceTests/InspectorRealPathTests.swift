@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -16,6 +17,7 @@ final class InspectorRealPathTests: XCTestCase {
     private func make(_ s: PromptScenario) async throws -> PromptRealPathHarness {
         let h = try await PromptRealPathHarness.make(s)
         harness = h
+        h.overrideDefault(RecallTuningStore.storageKey, try JSONEncoder().encode([h.profile.id: RecallTestTuning.make()]))
         return h
     }
 
@@ -50,6 +52,192 @@ final class InspectorRealPathTests: XCTestCase {
 
     func testG3PreviewEqualsSend() async throws {
         try await assertPreviewEqualsSend(PromptScenario(name: "G3-cache-friendly", cacheFriendly: true))
+    }
+
+    /// ⑤-1 P2-b r2：来源窗已删 / 关参与的碎片不进实发；预览 = 实发。
+    /// 走真实 VM → composePrompt 接线（单测只测 `roundInputs`，删掉这里任何一处传参都得红）
+    func testHiddenSourceWindowFragmentsNeverReachSend() async throws {
+        let h = try await make(PromptScenario(name: "hidden-source-windows"))
+        // 走「触发关」的全量注入路径（非钉住碎片才会进 X 来源）；trigger 开时由 recall 选择，
+        // 与这段要测的过滤接线无关
+        var tuning = RecallTestTuning.make()
+        tuning.archiveTriggerEnabled = false
+        h.overrideDefault(RecallTuningStore.storageKey, try JSONEncoder().encode([h.profile.id: tuning]))
+        func window(_ id: String, enabled: Bool = true, trashed: Bool = false) {
+            let c = Conversation(id: id, title: "窗口\(id)", createTime: Date(timeIntervalSince1970: 1),
+                                 updateTime: Date(timeIntervalSince1970: 1), currentNodeId: "", provider: "api",
+                                 profileId: h.profile.id)
+            c.memoryEnabled = enabled
+            c.isTrashed = trashed
+            h.context.insert(c)
+        }
+        window("xctest-source-open")
+        window("xctest-source-off", enabled: false)
+        window("xctest-source-trash", trashed: true)
+        let store = SwiftDataMemoryStore()
+        for (content, source) in [("开着的来源窗碎片", "xctest-source-open"),
+                                  ("关参与的来源窗碎片", "xctest-source-off"),
+                                  ("回收站的来源窗碎片", "xctest-source-trash")] {
+            let m = try store.add(content: content, category: "event", keywords: [], profileId: h.profile.id,
+                                  isUserExplicit: false, extractedBy: "t", sourceConversationId: source, context: h.context)
+            m.occurredDay = "2026-11-01"
+            m.reviewedAt = Date()
+        }
+        try h.context.save()
+        // 前两轮发送留下的 recall 回执（user / assistant 节点都可能有）会带旧 tuning（trigger 开）覆盖本场景设置
+        for node in h.viewModel.currentPath { node.recallReceipt = nil }
+        try h.context.save()
+
+        let turn = try preview(h)
+        let previewBody = try XCTUnwrap(turn.requestBody(providerManager: h.providerManager), "预览没出 body")
+        let sent = try await h.regenerateCapturingBody()
+        XCTAssertEqual(try h.canonical(previewBody), try h.canonical(sent), "预览 body ≠ 实发 body")
+
+        for body in [previewBody, sent] {
+            let text = try h.canonical(body)
+            XCTAssertTrue(text.contains("开着的来源窗碎片"), "开着的来源窗碎片照带")
+            XCTAssertFalse(text.contains("关参与的来源窗碎片"), "关参与来源窗的碎片不带")
+            XCTAssertFalse(text.contains("回收站的来源窗碎片"), "回收站来源窗的碎片不带")
+        }
+        // 门控快照：挡掉的条数进账（关参与 + 回收站各一条候选），预览 = 实发
+        XCTAssertEqual(turn.delivery.gate.hiddenFragments, 2, "被来源窗挡掉的碎片候选")
+        XCTAssertEqual(turn.delivery.gate.hiddenTimeline, 0)
+        let assistant = try XCTUnwrap(h.viewModel.currentPath.last { $0.role == "assistant" })
+        XCTAssertEqual(assistant.recallReceipt?.delivery?.gate, turn.delivery.gate, "实发回执同口径")
+    }
+
+    /// P2-b：检查器带的那份 delivery = 实发写进回执的那份（send / preview 同一个 `MemoryDelivery.build`）
+    func testPreviewDeliveryEqualsSendDelivery() async throws {
+        let h = try await make(PromptScenario(name: "delivery-preview"))
+        let turn = try preview(h)
+        let before = try XCTUnwrap(h.viewModel.currentPath.last { $0.role == "assistant" })
+        _ = try await h.regenerateCapturingBody()
+        let regenerated = try XCTUnwrap(h.viewModel.currentPath.last { $0.role == "assistant" })
+        XCTAssertNotEqual(regenerated.id, before.id)
+        let receipt = try XCTUnwrap(regenerated.recallReceipt)
+        XCTAssertEqual(turn.delivery, receipt.delivery, "预览 delivery ≠ 实发 delivery")
+        XCTAssertFalse(turn.delivery.items.isEmpty, "这场景至少有时间轴 / A2 / 碎片")
+        XCTAssertTrue(turn.delivery.gate.participates)
+    }
+
+    /// 直接读 A2 的生产输入；C2 当前消费同一输入并只排除 agentOrigin，保持写手算法不变。
+    func testRecallInjectionNeverEntersA2OrC2ExtractionInput() async throws {
+        let h = try await make(PromptScenario(name: "recall-extraction-input", memoryFixtures: false))
+        let users = h.viewModel.currentPath.filter { $0.role == "user" }
+        try XCTUnwrap(users.first).content = "星砚今天在云桥城"
+        try XCTUnwrap(users.last).content = "星砚想聊林栖周末在云桥城的安排"
+        // 原节点已换成新文本，不复用搭夹具时「第二条」的失败发送决策。
+        for user in users { user.recallReceipt = nil }
+        let assistant = try XCTUnwrap(h.viewModel.currentPath.first { $0.role == "assistant" })
+        assistant.content = "岚舟的真实答复"
+        assistant.setSegments([
+            .toolUse(id: "recall-smoke", name: RecallTool.toolName, inputJSON: #"{"query":"工具参数专属：林栖"}"#, integrationName: nil, iconName: nil),
+            .toolResult(toolUseId: "recall-smoke", text: "工具原文专属：林栖旧资料", isError: false, integrationName: nil),
+            .text("岚舟的真实答复")
+        ])
+        h.a2.content = "岚舟自主任务专属消息"
+        h.a2.agentOrigin = "recall-smoke-agent"
+        try h.context.save()
+        try await h.seedWiki([WikiPage(path: "人/林栖", hook: "记忆钩子专属：云桥城朋友",
+                                       title: "林栖", now: "记忆载荷专属：周末约定")])
+        let warmed = try await WikiInjectionCache.shared.warm(h.profile.id, WikiInjectionCache.source(profileId: h.profile.id))
+        let original = PromptAssembler.historyNodes(h.viewModel.currentPath)
+            .filter { $0.role == "user" || $0.role == "assistant" }.map { ($0.id, $0.content) }
+        for cache in [false, true] {
+            var preset = h.preset
+            preset.sampling.cacheFriendly = cache
+            for idx in preset.prompts.indices where preset.prompts[idx].id == PromptSlot.memoryInjectionId {
+                preset.prompts[idx].role = "user"
+                preset.prompts[idx].injectionPosition = .absolute
+                preset.prompts[idx].injectionDepth = 0
+            }
+            let composed = h.viewModel.composePrompt(profile: h.profile, preset: preset, excludingNodeId: nil,
+                                                      context: h.context, globalEntries: [], fileLibraryHint: nil,
+                                                      mode: .preview, warmedWiki: warmed)
+            XCTAssertTrue(composed.segments.contains { $0.source == .memory && $0.content.contains("记忆载荷专属") },
+                          "先证明本轮真的组装了记忆，不以空注入通过不回流测试")
+            let a2 = h.viewModel.sessionMessages()
+            let agentIds = Set(h.viewModel.currentPath.filter { $0.agentOrigin != nil }.map(\.id))
+            // 与 extractMemoriesIfNeeded 的现有 C2 入口完全相同，不启动写手或模型。
+            let c2 = a2.filter { !agentIds.contains($0.id) }
+            XCTAssertEqual(a2.map(\.id), original.map(\.0))
+            XCTAssertEqual(c2.map(\.id), original.map(\.0).filter { !agentIds.contains($0) })
+            XCTAssertTrue(a2.contains { $0.id == h.a2.id })
+            XCTAssertFalse(c2.contains { $0.id == h.a2.id })
+            XCTAssertEqual(a2.first { $0.id == assistant.id }?.content, "[调用了 recall]\n岚舟的真实答复")
+            XCTAssertEqual(c2.first { $0.id == assistant.id }?.content, "[调用了 recall]\n岚舟的真实答复")
+            for input in [a2, c2] {
+                let text = input.map(\.content).joined(separator: "\n")
+                XCTAssertTrue(text.contains("星砚想聊林栖周末在云桥城的安排"))
+                XCTAssertTrue(text.contains("岚舟的真实答复"))
+                XCTAssertTrue(text.contains("[调用了 recall"), "工具只保留生产中性动作")
+                for excluded in ["记忆载荷专属", "记忆钩子专属", "工具原文专属", "工具参数专属"] {
+                    XCTAssertFalse(text.contains(excluded), excluded)
+                }
+            }
+            XCTAssertEqual(PromptAssembler.historyNodes(h.viewModel.currentPath)
+                .filter { $0.role == "user" || $0.role == "assistant" }.map(\.content), original.map(\.1), "出口组装不改写真实节点")
+        }
+    }
+
+    /// 走真实 VM → router → provider.sendStreaming → RequestBodyTap，而非仅对 buildRequestBody 的替代输入断言。
+    func testRecallMemoryIsSystemOnActualSendAcrossCacheRolesAndProviders() async throws {
+        for provider in [ProviderType.openaiCompatible, .anthropic] {
+            for cache in [false, true] {
+                let h = try await make(PromptScenario(name: "recall-real-wire-\(provider)-\(cache)",
+                                                      profileId: "xctest-recall-wire", providerType: provider,
+                                                      cacheFriendly: cache, memoryFixtures: false))
+                try await h.seedWiki([WikiPage(path: "人/林栖", hook: "岚舟记忆钩子专属",
+                                               title: "林栖", now: "云桥城记忆载荷专属")])
+                var worldBook = WorldBookEntry()
+                worldBook.keys = ["林栖"]
+                worldBook.content = "星砚世界书动态专属"
+                h.viewModel.globalWorldBookEntries = [worldBook]
+                for role in ["user", "assistant"] {
+                    for depth in [0, 1] {
+                        var preset = h.preset
+                        for index in preset.prompts.indices where preset.prompts[index].id == PromptSlot.memoryInjectionId {
+                            preset.prompts[index].role = role
+                            preset.prompts[index].injectionPosition = .absolute
+                            preset.prompts[index].injectionDepth = depth
+                        }
+                        var captured: [String: Any]?
+                        RequestBodyTap.handler = { captured = $0 }
+                        let submitted = h.viewModel.sendMessage("星砚想聊林栖在云桥城的安排", model: h.model,
+                                                                profile: h.profile, preset: preset,
+                                                                providerManager: h.providerManager, context: h.context)
+                        XCTAssertTrue(submitted)
+                        await waitUntil("provider 未构造真实发送 body") { captured != nil }
+                        h.viewModel.cancelAssistantTurn(context: h.context)
+                        await h.waitForTurn()
+                        RequestBodyTap.handler = nil
+                        let body = try XCTUnwrap(captured, "真实发送没有构造 body")
+                        func text(_ message: [String: Any]) -> String {
+                            if let content = message["content"] as? String { return content }
+                            return (message["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
+                        }
+                        let messages = body["messages"] as? [[String: Any]] ?? []
+                        let topSystem = (body["system"] as? String)
+                            ?? (body["system"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
+                        let system = ([topSystem] + messages.filter { $0["role"] as? String == "system" }.map(text)).joined(separator: "\n")
+                        let nonSystem = messages.filter { $0["role"] as? String != "system" }.map(text).joined(separator: "\n")
+                        for payload in ["[[人/林栖]]", "岚舟记忆钩子专属", "云桥城记忆载荷专属"] {
+                            XCTAssertTrue(system.contains(payload), "provider=\(provider), cache=\(cache), role=\(role), depth=\(depth)：\(payload)")
+                            XCTAssertFalse(nonSystem.contains(payload), payload)
+                        }
+                        if cache {
+                            XCTAssertTrue(nonSystem.contains(worldBook.content), "世界书仍走非记忆动态策略")
+                            XCTAssertFalse(system.contains(worldBook.content))
+                        }
+                        let persisted = h.viewModel.currentPath.map(\.content).joined(separator: "\n")
+                        XCTAssertFalse(persisted.contains("岚舟记忆钩子专属"))
+                        XCTAssertFalse(persisted.contains("云桥城记忆载荷专属"))
+                    }
+                }
+                await h.tearDown()
+                harness = nil
+            }
+        }
     }
 
     func testG4PreviewEqualsSend() async throws {
@@ -101,10 +289,24 @@ final class InspectorRealPathTests: XCTestCase {
         MemoryInjectionMeter.clear(profileId: h.profile.id)   // 搭夹具时发过两轮（那时还没放记忆文件）
         _ = try preview(h)
         XCTAssertNil(MemoryInjectionMeter.load(profileId: h.profile.id), "预览不记账")
-        let sent = try await h.regenerateCapturingBody()
+        // 回执归新回复自己的节点；请求失败时占位节点会被删掉，所以在建 body 那一刻取（= 组装时算好的那份）
+        var captured: [String: Any]?
+        var capturedRecord: MemoryInjectionRecord?
+        RequestBodyTap.handler = { body in
+            captured = body
+            capturedRecord = h.viewModel.currentPath.last { $0.role == "assistant" }?.recallReceipt?.injectionRecord
+        }
+        defer { RequestBodyTap.handler = nil }
+        h.viewModel.regenerate(assistantNodeId: h.a2.id, model: h.model, profile: h.profile,
+                               preset: h.preset, providerManager: h.providerManager, context: h.context)
+        let deadline = Date().addingTimeInterval(5)
+        while captured == nil, Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        await h.waitForTurn()
+        let sent = try XCTUnwrap(captured, "实发没有建 body")
         let text = String(decoding: try JSONSerialization.data(withJSONObject: sent), as: UTF8.self)
             .replacingOccurrences(of: "\\n", with: "\n")
-        let rec = try XCTUnwrap(MemoryInjectionMeter.load(profileId: h.profile.id))
+        let rec = try XCTUnwrap(capturedRecord)
+        XCTAssertNil(MemoryInjectionMeter.load(profileId: h.profile.id), "没有有效响应，Meter 还不该写")
         let other = PromptRealPathHarness.otherWindowId
         XCTAssertEqual(rec.timelineKeys, ["2026-10-08", "2026-10-09", "2026-10-10", "2026-10-10|\(other)"])
         XCTAssertEqual(rec.contextKeys, ["\(conv.prefix(8))|\(PromptRealPathHarness.goneNodeId)"])
@@ -124,7 +326,7 @@ final class InspectorRealPathTests: XCTestCase {
             let composed = h.viewModel.composePrompt(profile: h.profile, preset: preset, excludingNodeId: h.a2.id, context: h.context,
                                                      globalEntries: h.viewModel.globalWorldBookEntries, fileLibraryHint: nil, mode: .send)
             XCTAssertEqual(composed.segments.contains { $0.source == .timeline }, preset.prompts.contains { $0.id == PromptSlot.timelineId && $0.isEnabled })
-            return MemoryInjectionMeter.load(profileId: h.profile.id)?.timelineKeys
+            return h.a2.recallReceipt?.injectionRecord?.timelineKeys
         }
         XCTAssertEqual(send(h.preset)?.count, 4, "插槽开着：三天的行 + 10 号那条老条目都记")
         var disabled = h.preset
@@ -222,7 +424,7 @@ final class InspectorRealPathTests: XCTestCase {
         let sent = try await h.regenerateCapturingBody()
         XCTAssertEqual(try h.canonical(previewBody), try h.canonical(sent), "抽屉改过：预览 body ≠ 实发 body")
         // 抽屉页顶部数字（previewTools）和实发记下的工具签名同源
-        let drawerPreview = try XCTUnwrap(h.viewModel.previewTools(providerManager: h.providerManager, globalModelId: nil))
+        let drawerPreview = try XCTUnwrap(h.viewModel.previewTools(providerManager: h.providerManager, profileModelId: nil, globalModelId: nil))
         let convId = try XCTUnwrap(h.viewModel.selectedConversation?.id)
         XCTAssertEqual(drawerPreview.signature, ToolDrawerStore.shared.sentSignature(conversationId: convId))
         XCTAssertEqual(drawerPreview.toolCount, (sent["tools"] as? [Any])?.count)
@@ -281,11 +483,27 @@ final class InspectorRealPathTests: XCTestCase {
         }
     }
 
-    func testDrawerAllOffSendsNoToolHints() async throws {
-        let (h, sent) = try await toolsOffScenario("T-drawer-all-off") { _ in drawerAllOff() }
-        XCTAssertNil(sent["tools"])
-        let text = try h.canonical(sent)
-        for marker in Self.toolHintMarkers { XCTAssertFalse(text.contains(marker), "抽屉全关还带着 \(marker)") }
+    func testDrawerAllOffRetainsOnlyTurnStatus() async throws {
+        let (_, sent) = try await toolsOffScenario("T-drawer-all-off") { _ in drawerAllOff() }
+        XCTAssertEqual(toolNames(sent), [TurnStatusTool.toolName])
+    }
+
+    /// atrium P3⑤0：健康手账约定段（文件库段里）按这个对话所在的层读体重档位——默认不允许、本层允许才带；
+    /// 别的层单独允许不影响这一层。预览 = 实发同一份组装，这里只看预览
+    func testHealthLogHintFollowsFloor() async throws {
+        let h = try await make(PromptScenario(name: "perm-floor-health-hint", voiceHint: false, memoryFixtures: false))
+        h.context.insert(WeightEntry(profileId: h.profile.id, date: Date(), weightKg: 52.0))
+        try h.context.save()
+        XCTAssertEqual(PermissionCenter.defaultLevel(.healthWeight), .notAllowed)
+        func hasHint() throws -> Bool {
+            let body = try XCTUnwrap(try preview(h).requestBody(providerManager: h.providerManager))
+            return try h.canonical(body).contains("```health-log")
+        }
+        XCTAssertFalse(try hasHint(), "默认不允许")
+        PermissionCenter.setFloorLevel(.bypass, for: .healthWeight, profileId: "xctest-perm-other-floor")
+        XCTAssertFalse(try hasHint(), "别的层允许不串过来")
+        PermissionCenter.setFloorLevel(.bypass, for: .healthWeight, profileId: h.profile.id)
+        XCTAssertTrue(try hasHint(), "本层单独允许")
     }
 
     func testToolsMasterOffSendsNoToolHints() async throws {
@@ -297,17 +515,10 @@ final class InspectorRealPathTests: XCTestCase {
         for marker in Self.toolHintMarkers { XCTAssertFalse(text.contains(marker), "总开关关了还带着 \(marker)") }
     }
 
-    func testOnlyTwoToolsOnlyTheirHints() async throws {
+    func testOnlySelectedDrawerToolsAndTurnStatusAreSent() async throws {
         let kept: Set<String> = [FileLibraryTools.Name.read.rawValue, OCRImageTool.toolName]
-        let (h, sent) = try await toolsOffScenario("T-two-tools") { _ in drawerAllOff(except: kept) }
-        XCTAssertEqual(toolNames(sent), kept)
-        let text = try h.canonical(sent, droppingTools: true)   // 只看说明，不看工具定义本身
-        XCTAssertTrue(text.contains("<文件库>"), "fs_read 开着，文件库说明要在")
-        XCTAssertTrue(text.contains("<设备>") && text.contains("识别图片文字（ocr_image）"))
-        for absent in ["calendar_*", "reminders_*", "clipboard_read", "notify_schedule", "open_url", "device_info", "<命令>", "〔回忆〕",
-                       "〔我的记忆〕", "〔更多工具〕", "[聊天卡片]"] {
-            XCTAssertFalse(text.contains(absent), "只开两个还带着 \(absent)")
-        }
+        let (_, sent) = try await toolsOffScenario("T-two-tools") { _ in drawerAllOff(except: kept) }
+        XCTAssertEqual(toolNames(sent), kept.union([TurnStatusTool.toolName]))
     }
 
     /// card_guide 开着、roll_dice / ask_user 关着：卡片目录还在，但不再提那两个工具
@@ -338,16 +549,21 @@ final class InspectorRealPathTests: XCTestCase {
         XCTAssertEqual(messages.last?["role"] as? String, "user")
     }
 
-    func testWikiWindowIgnoresPreviewAndTriggerSyntheticMessages() async throws {
+    func testWikiNewTopicIgnoresPreviousTopicAndSyntheticMessages() async throws {
         let h = try await make(PromptScenario(name: "wiki-synthetic"))
         let oldest = try XCTUnwrap(h.viewModel.currentPath.first { $0.role == "user" })
-        oldest.content = "聊月光书店"
-        h.a2.content = "<think>思考专属词</think>[thinking]思考专属词[/thinking]回复二"
+        oldest.content = "岚舟刚才提到云桥城"
+        let latest = try XCTUnwrap(h.viewModel.currentPath.last { $0.role == "user" })
+        latest.content = "星砚想了解林栖的周末安排"
+        // 这些真实消息替换了 harness 的短句，不能复用原来短句的已存决策。
+        for node in h.viewModel.currentPath { node.recallReceipt = nil }
+        h.a2.content = "<think>思考专属词</think>[thinking]思考专属词[/thinking]岚舟回复二"
         try await h.seedWiki([
-            WikiPage(path: "楼层/月光书店", title: "月光书店", now: "第四条真实消息命中。"),
-            WikiPage(path: "楼层/占位", triggers: ["你的下一条消息"], title: "占位", now: "占位文案不该触发。"),
-            WikiPage(path: "楼层/卡片", triggers: ["卡片里有新动作"], title: "卡片", now: "卡片文案不该触发。"),
-            WikiPage(path: "楼层/思考", triggers: ["思考专属词"], title: "思考", now: "思考文案不该触发。"),
+            WikiPage(path: "人/林栖", title: "林栖", now: "本轮真实用户消息命中。"),
+            WikiPage(path: "主题/云桥城", title: "云桥城", now: "旧话题不该触发。"),
+            WikiPage(path: "主题/占位", triggers: ["你的下一条消息"], title: "占位", now: "占位文案不该触发。"),
+            WikiPage(path: "主题/卡片", triggers: ["卡片里有新动作"], title: "卡片", now: "卡片文案不该触发。"),
+            WikiPage(path: "主题/思考", triggers: ["思考专属词"], title: "思考", now: "思考文案不该触发。"),
         ])
         let warmed = try await WikiInjectionCache.shared.warm(h.profile.id, WikiInjectionCache.source(profileId: h.profile.id))
         for cacheFriendly in [false, true] {
@@ -358,7 +574,10 @@ final class InspectorRealPathTests: XCTestCase {
                                                        context: h.context, globalEntries: [], fileLibraryHint: nil, mode: mode,
                                                        warmedWiki: mode == .send ? warmed : nil)
                 let text = prompt.segments.map(\.content).joined(separator: "\n")
-                XCTAssertTrue(text.contains("现在：第四条真实消息命中。"), "不能让合成消息挤掉倒数第四条")
+                XCTAssertEqual(prompt.recallDecision.gateReason, .search)
+                XCTAssertEqual(prompt.recallDecision.selected.map(\.source.path), ["人/林栖"])
+                XCTAssertTrue(text.contains("现在：本轮真实用户消息命中。"), "补合成 user 不能覆盖本轮真实用户查询")
+                XCTAssertFalse(text.contains("现在：旧话题不该触发。"), "新话题下界不回扫倒数第四条")
                 XCTAssertFalse(text.contains("现在：占位文案不该触发。"))
                 XCTAssertFalse(text.contains("现在：卡片文案不该触发。"))
                 XCTAssertFalse(text.contains("现在：思考文案不该触发。"))
@@ -368,23 +587,57 @@ final class InspectorRealPathTests: XCTestCase {
 
     func testRegenerateWarmsInvalidatedWikiBeforeRequest() async throws {
         let h = try await make(PromptScenario(name: "wiki-regenerate", cacheFriendly: true))
-        try await h.seedWiki([])
+        try await h.seedWiki([WikiPage(path: "人/林栖", title: "林栖", now: "在云桥城筹备合成展览。")])
+        let conversation = try XCTUnwrap(h.viewModel.selectedConversation)
+        let user = try XCTUnwrap(h.viewModel.currentPath.last { $0.role == "user" })
+        user.content = "星砚想聊林栖在云桥城的安排"
+        let warmed = try await WikiInjectionCache.shared.warm(h.profile.id, WikiInjectionCache.source(profileId: h.profile.id))
+        var tuning = RecallTestTuning.make()
+        tuning.maximumPages = 2
+        let anchor = conversation.recallState.branchAnchor.isEmpty ? conversation.id : conversation.recallState.branchAnchor
+        let prior = RecallSelection.prepare(
+            profile: h.profile, conversationId: conversation.id, turnId: user.id, branchAnchor: anchor,
+            text: user.content, state: .init(), existingDecision: nil,
+            inputs: .init(memories: [], selfMemory: nil, archiveBudget: 5_000, wiki: warmed.snapshot),
+            recentMessages: [user.content], now: MemoryClock.now, tuning: tuning).decision
+        XCTAssertEqual(prior.selected.map(\.source.path), ["人/林栖"])
+        user.recallReceipt = RecallTurnReceipt(decision: prior)
+        h.a2.recallReceipt = RecallTurnReceipt(decision: prior)
+        try h.context.save()
+
         let wiki = await Task.detached { WikiStore(profileId: h.profile.id) }.value
-        let a1 = try XCTUnwrap(h.viewModel.currentPath.first { $0.role == "assistant" })
-        a1.content = "谈到月光书店"
-        try wiki.save(WikiPage(path: "楼层/月光书店", title: "月光书店", now: "新开的书店。"))
+        try wiki.save(WikiPage(path: "主题/云桥城", hook: "岚舟新增目录标记", title: "云桥城", now: "重生成不应新增选页。"))
         try wiki.rebuildAllIndexes()
-        let body = try await h.regenerateCapturingBody()
-        let text = try h.canonical(body)
+        var captured: [String: Any]?
+        var freshWhenRequestBuilt = false
+        var replayDecision: RecallTurnDecision?
+        RequestBodyTap.handler = {
+            captured = $0
+            freshWhenRequestBuilt = WikiInjectionCache.shared.isFresh(h.profile.id)
+            replayDecision = h.viewModel.currentPath.last { $0.role == "assistant" }?.recallReceipt?.decision
+        }
+        defer { RequestBodyTap.handler = nil }
+        h.viewModel.regenerate(assistantNodeId: h.a2.id, model: h.model, profile: h.profile, preset: h.preset,
+                               providerManager: h.providerManager, context: h.context)
+        await h.waitForTurn()
+        let text = try h.canonical(XCTUnwrap(captured))
+        XCTAssertTrue(freshWhenRequestBuilt, "请求组装前必须 warm 被作废的 wiki")
         XCTAssertTrue(text.contains("[C 档案 · 索引]"))
-        XCTAssertTrue(text.contains("现在：新开的书店。"))
+        XCTAssertTrue(text.contains("岚舟新增目录标记"), "根索引使用刚 warm 的新快照")
+        XCTAssertTrue(text.contains("现在：在云桥城筹备合成展览。"), "同版原选页仍可复用")
+        XCTAssertFalse(text.contains("现在：重生成不应新增选页。"), "重生成不因新索引重搜同轮")
+        let replay = try XCTUnwrap(replayDecision)
+        XCTAssertEqual(replay.origin, .continuation)
+        XCTAssertEqual(replay.turnId, prior.turnId)
+        XCTAssertEqual(replay.selected, prior.selected)
+        XCTAssertEqual(replay.tuning, tuning)
     }
 
     func testEditResendWarmsInvalidatedWikiBeforeRequest() async throws {
         let h = try await make(PromptScenario(name: "wiki-edit", cacheFriendly: true))
         try await h.seedWiki([])
         let wiki = await Task.detached { WikiStore(profileId: h.profile.id) }.value
-        try wiki.save(WikiPage(path: "楼层/月光书店", title: "月光书店", now: "编辑重发用的新页。"))
+        try wiki.save(WikiPage(path: "主题/月光书店", title: "月光书店", now: "编辑重发用的新页。"))
         try wiki.rebuildAllIndexes()
         let user = try XCTUnwrap(h.viewModel.currentPath.last { $0.role == "user" })
         var captured: [String: Any]?
@@ -632,6 +885,29 @@ final class InspectorRealPathTests: XCTestCase {
             session.invalidateAndCancel()
             UserDefaults.standard.removePersistentDomain(forName: suite)
         }
+    }
+
+    func testCCSendPersistsNoInjectionReceiptAndMeterAgrees() async throws {
+        let h = try await make(PromptScenario(name: "recall-cc-receipt", profileId: "xctest-岚舟-\(UUID().uuidString)",
+                                              voiceHint: false, memoryFixtures: false))
+        let cc = h.addCard(type: .ccBridge, modelId: "xctest-cc-receipt")
+        let wire = CCWire()
+        defer { wire.close(); MemoryInjectionMeter.clear(profileId: h.profile.id) }
+        try await wire.waitUntilConnected()
+        h.viewModel.ccBridgeClient = wire.client
+        XCTAssertTrue(h.viewModel.sendMessage("林栖在云桥城的地图计划怎样了？", model: cc, profile: h.profile,
+                                              preset: h.preset, providerManager: h.providerManager, context: h.context))
+        await waitUntil("CC send frame must be handed to its transport") { wire.frames.count == 1 }
+        let user = try XCTUnwrap(h.viewModel.currentPath.last { $0.role == "user" })
+        try h.context.save()
+        let readback = ModelContext(h.context.container)
+        let id = user.id
+        let persisted = try XCTUnwrap(readback.fetch(FetchDescriptor<MessageNode>(predicate: #Predicate { $0.id == id })).first)
+        XCTAssertNil(try XCTUnwrap(persisted.recallReceipt).injectionRecord)
+        let meter = try XCTUnwrap(MemoryInjectionMeter.load(profileId: h.profile.id))
+        XCTAssertEqual(meter.viaCCBridge, true)
+        XCTAssertEqual(meter.tokens, 0)
+        XCTAssertEqual(meter.hitCount, 0)
     }
 
     func testCCColdCacheDoubleSendSerializesAppendWarmAssemblyAndFrames() async throws {

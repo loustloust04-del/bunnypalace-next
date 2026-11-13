@@ -40,10 +40,6 @@ final class Page2DesktopManager {
         resolve(dockToolIds, tm: tm)
     }
 
-    func isInDock(_ id: String, tm: RightPanelToolManager) -> Bool {
-        dockTools(tm).contains { $0.id == id }
-    }
-
     private func resolve(_ ids: [String]?, tm: RightPanelToolManager) -> [RightPanelTool] {
         guard let ids else { return tm.pinnedTools }
         return ids.compactMap { id in
@@ -72,43 +68,15 @@ final class Page2DesktopManager {
         setDesktop(moved(seededDesktop(tm), fromId: fromId, before: toId))
     }
 
-    // MARK: - dock 三件套
-
-    func addToDock(_ id: String, tm: RightPanelToolManager) {
-        var ids = seededDock(tm)
-        guard !ids.contains(id) else { return }
-        ids.append(id)
-        setDock(ids)
-    }
-
-    func removeFromDock(_ id: String, tm: RightPanelToolManager) {
-        var ids = seededDock(tm)
-        ids.removeAll { $0 == id }
-        setDock(ids)
-    }
-
-    func moveDock(_ fromId: String, before toId: String, tm: RightPanelToolManager) {
-        setDock(moved(seededDock(tm), fromId: fromId, before: toId))
-    }
-
     // MARK: - 播种 / 持久化
 
     private func seededDesktop(_ tm: RightPanelToolManager) -> [String] {
         desktopAppIds ?? tm.pinnedTools.map(\.id)
     }
 
-    private func seededDock(_ tm: RightPanelToolManager) -> [String] {
-        dockToolIds ?? tm.pinnedTools.map(\.id)
-    }
-
     private func setDesktop(_ ids: [String]) {
         desktopAppIds = ids
         defaults.set(ids, forKey: Self.desktopKey)
-    }
-
-    private func setDock(_ ids: [String]) {
-        dockToolIds = ids
-        defaults.set(ids, forKey: Self.dockKey)
     }
 
     private func moved(_ list: [String], fromId: String, before toId: String) -> [String] {

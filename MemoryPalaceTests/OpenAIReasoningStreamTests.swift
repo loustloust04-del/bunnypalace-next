@@ -310,7 +310,7 @@ final class OpenAIReasoningStreamTests: XCTestCase {
 /// router：这一次的思考才给（序号守卫），思考也算已输出（Q11）
 @MainActor
 final class OpenAIReasoningRouterTests: XCTestCase {
-    typealias Server = OutputTokenCapTests.ScriptedHTTPServer
+    typealias Server = ScriptedHTTPServer
 
     static let thinkingReply = OutputTokenCapTests.sse([
         #"data: {"choices":[{"delta":{"reasoning_content":"先想"}}]}"#,

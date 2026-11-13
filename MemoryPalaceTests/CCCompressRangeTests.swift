@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -85,7 +86,7 @@ final class CCCompressRangeTests: XCTestCase {
         // 补跑那次看到的是写完的状态：锚点已经到了，不再调模型
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(calls, 1)
-        XCTAssertEqual(SessionSummaryStore.load(conversationId: "conv-re", profileId: pid)?.segments.count, 1)
+        XCTAssertEqual(SessionSummaryStore.load(conversationId: "conv-re", memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))?.segments.count, 1)
     }
 }
 

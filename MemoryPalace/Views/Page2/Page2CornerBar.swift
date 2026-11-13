@@ -32,7 +32,10 @@ struct Page2CornerGesture: View {
     #endif
     /// 桌面上有后台应用时也接（⧫ 粟粟 10-11「在桌面的时候弧线也可以拉」：拉 = 进后台）
     private var active: Bool {
-        switcher == "arc" && Page2SceneState.shared.isActive && (!onDesktop || !shell.stack.openApps.isEmpty)
+        #if PERSONAL_APPS
+        if onDesktop && SkinState.shared.active { return false }
+        #endif
+        return switcher == "arc" && Page2SceneState.shared.isActive && (!onDesktop || !shell.stack.openApps.isEmpty)
             && !shell.showsSwitcher && shell.motion?.settling != true
     }
     private var onDesktop: Bool { selectedToolId == "home" }

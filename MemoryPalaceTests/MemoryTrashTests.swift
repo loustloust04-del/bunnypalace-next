@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -115,22 +116,22 @@ final class MemoryTrashTests: XCTestCase {
 
     func testSelfMemoryDeleteRemovesFileAndIndexEntry() throws {
         let keep = selfMem("留着"), gone = selfMem("要删")
-        try SelfMemoryStore.save(keep, profileId: pid)
-        try SelfMemoryStore.save(gone, profileId: pid)
-        let dir = SelfMemoryStore.directory(profileId: pid)
+        try SelfMemoryStore.save(keep, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked)
+        try SelfMemoryStore.save(gone, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked)
+        let dir = SelfMemoryStore.directory(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked)
         let index = dir.appendingPathComponent(SelfMemoryStore.indexFileName)
         XCTAssertTrue(try String(contentsOf: index, encoding: .utf8).contains(gone.fileName))
 
-        try SelfMemoryStore.delete(slug: gone.slug, profileId: pid)
+        try SelfMemoryStore.delete(slug: gone.slug, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent(gone.fileName).path))
-        XCTAssertEqual(SelfMemoryStore.list(profileId: pid).map(\.slug), [keep.slug])
+        XCTAssertEqual(SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked).map(\.slug), [keep.slug])
         let indexText = try String(contentsOf: index, encoding: .utf8)
         XCTAssertFalse(indexText.contains(gone.fileName))
         XCTAssertTrue(indexText.contains(keep.fileName))
     }
 
     func testSelfMemoryDeleteMissingThrows() {
-        XCTAssertThrowsError(try SelfMemoryStore.delete(slug: "没有这条", profileId: pid))
+        XCTAssertThrowsError(try SelfMemoryStore.delete(slug: "没有这条", memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked))
     }
 }

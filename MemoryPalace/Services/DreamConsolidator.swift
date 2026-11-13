@@ -9,11 +9,9 @@ enum DreamConsolidator {
 
     /// 设置页手动做梦用的模型解析：副模型优先，没有就用当前聊天模型
     static func resolveModel(providerManager: ProviderManager) -> ProviderModel? {
-        let extractId = UserDefaults.standard.string(forKey: "memoryExtractModelId") ?? ""
-        if !extractId.isEmpty, let m = providerManager.model(byId: extractId) { return m }
-        let chatId = UserDefaults.standard.string(forKey: "selectedChatModel") ?? ""
-        if !chatId.isEmpty, let m = providerManager.model(byId: chatId) { return m }
-        return nil
+        let d = UserDefaults.standard
+        return providerManager.sideModel(ids: [d.string(forKey: "memoryExtractModelId") ?? "",
+                                               d.string(forKey: "selectedChatModel") ?? ""])
     }
 
     // MARK: - MV1+MV5 公共毕业 helper

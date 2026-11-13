@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 import Observation

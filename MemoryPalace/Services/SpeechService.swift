@@ -1,3 +1,4 @@
+import MemoryCore
 @preconcurrency import AVFoundation
 import Foundation
 

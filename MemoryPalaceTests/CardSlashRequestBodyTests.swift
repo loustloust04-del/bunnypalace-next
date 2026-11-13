@@ -38,7 +38,8 @@ final class CardSlashRequestBodyTests: XCTestCase {
                 ordered: ordered, model: s.model, samplingParams: s.preset.sampling, tools: s.tools, toolTurns: s.toolTurns,
                 compat: ProviderOrderingScenarios.wireCompat(baseURL: s.baseURL, model: s.model, sampling: s.preset.sampling))
         }
-        return ProviderOrderingScenarios.canonicalJSON(raw)
+        return ProviderOrderingScenarios.canonicalJSON(
+            ProviderOrderingScenarios.strippingOrderedToolCacheMark(raw, scenario: s))
     }
 
     /// 末楼是纯文字用户消息的夹具（/send 只发文字）

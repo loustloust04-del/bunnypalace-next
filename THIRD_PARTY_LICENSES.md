@@ -3,7 +3,7 @@
 记忆花园 · Mneme Atrium 本身以 [AGPL-3.0](LICENSE) 发布（版权人：Mneme Atrium contributors）。下列第三方组件随 app 一起分发、在构建时链入，或有代码被改编进本仓库，各自保留原许可证。
 
 - **核对日期 2026-10-10**。Swift Package 版本以入库的 `MemoryPalace.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved` 及 `Packages/SwiftStreamingMarkdown/Package.resolved` 为准（另见 `project.yml` 的 `packages:` 段）。
-- **许可全文副本**在 `MemoryPalace/Resources/Licenses/`（字体的在 `MemoryPalace/Resources/Fonts/`），随 mac、iOS 两个 app bundle 分发；iOS 版可在「设置 › 关于 › 开源致谢」查看。
+- **许可全文副本**在 `MemoryPalace/Resources/Licenses/`（字体的也在这里，`font-*.txt`；`Resources/Fonts/IMFell-LICENSE.txt` 例外），随 mac、iOS 两个 app bundle 分发；iOS 版可在「设置 › 关于 › 开源致谢」查看。
 - **平台**列：`mac` = macOS 版（含内嵌的 `mp-code` CLI），`iOS` = iOS 版，`both` = 两者都有。
 
 ## Swift Package（静态链入 app）

@@ -7,27 +7,30 @@ struct DisclosureSheet<Content: View>: View {
     var detent: PresentationDetent = .fraction(0.72)
     /// false = 正文自己会滚（整理记录 sheet 里的原生只读文本视图），壳不再套 ScrollView
     var scrolls = true
+    /// 从聊天页打开传 `.chat`（底 + 字跟聊天主题）；别处复用保持全局
+    var scope: ThemeScope = .global
     @ViewBuilder let content: () -> Content
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(spacing: 0) {
+        let palette = scope.palette
+        return VStack(spacing: 0) {
             ZStack {
                 Text(title)
                     .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(palette.textPrimary)
                     .lineLimit(1)
                     .padding(.horizontal, 44)
                 HStack {
                     #if os(iOS)
-                    GlassBackButton(systemImage: "xmark") { dismiss() }
+                    GlassBackButton(systemImage: "xmark", foreground: scope == .chat ? palette.textSecondary : nil) { dismiss() }
                     #else
                     Button { dismiss() } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(Theme.textSecondary)
+                            .foregroundColor(palette.textSecondary)
                             .frame(width: 30, height: 30)
-                            .background(Circle().fill(Theme.accent.opacity(0.6)))
+                            .background(Circle().fill(palette.accent.opacity(0.6)))
                     }
                     .buttonStyle(.plain)
                     #endif
@@ -52,7 +55,7 @@ struct DisclosureSheet<Content: View>: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }
-        .background(Theme.mainBg)
+        .background(palette.mainBg)
         #if os(iOS)
         .presentationDetents([detent, .large])
         .presentationDragIndicator(.visible)
@@ -62,5 +65,6 @@ struct DisclosureSheet<Content: View>: View {
         // S1-5：mac 的 sheet 不自带 Esc。改这一处同时盖住 ThinkingSheet / RecallCardView /
         // MessageSegmentsView 那两个（都套这个壳）
         .macEscapeToDismiss { dismiss() }
+        .environment(\.themeScope, scope)
     }
 }

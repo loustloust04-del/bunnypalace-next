@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 import os
@@ -99,10 +100,6 @@ struct SearchFilter {
     var includeDeletedConversations: Bool = false
     /// `ext:`：只对「文件」标签生效（空 = 不限）
     var extensions: [String] = []
-
-    var hasActiveFilters: Bool {
-        dateRange != .all || roles != Set(["user", "assistant"])
-    }
 }
 
 struct MatchedNode: Identifiable {

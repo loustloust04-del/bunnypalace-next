@@ -23,7 +23,7 @@ final class VoicePromptInjectorTests: XCTestCase {
         VoiceMessageWriter.serviceProvider = { VoiceServiceStore.shared.service(id: $0) }
         VoiceMessageWriter.serviceKeyProvider = { VoiceServiceStore.shared.key(for: $0) }
         VoiceMessageWriter.synthesizerProvider = { $0.makeSynthesizer() }
-        VoiceMessageWriter.proactiveEnabledProvider = { UserDefaults.standard.bool(forKey: VoiceTuning.proactiveKey) }
+        VoiceMessageWriter.proactiveEnabledProvider = { PermissionCenter.level(.voiceProactive, profileId: $0) == .bypass }
         super.tearDown()
     }
 
@@ -41,7 +41,7 @@ final class VoicePromptInjectorTests: XCTestCase {
             for k in [Optional("k"), nil] {
                 for voice in [Optional("v"), nil] {
                     for service in [Optional("svc"), nil] {
-                        VoiceMessageWriter.proactiveEnabledProvider = { enabled }
+                        VoiceMessageWriter.proactiveEnabledProvider = { _ in enabled }
                         key = k
                         let hint = VoicePromptInjector.hint(profile: profile(service: service, voiceId: voice))
                         let expect = enabled && k != nil && voice != nil && service != nil
@@ -53,15 +53,31 @@ final class VoicePromptInjectorTests: XCTestCase {
         }
     }
 
+    /// atrium P3⑤0：默认主动语音关、A 层单独开 → 只有 A 带语音条段；CC 块同样按层
+    func testProactiveFollowsFloor() {
+        let sandbox = PermissionSandbox()
+        defer { sandbox.leave() }
+        VoiceMessageWriter.proactiveEnabledProvider = { PermissionCenter.level(.voiceProactive, profileId: $0) == .bypass }
+        PermissionCenter.setFloorLevel(.bypass, for: .voiceProactive, profileId: "p")
+        XCTAssertEqual(PermissionCenter.defaultLevel(.voiceProactive), .notAllowed)
+        let a = profile()
+        var b = profile()
+        b.id = "q"
+        XCTAssertNotNil(VoicePromptInjector.hint(profile: a))
+        XCTAssertNil(VoicePromptInjector.hint(profile: b))
+        XCTAssertFalse(VoicePromptInjector.ccInstructionsBlock(profile: a).contains("主动语音条已关闭"))
+        XCTAssertTrue(VoicePromptInjector.ccInstructionsBlock(profile: b).contains("主动语音条已关闭"))
+    }
+
     func testSystemVoiceNeedsNoKey() {
-        VoiceMessageWriter.proactiveEnabledProvider = { true }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in true }
         kind = .system
         key = nil
         XCTAssertEqual(VoicePromptInjector.hint(profile: profile()), VoicePromptInjector.plainHintText)
     }
 
     func testTextFollowsSupportsTags() {
-        VoiceMessageWriter.proactiveEnabledProvider = { true }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in true }
         kind = .elevenLabs
         XCTAssertEqual(VoicePromptInjector.hint(profile: profile()), VoicePromptInjector.tagsHintText)
         for plain in [VoiceServiceKind.openAICompatible, .miniMax] {
@@ -73,9 +89,9 @@ final class VoicePromptInjectorTests: XCTestCase {
     /// CC 桥：平时原文一字不加（语音写法在 cc-rp CLAUDE.md）；通话中末尾只加一行 `<通话中/>`
     func testBridgeOutsideCallPreservesExactPayload() {
         let raw = "发一条语音\n<style>自然口语</style>"
-        VoiceMessageWriter.proactiveEnabledProvider = { true }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in true }
         XCTAssertEqual(VoicePromptInjector.bridgeContent(raw, inCall: false), raw)
-        VoiceMessageWriter.proactiveEnabledProvider = { false }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in false }
         XCTAssertEqual(VoicePromptInjector.bridgeContent(raw, inCall: false), raw)
     }
 
@@ -87,7 +103,7 @@ final class VoicePromptInjectorTests: XCTestCase {
 
     /// cc-rp CLAUDE.md 标记块（plan-cc-terminal-mirror 二-b）：没配声音只一句
     func testCCBlockWithoutVoiceSetup() {
-        VoiceMessageWriter.proactiveEnabledProvider = { true }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in true }
         let block = VoicePromptInjector.ccInstructionsBlock(profile: profile(voiceId: nil))
         XCTAssertEqual(block, "当前楼层语音设置（记忆花园自动同步，别手改）：\n当前楼层没配声音，不要输出 voice 块。")
         key = nil
@@ -95,7 +111,7 @@ final class VoicePromptInjectorTests: XCTestCase {
     }
 
     func testCCBlockTagsServiceCarriesModelsNoteAndEffects() {
-        VoiceMessageWriter.proactiveEnabledProvider = { true }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in true }
         var p = profile(note: "{{char}}用轻声对{{user}}说，{{date}}照写。")
         p.assistantName = "角色"; p.userName = "禾禾"
         p.messageModel = ElevenLabsSynthesizer.v4
@@ -115,7 +131,7 @@ final class VoicePromptInjectorTests: XCTestCase {
     }
 
     func testCCBlockPlainServiceAndProactiveOff() {
-        VoiceMessageWriter.proactiveEnabledProvider = { false }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in false }
         kind = .system; key = nil
         var p = profile(); p.userName = "禾禾"
         let block = VoicePromptInjector.ccInstructionsBlock(profile: p)
@@ -180,7 +196,7 @@ final class VoicePromptInjectorTests: XCTestCase {
 
     /// 补充段：固定段逐字保留 + `</语音条>` 前插入；空白说明不追加
     func testExtraNoteAppendedInsideShell() {
-        VoiceMessageWriter.proactiveEnabledProvider = { true }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in true }
         let hint = VoicePromptInjector.hint(profile: profile(note: "  声音偏低，爱说「嗯哼」\n"))
         let fixed = String(VoicePromptInjector.tagsHintText.dropLast("</语音条>".count))
         XCTAssertEqual(hint, fixed + "<嗓子补充说明>\n声音偏低，爱说「嗯哼」\n</嗓子补充说明>\n</语音条>")
@@ -194,7 +210,7 @@ final class VoicePromptInjectorTests: XCTestCase {
     }
 
     func testEffectsHintOnlyAppearsWhenEnabledAndInsideVoiceShell() {
-        VoiceMessageWriter.proactiveEnabledProvider = { true }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in true }
         var p = profile()
         var effects = VoiceEffectConfiguration(); effects.kissIDs = [UUID().uuidString]
         p.voiceEffects = effects

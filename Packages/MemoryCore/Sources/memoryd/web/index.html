@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>memoryd · 记忆副本</title>
+<style>
+  :root { --fg:#1c1c1e; --muted:#6b6b70; --line:#e3e3e8; --bg:#fafafc; --card:#fff; --accent:#2f6fed; --bad:#c0392b; --good:#1e8e3e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.55 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; color:var(--fg); background:var(--bg); }
+  header { position:sticky; top:0; background:var(--card); border-bottom:1px solid var(--line); padding:10px 18px; display:flex; align-items:center; gap:16px; z-index:2; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  nav button { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:8px; padding:5px 14px; cursor:pointer; font-size:13px; }
+  nav button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  main { max-width:1020px; margin:0 auto; padding:20px 18px 60px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:14px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .muted { color:var(--muted); font-size:12.5px; }
+  .score { font-size:52px; font-weight:700; letter-spacing:-1px; }
+  .delta.up { color:var(--good); } .delta.down { color:var(--bad); }
+  button.primary { background:var(--accent); color:#fff; border:none; border-radius:8px; padding:7px 16px; cursor:pointer; font-size:13px; }
+  button.primary:disabled { opacity:.5; cursor:default; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--line); border-radius:8px; padding:5px 12px; cursor:pointer; font-size:12.5px; }
+  .set { border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:10px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .tag { display:inline-block; font-size:11.5px; border-radius:999px; padding:1px 8px; background:#eef2fb; color:var(--accent); margin-left:6px; }
+  .tag.off { background:#f2f2f5; color:var(--muted); }
+  ol.bad { margin:8px 0 0; padding-left:22px; }
+  ol.bad li { margin-bottom:6px; }
+  pre { background:#f6f6f9; border:1px solid var(--line); border-radius:8px; padding:12px; overflow:auto; white-space:pre-wrap; word-break:break-word; font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .cell { border-top:1px solid var(--line); padding:9px 0; cursor:pointer; }
+  .cell:hover { background:#fbfbfd; }
+  .crumb { margin-bottom:12px; font-size:12.5px; color:var(--muted); }
+  .crumb a { color:var(--accent); text-decoration:none; cursor:pointer; }
+  .entry { padding:9px 4px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:10px; }
+  .entry.click { cursor:pointer; } .entry.click:hover { background:#fbfbfd; }
+  .entry .count { color:var(--muted); font-size:12px; }
+  h2 { font-size:17px; margin:0 0 6px; }
+  h3 { font-size:14px; margin:14px 0 6px; }
+  .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; vertical-align:-2px; margin-right:6px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .error { color:var(--bad); }
+  ul.plain { margin:6px 0 0; padding-left:20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>memoryd</h1>
+  <nav>
+    <button id="tab-bench" class="on" data-tab="bench">测试台</button>
+    <button id="tab-wiki" data-tab="wiki">wiki</button>
+    <button id="tab-lab" data-tab="lab">实验台</button>
+    <button id="tab-review" data-tab="review">结果对照</button>
+  </nav>
+  <span class="muted" id="status"></span>
+</header>
+<main>
+  <section id="page-bench"></section>
+  <section id="page-wiki" hidden></section>
+  <section id="page-lab" hidden></section>
+  <section id="page-review" hidden></section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

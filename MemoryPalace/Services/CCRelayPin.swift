@@ -66,8 +66,12 @@ enum CCRelayPin {
 final class CCBridgeProbeDelegate: NSObject, URLSessionTaskDelegate {
     /// 秒连尺子：每个探测请求的 URLSessionTaskMetrics（session 委托队列上回调）
     private let onMetrics: ((Int, URLSessionTaskMetrics) -> Void)?
+    /// 这台 hub 的配对存在哪（主 hub = .standard，附加 hub = 它自己的 suite）：pin 只认它自己的中继
+    /// UserDefaults 本身线程安全，委托回调在 session 队列上只读它
+    private nonisolated(unsafe) let defaults: UserDefaults
 
-    init(onMetrics: ((Int, URLSessionTaskMetrics) -> Void)? = nil) {
+    init(defaults: UserDefaults = .standard, onMetrics: ((Int, URLSessionTaskMetrics) -> Void)? = nil) {
+        self.defaults = defaults
         self.onMetrics = onMetrics
     }
 
@@ -82,7 +86,7 @@ final class CCBridgeProbeDelegate: NSObject, URLSessionTaskDelegate {
 
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        let (disposition, credential) = CCRelayPin.evaluate(challenge)
+        let (disposition, credential) = CCRelayPin.evaluate(challenge, defaults: defaults)
         completionHandler(disposition, credential)
     }
 }

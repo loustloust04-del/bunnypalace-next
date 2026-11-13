@@ -63,3 +63,18 @@ struct OnNotify: ViewModifier {
         content.onReceive(NotificationCenter.default.publisher(for: name)) { _ in action() }
     }
 }
+
+/// 同 `OnNotify`，把通知带的 object 交给 action（链上同样只占一项）
+struct OnNotifyObject: ViewModifier {
+    let name: Notification.Name
+    let action: (Any?) -> Void
+
+    init(_ name: Notification.Name, action: @escaping (Any?) -> Void) {
+        self.name = name
+        self.action = action
+    }
+
+    func body(content: Content) -> some View {
+        content.onReceive(NotificationCenter.default.publisher(for: name)) { action($0.object) }
+    }
+}

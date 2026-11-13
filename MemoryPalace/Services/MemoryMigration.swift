@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// plan-memory-migrate-3gen：记忆三代旧数据搬成 v5 的样子（DEBUG「搬成新样子…」，粟粟手动点，只搬当前这一层）。
@@ -128,7 +129,7 @@ enum MemoryMigration {
         let segs = st.a2.segments
         let kind: Kind
         // 老式段 = 带待续、又没标新写法（format 0）；新写的 A2 段也带待续（第 7 段起由 A4 搬），不算老式、不重写
-        if segs.contains(where: { $0.kind == .rolling && !$0.pending.isEmpty && $0.format < SessionSegment.currentFormat && $0.start >= scope }) {
+        if segs.contains(where: { $0.kind == .rolling && !$0.pending.isEmpty && $0.format == 0 && $0.start >= scope }) {
             kind = .a2Full
         } else if segs.contains(where: { $0.kind == .closeout && !$0.isTail && $0.start >= scope }) {
             kind = .a2Incremental
@@ -196,7 +197,7 @@ enum MemoryMigration {
             return A2Work(keep: a2, parts: [], problem: "有一段要换下来的老段在这条主线上找不到，可能切过分支")
         }
         let parts = (base + gaps.flatMap { SessionCloseout.chunks($0) }).sorted { $0.lowerBound < $1.lowerBound }
-        return A2Work(keep: keep, parts: parts, problem: nil)
+        return A2Work(keep: keep, parts: SessionCloseout.contextParts(parts, dates: dates), problem: nil)
     }
 
     /// 一段在这条主线上实际盖住哪几条：最后一条按 lastNodeId 找、开头按开始时间找；第 0 段 = [0, to)。找不到 = nil
@@ -266,21 +267,25 @@ enum MemoryMigration {
                     || SessionCloseout.wouldRegress(mark: $0.lastNodeId, markDate: $0.end, snapshot: messages)
             } ?? false
             if start < messages.count, !noop {
-                let system = SessionSegmentWriter.systemPrompt(persona: persona, speakers: speakers, kind: .closeout)
-                let user = SessionSegmentWriter.userContent(messages: Array(messages[start...]), speakers: speakers,
-                                                            previous: formal.last, kind: .closeout)
-                calls.append(Call(writer: .context, tokens: est.estimate(system + user)))
-                var tail = placeholder(.closeout, messages, start..<messages.count)
-                tail.isTail = true
+                let parts = SessionCloseout.contextParts([start..<messages.count], dates: messages.map(\.date))
                 s.segments.removeAll { $0.isTail }
-                s.segments.append(tail)
+                for (i, part) in parts.enumerated() {
+                    let kind: SessionSegment.Kind = i == parts.count - 1 ? .closeout : .rolling
+                    let system = SessionSegmentWriter.systemPrompt(persona: persona, speakers: speakers, kind: kind)
+                    let user = SessionSegmentWriter.userContent(messages: Array(messages[part]), speakers: speakers,
+                                                                previous: s.segments.last { $0.kind != .closeout }, kind: kind)
+                    calls.append(Call(writer: .context, tokens: est.estimate(system + user)))
+                    var segment = placeholder(kind, messages, part)
+                    segment.isTail = kind == .closeout
+                    s.segments.append(segment)
+                }
             }
             // A3：同 recompressWindow 的输入
             let segs = s.segments.filter { $0.kind != .closeout || $0.isTail }
             let rawStart = SessionCloseout.windowTailStart(context: segs, pathIds: ids, notBefore: notBefore)
             let raw = rawStart < messages.count ? Array(messages[rawStart...]) : []
             if !segs.isEmpty || !raw.isEmpty {
-                let system = WindowSummaryWriter.systemPrompt(persona: persona, speakers: speakers, chars: MemoryWriterSettings.a3Chars)
+                let system = WindowSummaryWriter.systemPrompt(persona: persona, speakers: speakers, segmentCount: segs.count)
                 let user = WindowSummaryWriter.userContent(title: src.title, segments: segs, rawTail: raw, speakers: speakers)
                 calls.append(Call(writer: .window, tokens: est.estimate(system + user)))
             }
@@ -516,7 +521,7 @@ enum MemoryMigration {
                 s.title = src.title
                 let label = StepLabel()
                 let done = try await SessionCloseout.writeContextParts(w.parts, messages: messages, into: &s, title: src.title,
-                                                                       persona: writers.persona, speakers: writers.speakers,
+                                                                       persona: writers.persona, speakers: writers.speakers, profileId: profileId, memoryRoot: memoryRoot,
                                                                        caller: caller(.context, probe, label), save: { _ in },
                                                                        onPart: { label.set("写 A2 第 \($0) / \($1) 段") })
                 if !done || probe.skipped { throw StepFailure(step: .context, error: nil) }
@@ -528,7 +533,7 @@ enum MemoryMigration {
                 do {
                     let r = try await SessionCloseout.composeWindowSummary(
                         context: s, messages: messages, title: src.title, notBefore: notBefore, persona: writers.persona,
-                        speakers: writers.speakers, tailCaller: caller(.context, tailProbe, StepLabel("写 A2 尾段")),
+                        speakers: writers.speakers, profileId: profileId, memoryRoot: memoryRoot, tailCaller: caller(.context, tailProbe, StepLabel("写 A2 尾段")),
                         windowCaller: caller(.window, windowProbe, StepLabel("压 A3")))
                     if tailProbe.skipped { throw StepFailure(step: .tail, error: nil) }
                     if windowProbe.skipped { throw StepFailure(step: .window, error: nil) }
@@ -659,8 +664,8 @@ enum MemoryMigration {
         try fault(m.conversationId, "撤回")
         let id = m.conversationId
         if !m.addedPending.isEmpty {
-            try PendingStore.checkReadable(profileId: profileId, memoryRoot: rootInjected ? root : nil)
-            try PendingStore.mutate(profileId: profileId, memoryRoot: rootInjected ? root : nil) { items in
+            try PendingStore.checkReadable(profileId: profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), memoryRoot: rootInjected ? root : nil)
+            try PendingStore.mutate(profileId: profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), memoryRoot: rootInjected ? root : nil) { items in
                 items.removeAll { i in i.conversationId == id && m.addedPending.contains { $0.id == i.id && $0.text == i.text } }
             }
         }

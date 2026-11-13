@@ -8,9 +8,13 @@ final class APIModelRefreshUITests: RegressionTestCase {
         defer { server.stop() }
         launch(["--ui-regression-seed", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"])
         swipeToPrev()
-        let gear = app.buttons["gearshape"]
-        waitFor(gear, "设置入口")
-        gear.tap()
+        // 设置入口：page0 字标 → atrium「我」（plan-atrium P2 起 page0 没有 ⚙）
+        let wordmark = app.buttons["page0-wordmark"]
+        waitFor(wordmark, "page0 字标")
+        wordmark.tap()
+        let me = app.buttons["atrium-me"]
+        waitFor(me, "atrium「我」")
+        me.tap()
         let api = app.buttons.matching(NSPredicate(format: "label == %@ OR label == %@", "API", "模型（API）")).firstMatch
         reveal(api)
         api.tap()

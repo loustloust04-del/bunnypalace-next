@@ -66,8 +66,8 @@ final class FixJumpTests: XCTestCase {
 
     /// 只对 ⚠️ 标记拆出来的报错跑：普通正文提到「保险闸」不出按钮
     func testOnlyMarkedErrorsCount() {
-        XCTAssertNil(ChatSystemMessage.split("预算保险闸是个好东西").error)
-        let marked = ChatSystemMessage.split("半截正文\n\n⚠️ " + FixJump.budgetPreflightMessage).error
+        XCTAssertNil(ChatSystemMessage.split("预算保险闸是个好东西", legacy: true).error)
+        let marked = ChatSystemMessage.split("半截正文\n\n" + ChatSystemMessage.errorLine(FixJump.budgetPreflightMessage), legacy: false).error
         XCTAssertEqual(marked.flatMap(FixJump.kind(for:)), .budget)
     }
 

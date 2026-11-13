@@ -44,6 +44,8 @@ extension MarkdownRenderConfig {
                              lineSpacingScale: Double? = nil,
                              paragraphSpacingScale: Double? = nil,
                              textColor: Color = Theme.textPrimary,
+                             palette: ThemePalette? = nil,
+                             blockQuoteColor: Color? = nil,
                              mergesTextRuns: Bool = false) -> MarkdownRenderConfig {
         let bodySize: CGFloat = 13.5 * scale
         let codeSize: CGFloat = bodySize * 0.88
@@ -54,11 +56,13 @@ extension MarkdownRenderConfig {
 
         // 正文色：调用方按角色传（`ChatTextRole`），非聊天调用方不传 = 主文字。
         // 引用块 / 链接 / 行内码底色不跟它走，仍各自取 token。
+        // palette：聊天正文传 `Theme.chat`（气泡模式下是气泡主题），nil = 全局主题。
+        // blockQuoteColor：气泡模式下引用块改用泡里的正文色（压在彩色泡上也看得清），nil = secondary。
         let bodyTextUI = PlatformColor(textColor)
-        let textSecondaryUI = PlatformColor(Theme.textSecondary)
-        let accentUI = PlatformColor(Theme.accent)
-        let branchUI = PlatformColor(Theme.branchIndicator)
-        let mainBgUI = PlatformColor(Theme.mainBg)
+        let textSecondaryUI = PlatformColor(blockQuoteColor ?? palette?.textSecondary ?? Theme.textSecondary)
+        let accentUI = PlatformColor(palette?.accent ?? Theme.accent)
+        let branchUI = PlatformColor(palette?.branchIndicator ?? Theme.branchIndicator)
+        let mainBgUI = PlatformColor(palette?.mainBg ?? Theme.mainBg)
 
         // body paragraph：regular weight，bold/italic 变体由 mkTextFonts 找 family
         let paragraphFonts = mkTextFonts(size: bodySize, fontName: fontName, baseWeight: .regular)

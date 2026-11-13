@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import Network
 @testable import 记忆花园
@@ -139,6 +140,52 @@ final class MemoryBenchRunnerTests: XCTestCase {
     }
 
     // MARK: - 跑
+
+    func testLocalRecallNeverCallsModelAndRecordsZeroUnpricedCost() async throws {
+        let reader = MemoryBenchWriters.recallReader(profileId: "fictional-runner")
+        let suite = MemoryBenchLocalExecutor.preferencesSuite(named: "memory-bench-runner-\(UUID().uuidString)")
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { MemoryBenchLocalExecutor.removePreferences(defaults, suite: suite) }
+        let recipe = try XCTUnwrap(reader.builtInRecipes(defaults: defaults).first)
+        let set = try XCTUnwrap(MemoryBenchStore.builtInSets().first { $0.id == "recall-24" })
+        let calls = Counter()
+        let run = try await MemoryBenchRunner.run(writer: reader, set: set, caseIds: ["gate-06"], recipes: [recipe],
+            models: [haiku], store: store, profileId: pid, caller: { _, _ in
+                await calls.bump()
+                throw URLError(.unsupportedURL)
+            })
+        let count = await calls.value
+        XCTAssertEqual(count, 0)
+        let cell = try XCTUnwrap(run.cells.first)
+        XCTAssertNil(cell.error)
+        XCTAssertNil(cell.usage)
+        XCTAssertEqual(cell.usd, 0)
+        XCTAssertEqual(cell.costSource, .unpriced)
+        let request = try XCTUnwrap(store.requests(runId: run.id).first)
+        XCTAssertEqual(request.system, "")
+        XCTAssertEqual(request.user, "")
+        XCTAssertEqual(request.response, cell.output)
+
+        var invalidSet = set
+        var invalid = try XCTUnwrap(set.cases.first { $0.id == "gate-06" })
+        var input = try invalid.input.decode(MemoryBenchRecallInput.self)
+        input.snapshot = "fictional-missing-snapshot"
+        invalid.input = try .from(input)
+        invalidSet.cases = [invalid]
+        let failed = try await MemoryBenchRunner.run(writer: reader, set: invalidSet, recipes: [recipe],
+            models: [haiku], store: store, profileId: pid, caller: { _, _ in
+                await calls.bump()
+                throw URLError(.unsupportedURL)
+            })
+        let failure = try XCTUnwrap(failed.cells.first)
+        XCTAssertNotNil(failure.error)
+        XCTAssertNil(failure.output)
+        XCTAssertNil(failure.usage)
+        XCTAssertEqual(failure.usd, 0)
+        XCTAssertEqual(failure.costSource, .unpriced)
+        let finalCount = await calls.value
+        XCTAssertEqual(finalCount, 0)
+    }
 
     func testRunRecordsEverythingAndScores() async throws {
         let p = try probe
@@ -359,7 +406,7 @@ final class MemoryBenchRunnerTests: XCTestCase {
         _ = try await MemoryBenchRunner.run(writer: writer, set: try probe, caseIds: ["08"], recipes: [current], models: [haiku],
                                             store: store, profileId: pid, caller: Self.fake)
         MemoryWriteLog.flush()
-        let log = MemoryWriteLog.entries(profileId: pid)
+        let log = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
         XCTAssertEqual(log.count, 1, "一次跑一条汇总")
         XCTAssertEqual(log[0].writer, "C2")
         XCTAssertEqual(log[0].trial, true)

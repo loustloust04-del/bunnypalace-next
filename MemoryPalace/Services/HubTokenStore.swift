@@ -1,7 +1,8 @@
 import Foundation
 
-/// hub token 单一入口。优先 Keychain（`cc-bridge` account）；空则从 launchd plist bootstrap 一次。
-/// Phase 2 hub 收紧后（loopback 也校验 token），Mac app 主连接 & /pair 请求都从这里拿 token。
+/// hub token：主 hub 旧条目的账户名（`cc-bridge`）+ 本机 launchd 外部 hub 的 plist 口令。
+/// Phase 2 hub 收紧后（loopback 也校验 token）。plan-multi-hub recheck1 起：连接只用主 hub 本机副本（CCHubRegistry），
+/// plist 口令只在配对目标是本机回环时由 Registry 补进副本；Mac 配对页 /pair 只用 plist 口令。
 ///
 /// 信任边界：本机同 UID 进程能读 644 权限的 plist——等价"能读你 home 的进程"，
 /// 与 SSH key / Keychain（无 ACL prompt 时）同级。iOS 侧不走 bootstrap（无 plist），
@@ -18,21 +19,16 @@ enum HubTokenStore {
     }
     #endif
 
-    /// 拿 token。幂等：keychain 有直接返回；空则 macOS 上 bootstrap 读 plist 存入。
-    /// 每次 connect 前调，重启 hub 后自动补上，无需 Mac app 重启。
-    static func get() -> String? {
-        if TestHostIsolation.blocks(.hub) { return nil }   // #035：测试宿主不取口令、不从 plist 回写钥匙串
-        if let existing = KeychainStore.get(account: keychainAccount), !existing.isEmpty {
-            return existing
-        }
+    /// 这台 Mac 本机 launchd 外部 hub 的口令（plist 里的 MP_CC_HUB_TOKEN），只读、不写钥匙串。
+    /// 跟本机外部 hub 绑定的只有它：`cc-bridge` 条目会经 iCloud 被别的设备改成别台 hub 的口令，不能拿来连 / 配对本机 hub（plan-multi-hub recheck1 #1 / N1）。
+    /// 主 hub 的本机副本由 CCHubRegistry 核过配对目标后再用它补；Mac 配对二维码页用它请求 /pair。iOS / 测试宿主 = nil
+    static func launchdPlistToken() -> String? {
+        if TestHostIsolation.blocks(.hub) { return nil }   // #035：测试宿主不取口令
         #if os(macOS)
-        if let bootstrapped = readTokenFromLaunchdPlist(), !bootstrapped.isEmpty {
-            _ = KeychainStore.set(bootstrapped, account: keychainAccount, sync: false)
-            print("[HubTokenStore] bootstrapped from launchd plist")
-            return bootstrapped
-        }
-        #endif
+        return readTokenFromLaunchdPlist()
+        #else
         return nil
+        #endif
     }
 
     #if os(macOS)

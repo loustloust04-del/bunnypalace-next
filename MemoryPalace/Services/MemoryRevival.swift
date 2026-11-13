@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// 找回失效记忆（修复第一刀·刀2）：库里只记了失效时间没记原因，

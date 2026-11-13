@@ -154,11 +154,18 @@ final class ChatGPTOAuthProvider: BaseChatProvider {
         // 主要 event：output_text.delta（增量文本）
         if type.hasSuffix("output_text.delta") || type.contains(".output_text.delta") {
             if let delta = obj["delta"] as? String, !delta.isEmpty {
+                if !delta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { emitEffectiveEvent() }
                 streamingContent += delta
                 enqueueCallback {
                     self.onToken?(delta)
                 }
             }
+            return
+        }
+
+        if type == "response.output_item.added",
+           let item = obj["item"] as? [String: Any], item["type"] as? String == "function_call" {
+            collectFunctionCallEvent(obj)
             return
         }
 
@@ -199,6 +206,7 @@ final class ChatGPTOAuthProvider: BaseChatProvider {
             if !callId.isEmpty { existing.callId = callId }
             if !name.isEmpty { existing.name = name }
             fnCallAccum[itemId] = existing
+            if !existing.callId.isEmpty && !existing.name.isEmpty { emitEffectiveEvent() }
         }
         if let delta = obj["delta"] as? String {
             var existing = fnCallAccum[itemId] ?? (callId: itemId, name: "", args: "")
@@ -214,6 +222,7 @@ final class ChatGPTOAuthProvider: BaseChatProvider {
             return ToolCallBlock(id: entry.callId, name: entry.name, argumentsJSON: entry.args)
         }
         if !blocks.isEmpty {
+            emitEffectiveEvent()
             enqueueCallback { cb(blocks) }
         }
         fnCallAccum = [:]
@@ -297,6 +306,12 @@ final class ChatGPTOAuthProvider: BaseChatProvider {
                     "call_id": result.toolUseId,
                     "output": result.text,
                 ])
+            }
+            for follow in turn.followUps {
+                if follow.hasReply {
+                    input.append(["role": "assistant", "content": [["type": "output_text", "text": follow.reply]]])
+                }
+                input.append(["role": "user", "content": [["type": "input_text", "text": follow.note]]])
             }
         }
 

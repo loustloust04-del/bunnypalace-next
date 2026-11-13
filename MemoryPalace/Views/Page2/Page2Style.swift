@@ -45,7 +45,6 @@ enum Page2Fonts {
     }()
 
     static func enLabel(_ size: CGFloat) -> Font { .custom("AmericanTypewriter", size: size) }
-    static func enTitle(_ size: CGFloat) -> Font { .custom("AmericanTypewriter-Semibold", size: size) }
     static func cnTitle(_ size: CGFloat) -> Font {
         if let n = cnTitleName { return .custom(n, size: size) }
         return .system(size: size, weight: .semibold)

@@ -1,5 +1,7 @@
+import MemoryCore
 import AppKit
 import SwiftUI
+import SwiftData
 import XCTest
 import WebKit
 import Vision
@@ -84,7 +86,8 @@ final class FileEditorTextModeTests: XCTestCase {
             reloadExternalContent: { XCTFail("只读不重载"); return ReloadedFileContent(content: "", modifiedAt: nil) },
             onSave: { _, _ in XCTFail("只读不能保存") }, onCancel: {},
             versionKey: .file(profileId: "test", relativePath: "run.md"),
-            wikiHistory: WikiHistoryTarget(store: wiki, path: "楼层/测试", onRestored: { _ in XCTFail("只读不能恢复历史") })
+            wikiHistory: WikiHistoryTarget(store: wiki, path: "主题/测试", expectedVersion: nil,
+                                           onRestored: { _, _ in XCTFail("只读不能恢复历史") })
         )
         XCTAssertEqual(sheet.availableModes, [.preview])
         XCTAssertNil(sheet.versionKey)
@@ -173,6 +176,157 @@ final class FileEditorTextModeTests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    func testWikiLinkRoundTripRefreshesSavedBaseline() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("wiki-round-trip-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let wiki = WikiStore(root: root)
+        let path = "主题/回页A", other = "主题/回页B"
+        try wiki.saveRaw("# 打开时A\n\n[[\(other)]]", path: path)
+        try wiki.saveRaw("# 另一页B\n\n[[\(path)]]", path: other)
+        let target = try XCTUnwrap(WikiPageTarget.load(store: wiki, path: path))
+        let (window, hosting) = host(WikiPageEditorSheet(initial: target))
+        defer { window.close() }
+        window.orderFront(nil)
+
+        func editor(showing title: String) async throws -> WKWebView {
+            try await waitForState {
+                guard let web = self.findWebView(in: hosting) else { return false }
+                return (try? await web.evaluateJavaScript(
+                    "typeof view !== 'undefined' && view !== null && currentContent().includes('\(title)')"
+                )) as? Bool == true
+            }
+            return try XCTUnwrap(findWebView(in: hosting))
+        }
+
+        let first = try await editor(showing: "打开时A")
+        let saved = "# 人工初存A\n\n[[\(other)]]"
+        _ = try await first.evaluateJavaScript("""
+            view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "# 人工初存A\\n\\n[[主题/回页B]]" }, userEvent: "input" });
+            requestSave(); true;
+            """)
+        try await waitForState { wiki.readRaw(path) == saved }
+        let changed = "# 别处改版A\n\n[[\(other)]]"
+        try await WikiEditing.save(changed, baseline: saved, store: wiki, path: path)
+
+        _ = try await first.evaluateJavaScript("post({ type: 'openWikiLink', target: '主题/回页B' }); true;")
+        let second = try await editor(showing: "另一页B")
+        _ = try await second.evaluateJavaScript("post({ type: 'openWikiLink', target: '主题/回页A' }); true;")
+        let reopened = try await editor(showing: "别处改版A")
+        _ = try await reopened.evaluateJavaScript("""
+            view.dispatch({ changes: { from: view.state.doc.length, insert: "\\n人工续写" }, userEvent: "input" });
+            requestSave(); true;
+            """)
+        try await waitForState { wiki.readRaw(path) == changed + "\n人工续写" }
+        XCTAssertEqual(wiki.readRaw(path), changed + "\n人工续写", "回页后用新基线保存，不能误报冲突或覆盖别处改版")
+    }
+
+    func testWikiEditorKeepsDraftAndSavedBaselineAcrossProfileSwitch() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("wiki-switch-\(UUID().uuidString)")
+        let suite = "wiki-switch-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let schema = ProfileManager.makeFullSchema()
+        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
+        let first = Profile(name: "原楼层", emoji: "", description: "", userName: "小舟", assistantName: "砚")
+        let second = Profile(name: "另一层", emoji: "", description: "", userName: "小舟", assistantName: "砚")
+        let profiles = ProfileManager(container: container, profiles: [first, second], currentProfile: first,
+                                      loadError: nil, root: root, defaults: defaults, sideEffectsEnabled: false)
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        let path = "主题/虚构航线"
+        let target = try await Task.detached {
+            try wiki.saveRaw("# 航线", path: path)
+            return try XCTUnwrap(WikiPageTarget.load(store: wiki, path: path))
+        }.value
+        var dismissed = false
+        struct Presenter: View {
+            let target: WikiPageTarget
+            let onDismiss: () -> Void
+            @State private var presented = false
+
+            var body: some View {
+                Color.clear
+                    .sheet(isPresented: $presented, onDismiss: onDismiss) { WikiPageEditorSheet(initial: target) }
+                    .onAppear { presented = true }
+            }
+        }
+        let (window, _) = host(Presenter(target: target, onDismiss: { dismissed = true }).environment(profiles), fixedSize: true)
+        defer { window.close() }
+        window.orderFront(nil)
+        var editorWindow: NSWindow?
+        var editorWeb: WKWebView?
+        try await waitForState {
+            for candidate in NSApp.windows {
+                guard let content = candidate.contentView, let web = self.findWebView(in: content) else { continue }
+                if (try? await web.evaluateJavaScript("typeof view !== 'undefined' && view !== null && currentContent() === '# 航线'")) as? Bool == true {
+                    editorWindow = candidate
+                    editorWeb = web
+                    return true
+                }
+            }
+            return false
+        }
+        let sheet = try XCTUnwrap(editorWindow)
+        let web = try XCTUnwrap(editorWeb)
+        defer { sheet.close() }
+        sheet.makeKeyAndOrderFront(nil)
+        _ = try await web.evaluateJavaScript("""
+            view.dispatch({ changes: { from: view.state.doc.length, insert: "\\n未存草稿" }, userEvent: "input" }); true;
+            """)
+        NotificationCenter.default.post(name: .profileWillSwitch, object: nil)
+        profiles.switchTo(second)
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(dismissed)
+        XCTAssertTrue(sheet.isVisible)
+        let draft = try await web.evaluateJavaScript("currentContent()") as? String
+        XCTAssertEqual(draft, "# 航线\n未存草稿")
+        _ = try await web.evaluateJavaScript("requestSave(); true;")
+        try await waitForState { wiki.readRaw(path) == "# 航线\n未存草稿" }
+        _ = try await web.evaluateJavaScript("""
+            view.dispatch({ changes: { from: view.state.doc.length, insert: "\\n再次保存" }, userEvent: "input" });
+            requestSave(); true;
+            """)
+        try await waitForState { wiki.readRaw(path) == "# 航线\n未存草稿\n再次保存" }
+        print("A4 UI smoke: 原生编辑器切楼层保留草稿，原页连续保存两次")
+    }
+
+    func testWikiDeleteFromAnotherProfileShowsAlertWithoutDeleting() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("wiki-delete-switch-\(UUID().uuidString)")
+        let suite = "wiki-delete-switch-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let schema = ProfileManager.makeFullSchema()
+        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
+        let first = Profile(name: "原楼层", emoji: "", description: "", userName: "小舟", assistantName: "砚")
+        let second = Profile(name: "另一层", emoji: "", description: "", userName: "小舟", assistantName: "砚")
+        let profiles = ProfileManager(container: container, profiles: [first, second], currentProfile: second,
+                                      loadError: nil, root: root, defaults: defaults, sideEffectsEnabled: false)
+        let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
+        let path = "主题/虚构航线"
+        let version = try await Task.detached { try wiki.saveRaw("# 航线", path: path) }.value
+        var target: WikiDeletionTarget? = .init(profileId: first.id, store: wiki, path: path, title: "航线", expectedVersion: version)
+        let presenter = Color.clear.modifier(WikiDeleteConfirmation(
+            target: Binding(get: { target }, set: { target = $0 }), hasUnsavedEdits: false,
+            onDeleted: { _ in XCTFail("楼层不符不能删除") })).environment(profiles)
+        let (window, _) = host(presenter)
+        defer { window.close() }
+        window.orderFront(nil)
+        try await waitForState { window.attachedSheet != nil }
+        XCTAssertNil(target)
+        XCTAssertEqual(wiki.readRaw(path), "# 航线")
+        let alert = try XCTUnwrap(window.attachedSheet?.contentView)
+        func fields(_ view: NSView) -> [NSTextField] {
+            (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields)
+        }
+        XCTAssertTrue(fields(alert).contains { $0.stringValue == "已切换楼层，回原楼层再删" })
+        print("A4 UI smoke: 原生删除提示已显示「已切换楼层，回原楼层再删」，正文未删")
     }
 
     func testTypingFormattingAndSourceCommitUndoAsSeparateStepsAndSaveTail() async throws {
@@ -313,7 +467,7 @@ final class FileEditorTextModeTests: XCTestCase {
         return nil
     }
 
-    private func host(_ sheet: FileEditorSheet, fixedSize: Bool = false) -> (NSWindow, NSHostingView<FileEditorSheet>) {
+    private func host<Content: View>(_ sheet: Content, fixedSize: Bool = false) -> (NSWindow, NSHostingView<Content>) {
         let hosting = NSHostingView(rootView: sheet)
         if fixedSize {
             hosting.sizingOptions = []

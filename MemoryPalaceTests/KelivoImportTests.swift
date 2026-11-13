@@ -1,3 +1,4 @@
+import MemoryCore
 import CryptoKit
 import XCTest
 @testable import 记忆花园

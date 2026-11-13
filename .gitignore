@@ -25,6 +25,10 @@ cc-bridge/secrets/
 !/Packages/SwiftStreamingMarkdown/
 # #087 SwiftTerm 1.13.0 原样入库 + 宽字符补丁（Packages/SwiftTerm/MP-PATCHES.md）
 !/Packages/SwiftTerm/
+# 摘包刀 1（11-05）：记忆核心本地包，要跟踪
+!/Packages/MemoryCore/
+# 重构（11-11，docs/plan-重构.md）：对话页本地包，要跟踪
+!/Packages/TranscriptKit/
 Package.pins
 Package.resolved
 # app 的 SPM 版本锁入库（#010 陌生人可编译）：xcodeproj 整个忽略，只逐层放出 Xcode 读的这一份；xcodegen 不碰它
@@ -107,3 +111,6 @@ docs/**/*.log
 docs/prompts/**
 !docs/prompts/**/
 !docs/prompts/**/*.md
+
+# memoryd 跑批结果（挂在副本里，不进 git）
+bench-runs/

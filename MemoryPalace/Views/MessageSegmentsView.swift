@@ -10,8 +10,9 @@ import SwiftStreamingMarkdown  // Phase 4 D11=b：.text 段切 fork，跟 Segmen
 /// .renderSnapshot）调同一个正则——一个真相，别两处各写参数。气泡模式的 BubbleMarkdownSimplifier
 /// 不在此列（SegmentedAssistantBody 只在文章模式用，尾巴不需要 simplifier；调用点各自叠加）。
 enum SegmentDisplayText {
-    static func apply(scripts: [RegexScript], to text: String, placement: Int = RegexPipeline.assistantPlacement) -> String {
-        RegexPipeline.run(scripts, text: text, phase: .display, placement: placement)
+    static func apply(scripts: [RegexScript], to text: String, placement: Int = RegexPipeline.assistantPlacement,
+                      userName: String = "", charName: String = "") -> String {
+        RegexPipeline.run(scripts, text: text, phase: .display, placement: placement, userName: userName, charName: charName)
     }
 }
 
@@ -20,12 +21,17 @@ enum SegmentDisplayText {
 /// - toolUse 后紧跟的同 id toolResult 会合并成一张卡片
 /// - 样式沿用现有 Theme 调色盘（mainBg + textMuted），不引新色
 struct MessageSegmentsView: View {
+    @Environment(\.themeScope) private var themeScope
+    private var palette: ThemePalette { themeScope.palette }
     let segments: [MessageSegment]
     let selectedFont: String
     let fontScale: Double
     let lineSpacingScale: Double
     let paragraphSpacingScale: Double
     let regexScripts: [RegexScript]
+    /// 规则里的 {{user}} / {{char}} 宏用（不传 = 不替换）
+    var userName: String = ""
+    var charName: String = ""
     /// user 气泡字体 / 对齐跟 assistant 不一样；text 段按此切换渲染。
     var isUser: Bool = false
     /// 附件一份存储：解 ref 段读盘需要（空串 = 解不了，降级占位卡）
@@ -69,7 +75,9 @@ struct MessageSegmentsView: View {
     private var items: [Item] {
         // ref 段先统一解成内联（读盘）；丢失文件降级 .attachment 占位卡
         let hydrated = self.segments.hydratedForDisplay(profileId: profileId)
-        let visible = suppressTrailingError ? ChatSystemMessage.removingTrailingError(from: hydrated) : hydrated
+        // 尾巴报错只在 AI 消息上拆（调用处一律同时传 toolNode）；老消息也认老标记
+        let visible = suppressTrailingError
+            ? ChatSystemMessage.removingTrailingError(from: hydrated, legacy: toolNode?.usesLegacyErrorMarker ?? false) : hydrated
         let segments = toolNode == nil ? visible : ChatToolTimeline.pairedSegments(visible)
         var result: [Item] = []
         var i = 0
@@ -177,7 +185,8 @@ struct MessageSegmentsView: View {
         switch item {
         case .text(let s):
             let regexed = SegmentDisplayText.apply(scripts: regexScripts, to: s,
-                                                   placement: isUser ? RegexPipeline.userPlacement : RegexPipeline.assistantPlacement)
+                                                   placement: isUser ? RegexPipeline.userPlacement : RegexPipeline.assistantPlacement,
+                                                   userName: userName, charName: charName)
             let applied = simplifyMarkdown ? BubbleMarkdownSimplifier.simplify(regexed) : regexed
             if !applied.isEmpty {
                 // Phase 4 D11=b：iOS .text 段切 fork，跟 SegmentedAssistantBody 末尾 tail renderer 一致
@@ -186,7 +195,7 @@ struct MessageSegmentsView: View {
                 ChatMarkdownView(
                     text: MessageHTMLSegments.markdownPromotingHTML(applied),   // 卡库 ⑦：明确 HTML 交给网页卡
                     fontName: selectedFont,
-                    scale: CGFloat(fontScale > 0 ? fontScale : 1.0),
+                    scale: CGFloat(fontScale > 0 ? fontScale : 1.2),
                     nodeId: nodeId,
                     profileId: profileId,
                     onQuote: onQuoteText,
@@ -197,14 +206,14 @@ struct MessageSegmentsView: View {
                 )
                 .chatCardRenderer(nodeId: nodeId, streaming: isStreaming)
                 .environment(\.openURL, OpenURLAction { url in
-                    // assistant 才需要 citation 反查；user 不参与（items 应为空）
+                    // assistant 才需要 citation 反查；user 不参与（items 应为空）。最后按「链接打开方式」开（花园浏览器 / 系统）
                     let items = citationItems
-                    guard !items.isEmpty else { return .systemAction }
+                    guard !items.isEmpty else { return gardenOpenURLResult(url) }
                     if let real = WebSearchCitation.resolve(linkURL: url.absoluteString, items: items),
                        let realURL = URL(string: real) {
-                        return .systemAction(realURL)
+                        return gardenOpenURLResult(realURL)
                     }
-                    return .systemAction
+                    return gardenOpenURLResult(url)
                 })
             }
         case .thinking(let s):
@@ -269,7 +278,7 @@ struct MessageSegmentsView: View {
                     .font(.system(size: 11))
                 Text(name.isEmpty ? "(图片)" : name)
                     .font(.system(size: 12))
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(palette.textMuted)
             }
         }
     }
@@ -310,6 +319,8 @@ private struct ThinkingBlockView: View {
 // MARK: - Tool Call Card
 
 struct ToolCallCardView: View {
+    @Environment(\.themeScope) private var themeScope
+    private var palette: ThemePalette { themeScope.palette }
     let name: String
     let inputJSON: String
     let resultText: String?
@@ -387,36 +398,36 @@ struct ToolCallCardView: View {
                     if let icon, !icon.isEmpty {
                         Image(systemName: icon)
                             .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(Theme.textMuted)
+                            .foregroundColor(palette.textMuted)
                             .frame(width: 14)
                     } else {
                         Image(systemName: "wrench.and.screwdriver").font(.system(size: 11))
                     }
                     Text(displayName)
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Theme.textPrimary)
+                        .foregroundColor(palette.textPrimary)
                     if let integration, !integration.isEmpty {
                         Text("· \(integration)")
                             .font(.system(size: 10))
-                            .foregroundColor(Theme.textMuted.opacity(0.7))
+                            .foregroundColor(palette.textMuted.opacity(0.7))
                     }
                     if isError {
                         Text("· 失败")
                             .font(.system(size: 10))
-                            .foregroundColor(Theme.textMuted.opacity(0.8))
+                            .foregroundColor(palette.textMuted.opacity(0.8))
                     }
                     // 折叠着也要能扫出跑了什么（编程会话）；排在「失败」之后，长了自己截，不挤掉前面的字
                     if let summary, !summary.isEmpty {
                         Text("· \(summary)")
                             .font(.system(size: 10))
-                            .foregroundColor(Theme.textMuted.opacity(0.8))
+                            .foregroundColor(palette.textMuted.opacity(0.8))
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
                     Spacer(minLength: 4)
                     Image(systemName: isExpanded && mode == .inline ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10))
-                        .foregroundColor(Theme.textMuted)
+                        .foregroundColor(palette.textMuted)
                 }
             }
             .buttonStyle(.plain)
@@ -434,10 +445,10 @@ struct ToolCallCardView: View {
         .padding(8)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Theme.mainBg.opacity(0.5))
+                .fill(palette.mainBg.opacity(0.5))
         )
         .sheet(isPresented: $showSheet) {
-            DisclosureSheet(title: displayName) {
+            DisclosureSheet(title: displayName, scope: themeScope) {
                 if let sh = shellView {
                     shellBody(sh, monoSize: 12)
                 } else {
@@ -448,16 +459,13 @@ struct ToolCallCardView: View {
         }
         .sheet(isPresented: Binding(get: { fullResult != nil }, set: { if !$0 { fullResult = nil } })) {
             if let full = fullResult {
-                DisclosureSheet(title: (full.path as NSString).lastPathComponent) {
+                DisclosureSheet(title: (full.path as NSString).lastPathComponent, scrolls: false, scope: themeScope) {
                     VStack(alignment: .leading, spacing: 6) {
                         if full.truncated {
-                            Text("文件过大，只显示前 1MB").font(.system(size: 11)).foregroundColor(Theme.textMuted)
+                            Text("文件过大，只显示前 1MB").font(.system(size: 11)).foregroundColor(palette.textMuted)
                         }
-                        Text(full.text)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(Theme.textMuted)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        LongTextView(text: full.text, fontSize: 12, color: palette.textMuted)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
             }
@@ -469,7 +477,7 @@ struct ToolCallCardView: View {
         if fullResultPath != nil {
             Button("打开完整结果") { openFullResult() }
                 .font(.system(size: size))
-                .foregroundColor(Theme.branchIndicator)
+                .foregroundColor(palette.branchIndicator)
                 .buttonStyle(.plain)
         }
     }
@@ -479,17 +487,17 @@ struct ToolCallCardView: View {
         ScrollView(.horizontal, showsIndicators: Theme.hScrollIndicators) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("$ " + sh.command)
-                    .foregroundColor(Theme.textPrimary)
+                    .foregroundColor(palette.textPrimary)
                 if !sh.stdout.isEmpty {
                     Text(sh.stdout.trimmingCharacters(in: .newlines))
-                        .foregroundColor(Theme.textMuted)
+                        .foregroundColor(palette.textMuted)
                 }
                 if !sh.stderr.isEmpty {
                     Text(sh.stderr.trimmingCharacters(in: .newlines))
-                        .foregroundColor(Theme.branchIndicator)
+                        .foregroundColor(palette.branchIndicator)
                 }
                 if let code = sh.exit, code != 0 {
-                    Text("exit \(code)").foregroundColor(Theme.textMuted.opacity(0.8))
+                    Text("exit \(code)").foregroundColor(palette.textMuted.opacity(0.8))
                 }
             }
             .font(.system(size: monoSize, design: .monospaced))
@@ -501,6 +509,8 @@ struct ToolCallCardView: View {
 
 /// 工具卡展开体（原地和 sheet 共用）：input JSON + 结果；原地 >2000 字再折，sheet 全量 + 复制
 private struct ToolCallDetail: View {
+    @Environment(\.themeScope) private var themeScope
+    private var palette: ThemePalette { themeScope.palette }
     let inputJSON: String
     let resultText: String?
     let truncateResult: Bool
@@ -518,7 +528,7 @@ private struct ToolCallDetail: View {
             if hasInput {
                 Text(inputJSON)
                     .font(.system(size: monoSize, design: .monospaced))
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(palette.textMuted)
                     .textSelection(.enabled)
                     .padding(.top, 2)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -530,7 +540,7 @@ private struct ToolCallDetail: View {
                 let shown = (truncateResult && !resultExpanded) ? String(r.prefix(resultTruncate)) : r
                 Text(shown)
                     .font(.system(size: monoSize, design: .monospaced))
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(palette.textMuted)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if truncateResult, r.count > resultTruncate {
@@ -538,7 +548,7 @@ private struct ToolCallDetail: View {
                         resultExpanded.toggle()
                     }
                     .font(.system(size: 10))
-                    .foregroundColor(Theme.branchIndicator)
+                    .foregroundColor(palette.branchIndicator)
                     .buttonStyle(.plain)
                 }
             }
@@ -553,7 +563,7 @@ private struct ToolCallDetail: View {
                     #endif
                 }
                 .font(.system(size: 12))
-                .foregroundColor(Theme.branchIndicator)
+                .foregroundColor(palette.branchIndicator)
                 .buttonStyle(.plain)
                 .padding(.top, 4)
             }
@@ -564,6 +574,8 @@ private struct ToolCallDetail: View {
 // MARK: - Flag Card
 
 private struct FlagCardView: View {
+    @Environment(\.themeScope) private var themeScope
+    private var palette: ThemePalette { themeScope.palette }
     let kind: String
     let helplineLine: String?
     let helplineUrl: String?
@@ -575,7 +587,7 @@ private struct FlagCardView: View {
             if let url = helplineUrl, let link = URL(string: url) {
                 Link(url, destination: link)
                     .font(.system(size: 12))
-                    .foregroundColor(Theme.branchIndicator)
+                    .foregroundColor(palette.branchIndicator)
             }
         }
     }
@@ -584,6 +596,8 @@ private struct FlagCardView: View {
 // MARK: - Attachment Card
 
 private struct AttachmentCardView: View {
+    @Environment(\.themeScope) private var themeScope
+    private var palette: ThemePalette { themeScope.palette }
     let name: String
     let type: String?
     let extractedContent: String?
@@ -608,17 +622,17 @@ private struct AttachmentCardView: View {
                     Image(systemName: "paperclip").font(.system(size: 11))
                     Text(name.isEmpty ? "(附件)" : name)
                         .font(.system(size: 12))
-                        .foregroundColor(Theme.textPrimary)
+                        .foregroundColor(palette.textPrimary)
                     if let t = type, !t.isEmpty {
                         Text("· \(t)")
                             .font(.system(size: 10))
-                            .foregroundColor(Theme.textMuted.opacity(0.7))
+                            .foregroundColor(palette.textMuted.opacity(0.7))
                     }
                     Spacer()
                     if hasContent {
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                             .font(.system(size: 10))
-                            .foregroundColor(Theme.textMuted)
+                            .foregroundColor(palette.textMuted)
                     }
                 }
             }
@@ -629,7 +643,7 @@ private struct AttachmentCardView: View {
                 let shown = ex.count > previewTruncate ? String(ex.prefix(previewTruncate)) + "\n...（已截断）" : ex
                 Text(shown)
                     .font(.system(size: 10))
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(palette.textMuted)
                     .textSelection(.enabled)
                     .padding(.top, 2)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -638,7 +652,7 @@ private struct AttachmentCardView: View {
         .padding(8)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Theme.mainBg.opacity(0.5))
+                .fill(palette.mainBg.opacity(0.5))
         )
     }
 }

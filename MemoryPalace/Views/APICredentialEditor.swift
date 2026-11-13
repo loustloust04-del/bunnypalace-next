@@ -54,8 +54,17 @@ struct APICredentialEditor: View {
     @State private var hubURLDraft: String = ""
     @State private var hubBackupDraft: String = ""
     @State private var toolsSupported: Bool = true   // 卡级工具调用通道（B 止血）
+    @State private var sideCallStreaming: Bool = true   // 后台任务用流式（刀 4 返修）
     @State private var showScanner: Bool = false
     @State private var pairResult: String? = nil
+    /// 改了 Hub 配对、认出不是主电脑 / 认不出：弹落点（b4 #1，iOS）
+    @State private var pairingCheck: CCHubRegistry.PrimaryPairingCheck?
+    /// 认哪台之后要续上的原流程（保存 / 重连，R5.5）：落点提交成了 / Mac 选了「是主电脑」才跑
+    @State private var afterHubCommit: (() -> Void)?
+    #if os(macOS)
+    /// Mac：老 hub 报不出身份、口令也对不上，让人明说是不是主电脑换了口令（R5.1）
+    @State private var macChoice: CCHubRegistry.PrimaryPairingCheck?
+    #endif
     @State private var connectionTick: Int = 0   // 触发 view 重读 CCBridgeWebSocketClient 状态
 
     // chatgptOAuth 卡专用
@@ -91,7 +100,7 @@ struct APICredentialEditor: View {
     private var currentDraft: CredentialDraft {
         CredentialDraft(presetSelection: presetSelection, customType: customType, customBaseURL: customBaseURL,
                         nickname: nickname, emoji: emoji, models: draftModels, toolsSupported: toolsSupported,
-                        regionSelection: regionSelection, presetProtocol: presetProtocol)
+                        sideCallStreaming: sideCallStreaming, regionSelection: regionSelection, presetProtocol: presetProtocol)
     }
 
     private var currentType: ProviderType { currentDraft.type }
@@ -120,6 +129,7 @@ struct APICredentialEditor: View {
         var emoji, nickname, presetSelection, customBaseURL, apiKey: String
         var customType: ProviderType
         var toolsSupported: Bool
+        var sideCallStreaming: Bool
         var modelIds: [String]
         var regionSelection: String?
         var presetProtocol: ProviderType?
@@ -134,17 +144,26 @@ struct APICredentialEditor: View {
     private var snapshot: DraftSnapshot {
         let d = currentDraft
         return DraftSnapshot(emoji: emoji, nickname: nickname, presetSelection: presetSelection, customBaseURL: customBaseURL,
-                             apiKey: apiKey, customType: customType, toolsSupported: toolsSupported, modelIds: draftModels.map(\.modelId),
+                             apiKey: apiKey, customType: customType, toolsSupported: toolsSupported, sideCallStreaming: sideCallStreaming,
+                             modelIds: draftModels.map(\.modelId),
                              regionSelection: d.effectiveRegionSelection, presetProtocol: d.effectivePresetProtocol)
     }
 
     private var isDirty: Bool { original.map { $0 != snapshot } ?? false }
+
+    private func cancelEditing() {
+        draftFinished = true
+        APIDraftStore.clear(slot: draftSlot)
+        orLogin.cancel()
+        dismiss()
+    }
 
     // MARK: 草稿保活（plan-api-draft-and-fix-jump §2.2）
 
     @Environment(\.scenePhase) private var scenePhase
     /// 保存 / 取消 / 删卡之后不再存草稿（关页时的 onDisappear 也会走存草稿）
     @State private var draftFinished = false
+    @State private var confirmingDiscard = false
     /// 页顶「接着上次没存完的填 · 丢掉」
     @State private var restoredFromDraft = false
     /// 恢复出来的模型清单和它所属的提供商：装载时给 presetSelection 赋值会触发 resetDraftModelsForProvider，
@@ -168,6 +187,7 @@ struct APICredentialEditor: View {
         let savedKey = credentialId.flatMap { providerManager?.apiKey(for: $0) } ?? ""
         let draft = APIDraft(slot: draftSlot, emoji: emoji, nickname: nickname, presetSelection: presetSelection,
                              customBaseURL: customBaseURL, customType: customType.rawValue, toolsSupported: toolsSupported,
+                             sideCallStreaming: sideCallStreaming,
                              models: draftModels.map { .init(modelId: $0.modelId, name: $0.name) },
                              regionSelection: regionSelection, presetProtocol: presetProtocol?.rawValue)
         if APIDraftStore.save(draft, key: apiKey == savedKey && !isNew ? nil : apiKey) { lastDraftSnapshot = snapshot }
@@ -190,6 +210,7 @@ struct APICredentialEditor: View {
         regionSelection = restored.regionSelection
         presetProtocol = restored.presetProtocol
         toolsSupported = d.toolsSupported
+        sideCallStreaming = d.sideCallStreaming ?? true
         draftModels = models
         if let key = loaded.key { apiKey = key }
         restoredFromDraft = true
@@ -212,6 +233,7 @@ struct APICredentialEditor: View {
         presetProtocol = o.presetProtocol
         apiKey = o.apiKey
         toolsSupported = o.toolsSupported
+        sideCallStreaming = o.sideCallStreaming
         draftModels = resolvedCredential?.models ?? []
     }
 
@@ -338,19 +360,14 @@ struct APICredentialEditor: View {
         .scrollContentBackground(.hidden)
         .background(Theme.sidebarBg)
         .scrollDismissesKeyboard(.immediately)
-        .interactiveDismissDisabled(isDirty)   // 填了一半，下滑一下别全丢；要走点「取消」
+        .discardChangesGuard(isDirty: isDirty, confirming: $confirmingDiscard, onDiscard: cancelEditing)   // 填了一半，下滑 / 取消都先问
         .navigationTitle(isNew ? "新建 API" : "编辑 API")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                Button("取消") {
-                    draftFinished = true
-                    APIDraftStore.clear(slot: draftSlot)
-                    orLogin.cancel()
-                    dismiss()
-                }
+                Button("取消") { if isDirty { confirmingDiscard = true } else { cancelEditing() } }
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button(savedFlash ? "✓" : isSaving ? "保存中…" : saveFetchFailed ? "仍然保存" : "保存") { save() }
@@ -368,10 +385,24 @@ struct APICredentialEditor: View {
         .fullScreenCover(isPresented: $showScanner) {
             CCPairScannerSheet { payload in applyPairing(payload) }
         }
+        .sheet(item: $pairingCheck, onDismiss: { afterHubCommit = nil }) {
+            HubPairingSheet(target: CCHubRegistry.primaryId, check: $0, onCommitted: hubCommitted)
+        }
         #else
         .sheet(isPresented: $showScanner) {
             // mac 端弹"我是 hub"的二维码，给 iOS 扫
             CCPairingSheet()
+        }
+        .confirmationDialog("认不出这是哪台电脑", isPresented: Binding(get: { macChoice != nil }, set: { if !$0 { macChoice = nil } }),
+                            titleVisibility: .visible, presenting: macChoice) { check in
+            Button("是「\(hubName(CCHubRegistry.primaryId))」，换了口令") { macUpdatePrimary(check) }
+            Button("不是，是另一台电脑") {
+                afterHubCommit = nil
+                pairResult = "Mac 上只连一台电脑：没改「\(hubName(CCHubRegistry.primaryId))」的配对"
+            }
+            Button("取消", role: .cancel) { afterHubCommit = nil; pairResult = nil }
+        } message: { _ in
+            Text("那台电脑上的 hub 比较老，报不出自己是谁，口令也和现在的对不上。")
         }
         #endif
         .onAppear {
@@ -951,6 +982,15 @@ struct APICredentialEditor: View {
                     .tint(Theme.branchIndicator)
             } footer: {
                 Text("关闭后，走这张卡的请求不携带任何工具，也不会告诉模型有工具可用。后端不支持 function calling 的中转请关掉。")
+                    .font(.system(size: Theme.SettingsFont.caption))
+            }
+            .listRowBackground(Theme.mainBg)
+
+            Section {
+                Toggle("后台任务用流式", isOn: $sideCallStreaming)
+                    .tint(Theme.branchIndicator)
+            } footer: {
+                Text("记忆整理、窗口总结、心声这些后台任务边生成边接收，有的网络会掐断 30 秒以上没动静的连接，流式不会被掐。这家服务商对流式审查更严的话可以关掉，关掉后等整段生成完一次收回。")
                     .font(.system(size: Theme.SettingsFont.caption))
             }
             .listRowBackground(Theme.mainBg)
@@ -1544,6 +1584,12 @@ struct APICredentialEditor: View {
 
                     #endif
                     .autocorrectionDisabled(true)
+                // 待配对时不回显旧口令（它对不上 / 电脑不认），空着不是丢了（plan-multi-hub B4 后续）
+                if apiKey.isEmpty, CCHubRegistry.shared.status(for: CCHubRegistry.primaryId) == .needsPairing {
+                    Text("现在的口令对不上（或电脑不认它），这里不显示：重新扫码，或在这里填新口令")
+                        .font(.system(size: Theme.SettingsFont.caption))
+                        .foregroundColor(Theme.textMuted)
+                }
             }
         } header: {
             Text("手动配置（高级）")
@@ -1679,7 +1725,9 @@ struct APICredentialEditor: View {
             regionSelection = loaded.regionSelection
             presetProtocol = loaded.presetProtocol
             toolsSupported = c.toolsSupported ?? true
-            apiKey = pm.apiKey(for: c.id) ?? ""
+            sideCallStreaming = c.sideCallStreaming ?? true
+            // 主 hub 口令显示本机副本（plan-multi-hub impl1 #1）：cc-bridge 可能经 iCloud 被别的设备改过，存回去就把别台口令发给这台的 hub
+            apiKey = (c.id == HubTokenStore.keychainAccount ? CCHubRegistry.shared.pairedPrimaryToken : pm.apiKey(for: c.id)) ?? ""
             draftModels = c.models
             // chatgptOAuth 卡：apiKey 是 JSON，解出已登录账号 id 显示
             if c.type == .chatgptOAuth, let token = pm.oauthToken(for: c.id) {
@@ -1731,8 +1779,55 @@ struct APICredentialEditor: View {
 
     /// 扫码后写入：整体替换 Hub 地址（主 / 备 / 中继）+ Token → 立即重连（ccBridge 卡 id 固定 cc-bridge）
     private func applyPairing(_ p: CCPairPayload) {
-        pairResult = CCPairingApply.apply(p, providerManager: providerManager)
-        guard pairResult?.hasPrefix("已配对") == true else { return }
+        pairResult = CCPairingApply.checking
+        Task {
+            switch await CCPairingApply.apply(p, providerManager: providerManager) {
+            case .done(let line):
+                pairResult = line
+                if line.hasPrefix("已配对") { pairingApplied(p) }
+            case .confirm(let check):
+                pairResult = nil
+                afterHubCommit = nil
+                pairingCheck = check
+            }
+        }
+    }
+
+    #if os(iOS)
+    /// 落点页提交成了（R5.5）：没更新主电脑（加成了新电脑）就把草稿改回主电脑现在的配对，再续上原流程
+    private func hubCommitted(_ commit: CCHubPairingLanding.Commit) {
+        if commit != .update(CCHubRegistry.primaryId) {
+            let current = CCHubPairing.read(.standard)
+            hubURLDraft = current.primaryURL ?? ""
+            hubBackupDraft = current.backupURL ?? ""
+            if (credentialId ?? currentDraft.presetSelection) == HubTokenStore.keychainAccount {
+                apiKey = CCHubRegistry.shared.pairedPrimaryToken ?? ""
+            }
+        }
+        pairResult = nil
+        connectionTick &+= 1
+        let next = afterHubCommit
+        afterHubCommit = nil
+        next?()
+    }
+    #else
+    /// Mac 上明说了「是主电脑换了口令」才写（带握手看到的 hub_id，照旧核）
+    private func macUpdatePrimary(_ check: CCHubRegistry.PrimaryPairingCheck) {
+        let update = CCHubRegistry.shared.updatePairing(CCHubRegistry.primaryId, check.pairing, token: check.token,
+                                                        expectedIdentity: check.reported, providerManager: providerManager)
+        guard update == .updated else {
+            afterHubCommit = nil
+            pairResult = CCHubPairingLanding.failure(update, target: CCHubRegistry.primaryId, names: hubName) ?? Self.hubSecretWriteFailed
+            return
+        }
+        pairResult = nil
+        let next = afterHubCommit
+        afterHubCommit = nil
+        next?()
+    }
+    #endif
+
+    private func pairingApplied(_ p: CCPairPayload) {
         hubURLDraft = p.u ?? ""
         hubBackupDraft = p.u2 ?? ""
         apiKey = p.t   // draft 里同步显示
@@ -1743,15 +1838,66 @@ struct APICredentialEditor: View {
 
     /// 手动重连（用当前 hubURLDraft + backup + apiKey）
     private func reconnectCC() {
-        // 先把 draft 落盘；改了地址 = 换了电脑，扫码存的旧中继一起清掉
-        CCBridgeEndpoints.saveManual(primary: hubURLDraft, backup: hubBackupDraft)
-        let urls = CCBridgeEndpoints.configuredURLs()   // 刚落盘的主 / 备 + （没换目标时）扫码存的中继
-        guard !urls.isEmpty else { return }
-        let t = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        CCBridgeWebSocketClient.shared.disconnect()
-        CCBridgeWebSocketClient.shared.connect(urls: urls, token: t.isEmpty ? nil : t)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { connectionTick &+= 1 }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { connectionTick &+= 1 }
+        // 先把 draft 落盘（地址 + 口令一起，走 Registry 统一入口）；改了地址 = 换了电脑，扫码存的旧中继一起清掉。之后先断开再握手。
+        // 地址 / 口令改了要先认是不是主电脑（b4 #1）
+        commitHubDraft(reconnect: true) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { connectionTick &+= 1 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { connectionTick &+= 1 }
+        }
+    }
+
+    /// Hub 地址 / 口令草稿写成主电脑的配对：没改照旧（重连按钮照旧重新握手）；改了先握手认哪台，认出是主电脑才写，然后 then。
+    /// 不是主电脑 / 认不出：iOS 弹落点页，提交成了再续 then；Mac（只连一台）老 hub 认不出就让人明说是不是主电脑换了口令，其余不改并说明
+    private func commitHubDraft(reconnect: Bool, then: @escaping () -> Void) {
+        let registry = CCHubRegistry.shared
+        Task {
+            if !registry.primaryNeverPaired { pairResult = CCPairingApply.checking }
+            let result = await registry.applyPrimaryManual(primary: hubURLDraft, backup: hubBackupDraft, token: hubTokenForPairing,
+                                                           providerManager: providerManager, reconnect: reconnect)
+            switch result {
+            case .applied:
+                if pairResult == CCPairingApply.checking { pairResult = nil }
+                then()
+            case .failed(.secretWriteFailed):
+                pairResult = Self.hubSecretWriteFailed
+            case .failed(let failure):
+                pairResult = CCHubPairingLanding.failure(failure, target: CCHubRegistry.primaryId, names: hubName) ?? Self.hubSecretWriteFailed
+            case .confirm(let check):
+                #if os(iOS)
+                pairResult = "Hub 地址还没改：在弹出的页面里认好是哪台电脑"
+                afterHubCommit = then
+                pairingCheck = check
+                #else
+                guard check.match == .needsChoice else {
+                    pairResult = Self.macPairingRefused(check.match, names: hubName)
+                    return
+                }
+                pairResult = nil
+                afterHubCommit = then
+                macChoice = check
+                #endif
+            }
+        }
+    }
+
+    private func hubName(_ id: String) -> String { CCHubRegistry.shared.hubs.first { $0.id == id }?.name ?? "这台电脑" }
+
+    #if os(macOS)
+    /// Mac 上只连一台：认出是另一台 / 连不上就不改原来的配对
+    static func macPairingRefused(_ match: CCHubRegistry.PairingMatch, names: (String) -> String) -> String {
+        switch match {
+        case .unreachable(let reason): return "连不上这台电脑，Hub 地址没改" + (reason.isEmpty ? "" : "（\(reason)）")
+        default: return "这是另一台电脑，没改「\(names(CCHubRegistry.primaryId))」的配对"
+        }
+    }
+    #endif
+
+    static let hubSecretWriteFailed = "口令没存进钥匙串，Hub 地址没改，再试一次"
+
+    /// 主 hub 配对用的口令：Claude Code 卡的 key 就是主 hub 口令；Codex 本地卡共用 Hub 地址，口令沿用主 hub 现有的（本机副本，不读 cc-bridge）
+    private var hubTokenForPairing: String {
+        (credentialId ?? currentDraft.presetSelection) == HubTokenStore.keychainAccount
+            ? apiKey : (CCHubRegistry.shared.pairedPrimaryToken ?? "")
     }
 
     private func usedEmojisExcludingSelf() -> Set<String> {
@@ -1808,9 +1954,15 @@ struct APICredentialEditor: View {
     /// 唯一落盘入口：卡 + key 一起写；adopt = 新卡（或换了家的卡）挑一个模型收藏；保存前没有别的能用的卡才接管主模型（K3）
     private func persist(_ pm: ProviderManager, adopt: Bool) {
         if currentType == .ccBridge {
-            // ccBridge：Hub URL override + 备用 URL 写 UserDefaults（暂全局）
-            CCBridgeEndpoints.saveManual(primary: hubURLDraft, backup: hubBackupDraft)
+            // ccBridge：Hub 主 / 备地址 + 口令作为主 hub 的配对一起写（Registry 统一入口，钥匙串写失败 / 认出不是主电脑就不存、留在页面上）；
+            // 配对变了会先断开再握手
+            commitHubDraft(reconnect: false) { commitCard(pm, adopt: adopt) }
+            return
         }
+        commitCard(pm, adopt: adopt)
+    }
+
+    private func commitCard(_ pm: ProviderManager, adopt: Bool) {
         // 卡 id / 模型清单 / forgetModels / 钥匙串 / 本机模型收藏 / K3 接管都在 CredentialCommitter 里
         CredentialCommitter.commit(currentDraft, key: apiKey, existing: resolvedCredential,
                                    adopt: adopt ? .autoPick : .none, modelHints: draftHints, providerManager: pm)
@@ -2085,7 +2237,7 @@ struct ModelPoolPage: View {
                 }
             } footer: {
                 HStack {
-                    Text("🌞 主对话  ·  🌛 副记忆  ·  ☆ 收藏")
+                    Text("🌞 默认（新楼层 / 没选模型的人用）·  🌛 副记忆  ·  ☆ 收藏")
                     Spacer()
                     let matched = totalMatched
                     let all = totalAll

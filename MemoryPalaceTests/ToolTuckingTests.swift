@@ -36,7 +36,7 @@ final class ToolTuckingTests: XCTestCase {
 
     func testMetaToolsShowUpWhenSomethingIsTucked() {
         // open_url / device_info 只跟工具总开关走，总开关开着就一定有收起来的
-        PermissionCenter.setLevel(.bypass, for: .toolsMaster)
+        PermissionCenter.setDefaultLevel(.bypass, for: .toolsMaster)
         XCTAssertFalse(ToolRegistry.tuckedDefinitions(ctx).isEmpty)
         let inline = ToolRegistry.inlineDefinitions(ctx).map(\.name)
         XCTAssertTrue(MetaTools.names.isSubset(of: Set(inline)), "有收起来的工具就发元工具")

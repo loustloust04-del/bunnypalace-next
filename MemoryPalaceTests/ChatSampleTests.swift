@@ -78,12 +78,26 @@ final class ChatSampleTests: XCTestCase {
     }
 
     func testErrorCapsulePreservesPartialReplyAndUserContent() {
-        XCTAssertEqual(ChatSystemMessage.split("⚠️ 服务不可用"), .init(body: "", error: "服务不可用"))
-        XCTAssertEqual(ChatSystemMessage.split("正文\n\n⚠️ 服务不可用"), .init(body: "正文", error: "服务不可用"))
-        XCTAssertNil(ChatSystemMessage.split("这一句里有 ⚠️ 示例").error)
-        XCTAssertEqual(ChatSystemMessage.removingTrailingError(from: [.text("正文"), .text("⚠️ 失败")]), [.text("正文")])
-        XCTAssertEqual(ChatSystemMessage.removingTrailingError(from: [.text("正文\n\n⚠️ 失败")]), [.text("正文")])
-        XCTAssertEqual(ChatSystemMessage.split("（已停止）").notice, "已停止")
-        XCTAssertEqual(ChatSystemMessage.removingTrailingError(from: [.text("正文"), .text("（已停止）")]), [.text("正文")])
+        let err = ChatSystemMessage.errorLine
+        XCTAssertEqual(ChatSystemMessage.split(err("服务不可用"), legacy: false), .init(body: "", error: "服务不可用"))
+        XCTAssertEqual(ChatSystemMessage.split("正文\n\n" + err("服务不可用"), legacy: false), .init(body: "正文", error: "服务不可用"))
+        XCTAssertNil(ChatSystemMessage.split("这一句里有 ⚠️ 示例", legacy: true).error)
+        XCTAssertEqual(ChatSystemMessage.removingTrailingError(from: [.text("正文"), .text(err("失败"))], legacy: false), [.text("正文")])
+        XCTAssertEqual(ChatSystemMessage.removingTrailingError(from: [.text("正文\n\n" + err("失败"))], legacy: false), [.text("正文")])
+        XCTAssertEqual(ChatSystemMessage.split("（已停止）", legacy: false).notice, "已停止")
+        XCTAssertEqual(ChatSystemMessage.removingTrailingError(from: [.text("正文"), .text("（已停止）")], legacy: false), [.text("正文")])
+    }
+
+    /// plan-send-notice-marker B：新消息里 AI 自己写的「⚠️ 」是正文；老消息照旧按报错拆
+    func testPlainWarningIsBodyUnlessLegacy() {
+        XCTAssertEqual(ChatSystemMessage.split("⚠️ 注意别烫手", legacy: false), .init(body: "⚠️ 注意别烫手", error: nil))
+        XCTAssertEqual(ChatSystemMessage.split("先说正文\n\n⚠️ 注意别烫手", legacy: false).error, nil)
+        XCTAssertEqual(ChatSystemMessage.removingTrailingError(from: [.text("正文"), .text("⚠️ 提醒")], legacy: false).count, 2)
+        XCTAssertEqual(ChatSystemMessage.split("⚠️ 服务不可用", legacy: true), .init(body: "", error: "服务不可用"))
+        XCTAssertEqual(ChatSystemMessage.split("正文\n\n⚠️ 服务不可用", legacy: true), .init(body: "正文", error: "服务不可用"))
+        XCTAssertEqual(ChatSystemMessage.removingTrailingError(from: [.text("正文"), .text("⚠️ 失败")], legacy: true), [.text("正文")])
+        XCTAssertTrue(ChatSystemMessage.usesLegacyMarker(Date(timeIntervalSince1970: 1_794_185_000)))
+        XCTAssertFalse(ChatSystemMessage.usesLegacyMarker(Date(timeIntervalSince1970: 1_794_187_000)))
+        XCTAssertTrue(ChatSystemMessage.usesLegacyMarker(nil), "没时间的老导入消息按老规矩")
     }
 }

@@ -1098,7 +1098,6 @@ final class IPadPanelLayout {
     /// **工具面板恒在右、对话列表恒在左**（她 09-16：「工具页面永远放右边，列表永远从左边出来」）。
     /// `dockSide` 从此只决定那条竖 dock 图标条贴哪边——三者解耦（plan-lane-decouple）
     static let toolsSide: GridFrame.Side = .right
-    static let convSide: GridFrame.Side = .left
 
     /// dock 离边多远 / 工具侧是否预留两列：全屏模式 dock 贴边（0）且工具侧固定留两列给 tab 组盖
     /// （research-ipad-desktop-bugs §2.1 丙右）；浮窗模式 dock 悬在格线上（M）、工具侧一列

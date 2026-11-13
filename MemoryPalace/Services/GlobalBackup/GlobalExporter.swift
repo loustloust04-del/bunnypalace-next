@@ -1,4 +1,5 @@
 import Foundation
+import MemoryCore
 import SwiftData
 import ZIPFoundation
 #if os(iOS)
@@ -206,9 +207,28 @@ enum GlobalExporter {
             try cpData.write(to: cpURL, options: .atomic)
         }
 
+        try exportDeviceFloorFiles(to: udDir)
+
         // section sha256（整目录）
         let (sha, bytes) = try SectionHasher.hash(directory: udDir)
         sections.append(.init(path: "userdefaults", sha256: sha, bytes: bytes))
+    }
+
+    /// 本机按层设置（atrium P3⑤a §3.6）：权限档位单独设的 + 工具抽屉 + page2 App 装卸（P3⑥）。楼层 id 跟着整包走，所以随全量备份带；config 文件不带
+    static let deviceFloorFiles: [(udKey: String, filename: String)] = [
+        (PermissionCenter.floorsKey, "permission_floors.json"),
+        ("toolDrawer.v1", "tool_drawer.json"),   // = ToolDrawerStore.defaultsKey（那边是 MainActor，这里写字面量）
+        (Page2Apps.floorsKey, "page2_app_floors.json"),
+    ]
+
+    /// 没有的键不出文件（导入时没文件 = 本机值不动）；格式同 `dumpUDDataAsJSON`（解得开才写，pretty + sortedKeys）
+    static func exportDeviceFloorFiles(to udDir: URL, from defaults: UserDefaults = .standard) throws {
+        for (udKey, filename) in deviceFloorFiles {
+            guard let data = defaults.data(forKey: udKey),
+                  let obj = try? JSONSerialization.jsonObject(with: data) else { continue }
+            let pretty = try JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
+            try pretty.write(to: udDir.appendingPathComponent(filename), options: .atomic)
+        }
     }
 
     /// 把 UserDefaults object 转成 JSONSerialization 兼容值。
@@ -500,6 +520,15 @@ enum GlobalExporter {
                 to: pidOut.appendingPathComponent("placements.jsonl"),
                 stats: &stats.placedStickerCount
             )
+
+            // 4. ChatMeme（表情包）→ memes.jsonl；图片在 memes/ 子目录，上面第 1 步已整目录拷
+            var memeCount = 0
+            try dumpJSONL(
+                FetchDescriptor<ChatMeme>(predicate: #Predicate<ChatMeme> { $0.profileId == pid }),
+                context: bgContext, mapping: FullChatMemeDocument.init(model:),
+                to: pidOut.appendingPathComponent("memes.jsonl"),
+                stats: &memeCount
+            )
         }
 
         let (sha, bytes) = try SectionHasher.hash(directory: stickersOut)
@@ -671,11 +700,7 @@ enum GlobalExporter {
                 let memSrc = FileLibraryStore.memoryRoot(profileId: pid)
                 if FileManager.default.fileExists(atPath: memSrc.path) {
                     let dst = outPid.appendingPathComponent("memory", isDirectory: true)
-                    do {
-                        try FileManager.default.copyItem(at: memSrc, to: dst)
-                    } catch {
-                        throw GlobalBackupError.exportFileCopyFailed(memSrc, error)
-                    }
+                    try copyMemoryTree(from: memSrc, to: dst)
                 }
             }
 
@@ -692,6 +717,23 @@ enum GlobalExporter {
         let (sha, bytes) = try SectionHasher.hash(directory: outRoot)
         sections.append(.init(path: "filelibrary", sha256: sha, bytes: bytes))
         stats.uncompressedBytes += bytes
+    }
+
+    /// 记忆树整目录拷进备份，顶层 `exports/` 跳过：那是 Debug 导出的整楼层对话原文（含回收站），
+    /// 只留本机给 memoryd 用，不进任何备份包。
+    /// 集合存小写常量，匹配时把目录名 `lowercased()` —— 大小写不敏感卷上 `Exports/` 就是同一个目录。
+    static let memoryTreeExcludedDirs: Set<String> = [FloorSnapshotExportFolder.name]
+
+    static func copyMemoryTree(from src: URL, to dst: URL) throws {
+        let fm = FileManager.default
+        do {
+            try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+            for name in try fm.contentsOfDirectory(atPath: src.path) where !memoryTreeExcludedDirs.contains(name.lowercased()) {
+                try fm.copyItem(at: src.appendingPathComponent(name), to: dst.appendingPathComponent(name))
+            }
+        } catch {
+            throw GlobalBackupError.exportFileCopyFailed(src, error)
+        }
     }
 
     // MARK: - B.8 buildManifest

@@ -78,18 +78,42 @@ struct CCSessionPhase: Equatable {
     }
 }
 
-/// 按对话存（帧里的 chat_id = 这个会话最近一次从哪个对话发来）；聊天页底部的状态卡读它
+/// 按对话存（帧里的 chat_id = 这个会话最近一次从哪个对话发来）；聊天页底部的状态卡读它。
+/// 按 hub 分开存（plan-multi-hub B2.8）：每台各是各的，同名会话只在同一台里互相顶；读的时候给对话所属那台（默认主 hub）
 @MainActor @Observable
 final class CCSessionPhaseStore {
     static let shared = CCSessionPhaseStore()
 
-    private(set) var byChat: [String: CCSessionPhase] = [:]
+    /// hubId → chatId → 阶段
+    private(set) var byHub: [String: [String: CCSessionPhase]] = [:]
 
-    func apply(_ p: CCSessionPhase) {
+    /// 写入前核来源（plan-multi-hub B3.2 / research R7）：这条对话当前绑这台、或最近在这台上发过才收（app 根接上
+    /// ConversationViewModel.acceptsCCFrame）。改绑后旧那台还按 chat_id 推的阶段不写进来。nil = 照收
+    @ObservationIgnored var accepts: ((_ chatId: String, _ hubId: String) -> Bool)?
+    /// 这个对话的一轮收口了（working / waiting / 没有记录 → done / idle）：app 根接 ConversationViewModel.ccTurnSettled，
+    /// 清等待泡、让等着的贴表情马上投（plan-cc-reactions-1105 §1）。`at` = 帧里的 updated
+    @ObservationIgnored var onTurnSettled: ((_ chatId: String, _ hubId: String, _ at: Date) -> Void)?
+
+    func apply(_ p: CCSessionPhase, hubId: String = CCBridgeWebSocketClient.primaryHubId) {
+        guard accepts?(p.chatId, hubId) ?? true else { return }
+        var byChat = byHub[hubId] ?? [:]
+        let previous = byChat[p.chatId]?.phase
         // 同一个会话改从别的对话发了：旧对话不再挂它
         for (chat, old) in byChat where old.sessionName == p.sessionName && chat != p.chatId { byChat[chat] = nil }
         byChat[p.chatId] = p
+        byHub[hubId] = byChat
+        let settled: Set<CCSessionPhase.Phase> = [.done, .idle]
+        if settled.contains(p.phase), !(previous.map(settled.contains) ?? false) {
+            onTurnSettled?(p.chatId, hubId, p.updated)
+        }
     }
 
-    func phase(for conversationId: String) -> CCSessionPhase? { byChat[conversationId] }
+    func phase(for conversationId: String, hubId: String = CCBridgeWebSocketClient.primaryHubId) -> CCSessionPhase? {
+        byHub[hubId]?[conversationId]
+    }
+
+    /// 删 hub：那台推来的阶段一起清
+    func removeHub(_ hubId: String) {
+        byHub[hubId] = nil
+    }
 }

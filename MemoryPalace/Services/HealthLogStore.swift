@@ -41,25 +41,25 @@ enum HealthLogStore {
     static let intimacyShowKey = "health.show.intimacy"
 
     static var weightGateEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: weightGateKey) as? Bool ?? false }   // §4 默认收紧
-        set { PermissionCenter.setLevel(newValue ? .bypass : .notAllowed, for: .healthWeight) }   // 委托：防直写旧 key 与档位失同步
+        get { PermissionCenter.defaultLevel(.healthWeight) == .bypass }   // 只代表默认；请求路径用 PermissionCenter.level(_:profileId:)
+        set { PermissionCenter.setDefaultLevel(newValue ? .bypass : .notAllowed, for: .healthWeight) }   // 委托：防直写旧 key 与档位失同步
     }
 
     static var medsGateEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: medsGateKey) as? Bool ?? false }   // §4 默认收紧
-        set { PermissionCenter.setLevel(newValue ? .bypass : .notAllowed, for: .healthMeds) }   // 委托：防直写旧 key 与档位失同步
+        get { PermissionCenter.defaultLevel(.healthMeds) == .bypass }   // 只代表默认；请求路径用 PermissionCenter.level(_:profileId:)
+        set { PermissionCenter.setDefaultLevel(newValue ? .bypass : .notAllowed, for: .healthMeds) }   // 委托：防直写旧 key 与档位失同步
     }
 
     /// 月经闸**默认关**（脑爆拍板：敏感类默认关）。
     static var cycleGateEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: cycleGateKey) as? Bool ?? false }
-        set { PermissionCenter.setLevel(newValue ? .bypass : .notAllowed, for: .healthCycle) }   // 委托：防直写旧 key 与档位失同步
+        get { PermissionCenter.defaultLevel(.healthCycle) == .bypass }   // 只代表默认；请求路径用 PermissionCenter.level(_:profileId:)
+        set { PermissionCenter.setDefaultLevel(newValue ? .bypass : .notAllowed, for: .healthCycle) }   // 委托：防直写旧 key 与档位失同步
     }
 
     /// 亲密闸**默认关**（同敏感类）。
     static var intimacyGateEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: intimacyGateKey) as? Bool ?? false }
-        set { PermissionCenter.setLevel(newValue ? .bypass : .notAllowed, for: .healthIntimacy) }   // 委托：防直写旧 key 与档位失同步
+        get { PermissionCenter.defaultLevel(.healthIntimacy) == .bypass }   // 只代表默认；请求路径用 PermissionCenter.level(_:profileId:)
+        set { PermissionCenter.setDefaultLevel(newValue ? .bypass : .notAllowed, for: .healthIntimacy) }   // 委托：防直写旧 key 与档位失同步
     }
 
     /// 面板亲密卡可见性**默认关**——关 = 卡整个不渲染，数据/协议照常。
@@ -224,16 +224,16 @@ enum HealthLogStore {
     static func composedHealthSummary(context: ModelContext, profileId: String, now: Date = Date(), grants: PermissionGrants = .empty) -> String {
         var parts: [String] = []
         // healthApple：绕过 HealthService 缓存 bool 直接问 PermissionCenter（askOnce 需要 grants 语境）
-        if PermissionCenter.injectionAllowed(.healthApple, grants: grants), HealthService.shared.isAvailable {
+        if PermissionCenter.injectionAllowed(.healthApple, profileId: profileId, grants: grants), HealthService.shared.isAvailable {
             let hk = HealthService.shared.todaySummary
             if !hk.isEmpty { parts.append(hk) }
         }
 
-        if PermissionCenter.injectionAllowed(.healthWeight, grants: grants) {
+        if PermissionCenter.injectionAllowed(.healthWeight, profileId: profileId, grants: grants) {
             let seg = weightSummary(weights: fetchRecentWeights(context: context, profileId: profileId), now: now)
             if !seg.isEmpty { parts.append(seg) }
         }
-        if PermissionCenter.injectionAllowed(.healthMeds, grants: grants) {
+        if PermissionCenter.injectionAllowed(.healthMeds, profileId: profileId, grants: grants) {
             let seg = medsSummary(
                 meds: fetchActiveMeds(context: context, profileId: profileId),
                 todayLogs: fetchTodayLogs(context: context, profileId: profileId, now: now),
@@ -241,7 +241,7 @@ enum HealthLogStore {
             )
             if !seg.isEmpty { parts.append(seg) }
         }
-        if PermissionCenter.injectionAllowed(.healthCycle, grants: grants) {
+        if PermissionCenter.injectionAllowed(.healthCycle, profileId: profileId, grants: grants) {
             let periods = HealthCycleStore.periods(days: HealthCycleStore.fetchDays(context: context, profileId: profileId))
             let todayFlow = HealthCycleStore.fetchDay(context: context, profileId: profileId, date: now)
                 .flatMap { CycleFlow(rawValue: $0.flow) }
@@ -249,7 +249,7 @@ enum HealthLogStore {
             if !seg.isEmpty { parts.append(seg) }
         }
         // 亲密口径拍板：只报当天，不带历史/频率/距离，note 不注入
-        if PermissionCenter.injectionAllowed(.healthIntimacy, grants: grants), fetchIntimacy(context: context, profileId: profileId, date: now) != nil {
+        if PermissionCenter.injectionAllowed(.healthIntimacy, profileId: profileId, grants: grants), fetchIntimacy(context: context, profileId: profileId, date: now) != nil {
             parts.append("今天有亲密记录。")
         }
         return parts.joined(separator: "")

@@ -54,7 +54,7 @@ enum ConfigSecrets {
         }
 
         var out: [String: String] = [:]
-        for account in accounts {
+        for account in accounts where !isHubAccount(account) {
             guard let value = store.get(account: account), isPackable(value) else { continue }
             out[account] = value
         }
@@ -81,7 +81,13 @@ enum ConfigSecrets {
     /// 导入侧再挡一次：不写 OAuth / hub 这类本机登录态 account（备份被人改过也写不进去）
     private static func isRestorable(_ account: String) -> Bool {
         let blocked: Set<String> = [APIProvider.chatgptOAuth.id, HubTokenStore.keychainAccount, "cc-bridge-hub-token"]
-        return !blocked.contains(account)
+        return !blocked.contains(account) && !isHubAccount(account)
+    }
+
+    /// hub 口令：主 hub（`cc-bridge`，也是 ccBridge 卡的 id）、Mac 本机 hub 进程（`cc-bridge-hub-token`）、
+    /// 多 hub 预留的 `cc-bridge.hub.<id>`。collect / restore 两头都挡。
+    private static func isHubAccount(_ account: String) -> Bool {
+        account == HubTokenStore.keychainAccount || account == "cc-bridge-hub-token" || account.hasPrefix("cc-bridge.hub.")
     }
 
     /// 非空、且不是 OAuth token JSON（ChatGPT OAuth 卡的 value 是 token 三件套 JSON）

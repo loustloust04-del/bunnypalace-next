@@ -52,7 +52,7 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
         // 模拟器（Apple Silicon）也能拿到真 APNs token——不上报，推送只给真机。
         #if !targetEnvironment(simulator)
         let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
-        CCBridgeWebSocketClient.shared.sendPushToken(hex)
+        CCHubRegistry.shared.setPushToken(hex)   // 主 hub + 所有附加 hub（plan-multi-hub B2.7）
         #endif
     }
 
@@ -64,7 +64,9 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
     /// 前台到达也弹横幅（小克主动找你，前台也该看到）。
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        // 小芽检修提醒：前台时 App 顶上已经挂着小芽横幅，不再叠一个系统横幅
+        if notification.request.content.userInfo["route"] as? String == StatusPanelRoute.toolId { return [] }
+        return [.banner, .sound]
     }
 
     /// 点通知 → 记下 chat_id + 发通知请求打开对应会话（ContentView 消费）。
@@ -74,7 +76,16 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
                                 didReceive response: UNNotificationResponse) async {
         LaunchSplash.silenceForNotification()
         await MainActor.run { LaunchSplash.notificationLaunch() }
-        guard let chatId = response.notification.request.content.userInfo["chat_id"] as? String else { return }
+        let userInfo = response.notification.request.content.userInfo
+        // 小芽检修提醒（route=status，不带 chat_id）：打开状态面板，不走对话那条路
+        if userInfo["route"] as? String == StatusPanelRoute.toolId {
+            UserDefaults.standard.set(StatusPanelRoute.toolId, forKey: StatusPanelRoute.pendingKey)
+            await MainActor.run {
+                NotificationCenter.default.post(name: .statusPanelRequested, object: nil)
+            }
+            return
+        }
+        guard let chatId = userInfo["chat_id"] as? String else { return }
         UserDefaults.standard.set(chatId, forKey: "pendingPushChatId")
         await MainActor.run {
             NotificationCenter.default.post(name: .pushConversationRequested, object: nil)

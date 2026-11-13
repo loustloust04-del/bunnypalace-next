@@ -1,3 +1,4 @@
+import MemoryCore
 #if PERSONAL_APPS
 import XCTest
 import SwiftData

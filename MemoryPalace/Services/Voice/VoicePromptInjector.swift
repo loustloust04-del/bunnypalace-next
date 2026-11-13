@@ -8,7 +8,7 @@ enum VoicePromptInjector {
 
     /// nil = 不注入
     static func hint(profile: Profile) -> String? {
-        guard VoiceMessageWriter.proactiveEnabledProvider(),
+        guard VoiceMessageWriter.proactiveEnabledProvider(profile.id),
               let setup = VoiceMessageWriter.voiceSetup(for: profile) else { return nil }
         let base = setup.synthesizer.capabilities.supportsTags ? tagsHintText : plainHintText
         let composed = compose(base, extraNote: profile.voiceExtraNote)
@@ -33,7 +33,7 @@ enum VoicePromptInjector {
             lines.append(caps.supportsTags
                 ? "- 声音支持方括号表演标签：英文自然语言描述声音状态、可组合，只写耳朵听得见的；不支持 SSML。"
                 : "- 声音不支持表演标签：voice 块和通话都写纯口语，别写方括号标签、动作说明或 markdown，会被原样念出来。")
-            if !VoiceMessageWriter.proactiveEnabledProvider() {
+            if !VoiceMessageWriter.proactiveEnabledProvider(profile.id) {
                 lines.append("- 主动语音条已关闭，除非{{user}}要求别发。")
             }
             let note = (profile.voiceExtraNote ?? "").trimmingCharacters(in: .whitespacesAndNewlines)

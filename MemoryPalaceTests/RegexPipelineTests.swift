@@ -268,13 +268,14 @@ final class RegexPipelineTests: XCTestCase {
                 tools: s.tools, toolTurns: s.toolTurns,
                 compat: ProviderOrderingScenarios.wireCompat(baseURL: s.baseURL, model: s.model, sampling: s.preset.sampling))
         }
-        return ProviderOrderingScenarios.canonicalJSON(json)
+        return ProviderOrderingScenarios.canonicalJSON(
+            ProviderOrderingScenarios.strippingOrderedToolCacheMark(json, scenario: s))
     }
 
     func testFixturesByteIdenticalWithoutSendRules() {
         let all = ProviderOrderingScenarios.all()
         XCTAssertEqual(all.count, 8)
-        // 楼层没有任何规则 / 只有显示、输入规则 / 卡未许可 / 发送规则 disabled：请求体都与 ④b 改前 fixture 一致
+        // 楼层没有任何规则 / 只有显示、输入规则 / 卡未许可 / 发送规则 disabled：除末工具缓存断点外，与 ④b 改前 fixture 一致
         let prof = ProviderOrderingScenarios.profile()
         let unconsented = card(boundTo: prof.id, consent: .unknown, rules: [rule("c", find: "/./g", replace: "!", send: true)])
         let inactiveSets: [[RegexScript]] = [

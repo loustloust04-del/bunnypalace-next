@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct ChatSystemCapsule: View {
+    @Environment(\.themeScope) private var themeScope
+    private var palette: ThemePalette { themeScope.palette }
     let text: String
     var symbol: String = "info.circle"
     var isError: Bool = false
@@ -9,13 +11,15 @@ struct ChatSystemCapsule: View {
     /// 第二个按钮位：报错「去改」（plan-api-draft-and-fix-jump §3.4）。默认 nil，现有调用方不受影响
     var secondaryTitle: String? = nil
     var secondaryAction: (() -> Void)? = nil
+    /// 点开详情里补的原始信息（如上游 finish_reason / host / 模型名），plan-reply-error-report-1106 §1.4
+    var detailText: String? = nil
 
     @State private var showDetails = false
 
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: symbol)
-                .foregroundStyle(isError ? Theme.danger : Theme.textMuted)
+                .foregroundStyle(isError ? palette.danger : palette.textMuted)
                 .accessibilityHidden(true)
             Text(ChatSystemMessage.noticeText(text))
                 .lineLimit(1)
@@ -26,36 +30,43 @@ struct ChatSystemCapsule: View {
             if let actionTitle, let action {
                 Button(actionTitle, action: action)
                     .fontWeight(.semibold)
-                    .foregroundStyle(Theme.textPrimary)
+                    .foregroundStyle(palette.textPrimary)
                     .buttonStyle(.plain)
                     .fixedSize()
             }
             if let secondaryTitle, let secondaryAction {
                 if actionTitle != nil && action != nil {
-                    Text("·").foregroundStyle(Theme.textMuted)
+                    Text("·").foregroundStyle(palette.textMuted)
                 }
                 Button(secondaryTitle, action: secondaryAction)
                     .fontWeight(.semibold)
-                    .foregroundStyle(Theme.textPrimary)
+                    .foregroundStyle(palette.textPrimary)
                     .buttonStyle(.plain)
                     .fixedSize()
             }
         }
         .font(.system(size: 11))
-        .foregroundStyle(Theme.textSecondary)
+        .foregroundStyle(palette.textSecondary)
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
-        .background(Capsule().fill(Theme.accent.opacity(0.45)))
+        .background(Capsule().fill(palette.accent.opacity(0.45)))
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.vertical, 12)
         .sheet(isPresented: $showDetails) {
-            DisclosureSheet(title: isError ? "报错详情" : "系统消息") {
+            DisclosureSheet(title: isError ? "报错详情" : "系统消息", scope: themeScope) {
                 VStack(alignment: .leading, spacing: 14) {
                     Text(ChatSystemMessage.noticeText(text))
                         .font(.system(size: 13))
-                        .foregroundStyle(Theme.textSecondary)
+                        .foregroundStyle(palette.textSecondary)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    if let detailText, !detailText.isEmpty {
+                        Text(detailText)
+                            .font(.system(size: 12))
+                            .foregroundStyle(palette.textMuted)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     // 单行胶囊被挤时，点开详情也能找到「去改」
                     if let secondaryTitle, let secondaryAction {
                         Button {
@@ -65,10 +76,10 @@ struct ChatSystemCapsule: View {
                         } label: {
                             Text(secondaryTitle)
                                 .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(Theme.textPrimary)
+                                .foregroundStyle(palette.textPrimary)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 7)
-                                .background(Capsule().fill(Theme.accent))
+                                .background(Capsule().fill(palette.accent))
                         }
                         .buttonStyle(.plain)
                     }

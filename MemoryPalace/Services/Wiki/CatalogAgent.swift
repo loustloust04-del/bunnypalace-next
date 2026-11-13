@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 // MARK: - 手动整理 = 真 agent 的工具（plan-memory-c3-catalog 4.1b）：全是只读的，submit_proposal 是唯一的出口
@@ -15,6 +16,8 @@ struct CatalogAgentTools: Sendable {
     var embedder: any MemoryEmbedding = AppleMemoryEmbedder.shared
     var originalSearch: CatalogRetrieval.OriginalSearch? = nil
     var cancel: CatalogCancel = CatalogCancel()
+    /// 楼层用户名：list_wiki / read_wiki 的 path 第一段写名字的按本人那组（{{user}}）找
+    var user: String = ""
 
     enum Seen: Sendable {
         case none
@@ -197,7 +200,7 @@ struct CatalogAgentTools: Sendable {
             let receipt = result.receipt
             return Output(text: receipt.text, receipt: receipt)
         case "list_wiki":
-            let path = CatalogPrompts.normalizedPath(args.path ?? "")
+            let path = WikiStore.stored(CatalogPrompts.normalizedPath(args.path ?? ""), user: user)
             return await Task.detached(priority: .utility) { [wiki] in
                 guard path.isEmpty || (WikiStore.isValidFolderPath(path) && wiki.folderExists(path)) else {
                     return Output(text: "没有这一层：\(path)", isError: true)
@@ -205,7 +208,7 @@ struct CatalogAgentTools: Sendable {
                 return Output(text: Self.clip(wiki.layerMarkdown(path)))
             }.value
         case "read_wiki":
-            let path = CatalogPrompts.normalizedPath(args.path ?? "")
+            let path = WikiStore.stored(CatalogPrompts.normalizedPath(args.path ?? ""), user: user)
             return await Task.detached(priority: .utility) { [wiki] in
                 guard let read = wiki.readVersioned(path) else { return Output(text: "没有这一页：\(path)", isError: true) }
                 return Output(text: Self.clip(read.text), seen: .page(path: path, version: read.version))
@@ -236,6 +239,8 @@ final class CatalogAgent {
         var roundCost: @MainActor (AssistantBackend) -> Double? = { ($0 as? AssistantCloudBackend)?.lastCostUSD }
         /// 这一工具轮的完整回复（provider 内容块 / 思考 / reasoning）：种子 checkpoint 存下来、续轮原样回灌
         var roundTurn: @MainActor (AssistantBackend) -> AssistantTurnExtras? = { ($0 as? AssistantCloudBackend)?.lastTurnExtras }
+        /// 这一轮失败是请求超时（URLSession 的 NSURLErrorTimedOut，含回了 200 之后流断在半路）：种子原样再发一次
+        var roundTimedOut: @MainActor (AssistantBackend) -> Bool = { ($0 as? AssistantCloudBackend)?.lastFailureTimedOut == true }
     }
 
     struct Job {
@@ -259,6 +264,7 @@ final class CatalogAgent {
         var conversationIds: Set<String>? = nil
         var embedder: any MemoryEmbedding = AppleMemoryEmbedder.shared
         var originalSearch: CatalogRetrieval.OriginalSearch? = nil
+        var feedback: String? = nil
     }
 
     enum Stop: Equatable {
@@ -335,13 +341,15 @@ final class CatalogAgent {
         w?(event)
     }
 
-    /// 一轮：收集正文，等后端的终止事件。
-    func step(_ backend: AssistantBackend, _ request: AssistantBackendRequest) async -> (event: AssistantBackendEvent, text: String) {
-        await withCheckedContinuation { cont in
+    /// 一轮：收集正文，等后端的终止事件。发出去的那份把本人那组 `{{user}}` 显示成名字（`shown`）；
+    /// 回来的原样交回（重放给模型的就是它自己写的，签过名的思考不受影响）；执行 / 解析时各自按位置把名字还原成 {{user}}
+    func step(_ backend: AssistantBackend, _ request: AssistantBackendRequest, user: String) async -> (event: AssistantBackendEvent, text: String) {
+        let sent = Self.shown(request, user: user)
+        return await withCheckedContinuation { cont in
             MainActor.assumeIsolated {
                 var text = ""
                 waiting = { cont.resume(returning: ($0, text)) }
-                backend.run(request) { [weak self] event in
+                backend.run(sent) { [weak self] event in
                     if case .token(let token) = event {
                         text += token
                     } else {
@@ -350,6 +358,21 @@ final class CatalogAgent {
                 }
             }
         }
+    }
+
+    /// 发给模型的那份：提示词、历史、工具回执、工具定义里的 `{{user}}` 换成名字（工具定义在值上换）；模型自己的调用 / 正文 / 内容块原样，签过名的思考不能动
+    static func shown(_ request: AssistantBackendRequest, user: String) -> AssistantBackendRequest {
+        var r = request
+        r.system = WikiStore.shown(r.system, user: user)
+        r.history = r.history.map { (role: $0.role, content: WikiStore.shown($0.content, user: user)) }
+        r.toolTurns = r.toolTurns.map { turn in
+            var t = turn
+            t.results = t.results.map { ToolResultBlock(toolUseId: $0.toolUseId, text: WikiStore.shown($0.text, user: user), isError: $0.isError) }
+            t.followUps = t.followUps.map { ToolFollowUp(reply: $0.reply, note: WikiStore.shown($0.note, user: user)) }
+            return t
+        }
+        r.tools = r.tools.map { WikiStore.shownValue($0, user: user) as? [String: Any] ?? $0 }
+        return r
     }
 
     static func systemPrompt(names: MemoryExtractor.Names) -> String {
@@ -372,7 +395,8 @@ final class CatalogAgent {
 
     static func opening(_ job: Job, rootIndex: String, labels: [UUID: String]) -> String {
         var out = ["【主题】\(job.topic)" + (job.aliases.isEmpty ? "" : "（别名：\(job.aliases.joined(separator: "、"))）") + (job.hint.isEmpty ? "" : "\n\(job.hint)")]
-        out.append("【楼层提示词】（\(job.names.user)亲手写的人设，权威底图：已有的写「详见人设」，不重抄）\n" + (job.floorPrompt.isEmpty ? "（没写）" : job.floorPrompt))
+        if let feedback = job.feedback { out.append(feedback) }
+        out.append("【楼层提示词】（\(job.names.user)亲手写的人设，权威底图：已有的写「详见人设」，不重抄；\(CatalogPrompts.factDomainPrinciple)）\n" + (job.floorPrompt.isEmpty ? "（没写）" : job.floorPrompt))
         out.append("【wiki 根索引】\n" + rootIndex)
         let given = job.snapshot.filter { job.fragmentIds.contains($0.id) }
         if !given.isEmpty {
@@ -386,18 +410,29 @@ final class CatalogAgent {
 
     /// 送出去的大概有多少字（估钱用）
     static func payload(_ system: String, _ history: [(role: String, content: String)], _ turns: [ToolTurn]) -> String {
-        ([system] + history.map(\.content) + turns.flatMap { $0.calls.map(\.argumentsJSON) + $0.results.map(\.text) }).joined(separator: "\n")
+        ([system] + history.map(\.content) + turns.flatMap { turn in
+            turn.calls.map(\.argumentsJSON) + turn.results.map(\.text) + turn.followUps.flatMap { [$0.reply, $0.note] }
+        }).joined(separator: "\n")
     }
 
-    /// 最后那次「现在必须交」的提醒：有工具回合就接在最后一条结果后面，没有就是一句新的话
-    static func remind(_ note: String, history: inout [(role: String, content: String)], turns: inout [ToolTurn], lastText: String) {
-        if var last = turns.popLast(), let r = last.results.last {
-            last.results[last.results.count - 1] = ToolResultBlock(toolUseId: r.toolUseId, text: r.text + "\n\n" + note, isError: r.isError)
-            turns.append(last)
-        } else {
-            if !lastText.isEmpty { history.append((role: "assistant", content: lastText)) }
+    /// 提醒它交。reply = 模型刚才只回的那段字（没调工具）：有工具回合时这段话按 assistant 接在最后一个回合后面、提醒另起一条 user
+    /// （回执原样不动，同一条回执上不叠提醒）；还没有工具回合就进 history。
+    /// reply = nil：工具回合刚收完、要它收尾——提醒接在这个新回合最后一条结果后面；同一回合已经接过一条就不再接（astra：防连调两次叠两条）
+    static func remind(_ note: String, history: inout [(role: String, content: String)], turns: inout [ToolTurn], reply: String?) {
+        guard var last = turns.popLast() else {
+            if let reply, !reply.isEmpty { history.append((role: "assistant", content: reply)) }
             history.append((role: "user", content: note))
+            return
         }
+        if reply == nil, last.followUps.isEmpty, let r = last.results.last {
+            if !last.reminded {
+                last.results[last.results.count - 1] = ToolResultBlock(toolUseId: r.toolUseId, text: r.text + "\n\n" + note, isError: r.isError)
+                last.reminded = true
+            }
+        } else {
+            last.followUps.append(ToolFollowUp(reply: reply ?? "", note: note))
+        }
+        turns.append(last)
     }
 
     private static func traceJSON(_ value: [String]) -> String {
@@ -438,6 +473,19 @@ final class CatalogAgent {
         }.joined(separator: "\n\n")
     }
 
+    /// 回执之后模型只回的字和补的提醒（没有 = 空）
+    static func traceFollowUps(_ followUps: [ToolFollowUp]) -> String {
+        followUps.enumerated().map { index, follow in
+            "#### 回执后 \(index + 1) · 模型只回了字（assistant）\n" + CatalogRunRecord.code(follow.reply)
+                + "\n\n#### 回执后 \(index + 1) · 补的提醒（user）\n" + CatalogRunRecord.code(follow.note)
+        }.joined(separator: "\n\n")
+    }
+
+    /// 一个工具回合的记录：调用、回执、回执后的一来一回
+    static func traceTurn(_ turn: ToolTurn) -> String {
+        traceCalls(turn.calls) + "\n\n" + traceResults(turn.results) + (turn.followUps.isEmpty ? "" : "\n\n" + traceFollowUps(turn.followUps))
+    }
+
     static func traceRequest(_ request: AssistantBackendRequest) -> String {
         let tools: String
         do {
@@ -451,7 +499,7 @@ final class CatalogAgent {
         }.joined(separator: "\n\n"))
         parts.append("### 工具定义\n" + CatalogRunRecord.code(tools, language: "json"))
         parts.append("### 回灌 toolTurns\n" + (request.toolTurns.isEmpty ? "（无）" : request.toolTurns.enumerated().map { index, turn in
-            "#### 工具回合 \(index + 1)\n" + traceCalls(turn.calls) + "\n\n" + traceResults(turn.results)
+            "#### 工具回合 \(index + 1)\n" + traceTurn(turn)
         }.joined(separator: "\n\n")))
         return parts.joined(separator: "\n\n")
     }
@@ -491,7 +539,8 @@ final class CatalogAgent {
         }
     }
 
-    private func runCancellable(_ job: Job) async -> Outcome {
+    private func runCancellable(_ input: Job) async -> Outcome {
+        var job = input
         guard !isCancelled else { return Outcome(stop: .cancelled) }
         let wiki = WikiStore(root: job.memoryRoot.appendingPathComponent("wiki", isDirectory: true))
         let run = job.run ?? CatalogRunRecord(wiki: wiki, topic: job.topic, kind: "手动 agent")
@@ -499,7 +548,7 @@ final class CatalogAgent {
         currentAnchor = nil
         let tools = CatalogAgentTools(wiki: wiki, memoryRoot: job.memoryRoot, fragments: job.snapshot,
                                       conversationIds: job.conversationIds, embedder: job.embedder,
-                                      originalSearch: job.originalSearch, cancel: cancelToken)
+                                      originalSearch: job.originalSearch, cancel: cancelToken, user: job.names.user)
         let drafts = CatalogDrafts(wiki: wiki, now: Date())
         var sources = CatalogSources()
         for (index, fragment) in job.snapshot.enumerated() where job.fragmentIds.contains(fragment.id) {
@@ -510,14 +559,17 @@ final class CatalogAgent {
         for (i, f) in job.snapshot.enumerated() where labels[f.id] == nil { labels[f.id] = CatalogSorter.label(i) }
         run.recordSearch(CatalogSearchEvidence(assigned: job.snapshot.filter { job.fragmentIds.contains($0.id) }.map(\.content)))
         let token = cancelToken
-        let (rootIndex, versions) = await Task.detached(priority: .utility) {
-            guard !token.isCancelled else { return ("", [String: String]()) }
+        let initialQuery = WikiFeedback.Query(targetPath: job.path, fragmentIds: Set(job.fragmentIds))
+        let (rootIndex, versions, initialFeedback) = await Task.detached(priority: .utility) {
+            guard !token.isCancelled else { return ("", [String: String](), [WikiFeedback.Entry]()) }
             let index = wiki.layerMarkdown("")
-            guard !token.isCancelled else { return ("", [String: String]()) }
-            return (index, wiki.versionSnapshot())
+            guard !token.isCancelled else { return ("", [String: String](), [WikiFeedback.Entry]()) }
+            return (index, wiki.versionSnapshot(), WikiFeedback.select(initialQuery, wiki: wiki, now: Date()))
         }.value
         guard !isCancelled else { return Outcome(stop: .cancelled) }
         sources.versions = versions
+        job.feedback = WikiFeedback.render(initialFeedback)
+        var sentFeedback = initialFeedback
         /// 生成这一轮回复时模型已经收到的出处 / 读过的页：提交只认它，这一轮工具新查到的下一次请求发出去之后才算
         var seen = sources
         var seenPages: [String] = []
@@ -548,9 +600,15 @@ final class CatalogAgent {
             out.items = submitted.items
             out.dropped = submitted.dropped
             out.incomplete = forced == .rounds || forced == .chars
-            let named = submitted.coveredPage.flatMap { pages.contains($0) ? $0 : nil }
-            let path = named ?? job.path ?? out.items.first?.change.targetPath ?? (pages.count == 1 ? pages[0] : "")
-            out.covered = CatalogItems.attachCovered(&out.items, covered: submitted.covered, path: path, version: given.versions[path])
+            let named = submitted.coveredPage.flatMap { pages.contains($0) || $0 == job.path ? $0 : nil }
+            if submitted.coveredPage != nil, named == nil, !submitted.covered.isEmpty {
+                // 点名了却挂不上：不改挂到别的页，这几条碎片留在池里
+                out.covered = []
+                run.section("Agent「\(job.topic)」covered 没挂", body: "covered_page「\(submitted.coveredPage ?? "")」不是读过的页，\(submitted.covered.count) 条 covered 碎片没挂、留在池里")
+            } else {
+                let path = named ?? job.path ?? out.items.first?.change.targetPath ?? (pages.count == 1 ? pages[0] : "")
+                out.covered = CatalogItems.attachCovered(&out.items, covered: submitted.covered, path: path, version: given.versions[path])
+            }
             let provided = Dictionary(given.fragments.values.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
             out.single = submitted.single.filter { provided[$0].map { $0.organizedPage == nil && !$0.rejected } ?? false }
             out.reason = submitted.reason
@@ -605,12 +663,12 @@ final class CatalogAgent {
             return clipped
         }
 
-        func remind(_ note: String, lastText: String) {
+        func remind(_ note: String, reply: String?) {
             let room = max(0, Self.maxToolChars - out.toolChars - 2)
             guard room > 0 else { return }
             let text = String(note.prefix(room))
             out.toolChars += text.count + 2
-            Self.remind(text, history: &history, turns: &turns, lastText: lastText)
+            Self.remind(text, history: &history, turns: &turns, reply: reply)
         }
 
         while true {
@@ -621,13 +679,13 @@ final class CatalogAgent {
             onRound?(out.rounds)
             let request = AssistantBackendRequest(system: system, history: history, tools: CatalogAgentTools.definitions(submitOnly: finalChance),
                                                   toolTurns: turns, maxTokens: Self.maxTokens)
-            currentAnchor = run.section("Agent「\(job.topic)」第 \(out.rounds) 轮 · 系统提示与请求", body: Self.traceRequest(request))
+            currentAnchor = run.section("Agent「\(job.topic)」第 \(out.rounds) 轮 · 系统提示与请求", body: Self.traceRequest(Self.shown(request, user: job.names.user)))
             if let why = await deps.gate(Self.payload(system, history, turns)) {
                 await blocked(job, drafts: drafts, why: why, round: out.rounds, executed: executed)
                 return await finish(.blocked(why))
             }
             if isCancelled { return await finish(.cancelled) }
-            let response = await step(backend, request)
+            let response = await step(backend, request, user: job.names.user)
             let modelText: String
             let eventName: String
             var callsText = ""
@@ -656,8 +714,8 @@ final class CatalogAgent {
                 if finalChance || revised { return await finish(.gaveUp) }
                 let next: Forced = out.rounds + 2 >= job.maxRounds ? .rounds : .noSubmit
                 forced = next
-                remind(next.note, lastText: text)
-                run.section("第 \(out.rounds) 轮补充提醒", body: Self.traceRequest(AssistantBackendRequest(system: system, history: history, tools: request.tools, toolTurns: turns)) + "\n\n累计 toolChars：\(out.toolChars)")
+                remind(next.note, reply: text)
+                run.section("第 \(out.rounds) 轮补充提醒", body: Self.traceRequest(Self.shown(AssistantBackendRequest(system: system, history: history, tools: request.tools, toolTurns: turns), user: job.names.user)) + "\n\n累计 toolChars：\(out.toolChars)")
             case .toolCalls(let calls):
                 seen = sources
                 seenPages = readPages
@@ -673,10 +731,11 @@ final class CatalogAgent {
                         let snapshot = seen
                         let round = out.rounds
                         let topic = job.topic
+                        let user = job.names.user
                         let body = response.text
                         let (parsed, draft, parseError) = await Task.detached(priority: .utility) {
                             var failure = ""
-                            let parsed = CatalogItems.parse(json, sources: snapshot, wiki: wiki, truncated: call.truncated) { failure = $0 }
+                            let parsed = CatalogItems.parse(json, sources: snapshot, wiki: wiki, truncated: call.truncated, user: user) { failure = $0 }
                             let draft = drafts.saveSubmit(argumentsJSON: json, text: body, truncated: call.truncated,
                                                           parsed: parsed, topic: topic, round: round)
                             return (parsed, draft, failure)
@@ -724,6 +783,9 @@ final class CatalogAgent {
                                 rejected = true
                             }
                         } else if var parsed {
+                            if let note = CatalogItems.coveredPageCheck(parsed, allowed: { seenPages.contains($0) || $0 == job.path }) {
+                                parsed.checks.append(note)
+                            }
                             let allDropped = parsed.items.isEmpty && parsed.unapplied.isEmpty && parsed.dropped > 0
                             if allDropped || !parsed.revisionNotes.isEmpty, !isLastRound {
                                 revised = true
@@ -771,7 +833,7 @@ final class CatalogAgent {
                         return await finish(.cancelled)
                     }
                     let limit = output.receipt != nil ? room : min(CatalogAgentTools.resultLimit, room)
-                    let text = feedback(CatalogAgentTools.clip(output.text, limit: limit))
+                    var text = feedback(CatalogAgentTools.clip(output.text, limit: limit))
                     if let receipt = output.receipt {
                         let count = text.hasSuffix(CatalogAgentTools.clipNote) ? text.count - CatalogAgentTools.clipNote.count : text.count
                         let visible = receipt.prefix(count)
@@ -779,6 +841,19 @@ final class CatalogAgent {
                         let evidence = visible.evidence()
                         out.searchedChars += evidence.searchedChars
                         run.recordSearch(evidence)
+                        let query = WikiFeedback.query(receipt: visible)
+                        let previous = sentFeedback
+                        var additional = await Task.detached(priority: .utility) {
+                            WikiFeedback.select(query, wiki: wiki, now: Date(), previous: previous)
+                        }.value
+                        let remaining = Self.maxToolChars - Self.reserve - out.toolChars
+                        while let rendered = WikiFeedback.render(additional), rendered.count + 2 > remaining {
+                            additional.removeFirst()
+                        }
+                        if let rendered = WikiFeedback.render(additional) {
+                            text += feedback("\n\n" + rendered)
+                            sentFeedback += additional
+                        }
                     }
                     if case .page(let path, let version) = output.seen {
                         sources.versions[path] = version
@@ -804,7 +879,7 @@ final class CatalogAgent {
                     forced = .chars
                 }
                 if let forced {
-                    remind(forced.note, lastText: "")
+                    remind(forced.note, reply: nil)
                     run.section("第 \(out.rounds) 轮补充提醒", body: Self.traceResults(turns.last?.results ?? []) + "\n\n累计 toolChars：\(out.toolChars)")
                 }
             }
@@ -827,7 +902,7 @@ final class CatalogAgent {
         await currentRun?.flush()
         await MemoryWriteLog.metered {
             if let cost { MemoryWriteLog.addCost(cost) }
-            MemoryWriteLog.record(writer: .c3, profileId: job.profileId, ok: ok, note: "整理「\(job.topic)」\(note)", model: job.modelName, run: run)
+            MemoryWriteLog.record(writer: .c3, profileId: job.profileId, ok: ok, note: "整理「\(job.topic)」\(note)", model: job.modelName, run: run, memoryRoot: FileLibraryStore.memoryRoot(profileId: job.profileId))
         }
     }
 }

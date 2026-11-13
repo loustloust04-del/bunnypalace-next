@@ -41,32 +41,25 @@ final class MCPSSETransport: MCPTransport {
                 if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                     throw MCPError.serverError("MCP SSE 连接失败: HTTP \(http.statusCode)")
                 }
-                var eventName = ""
-                var dataLines: [String] = []
-                var lineBuffer = [UInt8]()
-
-                func handleLine(_ rawLine: String) {
-                    let line = rawLine.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
-                    if line.isEmpty {
-                        self.processEvent(name: eventName, data: dataLines.joined(separator: "\n"))
-                        eventName = ""
-                        dataLines.removeAll()
-                    } else if line.hasPrefix("event:") {
-                        eventName = String(line.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-                    } else if line.hasPrefix("data:") {
-                        dataLines.append(String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces))
-                    }
-                }
+                var decoder = SSELineDecoder()
+                var assembler = SSEEventAssembler()
+                var lineBuffer = Data()
 
                 // 不能用 bytes.lines：AsyncLineSequence 会吞掉空行，而 SSE 靠空行分隔 event。
-                // 手动按 \n 切字节，连续 \n 产生的空行才能被识别并触发 processEvent。
+                // 攒到行尾字节就喂解码器（\r\n / 单独 \r 由解码器判）
                 for try await byte in bytes {
                     if Task.isCancelled || self.closed { break }
-                    if byte == 0x0A {
-                        handleLine(String(decoding: lineBuffer, as: UTF8.self))
-                        lineBuffer.removeAll(keepingCapacity: true)
-                    } else {
-                        lineBuffer.append(byte)
+                    lineBuffer.append(byte)
+                    guard byte == 0x0A || byte == 0x0D else { continue }
+                    for event in assembler.add(try decoder.feed(lineBuffer)) {
+                        self.processEvent(name: event.name, data: event.data)
+                    }
+                    lineBuffer.removeAll(keepingCapacity: true)
+                }
+                if !Task.isCancelled && !self.closed {
+                    _ = try decoder.feed(lineBuffer)
+                    for event in assembler.add(decoder.finish()) + assembler.finish() {
+                        self.processEvent(name: event.name, data: event.data)
                     }
                 }
                 self.finishEndpointIfNeeded(error: MCPError.connectionClosed)

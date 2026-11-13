@@ -47,6 +47,8 @@ final class InternalBrowser: NSObject, WKNavigationDelegate, WKUIDelegate {
         let excerpt: String?     // Readability 自带摘要
         let truncated: Bool      // markdown 是否被截断
         let usedCookies: Int     // 该 host 在 default datastore 里的 cookie 数（>0 = 登录态读）
+        var metaDescription: String? = nil   // og / twitter / description 头
+        var metaImage: URL? = nil
     }
 
     enum BrowseError: LocalizedError {
@@ -72,12 +74,16 @@ final class InternalBrowser: NSObject, WKNavigationDelegate, WKUIDelegate {
     private struct Job {
         let url: URL
         let timeout: TimeInterval
+        /// 没有正文但页头有简介时也算读到（链接直读：IG 帖子）；browse_url 保持原样报 noArticle
+        let metaFallback: Bool
         let completion: (Result<ExtractedPage, Error>) -> Void
     }
 
     private var queue: [Job] = []
     private var busy = false
     private var webView: WKWebView?
+    /// 这个离屏网页是哪个浏览器身份的（换了身份就重建，plan-ai-browser-operate 收尾：后台读也用浏览器当前身份）
+    private var webViewIdentity: UUID?
     private var currentJob: Job?
     private var timeoutTask: Task<Void, Never>?
 
@@ -85,9 +91,9 @@ final class InternalBrowser: NSObject, WKNavigationDelegate, WKUIDelegate {
     private static let markdownLimit = 8000
 
     /// async 入口
-    func read(url: URL, timeout: TimeInterval = 8.0) async throws -> ExtractedPage {
+    func read(url: URL, timeout: TimeInterval = 8.0, metaFallback: Bool = false) async throws -> ExtractedPage {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<ExtractedPage, Error>) in
-            let job = Job(url: url, timeout: timeout) { result in
+            let job = Job(url: url, timeout: timeout, metaFallback: metaFallback) { result in
                 cont.resume(with: result)
             }
             queue.append(job)
@@ -114,7 +120,8 @@ final class InternalBrowser: NSObject, WKNavigationDelegate, WKUIDelegate {
         // 启动超时
         timeoutTask?.cancel()
         timeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(job.timeout * 1_000_000_000))
+            // 被取消（上一单已收尾、下一单重排了计时）就别往下走：同一网址连排两单时，旧计时器会把新的一单判成超时
+            guard (try? await Task.sleep(nanoseconds: UInt64(job.timeout * 1_000_000_000))) != nil else { return }
             await MainActor.run {
                 guard let self else { return }
                 guard self.currentJob?.url == job.url else { return }   // 已完成则忽略
@@ -128,12 +135,14 @@ final class InternalBrowser: NSObject, WKNavigationDelegate, WKUIDelegate {
     // MARK: - WebView 配置
 
     private func ensureWebView() -> WKWebView {
-        if let webView { attachIfNeeded(webView); return webView }
+        let identity = BrowserIdentityStore.current()
+        if let webView, webViewIdentity == identity.id { attachIfNeeded(webView); return webView }
+        webView?.removeFromSuperview()
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        // v2 Phase 3：用 default datastore 解锁登录态——和 MiniBrowserView 共享 cookie，
-        // 用户在 MiniBrowser 登录知乎/豆瓣等，InternalBrowser 调 browse_url 同域自动带 cookie
-        configuration.websiteDataStore = .default()
+        // v2 Phase 3：用浏览器的登录态——粟粟在花园浏览器里登知乎 / 豆瓣，browse_url 同域自动带 cookie。
+        // 多身份后用浏览器**当前身份**那份（主号 = 原来的 .default()）
+        configuration.websiteDataStore = identity.dataStore
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 1280, height: 720), configuration: configuration)
         webView.navigationDelegate = self
         // satyricon §4：阻止 Universal Links 把流量踢到原生 app
@@ -141,8 +150,9 @@ final class InternalBrowser: NSObject, WKNavigationDelegate, WKUIDelegate {
         // satyricon §7：离屏 WebView 遇 JS alert/confirm/prompt 会卡住等 UI 响应——给个 noop delegate 自动放行
         webView.uiDelegate = self
         // satyricon §8：UA 伪装真 Safari（X.com 等反爬站默认 WebView UA 缺 Version/N 字段会拒服务白屏）
-        webView.customUserAgent = WebUserAgent.platformDefault
+        webView.customUserAgent = identity.userAgent
         self.webView = webView
+        webViewIdentity = identity.id
         attachIfNeeded(webView)
         return webView
     }
@@ -216,7 +226,17 @@ final class InternalBrowser: NSObject, WKNavigationDelegate, WKUIDelegate {
                     self.finishCurrent(.failure(BrowseError.extractFailed("脚本未返回有效 JSON")))
                     return
                 }
+                let meta = dict["meta"] as? [String: Any]
+                let metaDescription = (meta?["description"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                let metaImage = (meta?["image"] as? String).flatMap(URL.init(string:))
                 if let err = dict["error"] as? String {
+                    if err.hasPrefix("no-article"), self.currentJob?.metaFallback == true, let metaDescription {
+                        let title = (meta?["title"] as? String) ?? (dict["title"] as? String) ?? ""
+                        self.finishCurrent(.success(ExtractedPage(
+                            title: title, byline: nil, markdown: "", length: 0, excerpt: nil, truncated: false,
+                            usedCookies: 0, metaDescription: metaDescription, metaImage: metaImage)))
+                        return
+                    }
                     if err.hasPrefix("no-article") {
                         let title = dict["title"] as? String ?? ""
                         let url = self.currentJob?.url.absoluteString ?? ""
@@ -230,8 +250,8 @@ final class InternalBrowser: NSObject, WKNavigationDelegate, WKUIDelegate {
                 let length = dict["length"] as? Int ?? rawMD.count
                 let (truncated, md) = Self.truncateIfNeeded(rawMD)
                 let host = self.currentJob?.url.host ?? ""
-                // 查该 host 在 default datastore 里的 cookie 数（登录态指示）
-                let cookieStore = WKWebsiteDataStore.default().httpCookieStore
+                // 查该 host 在这个身份数据仓里的 cookie 数（登录态指示）
+                let cookieStore = webView.configuration.websiteDataStore.httpCookieStore
                 cookieStore.getAllCookies { cookies in
                     let count = cookies.filter { c in
                         let d = c.domain.hasPrefix(".") ? String(c.domain.dropFirst()) : c.domain
@@ -245,7 +265,9 @@ final class InternalBrowser: NSObject, WKNavigationDelegate, WKUIDelegate {
                             length: length,
                             excerpt: dict["excerpt"] as? String,
                             truncated: truncated,
-                            usedCookies: count
+                            usedCookies: count,
+                            metaDescription: metaDescription,
+                            metaImage: metaImage
                         )
                         self.finishCurrent(.success(page))
                     }

@@ -35,6 +35,8 @@ final class SentRequestStore {
     @ObservationIgnored private var recency: [String] = []   // 最近用过的在后
     /// 每个对话存了几次：检查器读它，同一对话里新请求进来就刷新
     private(set) var versions: [String: Int] = [:]
+    /// 本次启动里最后发过请求的对话：mac 设置窗没绑对话时拿它兜底
+    private(set) var lastRecordedConversationId: String?
     @ObservationIgnored private let io = DispatchQueue(label: "SentRequestStore.io", qos: .utility)
 
     init(directory: URL) {
@@ -53,6 +55,7 @@ final class SentRequestStore {
         turn.requests.append(sent)
         remember(turn)
         versions[conversationId, default: 0] += 1
+        lastRecordedConversationId = conversationId
         let file = fileURL(conversationId)
         let dir = directory
         let snapshot = turn

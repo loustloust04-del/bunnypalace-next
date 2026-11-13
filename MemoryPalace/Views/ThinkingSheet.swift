@@ -4,6 +4,8 @@ import SwiftUI
 /// segmented ThinkingBlockView 三处共用）：
 /// 「思考过程弹出显示」开关关 = 原地折叠展开（原行为）；开 = 弹官端式 sheet。
 struct ThinkingDisclosure: View {
+    @Environment(\.themeScope) private var themeScope
+    private var palette: ThemePalette { themeScope.palette }
     var label: String = "思考过程"
     let text: String
     /// 划线/收生词锚（sheet 正文用聊天同款渲染器）；nil = sheet 正文纯文本
@@ -48,7 +50,7 @@ struct ThinkingDisclosure: View {
                 // 学官端「Thought process」行（粟粟 09-27 截图）：左小图标 + 总结 + ›，整行比正文淡一档、字号接近正文、上下留足
                 HStack(spacing: 10) {
                     // 显式给棕灰：tint nil 走 .foregroundColor(nil) 会重置成系统黑，不继承下面的 textMuted（粟粟 10-03「不要黑色。棕灰」）
-                    AppIconView(name: "ri-history", size: labelSize * 0.9, tint: Theme.textMuted)
+                    AppIconView(name: "ri-history", size: labelSize * 0.9, tint: palette.textMuted)
                     Text(headline)
                         .font(.system(size: labelSize))
                         .lineLimit(1)
@@ -56,7 +58,7 @@ struct ThinkingDisclosure: View {
                         .font(.system(size: labelSize * 0.72, weight: .medium))
                     Spacer(minLength: 0)
                 }
-                .foregroundColor(Theme.textMuted)
+                .foregroundColor(palette.textMuted)
                 .padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
@@ -67,11 +69,11 @@ struct ThinkingDisclosure: View {
                 Text(text)
                     .font(.system(size: labelSize * 0.92))
                     .lineSpacing(labelSize * 0.5)
-                    .foregroundColor(Theme.textMuted)
+                    .foregroundColor(palette.textMuted)
                     .textSelection(.enabled)
                     .padding(.leading, 12)
                     .overlay(alignment: .leading) {
-                        Rectangle().fill(Theme.textPrimary.opacity(0.09)).frame(width: 2)
+                        Rectangle().fill(palette.textPrimary.opacity(0.09)).frame(width: 2)
                     }
                     .padding(.bottom, 10)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -98,6 +100,7 @@ struct ThinkingSheet: View {
     var flashWord: String? = nil
     var profileId: String = ""
     @AppStorage("selectedFont") private var selectedFont = ""
+    @Environment(\.themeScope) private var themeScope
     #if os(macOS)
     // 字号跟设置走（面 3.1 ⧫7）；行距/段距由 ChatMarkdownView 在 mac 自读（与 CardFlowView 同 key），这里不订阅
     @AppStorage("fontScale") private var fontScale = 1.2
@@ -105,7 +108,7 @@ struct ThinkingSheet: View {
 
     var body: some View {
         // 官端原味英文标题（粟粟点名；小灰字微标签英文例外条款同源）
-        DisclosureSheet(title: "Thought process") {
+        DisclosureSheet(title: "Thought process", scope: themeScope) {
             #if os(iOS)
             // 聊天正文同款渲染器：划词收生词 + 划线浮条。锚 = 合成锚 thinking:<nodeId>
             //（vocab:/vocabnote: 先例——thinking 划线不与正文划线混锚，收藏页对查不到
@@ -115,7 +118,8 @@ struct ThinkingSheet: View {
                 fontName: selectedFont,
                 nodeId: nodeId.map { "thinking:\($0)" },
                 profileId: profileId,
-                flashQuote: flashWord
+                flashQuote: flashWord,
+                role: .chatPlain
             )
             #else
             // ms0911：mac 也走同一渲染器（MarkdownUI 退出聊天正文）；mac 思考表字号跟设置走，
@@ -123,10 +127,11 @@ struct ThinkingSheet: View {
             ChatMarkdownView(
                 text: text,
                 fontName: selectedFont,
-                scale: CGFloat(fontScale > 0 ? fontScale : 1.0),
+                scale: CGFloat(fontScale > 0 ? fontScale : 1.2),
                 nodeId: nodeId.map { "thinking:\($0)" },
                 profileId: profileId,
-                flashQuote: flashWord
+                flashQuote: flashWord,
+                role: .chatPlain
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             // R9b N2：气泡模式在 BubbleModeRow 根注入了固定排版覆盖，会顺 environment 漏进

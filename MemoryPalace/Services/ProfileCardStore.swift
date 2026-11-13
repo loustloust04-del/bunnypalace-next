@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// AI 资料卡店：memory/profile-card.md。

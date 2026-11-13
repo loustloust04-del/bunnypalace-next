@@ -1,7 +1,7 @@
 import XCTest
 @testable import 记忆花园
 
-/// 卡库 ③-4：身份进发送链后的最终请求体。无身份（含指定了但找不到）时 ④b 那 8 份逐字节不变；
+/// 卡库 ③-4：身份进发送链后的最终请求体。无身份（含指定了但找不到）时，除末工具缓存断点外，④b 那 8 份逐字节不变；
 /// 有身份时只有 `{{user}}` 展开出的名字变、身份描述落在楼层原有身份描述的同一位置，不新增插槽、不改顺序。
 final class PersonaRequestBodyTests: XCTestCase {
 
@@ -39,7 +39,8 @@ final class PersonaRequestBodyTests: XCTestCase {
                 ordered: ordered, model: s.model, samplingParams: preset.sampling, tools: s.tools, toolTurns: s.toolTurns,
                 compat: ProviderOrderingScenarios.wireCompat(baseURL: s.baseURL, model: s.model, sampling: preset.sampling))
         }
-        return ProviderOrderingScenarios.canonicalJSON(raw)
+        return ProviderOrderingScenarios.canonicalJSON(
+            ProviderOrderingScenarios.strippingOrderedToolCacheMark(raw, scenario: s))
     }
 
     private let personas = [UserPersona(id: "p", name: "阿禾", description: "身份描述：{{user}}爱喝茶")]

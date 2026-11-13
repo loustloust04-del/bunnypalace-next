@@ -48,6 +48,49 @@ final class TestHostIsolationTests: XCTestCase {
         XCTAssertEqual(suite.string(forKey: key + ".appstorage"), "appstorage")
     }
 
+    /// 启动清 suite：带 >1KB 窗口位置 key 的域，removePersistentDomain 会被 cfprefsd 整批静默丢掉。
+    /// 真值走 `defaults export` 子进程从 cfprefsd 读（本进程缓存会骗人）。域名一次性 UUID，跑完删域 + 删真家里的空 plist
+    func testClearPreferencesDomainEmptiesDomainWithLongKeys() throws {
+        let name = "com.susu.MemoryPalace.xctest-scratch.\(UUID().uuidString)"
+        defer {
+            _ = try? defaults(["delete", name])
+            if let entry = getpwuid(getuid()), let dir = entry.pointee.pw_dir {
+                try? FileManager.default.removeItem(atPath: String(cString: dir) + "/Library/Preferences/\(name).plist")
+            }
+        }
+
+        func storedKeyCount() throws -> Int {
+            let plist = try PropertyListSerialization.propertyList(from: defaults(["export", name, "-"]), format: nil)
+            return try XCTUnwrap(plist as? [String: Any]).count
+        }
+
+        let writer = try XCTUnwrap(UserDefaults(suiteName: name))
+        let typeName = String(repeating: "SwiftUI.ModifiedContent<", count: 80)
+        writer.set(true, forKey: "mem_content_heartvoice")
+        for i in 1...3 { writer.set("{{0, 0}, {800, 600}}", forKey: "NSWindow Frame \(typeName)-1-AppWindow-\(i)") }
+        CFPreferencesAppSynchronize(name as CFString)
+        XCTAssertEqual(try storedKeyCount(), 4)
+
+        let cleared = TestHostIsolation.clearPreferencesDomain(name)
+        XCTAssertEqual(cleared.before, 4)
+        XCTAssertEqual(cleared.left, 0)
+        XCTAssertEqual(try storedKeyCount(), 0)
+        XCTAssertFalse(writer.bool(forKey: "mem_content_heartvoice"))
+    }
+
+    private func defaults(_ arguments: [String]) throws -> Data {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return output
+    }
+
     func testDefaultKeychainIsPrivateToTempHome() throws {
         let home = try home
         let path = try XCTUnwrap(TestHostIsolation.defaultKeychainPath())
@@ -127,7 +170,7 @@ final class TestHostIsolationTests: XCTestCase {
     @MainActor
     func testHubAndExternalSideEffectsAreGated() {
         let hubBefore = TestHostIsolation.blockedCount(.hub)
-        XCTAssertNil(HubTokenStore.get())
+        XCTAssertNil(HubTokenStore.launchdPlistToken())
         let client = CCBridgeWebSocketClient(dedupDefaults: UserDefaults(suiteName: "mp.xctest.hub.\(UUID().uuidString)")!)
         client.connect(url: URL(string: "ws://127.0.0.1:9/ws")!)
         XCTAssertFalse(client.isConnected)

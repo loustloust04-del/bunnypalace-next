@@ -116,11 +116,12 @@ final class NativeCallCoordinator: NSObject {
         if let call = current, let pendingAction { sendAction(pendingAction, id: call.call_id) }
     }
     private func reconnectBridge() {
-        let urls = CCBridgeEndpoints.configuredURLs(fallbackToLocal: false)   // 没配过 hub 就不连（原语义）
-        guard !urls.isEmpty else { return }
-        let token = KeychainStore.get(account: "cc-bridge")
-        if token == nil { callLog.error("reconnect 读不到 hub 口令 status=\(KeychainStore.readStatus(account: "cc-bridge"), privacy: .public)") }
-        CCBridgeWebSocketClient.shared.connect(urls: urls, token: token, keepExistingToken: true)
+        // 没配过 hub 就不连（原语义）；口令只认主 hub 本机副本、核过配对指纹（plan-multi-hub impl1 #1），不读可能被 iCloud 改过的 cc-bridge
+        let account = CCHubRegistry.keychainAccount(for: CCHubRegistry.primaryId)
+        if KeychainStore.get(account: account) == nil {
+            callLog.error("reconnect 读不到 hub 口令 status=\(KeychainStore.readStatus(account: account), privacy: .public)")
+        }
+        CCHubRegistry.shared.reconnectPrimary(fallbackToLocal: false)
     }
     func receiveState(_ call: NativeVoiceCall) {
         guard call.valid, call.install_id == installID else { return }
@@ -320,7 +321,6 @@ extension NativeCallCoordinator: ConversationManagerDelegate {
     }
 }
 extension Notification.Name {
-    static let nativeCallRequested = Notification.Name("MemoryPalaceNativeCallRequested")
     static let nativeCallEnded = Notification.Name("MemoryPalaceNativeCallEnded")
 }
 #endif

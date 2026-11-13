@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -69,6 +70,20 @@ struct RightPanelToolContent: View {
     /// docs/research-page2-ios-hangs.md §3）。这里用 @State 镜像双向同步，往下传 @State 支持的 binding。
     @State private var homeTool: String = "home"
     #endif
+    #if os(iOS)
+    @ViewBuilder private var originalHome: some View {
+        if homePresentation == "free" {
+            Page2HomeView(selectedToolId: $homeTool)
+                .onAppear { homeTool = selectedToolId }
+                .onChange(of: selectedToolId) { _, v in if homeTool != v { homeTool = v } }
+                .onChange(of: homeTool) { _, v in if selectedToolId != v { selectedToolId = v } }
+        } else if homePresentation == "stitch" {
+            Page2DesktopView(selectedToolId: $selectedToolId)
+        } else {
+            DashboardView()
+        }
+    }
+    #endif
 
     var body: some View {
         #if (DEBUG || PERF_BENCH) && os(iOS)
@@ -77,16 +92,15 @@ struct RightPanelToolContent: View {
         switch toolId {
         case "home":
             #if os(iOS)
-            if homePresentation == "free" {
-                Page2HomeView(selectedToolId: $homeTool)
-                    .onAppear { homeTool = selectedToolId }
-                    .onChange(of: selectedToolId) { _, v in if homeTool != v { homeTool = v } }
-                    .onChange(of: homeTool) { _, v in if selectedToolId != v { selectedToolId = v } }
-            } else if homePresentation == "stitch" {
-                Page2DesktopView(selectedToolId: $selectedToolId)
+            #if PERSONAL_APPS
+            if SkinState.shared.active {
+                TutuWuPage(selectedToolId: $selectedToolId)
             } else {
-                DashboardView()
+                originalHome
             }
+            #else
+            originalHome
+            #endif
             #else
             DashboardView()
             #endif
@@ -95,7 +109,7 @@ struct RightPanelToolContent: View {
         case "memory":
             MemoryPanelView(viewModel: viewModel)
         case "worldBook":
-            // B8：世界书工具开卡库的世界书页签；旧 WorldBookPanelView 代码保留
+            // B8：世界书工具开卡库的世界书页签
             CardLibraryWorkspaceView(initial: .worldBook)
         case "cardLibrary":
             CardLibraryWorkspaceView(initial: .characters)
@@ -145,6 +159,8 @@ struct RightPanelToolContent: View {
             BunnyConsoleView()
         case "study":
             StudyPanelView(viewModel: viewModel)
+        case "status":
+            StatusPanelView()
         #if PERSONAL_APPS
         case "deathScale":
             DeathScaleView()
@@ -158,6 +174,8 @@ struct RightPanelToolContent: View {
         #if os(iOS)
         case "cssChat":
             Page2ChatWebView(viewModel: viewModel)
+        case RightPanelToolManager.gardenOSToolId:
+            NavigationStack { GardenOSSettingsView() }
         #endif
         case "xiaoya":
             AssistantPanelView()
@@ -173,17 +191,18 @@ struct RightPanelToolContent: View {
 //
 // 首屏：出问题时一行提醒 + 常驻记忆一行 + 两组记忆（画像卡 v5 下线）；关系图进「⋯」，下一轮会想起什么在常驻记忆页，设置在每格左上角（弹 sheet）。
 // 多选删除 / 钉住：EditMode + List(selection:) + bottom toolbar；两组记忆一个行样式（MemoryRow），删掉的进「已删除」。
-// 四格「记忆 / 窗口总结 / 时间轴 / 审计台」在底部（同日历 iOS 版，规格 7¼）：iOS 系统 TabView，mac 浮动胶囊 `PanelFloatingTabBar`。
+// 四格「记忆 / 窗口·时间轴 / wiki / 审计台」在底部（同日历 iOS 版，规格 7¼；粟粟 10-24）：iOS 系统 TabView，mac 浮动胶囊 `PanelFloatingTabBar`。
+// 窗口·时间轴 = 原「窗口总结」「时间轴」两格合一，格内顶上分段切；wiki = 原审计台 wiki 台里翻页那段；审计台的 wiki 台只剩整理提案。
 
 enum MemoryPanelTab: PanelFloatingTab {
     /// 规格 7¼（粟粟 10-16）：审计台占原「设置」最右那格；设置挪到每格左上角，点开弹 sheet
-    case memory, sessions, timeline, audit
+    case memory, windows, wiki, audit
 
     var title: String {
         switch self {
         case .memory: "记忆"
-        case .sessions: "窗口总结"
-        case .timeline: "时间轴"
+        case .windows: "窗口·时间轴"
+        case .wiki: "wiki"
         case .audit: "审计台"
         }
     }
@@ -191,10 +210,45 @@ enum MemoryPanelTab: PanelFloatingTab {
     var icon: String {
         switch self {
         case .memory: "leaf"
-        case .sessions: "rectangle.stack"
-        case .timeline: "calendar.day.timeline.left"
+        case .windows: "calendar.day.timeline.left"
+        case .wiki: "book.closed"
         case .audit: "checklist"
         }
+    }
+}
+
+/// 「窗口·时间轴」格顶上的分段：两个页面照旧，只换哪个在台上
+enum MemoryWindowsSegment: CaseIterable {
+    case sessions, timeline
+
+    var title: String {
+        switch self {
+        case .sessions: "窗口总结"
+        case .timeline: "时间轴"
+        }
+    }
+
+    /// 切到这段：两段常驻、`.task` 不随切段重跑，后台被 markStale 的那段在这里重读
+    @MainActor
+    func activate(timeline: MemoryTimelineModel, sessions: MemorySessionsModel, profileId: String, container: ModelContainer) {
+        switch self {
+        case .sessions: sessions.loadIfNeeded(profileId: profileId, container: container)
+        case .timeline: timeline.loadIfNeeded(profileId: profileId, container: container)
+        }
+    }
+
+    /// 这段此刻看得见：底栏选的是「窗口·时间轴」且这段在台上
+    func isVisible(selected: MemoryWindowsSegment, tab: MemoryPanelTab) -> Bool {
+        tab == .windows && selected == self
+    }
+}
+
+private extension View {
+    /// 常驻的那两段：不在台上的看不见、不吃点击、读屏跳过，视图本身留着
+    func windowsSegmentVisible(_ active: Bool) -> some View {
+        opacity(active ? 1 : 0)
+            .allowsHitTesting(active)
+            .accessibilityHidden(!active)
     }
 }
 
@@ -210,6 +264,8 @@ struct MemoryPanelView: View {
     @State private var selfMemories: [SelfMemory] = []
     @State private var editingSelfMemory: SelfMemory? = nil
     @State private var tab: MemoryPanelTab = .memory
+    /// 「窗口·时间轴」格里哪段在台上；父级持有，mac 切格重建页面也不丢
+    @State private var windowsSegment: MemoryWindowsSegment = .sessions
     @State private var showGraph = false
     @State private var timelineModel = MemoryTimelineModel()
     @State private var sessionsModel = MemorySessionsModel()
@@ -330,12 +386,12 @@ struct MemoryPanelView: View {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in
                     refreshMemories()
-                    if tab == .timeline, let pid = profileManager?.currentProfile.id {
+                    if tab == .windows, windowsSegment == .timeline, let pid = profileManager?.currentProfile.id {
                         timelineModel.reload(profileId: pid, container: modelContext.container)
                     } else {
                         timelineModel.markStale()
                     }
-                    if tab == .sessions, let pid = profileManager?.currentProfile.id {
+                    if tab == .windows, windowsSegment == .sessions, let pid = profileManager?.currentProfile.id {
                         sessionsModel.reload(profileId: pid, container: modelContext.container)
                     } else {
                         sessionsModel.markStale()
@@ -355,22 +411,19 @@ struct MemoryPanelView: View {
                         .toolbar { memoryToolbar }
                 }
             }
-            Tab(MemoryPanelTab.sessions.title, systemImage: MemoryPanelTab.sessions.icon, value: MemoryPanelTab.sessions) {
+            Tab(MemoryPanelTab.windows.title, systemImage: MemoryPanelTab.windows.icon, value: MemoryPanelTab.windows) {
                 tabPage {
-                    MemorySessionsView(model: sessionsModel, viewModel: viewModel)
+                    windowsPage
                         .contentMargins(.top, 4, for: .scrollContent)
                         .toolbar {
                             ToolbarItemGroup(placement: .primaryAction) { moreMenu }
                         }
                 }
             }
-            Tab(MemoryPanelTab.timeline.title, systemImage: MemoryPanelTab.timeline.icon, value: MemoryPanelTab.timeline) {
+            // wiki 格：整理好的档案翻页（原审计台 wiki 台里「页」那段，粟粟 10-24）
+            Tab(MemoryPanelTab.wiki.title, systemImage: MemoryPanelTab.wiki.icon, value: MemoryPanelTab.wiki) {
                 tabPage {
-                    MemoryTimelineView(model: timelineModel, viewModel: viewModel)
-                        .contentMargins(.top, 4, for: .scrollContent)
-                        .toolbar {
-                            ToolbarItemGroup(placement: .primaryAction) { moreMenu }
-                        }
+                    MemoryWikiPage(openProposals: openProposals)
                 }
             }
             // 审计台格：方块首页（plan-memory-audit-home-trial 第二节），点一块推一个台；整理台自带「选择 / ⋯」
@@ -412,10 +465,10 @@ struct MemoryPanelView: View {
                 switch tab {
                 case .memory:
                     memoryList(proxy)
-                case .sessions:
-                    MemorySessionsView(model: sessionsModel, viewModel: viewModel)
-                case .timeline:
-                    MemoryTimelineView(model: timelineModel, viewModel: viewModel)
+                case .windows:
+                    windowsPage
+                case .wiki:
+                    MemoryWikiPage(openProposals: openProposals)
                 case .audit:
                     MemoryAuditHome(viewState: auditState, viewModel: viewModel)
                         .environment(viewModel)
@@ -432,6 +485,42 @@ struct MemoryPanelView: View {
         }
     }
     #endif
+
+    /// 「窗口·时间轴」格：顶上分段「窗口总结 | 时间轴」，两个页面原样，只换哪个在台上（切换不带动画，同 wiki 台原来的分段）。
+    /// 两段常驻、不在台上的藏起来：切段不拆视图，时间轴的重写中 / 展开 / 滚动位置都留着（10-24 astra P2：拆了会重复点重写）
+    private var windowsPage: some View {
+        ZStack {
+            MemorySessionsView(model: sessionsModel, viewModel: viewModel)
+                .windowsSegmentVisible(windowsSegment == .sessions)
+            MemoryTimelineView(model: timelineModel, viewModel: viewModel,
+                               isActive: MemoryWindowsSegment.timeline.isVisible(selected: windowsSegment, tab: tab))
+                .windowsSegmentVisible(windowsSegment == .timeline)
+        }
+        .animation(nil, value: windowsSegment)
+        .onChange(of: windowsSegment) { _, seg in
+            guard let pid = profileManager?.currentProfile.id else { return }
+            seg.activate(timeline: timelineModel, sessions: sessionsModel, profileId: pid, container: modelContext.container)
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            Picker("窗口·时间轴", selection: $windowsSegment) {
+                ForEach(MemoryWindowsSegment.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+            .padding(.bottom, 8)
+            .toolPageBackground()
+        }
+        .toolPageBackground()
+        .tint(Theme.branchIndicator)
+    }
+
+    /// wiki 格空页「去整理提案 ›」：切到审计台格、推 wiki 台（那里现在直接是整理提案）
+    private func openProposals() {
+        tab = .audit
+        auditState.station = .wiki
+    }
 
     private func memoryList(_ proxy: ScrollViewProxy) -> some View {
         Group {
@@ -509,7 +598,7 @@ struct MemoryPanelView: View {
         .panelRowBackground()
     }
 
-    /// 两组记忆都空：整页一个原生空状态（搜索时不算）。wiki 10-23 挪去审计台 wiki 台，不算在这里
+    /// 两组记忆都空：整页一个原生空状态（搜索时不算）。wiki 在底栏 wiki 格（10-24），不算在这里
     private var pageIsEmpty: Bool {
         loaded && searchText.panelSearchKeyword == nil
             && !memories.contains { $0.supersededAt == nil } && !selfMemories.contains(where: \.isActive)
@@ -825,7 +914,7 @@ struct MemoryPanelView: View {
                     Label("选择", systemImage: "checkmark.circle")
                 }
             }
-            if tab == .timeline {
+            if tab == .windows, windowsSegment == .timeline {
                 Button {
                     timelineOn.toggle()
                 } label: {
@@ -1034,7 +1123,7 @@ struct MemoryPanelView: View {
         for (i, m) in selfMemories.enumerated() where m.isActive && ids.contains(.assistant(m.slug)) {
             var deleted = m
             deleted.superseded = now
-            if (try? SelfMemoryStore.save(deleted, profileId: pid)) != nil {
+            if (try? SelfMemoryStore.save(deleted, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked)) != nil {
                 selfMemories[i] = deleted
             }
         }
@@ -1042,20 +1131,9 @@ struct MemoryPanelView: View {
         refreshMemories()
     }
 
-    /// 同时间轴：load 完再发通知，页 2 才会翻回聊天页（有 nodeId 那支 navigateToSearchResult 自己发）
     private func jumpToSource(_ memory: Memory) {
-        guard let cid = memory.sourceConversationId else { return }
-        let pid = profileManager?.currentProfile.id ?? ""
-        let convDesc = FetchDescriptor<Conversation>(
-            predicate: #Predicate<Conversation> { conv in conv.id == cid && conv.profileId == pid }
-        )
-        guard let conv = try? modelContext.fetch(convDesc).first else { return }
-        if let nodeId = memory.sourceNodeId {
-            viewModel.navigateToSearchResult(nodeId: nodeId, conversation: conv, context: modelContext)
-        } else {
-            viewModel.loadConversation(conv, context: modelContext)
-            NotificationCenter.default.post(name: .conversationNavigationRequested, object: nil)
-        }
+        MemoryConversationLink.openSource(of: memory, profileId: profileManager?.currentProfile.id ?? "",
+                                          context: modelContext, viewModel: viewModel)
     }
 
     // MARK: - Data
@@ -1093,7 +1171,7 @@ struct MemoryPanelView: View {
         }
         Task {
             let list = await Task.detached {
-                SelfMemoryStore.list(profileId: profileId)
+                SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked)
             }.value
             guard profileId == profileManager?.currentProfile.id else { return }
             var t = Transaction()
@@ -1117,12 +1195,14 @@ struct MemoryPanelView: View {
         let conversationMemoryOn: Bool
         let settings: [String]
         let slotOn: Bool
+        let choices: Data?
+        let previousWindow: Data?
     }
 
     private var residentKey: ResidentKey {
         let conv = viewModel.selectedConversation
         return ResidentKey(conversationId: conv?.id, conversationMemoryOn: conv?.memoryEnabled ?? true, settings: residentSettings,
-                           slotOn: residentSlotOn)
+                           slotOn: residentSlotOn, choices: conv?.memoryWindowChoicesData, previousWindow: conv?.previousWindowSnapshotData)
     }
 
     /// 实发用的预设同聊天页：楼层绑的那份，找不到用内置
@@ -1136,12 +1216,15 @@ struct MemoryPanelView: View {
         guard let profile = profileManager?.currentProfile else { return }
         let n = residentTicket.next()
         let profileId = profile.id
-        let convOn = viewModel.selectedConversation?.memoryEnabled ?? true
+        let conversation = viewModel.selectedConversation
+        let preset = presetManager?.preset(byId: profile.presetId ?? "") ?? Preset.balanced
+        let participation = EffectiveMemoryParticipation.resolve(profileId: profileId, conversation: conversation, preset: preset)
+        let previousWindow = conversation?.previousWindowSnapshot
         let container = modelContext.container
-        let slotOn = residentSlotOn
         Task {
-            let summary = await MemoryResident.loadSummary(profile: profile, conversationMemoryEnabled: convOn,
-                                                           container: container, selfMemories: list, slotOn: slotOn)
+            let summary = await MemoryResident.loadSummary(profile: profile, participation: participation,
+                                                           container: container, selfMemories: list,
+                                                           previousWindow: previousWindow)
             guard residentTicket.isLatest(n), profileId == profileManager?.currentProfile.id else { return }
             resident = summary.revalidated(memories)
         }

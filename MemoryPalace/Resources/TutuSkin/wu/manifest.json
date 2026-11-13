@@ -1,0 +1,1494 @@
+{
+  "schemaVersion": 1,
+  "commit": "f7c5761462a76cf03b5c6ffc22eec8c64fcda5c9",
+  "inputs": [
+    {
+      "file": "双击打开_物页_v6纸剧场_5.html",
+      "bytes": 6808835,
+      "sha256": "7c2ceebc41b96658f0bc6e444c212b5f3b18c140435fe14aef205539b686c705"
+    },
+    {
+      "file": "说明.md",
+      "bytes": 2995,
+      "sha256": "7345211bdf6223a6d1fda5f37c280388f3a6056cb39eb9b2a56425547ed068f0"
+    },
+    {
+      "file": "源码/build_paper6.py",
+      "bytes": 12192,
+      "sha256": "cd80760ae593391ec47179fc431188beaf8f9c943cc323eda5bd30a4c5f12929"
+    },
+    {
+      "file": "源码/src/light.js",
+      "bytes": 16909,
+      "sha256": "3bdb750241f9b4c547a958504053b4ff522070d98c71257d3daf7f86db1a87bb"
+    },
+    {
+      "file": "源码/src/paperkit.js",
+      "bytes": 25957,
+      "sha256": "2498e9ffbc7ba2699f6edd90f32783960a6c70e8989d2858db19802fcc07fbee"
+    },
+    {
+      "file": "源码/src/paperlive.js",
+      "bytes": 8958,
+      "sha256": "f3139deb05b4556a21b96864d681d6f9e536321725489bdd12d23bed4263aa41"
+    },
+    {
+      "file": "源码/src/popup.js",
+      "bytes": 13273,
+      "sha256": "dba8343e50fd9e69ab4f89b4da1f6b42e8593a64a42f83379174183756fb40bd"
+    },
+    {
+      "file": "源码/src/keylace.svg",
+      "bytes": 178523,
+      "sha256": "5b13bf6444989439e43a3476c2314ccfe6c3caf960222fcbb286c36ce9efed11"
+    }
+  ],
+  "canonical": {
+    "performanceNow": 0,
+    "rafTimestamp": 0,
+    "reducedMotion": true,
+    "randomSeed": "0x4d350001",
+    "randomGenerator": "LCG 1664525/1013904223 modulo 2^32",
+    "lampY": 161.0367746201974,
+    "flick": 1,
+    "F": -1,
+    "animations": "frozen; original page run to completion"
+  },
+  "browser": "156.0.8078.80",
+  "args": [
+    "--use-gl=angle",
+    "--use-angle=metal",
+    "--disable-gpu-compositing",
+    "--disable-skia-runtime-opts",
+    "--force-color-profile=srgb"
+  ],
+  "papers": {
+    "plain": {
+      "kind": 0,
+      "name": "素绒",
+      "note": "平铺的黑丝绒",
+      "blur": 1.4,
+      "shin": 30,
+      "glint": [
+        0.5,
+        0.6,
+        20
+      ],
+      "pile": [
+        0.0016,
+        0.0011,
+        0.0016
+      ],
+      "ground": [
+        0.0016,
+        0.0011,
+        0.0016
+      ],
+      "sheen": [
+        0.2,
+        0.19,
+        0.19
+      ],
+      "spec": [
+        0.02,
+        0.019,
+        0.019
+      ]
+    },
+    "folds": {
+      "kind": 1,
+      "name": "褶绒",
+      "note": "垂下来的大褶",
+      "blur": 1.4,
+      "shin": 40,
+      "glint": [
+        0,
+        0,
+        1
+      ],
+      "pile": [
+        0.0016,
+        0.0011,
+        0.0016
+      ],
+      "ground": [
+        0.0016,
+        0.0011,
+        0.0016
+      ],
+      "sheen": [
+        0.12,
+        0.112,
+        0.116
+      ],
+      "spec": [
+        0,
+        0,
+        0
+      ]
+    },
+    "crushed": {
+      "kind": 2,
+      "name": "碎绒",
+      "note": "压皱的绒面",
+      "blur": 1.4,
+      "shin": 14,
+      "glint": [
+        0.8,
+        0.4,
+        16
+      ],
+      "pile": [
+        0.0016,
+        0.0011,
+        0.0016
+      ],
+      "ground": [
+        0.0019,
+        0.0014,
+        0.0018
+      ],
+      "sheen": [
+        0.095,
+        0.089,
+        0.092
+      ],
+      "spec": [
+        0.035,
+        0.033,
+        0.034
+      ]
+    },
+    "damask": {
+      "kind": 3,
+      "name": "烂花",
+      "note": "黑绒花压在暗灰缎底上",
+      "blur": 1.4,
+      "shin": 34,
+      "glint": [
+        0.6,
+        0.5,
+        30
+      ],
+      "pile": [
+        0.0012,
+        0.0009,
+        0.0011
+      ],
+      "ground": [
+        0.0095,
+        0.0086,
+        0.0076
+      ],
+      "sheen": [
+        0.16,
+        0.15,
+        0.155
+      ],
+      "spec": [
+        0.058,
+        0.054,
+        0.05
+      ]
+    },
+    "emboss": {
+      "kind": 4,
+      "name": "压花",
+      "note": "花纹压进绒毛里",
+      "blur": 2.8,
+      "shin": 20,
+      "glint": [
+        0.1,
+        1,
+        36
+      ],
+      "pile": [
+        0.0016,
+        0.0011,
+        0.0016
+      ],
+      "ground": [
+        0.0016,
+        0.0011,
+        0.0016
+      ],
+      "sheen": [
+        0.14,
+        0.13,
+        0.135
+      ],
+      "spec": [
+        0.04,
+        0.038,
+        0.039
+      ]
+    }
+  },
+  "pieces": [
+    {
+      "key": "book",
+      "label": "纸剧场里那本书：两本平放的书上立着一本，封面打着一圈孔。点一下，它在你面前打开，书页里立起一扇尖窗和两枝苹果花，一弯纸月亮落下来",
+      "frame": {
+        "left": 12,
+        "top": 454,
+        "w": 276,
+        "h": 260,
+        "z": 14
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "pomander",
+      "label": "一颗打孔的纸球吊在长丝线上，底下坠着酒红线的流苏",
+      "frame": {
+        "left": 176,
+        "top": -18,
+        "w": 68,
+        "h": 350,
+        "z": 12
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "leaning",
+      "label": "一本亚麻封面的本子斜靠在墙上，封面中央缝着一块椭圆的蕾丝，一根酒红书签带垂在封面上",
+      "frame": {
+        "left": 15.399999999999999,
+        "top": 498,
+        "w": 137,
+        "h": 178.6,
+        "z": 14
+      },
+      "visible": false,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "stack",
+      "label": "三本大小不一的本子叠在一起：最底下一本酒红布面、刷金边，中间一本裹着蕾丝，最上面一本象牙白皮面带铜扣；从中间那本里滑出来的蕾丝书签带，从桌沿垂下去",
+      "frame": {
+        "left": 78,
+        "top": 627.1,
+        "w": 184,
+        "h": 124.2,
+        "z": 26
+      },
+      "visible": false,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "candela",
+      "label": "纸剪的三枝烛台，三支蜡烛都点着。它是桌上的光，可以拿起来端着走，光和影子都跟着它",
+      "frame": {
+        "left": 226,
+        "top": 304,
+        "w": 208,
+        "h": 398,
+        "z": 15
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "pins",
+      "label": "一颗酒红纸剪的番茄针插，扎着五根珍珠头的针",
+      "frame": {
+        "left": 362,
+        "top": 620,
+        "w": 76,
+        "h": 82,
+        "z": 25
+      },
+      "visible": false,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "bottle",
+      "label": "一只威尼斯针绣蕾丝做的细长花瓶，微微歪着，瓶腹上绣着一枝苹果花；瓶口插着一枝真的苹果花，枝子是常玉的笔触，白瓷的花有大有小",
+      "frame": {
+        "left": 412.69,
+        "top": 59.31000000000006,
+        "w": 468.52000000000004,
+        "h": 650.165,
+        "z": 16
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "bottle2",
+      "label": "一只歪歪的蕾丝酒瓶，瓶口插着同一枝苹果花",
+      "frame": {
+        "left": 410.14,
+        "top": 79.20000000000005,
+        "w": 468.52000000000004,
+        "h": 622.1999999999999,
+        "z": 30
+      },
+      "visible": false,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "almonds",
+      "label": "三颗白纸压出来的杏仁",
+      "frame": {
+        "left": 428,
+        "top": 672,
+        "w": 84,
+        "h": 30,
+        "z": 24
+      },
+      "visible": false,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "plate",
+      "label": "一只打孔的纸盘子立在细金丝盘架上，一把银纸刀和一把银纸叉交叉着靠在它前面",
+      "frame": {
+        "left": 550,
+        "top": 498,
+        "w": 180,
+        "h": 204,
+        "z": 19
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "cup",
+      "label": "一只纸剪的茶杯，裂了，裂口两边打了孔，用酒红线一针一针缝上；碟子上躺着一把银纸小勺",
+      "frame": {
+        "left": 636,
+        "top": 632,
+        "w": 132,
+        "h": 74,
+        "z": 22
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "petals",
+      "label": "三片落下的纸花瓣",
+      "frame": {
+        "left": 551,
+        "top": 682,
+        "w": 66,
+        "h": 22,
+        "z": 23
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "glass",
+      "label": "纸剧场里那只高脚杯：纸剪的，杯口一圈打孔的纸蕾丝，薄纸杯身里透出红酒，金箔在酒里慢慢转。点一下会晃，左右划桌子酒也会晃",
+      "frame": {
+        "left": 778,
+        "top": 422,
+        "w": 168,
+        "h": 292,
+        "z": 18
+      },
+      "visible": true,
+      "source": "paperlive canvas"
+    },
+    {
+      "key": "dream",
+      "label": "捕梦网：一块歪歪的手工蕾丝桌垫用丝线吊着，像一轮月亮；它被划开过，又用酒红丝线一针一针缝上。底下五串长长的珠链，每串挂两根白羽毛，链子上绑着手术刀、钢笔、树脂柄刻刀、骨柄小刀、小银勺、蕾丝花和大理石杏仁。它会轻轻晃，点一下晃得更厉害",
+      "frame": {
+        "left": 810.4,
+        "top": -10,
+        "w": 394.2,
+        "h": 661.5,
+        "z": 11
+      },
+      "visible": true,
+      "source": "original multi-node rig composite"
+    },
+    {
+      "key": "opened",
+      "label": "一本摊开的本子，有一页翘起来，书页上写着字，一把金色的鹳鸟剪刀搁在上面",
+      "frame": {
+        "left": 914,
+        "top": 640.7,
+        "w": 192,
+        "h": 69.9,
+        "z": 21
+      },
+      "visible": false,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "spool",
+      "label": "一卷纸线轴，缠着打孔的纸花边，插着一根针；松开的花边从桌沿垂下去打了个卷",
+      "frame": {
+        "left": 1108,
+        "top": 580,
+        "w": 124,
+        "h": 216,
+        "z": 27
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "cloche",
+      "label": "纸做的蛋糕台上罩着一只硫酸纸的钟罩，罩里一小卷打孔的纸花边隔着半透明的纸看得见",
+      "frame": {
+        "left": 1146,
+        "top": 512,
+        "w": 148,
+        "h": 190,
+        "z": 20
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "perfume",
+      "label": "一只圆圆的卡纸香水瓶，打着一圈孔，金纸瓶盖；酒红线当丝管和气囊，从桌沿垂下去，底下一束金纸流苏",
+      "frame": {
+        "left": 1280,
+        "top": 554,
+        "w": 134,
+        "h": 254,
+        "z": 28
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "ewer",
+      "label": "一只白卡纸剪的执壶，鸟喙一样的壶嘴，树枝一样的壶把；肚子上的苹果花枝是从纸背面压出来的，没有颜色，烛光斜着照过来才看得见",
+      "frame": {
+        "left": 1339.879375,
+        "top": 398.92625,
+        "w": 185.75875000000002,
+        "h": 302.10125,
+        "z": 17
+      },
+      "visible": true,
+      "source": "paperlive canvas"
+    },
+    {
+      "key": "runner",
+      "label": "一块针绣蕾丝桌垫一半铺在桌上，一半搭过桌沿垂下去，两个角坠成锥形的褶，花纹跟着褶子弯",
+      "frame": {
+        "left": 1360,
+        "top": 677,
+        "w": 194,
+        "h": 162,
+        "z": 29
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    },
+    {
+      "key": "key",
+      "label": "从上面垂下一条蕾丝带子，和花瓶同一种蕾丝：网底，两边细绳勾边带一排小结，中间绣一枝苹果花；拧了两道，末端往左一勾，收进一个金扣，挂着一把金箔纸的小钥匙",
+      "frame": {
+        "left": 1495.5,
+        "top": -16.1,
+        "w": 54.5,
+        "h": 409.1,
+        "z": 13
+      },
+      "visible": true,
+      "source": "finished-page image / paperkit result"
+    }
+  ],
+  "candle": {
+    "x": 330,
+    "y": 336.6666666666667,
+    "flames": [
+      [
+        330,
+        314
+      ],
+      [
+        250,
+        363
+      ],
+      [
+        410,
+        363
+      ]
+    ],
+    "k": 1
+  },
+  "motes": [
+    {
+      "x": 285.3495091989316,
+      "y": 199.74981123035832,
+      "s": 1.1743745280758957,
+      "vx": 2.914581760252986,
+      "vy": -2.231665408202389,
+      "p": 1.1487146908777504
+    },
+    {
+      "x": 864.9769622049644,
+      "y": 594.0335100173252,
+      "s": 1.6279468923061358,
+      "vx": 6.997563705110224,
+      "vy": -5.0897726385165925,
+      "p": 2.429794264576049
+    },
+    {
+      "x": 556.1210763570853,
+      "y": 158.8865317919408,
+      "s": 1.6921911621779144,
+      "vx": 4.54100380168893,
+      "vy": -4.250297864477034,
+      "p": 3.4520174997273716
+    },
+    {
+      "x": 1400.6537855780334,
+      "y": 312.83020129980287,
+      "s": 2.315996212279424,
+      "vx": 2.7002993849891936,
+      "vy": -2.2796742617792916,
+      "p": 4.034257597360411
+    },
+    {
+      "x": 183.27947279118234,
+      "y": 338.7640222461778,
+      "s": 1.4287901484553003,
+      "vx": 6.487471149950579,
+      "vy": -4.65397127365577,
+      "p": 4.914444586285972
+    },
+    {
+      "x": 948.8210916086337,
+      "y": 430.7944040303846,
+      "s": 2.307394740374002,
+      "vx": 3.2785102580528473,
+      "vy": -3.8693586081208196,
+      "p": 0.5559050488352659
+    },
+    {
+      "x": 42.17902600459638,
+      "y": 326.52236938978604,
+      "s": 1.5523800733684765,
+      "vx": 4.092891850406886,
+      "vy": -4.246542611188488,
+      "p": 4.6754341323667905
+    },
+    {
+      "x": 292.99776769126765,
+      "y": 373.5784400544071,
+      "s": 1.433993669452684,
+      "vx": 4.715247439518862,
+      "vy": -1.9592435452796053,
+      "p": 1.8577980345992364
+    },
+    {
+      "x": 1284.9063613210456,
+      "y": 660.2561037542182,
+      "s": 1.4290272424172143,
+      "vx": 5.498790030735108,
+      "vy": -3.79172750088037,
+      "p": 4.5061459009903775
+    },
+    {
+      "x": 87.75855570944259,
+      "y": 215.2065469205263,
+      "s": 1.4081355425500077,
+      "vx": 4.543212050131842,
+      "vy": -1.9484656207787339,
+      "p": 2.6349528005931644
+    },
+    {
+      "x": 879.3431743604742,
+      "y": 581.7765239544678,
+      "s": 1.9649735625702305,
+      "vx": 4.455128283522754,
+      "vy": -1.6738238307734719,
+      "p": 4.161893738990475
+    },
+    {
+      "x": 371.9563092620956,
+      "y": 220.6114383864042,
+      "s": 2.1852527367977017,
+      "vx": 2.679732653247811,
+      "vy": -4.678574549183395,
+      "p": 3.072354151874606
+    },
+    {
+      "x": 766.4142916022683,
+      "y": 146.83738609695865,
+      "s": 2.207224619342378,
+      "vx": 4.094079903581587,
+      "vy": -2.585355423609144,
+      "p": 0.9542302172185737
+    },
+    {
+      "x": 722.6088095339946,
+      "y": 243.97269105087616,
+      "s": 2.3865645674753977,
+      "vx": 6.908844801084342,
+      "vy": -5.14707164138963,
+      "p": 5.425249307648191
+    },
+    {
+      "x": 1432.2798890835838,
+      "y": 139.9920124275377,
+      "s": 1.5523642463353098,
+      "vx": 3.766945634226431,
+      "vy": -3.158426821930334,
+      "p": 5.378257215186241
+    },
+    {
+      "x": 1375.1054641749943,
+      "y": 410.6290555943269,
+      "s": 1.0937622902260045,
+      "vx": 4.193467606084596,
+      "vy": -3.1172860005754046,
+      "p": 0.4112890162987606
+    },
+    {
+      "x": 1214.1682826039141,
+      "y": 481.1290594624006,
+      "s": 1.5842847827647346,
+      "vx": 2.294718555305735,
+      "vy": -3.4630513657757547,
+      "p": 5.8611849408676795
+    },
+    {
+      "x": 908.8227499961795,
+      "y": 318.27499960476416,
+      "s": 1.0932427160209044,
+      "vx": 4.987415693605726,
+      "vy": -2.9781937210645992,
+      "p": 1.2411126727901864
+    },
+    {
+      "x": 354.5181472992408,
+      "y": 293.94353175252036,
+      "s": 2.372172254074394,
+      "vx": 6.322274863225175,
+      "vy": -4.498289968643803,
+      "p": 4.305942006027035
+    },
+    {
+      "x": 899.9743681881228,
+      "y": 434.1970373314689,
+      "s": 2.29619893687086,
+      "vx": 2.9891495322517585,
+      "vy": -3.3199379729048815,
+      "p": 0.9332734795080615
+    },
+    {
+      "x": 1466.7203407813213,
+      "y": 197.44038305128925,
+      "s": 1.2732490515192239,
+      "vx": 5.247580502156779,
+      "vy": -3.4921389376104344,
+      "p": 3.9076384866509764
+    },
+    {
+      "x": 1505.2454230070725,
+      "y": 106.86577778309584,
+      "s": 2.3443440714630923,
+      "vx": 6.737756226886631,
+      "vy": -3.076815795931907,
+      "p": 0.21061697621255007
+    },
+    {
+      "x": 365.4143619329261,
+      "y": 156.78346254921053,
+      "s": 1.5824767398393305,
+      "vx": 6.309119227557403,
+      "vy": -3.9501278510324482,
+      "p": 5.445536988799449
+    },
+    {
+      "x": 1067.577129060519,
+      "y": 594.2827834891796,
+      "s": 1.2940286875913443,
+      "vx": 5.539946714508915,
+      "vy": -3.2353079635067843,
+      "p": 5.678828070166055
+    },
+    {
+      "x": 69.24529839103343,
+      "y": 461.418541426101,
+      "s": 1.604576542291761,
+      "vx": 2.3324885944311973,
+      "vy": -1.691081356650102,
+      "p": 2.915802493499068
+    },
+    {
+      "x": 410.6368257923168,
+      "y": 559.571907005593,
+      "s": 2.1469529849258833,
+      "vx": 4.091379136636533,
+      "vy": -5.141654821636621,
+      "p": 3.3811547787601013
+    },
+    {
+      "x": 1106.0404631098208,
+      "y": 638.0135865655029,
+      "s": 1.17397733698308,
+      "vx": 3.663143941659655,
+      "vy": -3.7096216009522323,
+      "p": 1.1674147964536679
+    },
+    {
+      "x": 892.2363644500183,
+      "y": 509.9847036492429,
+      "s": 1.345794473334672,
+      "vx": 2.45544507647719,
+      "vy": -3.11682936840225,
+      "p": 5.127457154581789
+    },
+    {
+      "x": 1030.9917861575377,
+      "y": 563.2443109882297,
+      "s": 2.3047318966713646,
+      "vx": 2.8769359019061085,
+      "vy": -5.301707358361455,
+      "p": 2.1428671806149944
+    },
+    {
+      "x": 222.65463083807845,
+      "y": 630.9470728773158,
+      "s": 1.6773077695637766,
+      "vx": 6.246287026981008,
+      "vy": -4.840513908537105,
+      "p": 2.476161751205182
+    },
+    {
+      "x": 964.9455237985239,
+      "y": 445.58429374686966,
+      "s": 1.4117069192747294,
+      "vx": 2.3236369620572077,
+      "vy": -1.8267190653568832,
+      "p": 2.8402935313343187
+    },
+    {
+      "x": 293.9870074996725,
+      "y": 531.7647476584534,
+      "s": 1.7653599694116564,
+      "vx": 2.2591818925247935,
+      "vy": -2.4369599023921182,
+      "p": 4.947975830799842
+    },
+    {
+      "x": 166.2525181266392,
+      "y": 105.40031681070104,
+      "s": 0.9252947649096314,
+      "vx": 2.6257918901974335,
+      "vy": -2.4524373003350775,
+      "p": 0.4654331984955934
+    },
+    {
+      "x": 745.3867719697882,
+      "y": 360.24539901613025,
+      "s": 1.300270134970924,
+      "vx": 3.8827539931498904,
+      "vy": -1.8112068534246646,
+      "p": 4.425525521066157
+    },
+    {
+      "x": 1352.2242872716743,
+      "y": 576.5368331316859,
+      "s": 2.280138202886769,
+      "vx": 6.697151738464527,
+      "vy": -5.1465456842124695,
+      "p": 4.982307700671081
+    },
+    {
+      "x": 201.35754202696262,
+      "y": 366.2766980675224,
+      "s": 1.4644974383303633,
+      "vx": 3.662382937647635,
+      "vy": -4.778510159696452,
+      "p": 6.123920847939881
+    },
+    {
+      "x": 929.4949547955184,
+      "y": 324.3915906272741,
+      "s": 1.3776822259846084,
+      "vx": 6.803851744400163,
+      "vy": -4.582736347190803,
+      "p": 3.8497798768550275
+    },
+    {
+      "x": 61.215777561301365,
+      "y": 591.6856255268067,
+      "s": 2.2253291822729806,
+      "vx": 2.644775084365392,
+      "vy": -2.2302753892727196,
+      "p": 2.3182143405929856
+    },
+    {
+      "x": 661.4830030031953,
+      "y": 379.8667477078561,
+      "s": 1.8542104823776753,
+      "vx": 6.420768204872729,
+      "vy": -5.197496545355534,
+      "p": 0.9259212753914472
+    },
+    {
+      "x": 272.6871303546068,
+      "y": 438.35322058643214,
+      "s": 1.1274729601413127,
+      "vx": 5.293695078245946,
+      "vy": -2.505711452686228,
+      "p": 3.3792719116745866
+    },
+    {
+      "x": 1143.661659649224,
+      "y": 661.7707921066904,
+      "s": 1.2537570762946415,
+      "vx": 2.2482893713386147,
+      "vy": -3.333778960906784,
+      "p": 4.783343141593796
+    },
+    {
+      "x": 945.0234767206712,
+      "y": 278.9551969106833,
+      "s": 1.7241163321015676,
+      "vx": 2.9872262344288174,
+      "vy": -2.4853913937258767,
+      "p": 3.4033161461594865
+    },
+    {
+      "x": 780.4314673510089,
+      "y": 284.5142707787454,
+      "s": 1.7913515352523972,
+      "vx": 2.8860428221305483,
+      "vy": -1.8789159073130577,
+      "p": 3.76723697568872
+    },
+    {
+      "x": 472.2648915935133,
+      "y": 496.01572804080206,
+      "s": 1.9162029774437541,
+      "vx": 5.306756279835099,
+      "vy": -3.8306563838996226,
+      "p": 2.389927336612309
+    },
+    {
+      "x": 853.3146129456873,
+      "y": 285.70823735630256,
+      "s": 2.2865612045083252,
+      "vx": 6.712990923526377,
+      "vy": -4.141525882383576,
+      "p": 2.6067669637986546
+    },
+    {
+      "x": 1413.744288374728,
+      "y": 654.0955642142217,
+      "s": 2.398318114212452,
+      "vx": 3.501406330039572,
+      "vy": -2.5733555226324825,
+      "p": 1.0388428325542918
+    },
+    {
+      "x": 14.140172975021414,
+      "y": 664.821388773853,
+      "s": 2.393782116092916,
+      "vx": 5.6621131711763155,
+      "vy": -5.3038347401598,
+      "p": 3.3132622099500444
+    },
+    {
+      "x": 727.000049741473,
+      "y": 134.28498895576922,
+      "s": 2.1001272129182325,
+      "vx": 3.6502126714476617,
+      "vy": -3.456913472531596,
+      "p": 3.709428089190333
+    },
+    {
+      "x": 1475.9915651087067,
+      "y": 644.6873134651833,
+      "s": 2.166835642377771,
+      "vx": 2.460130043047684,
+      "vy": -1.9982282961718738,
+      "p": 1.190608448860876
+    },
+    {
+      "x": 235.23841945727327,
+      "y": 226.91808238290832,
+      "s": 1.8764553336754033,
+      "vx": 6.016073716593382,
+      "vy": -1.8332800668431446,
+      "p": 2.7025093740737067
+    },
+    {
+      "x": 1524.8926753971318,
+      "y": 337.37982140213717,
+      "s": 2.1626491159026044,
+      "vx": 5.688983911015384,
+      "vy": -5.26049209057237,
+      "p": 0.28471541577397147
+    },
+    {
+      "x": 179.8495332308812,
+      "y": 344.16234825679567,
+      "s": 1.4422920718156091,
+      "vx": 3.9725428262609057,
+      "vy": -2.5762444943538867,
+      "p": 2.5890639974551597
+    },
+    {
+      "x": 1143.8548098230967,
+      "y": 434.2800528049702,
+      "s": 1.4966668466899136,
+      "vx": 2.9382739731881884,
+      "vy": -2.6761215988808544,
+      "p": 5.608565012134932
+    },
+    {
+      "x": 80.86477262957487,
+      "y": 490.0029286398785,
+      "s": 1.196744869378017,
+      "vx": 6.78422762669652,
+      "vy": -4.947295342310099,
+      "p": 1.368071064453834
+    }
+  ],
+  "renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M5, Unspecified Version)",
+  "outputs": [
+    {
+      "file": "shade.png",
+      "bytes": 2975545,
+      "sha256": "e8db749881f0f47b67c28e397fe2c194c5de762303aa755507c8ec27ac594f44",
+      "width": 2340,
+      "height": 1266,
+      "source": "light.js drawShade canonical frame; original min(DPR,1.5)"
+    },
+    {
+      "file": "flame-0.png",
+      "bytes": 3543,
+      "sha256": "92c942a482e97a51452f67ebba1802d2d4534ae8ca04aed005cbd1ab41fecafa",
+      "width": 96,
+      "height": 160,
+      "source": "light.js FL original canvas"
+    },
+    {
+      "file": "flame-1.png",
+      "bytes": 3644,
+      "sha256": "296a1d9e24a6e9fac41863f8faa8cb5b800ae83282fcbc1af50b857efefd31c9",
+      "width": 96,
+      "height": 160,
+      "source": "light.js FL original canvas"
+    },
+    {
+      "file": "flame-2.png",
+      "bytes": 3318,
+      "sha256": "680647431ff969cd7ddd04505625e764398e8a4035dd0dc4303b5d9544180e47",
+      "width": 96,
+      "height": 160,
+      "source": "light.js FL original canvas"
+    },
+    {
+      "file": "wall-plain.rgba.sub.zlib",
+      "bytes": 4461608,
+      "sha256": "d74b76af4ddc205c9dd040c6c24d2f527be68cf5a248391e031d84f2bb5ad689",
+      "width": 2340,
+      "height": 1266,
+      "source": "original finished-page bake framebuffer RGBA; GL bottom row first; row Sub prediction then zlib",
+      "rawSHA256": "f1325eb98531e02c7ed4114ef063207daa4f03b9a4d980f4aaec32bc47910ef0",
+      "decodedSHA256": "f1325eb98531e02c7ed4114ef063207daa4f03b9a4d980f4aaec32bc47910ef0",
+      "decodedBytes": 11849760,
+      "changedBytes": 0
+    },
+    {
+      "file": "wall-folds.rgba.sub.zlib",
+      "bytes": 4029639,
+      "sha256": "cf728ea1710ad8b14560f9de4c67e5f9d5732ae550828acd37ea57d08f928526",
+      "width": 2340,
+      "height": 1266,
+      "source": "original finished-page bake framebuffer RGBA; GL bottom row first; row Sub prediction then zlib",
+      "rawSHA256": "141888604030836a449790c1e854acbd0f9f75742d9d6470accab33b5615065e",
+      "decodedSHA256": "141888604030836a449790c1e854acbd0f9f75742d9d6470accab33b5615065e",
+      "decodedBytes": 11849760,
+      "changedBytes": 0
+    },
+    {
+      "file": "wall-crushed.rgba.sub.zlib",
+      "bytes": 6650993,
+      "sha256": "b3c925b03df6f35a86eecec05c4b72ba4104cdaa7008a05d7bfb3e560db395dd",
+      "width": 2340,
+      "height": 1266,
+      "source": "original finished-page bake framebuffer RGBA; GL bottom row first; row Sub prediction then zlib",
+      "rawSHA256": "ff2bcc545fe7f361e1df61b7d9241e6c4af47c48a2c47d46fe5ad0e62854df51",
+      "decodedSHA256": "ff2bcc545fe7f361e1df61b7d9241e6c4af47c48a2c47d46fe5ad0e62854df51",
+      "decodedBytes": 11849760,
+      "changedBytes": 0
+    },
+    {
+      "file": "wall-damask.rgba.sub.zlib",
+      "bytes": 3741327,
+      "sha256": "d9eeee254fde6cbbff778b853895417ffa808468640b1c37c5c0c089d141d9c0",
+      "width": 2340,
+      "height": 1266,
+      "source": "original finished-page bake framebuffer RGBA; GL bottom row first; row Sub prediction then zlib",
+      "rawSHA256": "c50e23efd86310bc2a44ee76fa7e261d3f637d9e3d0eabdda5a4de7430f37254",
+      "decodedSHA256": "c50e23efd86310bc2a44ee76fa7e261d3f637d9e3d0eabdda5a4de7430f37254",
+      "decodedBytes": 11849760,
+      "changedBytes": 0
+    },
+    {
+      "file": "wall-emboss.rgba.sub.zlib",
+      "bytes": 5200790,
+      "sha256": "7f7cf4f2338f58c240eda2b6c9e9d6b2322b8124d9c867dd39043af6e6c35c0f",
+      "width": 2340,
+      "height": 1266,
+      "source": "original finished-page bake framebuffer RGBA; GL bottom row first; row Sub prediction then zlib",
+      "rawSHA256": "a86f02b59ad430eebddd2d97bf875e6b99cedd69db32604e15046e89fd71e7a0",
+      "decodedSHA256": "a86f02b59ad430eebddd2d97bf875e6b99cedd69db32604e15046e89fd71e7a0",
+      "decodedBytes": 11849760,
+      "changedBytes": 0
+    },
+    {
+      "file": "piece-book.png",
+      "bytes": 200287,
+      "sha256": "813400c3877de4bbdf09b50f79fa4bb4ce5d7fc8539ff389dbda01fc9e6df551",
+      "width": 652,
+      "height": 720,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 42.0,
+        "y": 473.6666666666667,
+        "width": 217.33333333333334,
+        "height": 240.0
+      },
+      "extractedSHA256": "c3615e2712e3cb442fa04de4905165bb81a4f813f0f9fd5a7036d4f642aebf35",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-pomander.png",
+      "bytes": 80208,
+      "sha256": "b07cfd46d19edc5573aae50b8d56c8666822bad63c274579c35b51552c879a1c",
+      "width": 313,
+      "height": 1127,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 168.33333333333334,
+        "y": 0.0,
+        "width": 104.33333333333333,
+        "height": 375.6666666666667
+      },
+      "extractedSHA256": "128fb3a95d15358ea8a4a5af0f92cc984f65eec95aa5a374b21620dad063a6c9",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-leaning.png",
+      "bytes": 107825,
+      "sha256": "df241491be8dfd0040dedf11cec66840825ef6e4983c47a2f87687860c610bc2",
+      "width": 413,
+      "height": 545,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 14.666666666666666,
+        "y": 501.0,
+        "width": 137.66666666666666,
+        "height": 181.66666666666666
+      },
+      "extractedSHA256": "89c2950e66b9f325a0e5516884162f38b2231173825bc8733bc7365281696ee0",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-stack.png",
+      "bytes": 62620,
+      "sha256": "893742e049cd1c91a0357c0020dbdd686fc0d2a5aaaeceaeca9f59a4089c2e22",
+      "width": 546,
+      "height": 374,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 79.0,
+        "y": 629.6666666666666,
+        "width": 182.0,
+        "height": 124.66666666666667
+      },
+      "extractedSHA256": "5969ba5b68330de81bbc57ac88454a9ff6a2fa554e6bbe7f0d000bd4599f6f10",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-candela.png",
+      "bytes": 210021,
+      "sha256": "3c97e52a0be114c8bab26491f94dc0890865dfaaf716f5e1c5ff8b05a0f9a9ce",
+      "width": 671,
+      "height": 1218,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 218.66666666666666,
+        "y": 307.3333333333333,
+        "width": 223.66666666666666,
+        "height": 406.0
+      },
+      "extractedSHA256": "9ace0ee94edfcda398c33543eb9179871afa95dbdca17a367b4e03ef13865205",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-pins.png",
+      "bytes": 57783,
+      "sha256": "4edd7fccd04592b4cb5f785bdb213015dfac62278eec07ec03f36f0f4a17fefa",
+      "width": 280,
+      "height": 295,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 355.3333333333333,
+        "y": 613.6666666666666,
+        "width": 93.33333333333333,
+        "height": 98.33333333333333
+      },
+      "extractedSHA256": "eca284ef97bf1244360334a8ca5c49059d6a8fa892e296a988ef2157b44e1700",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-bottle.png",
+      "bytes": 911061,
+      "sha256": "77426325320790edf668d10c7fbd7c92b7ef2dc889c4227b7cae8a3c5544d051",
+      "width": 1091,
+      "height": 1847,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 427.0,
+        "y": 99.33333333333333,
+        "width": 363.6666666666667,
+        "height": 615.6666666666666
+      },
+      "extractedSHA256": "9a6606855f83b49b05e6dc10dff14a6084b536459bf194d9e1badd0cff63e026",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-bottle2.png",
+      "bytes": 873387,
+      "sha256": "e25d887a38dacc9a813828605af9d2d50be8b55dc8cd8168e48a7102db2b1d28",
+      "width": 1093,
+      "height": 1779,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 424.0,
+        "y": 119.33333333333333,
+        "width": 364.3333333333333,
+        "height": 593.0
+      },
+      "extractedSHA256": "e94a4c0432c8592efaea99726315aa68793e49deda1cf71d70537929c1aafd8d",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-almonds.png",
+      "bytes": 20288,
+      "sha256": "fa5b40a531d1897d8ec150bc194c4e4400c2fe06403f5ca577347e4b14eecd87",
+      "width": 282,
+      "height": 130,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 425.0,
+        "y": 670.0,
+        "width": 94.0,
+        "height": 43.333333333333336
+      },
+      "extractedSHA256": "92af00c308c3b1ecd35326e4fc625c183a0346fc2310cf504af5fe458cf94739",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-plate.png",
+      "bytes": 239530,
+      "sha256": "c8306b8e3ba546e013b60e853b9562c2f590dc8e60bba2f41e490d6bb92f34be",
+      "width": 604,
+      "height": 635,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 539.3333333333334,
+        "y": 501.6666666666667,
+        "width": 201.33333333333334,
+        "height": 211.66666666666666
+      },
+      "extractedSHA256": "d443aa8bd755df89559b9cb025394a35b76880314ca9af21df965955e4e04827",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-cup.png",
+      "bytes": 70051,
+      "sha256": "e6f2b15f80ef957807b06779ed5759d015a494cd98f7545cf47a4c91ba5f09d5",
+      "width": 409,
+      "height": 267,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 634.3333333333334,
+        "y": 627.3333333333334,
+        "width": 136.33333333333334,
+        "height": 89.0
+      },
+      "extractedSHA256": "285ffb784f6d3939496e8701cce3ac9467fe96de461d8d009d237679642b6efe",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-petals.png",
+      "bytes": 14473,
+      "sha256": "6bf8a47321b7a53fa921b8c39480c0035ae1653b60d75a850ae8e0998492ece9",
+      "width": 226,
+      "height": 113,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 546.3333333333334,
+        "y": 679.3333333333334,
+        "width": 75.33333333333333,
+        "height": 37.666666666666664
+      },
+      "extractedSHA256": "60d0de5ff325f8a2aec80c0db7796d52b994cf6015bf81ae51cc63bcba453b52",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-glass.png",
+      "bytes": 139445,
+      "sha256": "edfab5fd67be3b1678b7c4d7663c6900e8e00f5ec210c9123eb6e699a2d1c376",
+      "width": 363,
+      "height": 740,
+      "source": "paperlive canvas",
+      "rasterFrame": {
+        "x": 800.0,
+        "y": 466.6666666666667,
+        "width": 121.0,
+        "height": 246.66666666666666
+      },
+      "extractedSHA256": "b10d0d41699e6fb5feecdc3012ef3e824748ca52e5910ab374f0203a9b31584c",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-dream.png",
+      "bytes": 1714836,
+      "sha256": "ded1172c87ea59a0cc6cfba712ed597afbe5a27188a9c1b0b2d2e3c8dd919101",
+      "width": 859,
+      "height": 1975,
+      "source": "original multi-node rig composite",
+      "rasterFrame": {
+        "x": 883.3333333333334,
+        "y": 0.0,
+        "width": 286.3333333333333,
+        "height": 658.3333333333334
+      },
+      "extractedSHA256": "9e3b96ea104d5b5afaa73f92c3ec3aa5a1439ae19a3e9669053fdf0115f4d999",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-opened.png",
+      "bytes": 39617,
+      "sha256": "c7172050c94e4e923399e421c0338598b648a0a6d28a43dd5cbc9baeddd3476d",
+      "width": 576,
+      "height": 219,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 914.0,
+        "y": 643.3333333333334,
+        "width": 192.0,
+        "height": 73.0
+      },
+      "extractedSHA256": "d5f6685d70c7cf24f3bac46ceea9db6d3d806f20d469116e5d77d10f5480244e",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-spool.png",
+      "bytes": 85645,
+      "sha256": "a0f2eb453429cbeed9212a39588d3f856ca41c0c3e087161e8e33040724233d2",
+      "width": 361,
+      "height": 659,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 1106.0,
+        "y": 581.0,
+        "width": 120.33333333333333,
+        "height": 219.66666666666666
+      },
+      "extractedSHA256": "4d66259c6f4f5985e4f9496ca67f564e70a501ba56bdcb17460979758ef556e6",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-cloche.png",
+      "bytes": 130162,
+      "sha256": "05dfa77bb443837993f741593922c33a1a632d8feb56e4b93b8e91c762996d58",
+      "width": 443,
+      "height": 623,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 1146.6666666666667,
+        "y": 505.6666666666667,
+        "width": 147.66666666666666,
+        "height": 207.66666666666666
+      },
+      "extractedSHA256": "4b335e639ad480bcea10faa10168ce5fa0cb611894ace5a6ceaf2b30e1a07e27",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-perfume.png",
+      "bytes": 149815,
+      "sha256": "e6ad022a71d8983469cad58dd332274d71c7f866e791ee4156426d942460bc74",
+      "width": 416,
+      "height": 804,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 1275.3333333333333,
+        "y": 550.6666666666666,
+        "width": 138.66666666666666,
+        "height": 268.0
+      },
+      "extractedSHA256": "9d90a4e8e7fdd56ea284deee54812f1d907a4693e333f80e5d8a4beb13cb679d",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-ewer.png",
+      "bytes": 264200,
+      "sha256": "15ec5b5df1201e284f6ca1167d5fbbf72d15c5d3393a3d0ec861e7094eea9a51",
+      "width": 602,
+      "height": 954,
+      "source": "paperlive canvas",
+      "rasterFrame": {
+        "x": 1334.0,
+        "y": 395.3333333333333,
+        "width": 200.66666666666666,
+        "height": 318.0
+      },
+      "extractedSHA256": "487ed949f13975bab8fadb7814dd3a936dd973a1a81b25abcdce913d427ca700",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-runner.png",
+      "bytes": 565578,
+      "sha256": "c1cab7530347720d4196c0e358353b93d624f60a2d66e488de306b673d5db5d6",
+      "width": 623,
+      "height": 490,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 1352.3333333333333,
+        "y": 672.6666666666666,
+        "width": 207.66666666666666,
+        "height": 163.33333333333334
+      },
+      "extractedSHA256": "2ff8838006c0f6b9624fcd60f8d5444af560c8d24443e4bdc6b7661ce08cdd98",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "piece-key.png",
+      "bytes": 92587,
+      "sha256": "8b02714f37ffec5565f3a727b44f1a8e690f0c576de2c84110a6f24a4f54df06",
+      "width": 208,
+      "height": 1302,
+      "source": "finished-page image / paperkit result",
+      "rasterFrame": {
+        "x": 1490.6666666666667,
+        "y": 0.0,
+        "width": 69.33333333333333,
+        "height": 434.0
+      },
+      "extractedSHA256": "13839435087db8e2e565950b58d3f22ad9b808258aafd0d0dcb1e2085d2e8930",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0
+    },
+    {
+      "file": "table.png",
+      "bytes": 1419861,
+      "sha256": "46d61af68b505b680a96943c4912615faf3a98668973d0cc72d9d29fd39ca876",
+      "width": 4680,
+      "height": 180,
+      "source": "original embedded table SVG including original lace",
+      "extractedSHA256": "8098c78d87e548338734b47e559f4bbd913a856b60615fa8ca0f63ccfbaf20e8",
+      "extractedSize": [
+        4680,
+        2532
+      ],
+      "croppedPixelsChanged": 0,
+      "rasterFrame": {
+        "x": 0.0,
+        "y": 695.0,
+        "width": 1560.0,
+        "height": 60.0
+      }
+    }
+  ],
+  "totalBytes": 34519687,
+  "accounting": "totalBytes counts image/material outputs; directoryTotalBytes includes manifest.json and SOURCE.txt; self hashes excluded to avoid circularity",
+  "directoryTotalBytes": 34565979,
+  "packing": "Only transparent borders cropped at integer DPR3 pixels, with three-pixel padding; restoring crops was byte-identical to original decoded RGBA. No resampling/repainting."
+}

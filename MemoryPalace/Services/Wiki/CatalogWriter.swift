@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 // MARK: - 楼层提示词：她亲手写的那几段（规格 4：写过的不重复写）
@@ -69,42 +70,84 @@ struct CatalogSources: Sendable {
     }
 
     static func label(_ cite: WikiProposal.Cite) -> String {
-        let path = cite.filePath ?? ""
-        switch cite.layer {
-        case "Prompt": return "Prompt \(cite.name ?? path)"
-        case "wiki":
-            if let page = CatalogSeedMaterials.pagePath(path) { return "wiki " + page }
-            if let folder = CatalogSeedMaterials.indexFolder(path) { return folder.isEmpty ? "wiki 根索引" : "wiki \(folder) 索引" }
-            return "wiki " + path
-        case CatalogSurvey.layer: return CatalogSurvey.label(cite)
-        default: return "\(cite.layer) \(path)"
-        }
+        CatalogRecordLine.citeLabel(layer: cite.layer, filePath: cite.filePath, name: cite.name, day: cite.day)
     }
 
-    static func label(_ fragment: UUID) -> String { "碎片 \(fragment.uuidString.prefix(8).lowercased())" }
+    static func label(_ fragment: UUID) -> String { CatalogRecordLine.fragmentLabel(fragment) }
 
     /// 她自己补的、改过字的记录行的出处
     static let userEdit = "用户编辑"
 
-    /// 一行记录拆成正文和「（出处：…）」里的几项；没有出处 = nil
-    static func split(_ line: String) -> (body: String, labels: [String]?) {
-        guard line.hasSuffix("）"), let open = line.range(of: "（出处：", options: .backwards) else { return (line, nil) }
-        return (String(line[..<open.lowerBound]), line[open.upperBound..<line.index(before: line.endIndex)].components(separatedBy: "；"))
+    struct Conversion: Equatable, Sendable {
+        var index: Int
+        var fingerprint: String
+        var newLine: String
     }
 
+    static func fingerprint(_ line: String) -> String { CatalogRecordLine.fingerprint(line) }
+
+    static func hasCodeSources(_ labels: [String]) -> Bool {
+        labels.contains { $0 != userEdit }
+    }
+
+    /// 一行记录拆成正文和出处：旧「（出处：…）」或种子「（path）」；没有出处 = nil。
+    static func split(_ line: String) -> (body: String, labels: [String]?) { CatalogRecordLine.split(line) }
+
     /// 审计台 / 文件库改过的记录（种子、普通提案同一套）：行末留着原有出处（或「用户编辑」）的照留，改了字也不动出处；
-    /// 没写出处的新行标「用户编辑」；删掉旧行的出处、或写了不认识的出处，拒存
-    static func checkEdited(_ lines: [String], original: [String], allowed: Set<String>) throws -> [String] {
-        let bodies = Set(original.map { split($0).body })
-        let known = allowed.union(original.flatMap { split($0).labels ?? [] }).union([userEdit])
-        return try lines.enumerated().map { index, raw in
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            let (body, labels) = split(line)
-            guard let labels else {
-                if bodies.contains(body) { throw CatalogSeedDrafts.EditError.invalid("第 \(index + 1) 条记录删掉了出处，不能存") }
-                return "\(line)（出处：\(userEdit)）"
+    /// 没写出处的新行标「用户编辑」；删掉旧行的出处、写了不认识的出处、单条里夹换行，拒存
+    static func checkEdited(_ lines: [String], original: [String], allowed: Set<String>,
+                            conversions: [Conversion] = []) throws -> [String] {
+        if let index = lines.firstIndex(where: { $0.contains(where: \.isNewline) }) {
+            throw CatalogSeedDrafts.EditError.invalid("第 \(index + 1) 条记录里有换行；一条记录一行，要两条用「加一行」")
+        }
+        let lines = lines.map { $0.trimmingCharacters(in: .whitespaces) }
+        var converted = Set<Int>(), outputs = Set<Int>()
+        for conversion in conversions {
+            guard original.indices.contains(conversion.index),
+                  fingerprint(original[conversion.index]) == conversion.fingerprint,
+                  converted.insert(conversion.index).inserted else {
+                throw CatalogSeedDrafts.EditError.invalid("第 \(conversion.index + 1) 行已变，重新打开再转")
             }
-            guard labels.allSatisfy(known.contains) else {
+            guard hasCodeSources(split(original[conversion.index]).labels ?? []) else {
+                throw CatalogSeedDrafts.EditError.invalid("这行不需要转换")
+            }
+            let newLine = conversion.newLine.trimmingCharacters(in: .whitespaces)
+            guard split(newLine).labels == [userEdit],
+                  let output = lines.indices.first(where: { !outputs.contains($0) && lines[$0] == newLine }) else {
+                throw CatalogSeedDrafts.EditError.invalid("转换后的记录不匹配，重新打开再转")
+            }
+            outputs.insert(output)
+        }
+        var manualBodies: [String: Int] = [:]
+        let code = original.enumerated().compactMap { index, line -> (body: String, labels: [String])? in
+            let part = split(line)
+            if part.labels == nil || part.labels == [userEdit] {
+                manualBodies[part.body, default: 0] += 1
+                return nil
+            }
+            guard !converted.contains(index), let labels = part.labels, hasCodeSources(labels) else { return nil }
+            return (part.body, labels.filter { $0 != userEdit })
+        }
+        let bodies = Set(code.map(\.body))
+        let known = allowed.union(original.flatMap { split($0).labels ?? [] }).union([userEdit])
+        let retained = Set(lines.flatMap { split($0).labels ?? [] })
+        // 整条代码记录可删；但不能把失去出处的改写伪装成一条新手写记录。
+        let removedCodeBodies = code.filter { $0.labels.allSatisfy { !retained.contains($0) } }.map(\.body)
+        return try lines.enumerated().map { index, line in
+            if outputs.contains(index) { return line }
+            let (body, labels) = split(line)
+            if labels == nil || labels == [userEdit] {
+                if let count = manualBodies[body], count > 0 {
+                    manualBodies[body] = count - 1
+                } else {
+                    let removedCodeSource = !body.isEmpty && removedCodeBodies.contains { !$0.isEmpty && (body.contains($0) || $0.contains(body)) }
+                    if bodies.contains(body) || removedCodeSource {
+                        throw CatalogSeedDrafts.EditError.invalid("第 \(index + 1) 条记录删掉了出处，不能存；要改成手写事实去审计台 › 整理提案 › 改，用「改为手写事实」")
+                    }
+                }
+                return labels == nil ? "\(line)（出处：\(userEdit)）" : line
+            }
+            guard labels?.allSatisfy(known.contains) == true else {
                 throw CatalogSeedDrafts.EditError.invalid("第 \(index + 1) 条记录的出处不是这一条原来的出处，不能存")
             }
             return line
@@ -118,6 +161,16 @@ struct CatalogSources: Sendable {
     }
     /// 还没入库、但这次可以连过去的页（种子：同一任务里获批的目录项）；是否真的在，正文审批时再处理
     var linkTargets: Set<String> = []
+    /// 这一批条目的页路径定死（种子写一页：路径由目录项定，写手交的 path 不算）；nil = 按条目自己写的
+    var lockedPath: String?
+    /// 路径定死时明说是另一页的路径（目录里的别的项等）：写到这些路径的条目打回，不按本页纠正
+    var otherPages: Set<String> = []
+
+    /// 比页身份用：「物/星砚」「memory/wiki/物/星砚.md」「[[物/星砚]]」都算同一页
+    static func pageIdentity(_ raw: String) -> String {
+        let path = CatalogPrompts.normalizedPath(raw)
+        return path.hasPrefix(CatalogSeedMaterials.wikiPrefix) ? String(path.dropFirst(CatalogSeedMaterials.wikiPrefix.count)) : path
+    }
 
     static func windowKey(_ raw: String) -> String {
         var t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -348,17 +401,19 @@ enum CatalogItems {
         return "\(t)（出处：\(src.joined(separator: "；"))）"
     }
 
-    /// nil = 不是 {"items":[…]}。校验：路径在工程 / 楼层下；新开页必须还没有、别的种必须已有且看过版本（基线 = sources.versions）；
+    /// nil = 不是 {"items":[…]}。校验：路径第一段是 9 个组之一；新开页必须还没有、别的种必须已有且看过版本（基线 = sources.versions）；
     /// 记录行没出处的扔；「记录」只能追加（没有改 / 删旧记录的种）。硬查没过的写进 checks（条目上和汇总各一份）；
     /// 关系不在四种之内、不认识的条目类型、带了不收的字段 → unapplied（原样留下，不执行）。读 wiki，后台调。
     /// 正文和 coverage / preservation 诊断分开解析（`CatalogDiagnostics.split`）：诊断缺、坏、被截断只记未评估，不连累正文；
     /// truncated = 输出被截断：只收诊断键之前那段完整的正文
-    static func parse(_ json: String, sources: CatalogSources, wiki: WikiStore, truncated: Bool = false,
+    /// user = 楼层用户名：按原规则恢复出正文 / 诊断之后，再把路径位置上的名字还原成 {{user}}（WikiPathFields.items），最后校验
+    static func parse(_ json: String, sources: CatalogSources, wiki: WikiStore, truncated: Bool = false, user: String? = nil,
                       onError: ((String) -> Void)? = nil) -> Parsed? {
         let split = CatalogDiagnostics.split(json, truncated: truncated)
         var firstError: String?
         var picked: (env: Envelope, text: String)?
-        for body in split.bodies {
+        for raw in split.bodies {
+            let body = user.map { WikiStore.storedJSON(raw, fields: .items, user: $0) } ?? raw
             if let env = CatalogJSON.decode(Envelope.self, body, onError: { firstError = firstError ?? $0 }) {
                 picked = (env, body)
                 break
@@ -368,7 +423,7 @@ enum CatalogItems {
             onError?(firstError ?? "输出被截断，正文不完整")
             return nil
         }
-        let diagnostics = CatalogDiagnostics.decode(split.diagnostics)
+        let diagnostics = CatalogDiagnostics.decode(split.diagnostics.map { d in user.map { WikiStore.storedJSON(d, fields: .diagnostics, user: $0) } ?? d })
         var items: [WikiProposal.Item] = []
         var dropReasons: [String] = []
         /// 按条目顺序排：带了不收的字段的在前面那一遍就挑出来了
@@ -412,21 +467,48 @@ enum CatalogItems {
             ]
             return fields.first { $0.1 && !consumed.contains($0.0) }.map { ($0.0, $0.2) }
         }
-        let raws = env.items.enumerated().compactMap { index, entry -> (index: Int, raw: RawItem)? in
+        var raws = env.items.enumerated().compactMap { index, entry -> (index: Int, raw: RawItem)? in
             guard let raw = entry.value else {
                 drop("items[\(index)]", "条目格式不合格（字段缺失或类型错误）")
                 return nil
             }
+            // 路径定死时：明说写的是另一页（目录里的别的项、这一项原料里的别的已有页）的条目不收，不改成本页
+            if let locked = sources.lockedPath {
+                let own = CatalogSources.pageIdentity(raw.path)
+                if own != locked, sources.otherPages.contains(own) {
+                    drop("items[\(index)] \(own)", "这段只写本项（\(locked)）；\(own) 是另一页，这条不收，那一页另开一次写")
+                    return nil
+                }
+            }
             if let extra = unconsumedField(raw) {
-                let path = CatalogPrompts.normalizedPath(raw.path)
+                let path = sources.lockedPath ?? CatalogPrompts.normalizedPath(raw.path)
                 unapplied.append((index, .init(page: WikiStore.isValidPagePath(path) ? path : nil, raw: original(index, fallback: "type=\(raw.type) path=\(raw.path)"),
                                        reason: "type=\(raw.type) 不收 \(extra.name) 字段，改用 \(extra.replacement)", at: "items[\(index)] \(path)")))
                 return nil
             }
             return (index, raw)
         }
+        if let locked = sources.lockedPath {
+            // 别的条目路径不是已知的别的页 = 本页抄错，按本页纠正。只有 new_page 例外：已经有一条路径完全对的 new_page，
+            // 其余路径对不上的 new_page 是想另开新页（单页阶段不许），不收
+            let own = { (raw: RawItem) in CatalogSources.pageIdentity(raw.path) }
+            if raws.contains(where: { $0.raw.type == "new_page" && own($0.raw) == locked }) {
+                for (index, raw) in raws where raw.type == "new_page" && own(raw) != locked {
+                    drop("items[\(index)] \(own(raw))", "这段只写本项（\(locked)），不能另开新页，这条不收")
+                }
+                raws.removeAll { $0.raw.type == "new_page" && own($0.raw) != locked }
+            }
+            // 纠正后新开页只能恰好一条：交了几条就分不清哪条是本页，都不收
+            let pages = raws.filter { $0.raw.type == "new_page" }
+            if pages.count > 1 {
+                for (index, raw) in pages {
+                    drop("items[\(index)] \(CatalogPrompts.normalizedPath(raw.path))", "这段只写本项（\(locked)），新开页只能交一条 new_page，这次交了 \(pages.count) 条，都不收")
+                }
+                raws.removeAll { $0.raw.type == "new_page" }
+            }
+        }
         for (_, raw) in raws where raw.type == "new_page" {
-            let path = CatalogPrompts.normalizedPath(raw.path)
+            let path = sources.lockedPath ?? CatalogPrompts.normalizedPath(raw.path)
             if WikiStore.isValidPagePath(path), !wiki.pageExists(path) { newPaths.insert(path) }
         }
 
@@ -473,9 +555,9 @@ enum CatalogItems {
             return day
         }
         for (index, raw) in raws {
-            let path = CatalogPrompts.normalizedPath(raw.path)
+            let path = sources.lockedPath ?? CatalogPrompts.normalizedPath(raw.path)
             let at = "items[\(index)] \(path)"
-            guard WikiStore.isValidPagePath(path) else { drop(at, "路径不在工程 / 楼层下或路径不合法"); continue }
+            guard WikiStore.isValidPagePath(path) else { drop(at, "路径第一段不是 \(WikiStore.branchesText) 之一或路径不合法"); continue }
             let extra = resolve(raw.fragments, raw.aline, sources: sources)
             var item: WikiProposal.Item?
             var rejection: String? = "条目格式不合格"
@@ -604,6 +686,13 @@ enum CatalogItems {
 
     /// covered 的碎片挂在写这一页的第一条上（批了一起标「已整理进」，驳回不连带）；这页这次一条都没写、页在且看过版本，
     /// 就单出一条「确认已覆盖」等她批（不改页）。返回哪都挂不上的（页不在），不打标
+    /// 交了 covered 碎片、点名了 covered_page，但那一页不是能挂的（没读过 / 没给全文）：一处检查（打回重写一次）；
+    /// 修订用不了也不改挂到别的页（调用方不挂）
+    static func coveredPageCheck(_ parsed: Parsed, allowed: (String) -> Bool) -> String? {
+        guard let page = parsed.coveredPage, !parsed.covered.isEmpty, !allowed(page) else { return nil }
+        return "covered_page「\(page)」不是这次读过 / 给了全文的页，covered 挂不上：改成那几页里的一页，或不写 covered_page"
+    }
+
     static func attachCovered(_ items: inout [WikiProposal.Item], covered: [UUID], path: String, version: String?) -> [UUID] {
         guard !covered.isEmpty else { return [] }
         if let i = items.firstIndex(where: { $0.change.targetPath == path }) {
@@ -749,6 +838,9 @@ extension String {
 // MARK: - 提示词：写作者的页面规则 + 条目格式（日常写手、手动 agent、种子正文共用一套；种子只多一条例外）
 
 extension CatalogPrompts {
+    static let indexDomainMarkerRule = "索引里标题后的 [设定] / [待判域] 是域标记，不是标题的一部分，连线和写标题时不要带。"
+    static let factDomainPrinciple = "人设是底图不代表其所有剧情都是现实履历；戏内经历写「设定中……」，不写成本人真实经历。" + indexDomainMarkerRule
+
     /// 新稿第 3 部分（写线不写点）。seed = 种子正文：人设里写过的也完整写，不写「详见人设」，出处写 sources
     static func pageRules(names: MemoryExtractor.Names, seed: Bool = false) -> String {
         let u = names.user, c = names.char
@@ -760,27 +852,27 @@ extension CatalogPrompts {
             """
             : """
             3. 只写增量：人设（楼层提示词）里已有的写「详见人设」，不重抄。动笔前先扫一遍人设里和这页有关的事实：
-               碎片说的和人设一样 → 这句写「对花生过敏（详见人设）」；
-               碎片有更新 / 补充 → 写增量，带时间锚：「减糖中（自 2026-10 起）」；
-               碎片和人设矛盾（人设写近视 500 度，碎片说做了手术）→ 两条都留、各带日期，「现在」按新的写；人设不是 wiki 页，不连线。
+               碎片说的和人设一样 → 这句写「一晒月光就打喷嚏（详见人设）」；
+               碎片有更新 / 补充 → 写增量，带时间锚：「戒蜜露中（自 2026-10 起）」；
+               碎片和人设矛盾（人设写怕听潮声，碎片说已经听惯了）→ 两条都留、各带日期，「现在」按新的写；人设不是 wiki 页，不连线。
             """
         return """
         ## 核心：写线不写点
         碎片是点，wiki 页是线。不是把碎片搬进页面，是从碎片里理出关系，写成段落。三步：
-        1. 分组：因果的放一组（对花生过敏 + 随身带肾上腺素笔）；同一件事的放一组（报了 N2 + 12 月考 + 交了报名费）；同类属性的放一组（不吃香菜 + 喜欢面包 + 在减糖）。
-        2. 每组写成一句：有因果用因果连「对花生过敏，随身带肾上腺素笔」；有时间用时间锚「减糖中（自 2026-10 起）」；同类用逗号并列「喜欢面包，不吃香菜」。
+        1. 分组：因果的放一组（一晒月光就打喷嚏 + 夜里出门撑银纸伞）；同一件事的放一组（报了星图测绘三级 + 12 月考 + 交了报名费）；同类属性的放一组（不吃银鳞果 + 爱喝苦茴汤 + 在戒蜜露）。
+        2. 每组写成一句：有因果用因果连「一晒月光就打喷嚏，夜里出门撑银纸伞」；有时间用时间锚「戒蜜露中（自 2026-10 起）」；同类用逗号并列「爱喝苦茴汤，不吃银鳞果」。
         3. 组和组之间用句号断开，不用「另外 / 此外 / 同时」去连。
-        ✗ 点：\(u)对花生过敏。\(u)喜欢吃面包。\(u)不吃香菜。\(u)最近在减糖。\(u)随身带肾上腺素笔。
-        ✓ 线：对花生过敏，随身带肾上腺素笔。减糖中（自 2026-10 起）。喜欢面包，不吃香菜。
+        ✗ 点：\(u)一晒月光就打喷嚏。\(u)爱喝苦茴汤。\(u)不吃银鳞果。\(u)最近在戒蜜露。\(u)夜里出门撑银纸伞。
+        ✓ 线：一晒月光就打喷嚏，夜里出门撑银纸伞。戒蜜露中（自 2026-10 起）。爱喝苦茴汤，不吃银鳞果。
 
         ## 一页 = 标题 + 钩子 + 触发词 + 现在 + 记录 + 连到
         页上不写「用户 / AI / 助手 / 她 / 他」，写名字：\(u)、\(c)。\(c)的观察写「\(c)认为……」，不写成\(u)的客观属性；归因不明的不猜是谁说的；没兑现的承诺照写成承诺，不写成已经做到。正文里引用别人的话用「」，不用半角双引号。
 
         ### 钩子
         写成「当……时先看这页」：写场景，不写空话；可以放具体的触发词、原话，它们就是搜索命中的入口。
-        ✗ \(u)的身体信息
-        ✓ 当\(u)说过敏、吃药、身体不舒服、眼睛疼时先看这页
-        ✓ 当\(u)说「来不及了」「不想做」「又拖了」时先看这页
+        ✗ \(u)的月光体质信息
+        ✓ 当\(u)说月光、打喷嚏、银纸伞、潮声吵时先看这页
+        ✓ 当\(u)说「灯油不够了」「再囤一箱」「又买多了」时先看这页
         触发词：标题 + 别名（平时怎么叫它）。
 
         ### 现在
@@ -790,18 +882,18 @@ extension CatalogPrompts {
         4. 只在确有变化时改「现在」；已经写过的事实不再写。
         5. 「现在」里写了「（到 YYYY-MM-DD）」这种到期日，就在这条 new_page / rewrite_now 上另填 valid_until = 那一天（见条目格式）。
         不同的页重心不同（这是写法建议，按内容自己判断是哪种页）：
-        - 普通页（\(u)的身体、偏好，一个人、一只猫……）：按属性分组，每组一句。
-          ✗ 饼干是橘猫。饼干 2 岁。饼干是公猫。饼干已绝育。饼干贪吃。饼干 6kg。
-          ✓ 橘猫，公，2 岁，已绝育（自 2026-09 起）。贪吃，会自己开橱柜门偷零食（自 2026-09 起）。体重 6kg，兽医要求控制（自 2026-09 检查起）。
-        - 行为模式页（楼层/\(u)/行为模式/…）：不记事件，画路径「遇到 X 时会怎么走」——触发条件；路径 阶段 → 阶段 → 阶段；典型时长；接住方式（\(c)该怎么应对）；（基于 YYYY-MM/MM 共 N 次观察）。
-          ✗ 9 月拖了毕设。10 月也拖了作品集。每次都拖延。
-          ✓ 遇到大截止日时触发。恐慌（「来不及了」）→ 逃避（刷手机、打扫房间）→ 内疚（「我怎么又这样」）→ 深夜赶工。通常拖 2–3 天，截止前一晚通宵完成。接住方式：不催，陪着，帮\(u)把任务拆成 15 分钟小块。（基于 2026-09/10 两次观察）
-        - 事页（楼层/事/…）：按时间线写，同一阶段的合成一句，不逐天记流水账；经过引用出处，不重抄。
-          ✓ 9 月初被裁，哭了一天后和小方通话决定转产品方向（自 2026-09-03 起）。9 月中开始投简历，面了三家（自 2026-09-10 起）。
+        - 普通页（\(u)本人的某一方面、偏好，一个人、一只灵兽……）：按属性分组，每组一句。
+          ✗ 星砚是云貂。星砚 3 岁。星砚是母的。星砚左耳有银毛。星砚爱囤松针。星砚 2kg。
+          ✓ 云貂，母，3 岁，左耳一撮银毛（自 2026-09 起）。爱囤松针，会自己拧开灯罩偷灯芯（自 2026-09 起）。体重 2kg，驯兽师要求少喂蜜露（自 2026-09 检查起）。
+        - 行为模式页（{{user}}/行为模式/…）：不记事件，画路径「遇到 X 时会怎么走」——触发条件；路径 阶段 → 阶段 → 阶段；典型时长；接住方式（\(c)该怎么应对）；（基于 YYYY-MM/MM 共 N 次观察）。
+          ✗ 9 月大潮前囤了三箱灯芯。10 月又囤了两箱。每次都囤多。
+          ✓ 遇到大潮预报时触发。慌（「灯油不够了」）→ 囤（连夜去云桥城扫灯芯）→ 后悔（「又买多了」）→ 把多的分给岚舟。通常折腾 1–2 天，涨潮前一晚收尾。接住方式：不笑话，帮\(u)先列清单再出门。（基于 2026-09/10 两次观察）
+        - 事页（事/…）：按时间线写，同一阶段的合成一句，不逐天记流水账；经过引用出处，不重抄。
+          ✓ 9 月初北塔的灯停了，守了一夜后和岚舟商量改点雾灯（自 2026-09-03 起）。9 月中开始试灯芯，试了三种（自 2026-09-10 起）。
         - 项目页：当前状态 + 关键节点。
-          ✓ 交互装置方向，12 月截止（到 2026-12-15）。10 月中完成原型，正在调传感器（自 2026-10-15 起）。导师要求加用户测试环节（自 2026-10 起）。
+          ✓ 给北塔搭雾灯台，12 月点灯（到 2026-12-15）。10 月中搭好灯架，正在调灯芯（自 2026-10-15 起）。岚舟要求加一道防潮罩（自 2026-10 起）。
         - 主题页：当前水平 + 方法 + 目标。
-          ✓ 目标 N2，报了 12 月考试（到 2026-12-01）。听力是瓶颈，每天背 20 个单词（自 2026-09 起）。跟田中老师每周三上课（自 2026-09 起）。
+          ✓ 目标星图测绘三级，报了 12 月考级（到 2026-12-01）。等高线是瓶颈，每天描 20 格星图（自 2026-09 起）。跟岚舟每周三学（自 2026-09 起）。
 
         ### 记录
         一行一件事，text 写「YYYY-MM-DD 动词短语」：
@@ -810,43 +902,43 @@ extension CatalogPrompts {
         3. 出处不写进 text，写在 \(cite) 里，代码接在行尾；没有出处的行会被扔掉。
         4. 只追加：已有的记录行原封不动。
         5. 原料没写日期就写「日期未注明」，不拿文件时间、今天的日期当事实日期。
-        ✗ 2026-10-15 和朋友一起去了公司附近新开的面包店买了很多面包说特别好吃想下次再去
-        ✓ 2026-10-15 发现公司附近新面包店，想再去
-        ✗ 2026-10-12 饼干半夜踩键盘删了三页毕设
-        ✓ 2026-10-12 半夜踩键盘删三页毕设
+        ✗ 2026-10-15 和岚舟一起去了云桥城新开的灯芯铺买了好多灯芯说特别耐烧想下次再去
+        ✓ 2026-10-15 发现云桥城新灯芯铺，想再去
+        ✗ 2026-10-12 星砚半夜拧开灯罩叼走了三根灯芯
+        ✓ 2026-10-12 半夜拧开灯罩叼走三根灯芯
 
         ### 连到
         relation 只有四种：补充 / 矛盾 / 共鸣 / 引用，没有「替代」。同一件事的不同面 → 补充；信息冲突 → 矛盾；印证、呼应另一页的观点 → 共鸣；直接提到另一页的内容 → 引用；都不是就不连，不为连而连。why 写一句为什么。
-        ✓ 楼层/\(u)/行为模式/拖延曲线 → 楼层/项目/毕设 · 补充 · 毕设是拖延的主要触发源
-        ✗ → 楼层/\(u)/概要 · 补充 · \(u)就是\(u)（没信息量，不连）
+        ✓ {{user}}/行为模式/涨潮前囤灯 → 项目/雾灯台 · 补充 · 雾灯台是囤灯的主要缘由
+        ✗ → {{user}}/概要 · 补充 · \(u)就是\(u)（没信息量，不连）
 
         ### 新旧不一样
-        同一个属性的不同值 = 冲突（住三楼 → 住五楼）；不同属性 = 共存（喜欢猫，也喜欢狗）。
+        同一个属性的不同值 = 冲突（守北塔 → 改守南塔）；不同属性 = 共存（收集雾玻璃，也收集铜罗盘）。
         - 共存：两条都记，不连矛盾线，judgment 写 coexist；
         - 冲突：记录两条都留、各带日期；「现在」按新的写；judgment 写 conflict。另一方在别的页上，才连一条「矛盾」到那一页；另一方是人设，或者就在这一页上（旧说法、旧记录），不连线，也不连回自己这一页。
 
         ### 更新已有页
-        不整页重写，只做该做的：补充的新信息只是一件事 → append 追加记录；补充的新信息改变了现在的样子（比如开始减糖）→ 同时交 rewrite_now（改完的整段「现在」）和 append（这件事的记录），旧记录照旧不动；已有信息变了 → rewrite_now 重写整段「现在」；和另一页有关 → link；触发词变了 → retag。
+        不整页重写，只做该做的：补充的新信息只是一件事 → append 追加记录；补充的新信息改变了现在的样子（比如开始戒蜜露）→ 同时交 rewrite_now（改完的整段「现在」）和 append（这件事的记录），旧记录照旧不动；已有信息变了 → rewrite_now 重写整段「现在」；和另一页有关 → link；触发词变了 → retag。
 
         ### 各类页整页正反例
-        楼层/\(u)/身体
-        ✗ {"now": "\(u)对花生过敏。\\n\(u)随身带肾上腺素笔。\\n\(u)在减糖。\\n\(u)近视约 500 度。\\n\(u)喜欢面包。\\n\(u)不吃香菜。\\n\(u)最近睡眠不好。"}
-        ✓ {"now": "对花生过敏，随身带肾上腺素笔\(seed ? "" : "（详见人设）")。减糖中（自 2026-10 起）。近视约 500 度，长时间看屏幕眼睛疼。喜欢面包，不吃香菜。最近连续 2 点才睡（自 2026-10 中旬起）。"}
-        楼层/\(u)/行为模式/拖延曲线
-        ✗ {"now": "\(u) 9 月拖了毕设。\(u) 10 月也拖了作品集。\(u)每次都拖延。"}
-        ✓ {"now": "遇到大截止日时触发。恐慌（「来不及了」）→ 逃避（刷手机/打扫房间/逛淘宝）→ 内疚（「我怎么又这样」）→ 深夜赶工。通常拖 2-3 天，截止前一晚通宵完成。接住方式：不催，陪\(u)待着，帮\(u)把任务拆成 15 分钟小块。（基于 2026-09/10 两次观察）"}
-        楼层/人/饼干
-        ✗ {"now": "饼干是橘猫。\\n饼干 2 岁。\\n饼干是公猫。\\n饼干已绝育。\\n饼干贪吃。\\n饼干会开橱柜门。\\n饼干体重 6kg。"}
-        ✓ {"now": "橘猫，公，2 岁，已绝育。贪吃，会自己开橱柜门偷零食。体重 6kg，兽医要求控制（自 2026-09 检查起）。是\(u)独居最重要的陪伴。"}
-        楼层/项目/毕设
-        ✗ {"now": "\(u)在做毕设。毕设是交互装置。12 月要交。导师让加用户测试。10 月做完了原型。"}
-        ✓ {"now": "交互装置方向，12 月截止。10 月中完成原型，正在调传感器（自 2026-10-15 起）。导师要求加用户测试环节。"}
-        楼层/事/2026-09 被裁
-        ✗ {"now": "9月1号被通知裁员。9月2号哭了一天。9月3号跟小方打电话。9月5号投简历。9月10号面试。"}
-        ✓ {"now": "9 月初被裁，哭了一天后跟小方通话决定转产品方向（自 2026-09-03 起）。9 月中开始投简历，面了三家（自 2026-09-10 起）。目前等两家回复。"}
-        楼层/主题/日语学习
-        ✗ {"now": "\(u)在学日语。目标是 N2。听力最难。每天背 20 个单词。报了 12 月考试。跟田中老师上课。"}
-        ✓ {"now": "目标 N2，报了 12 月考试（到 2026-12-01）。听力是瓶颈，每天背 20 个单词。跟田中老师每周三上课（自 2026-09 起）。"}
+        {{user}}/月光体质
+        ✗ {"now": "\(u)一晒月光就打喷嚏。\\n\(u)夜里出门撑银纸伞。\\n\(u)在戒蜜露。\\n\(u)听潮声久了左耳发烫。\\n\(u)爱喝苦茴汤。\\n\(u)不吃银鳞果。\\n\(u)最近守灯守得晚。"}
+        ✓ {"now": "一晒月光就打喷嚏，夜里出门撑银纸伞\(seed ? "" : "（详见人设）")。戒蜜露中（自 2026-10 起）。听潮声久了左耳发烫，涨潮夜塞蜡耳塞。爱喝苦茴汤，不吃银鳞果。最近连着守灯到三更（自 2026-10 中旬起）。"}
+        {{user}}/行为模式/涨潮前囤灯
+        ✗ {"now": "\(u) 9 月大潮前囤了三箱灯芯。\(u) 10 月又囤了两箱。\(u)每次都囤多。"}
+        ✓ {"now": "遇到大潮预报时触发。慌（「灯油不够了」）→ 囤（连夜去云桥城扫灯芯/灯油/蜡耳塞）→ 后悔（「又买多了」）→ 把多的分给岚舟。通常折腾 1-2 天，涨潮前一晚收尾。接住方式：不笑话，陪\(u)待着，帮\(u)先列清单再出门。（基于 2026-09/10 两次观察）"}
+        人/星砚
+        ✗ {"now": "星砚是云貂。\\n星砚 3 岁。\\n星砚是母的。\\n星砚左耳有银毛。\\n星砚爱囤松针。\\n星砚会拧开灯罩。\\n星砚体重 2kg。"}
+        ✓ {"now": "云貂，母，3 岁，左耳一撮银毛。爱囤松针，会自己拧开灯罩偷灯芯。体重 2kg，驯兽师要求少喂蜜露（自 2026-09 检查起）。是\(u)守塔时最要紧的伴。"}
+        项目/雾灯台
+        ✗ {"now": "\(u)在搭雾灯台。雾灯台给北塔用。12 月要点灯。岚舟让加防潮罩。10 月搭好了灯架。"}
+        ✓ {"now": "给北塔搭雾灯台，12 月点灯。10 月中搭好灯架，正在调灯芯（自 2026-10-15 起）。岚舟要求加一道防潮罩。"}
+        事/2026-09 北塔停灯
+        ✗ {"now": "9月1号北塔的灯停了。9月2号守了一夜。9月3号跟岚舟商量。9月5号去买灯芯。9月10号试灯。"}
+        ✓ {"now": "9 月初北塔的灯停了，守了一夜后跟岚舟商量改点雾灯（自 2026-09-03 起）。9 月中开始试灯芯，试了三种（自 2026-09-10 起）。目前等云桥城的灯匠回信。"}
+        主题/星图测绘
+        ✗ {"now": "\(u)在学星图测绘。目标是三级。等高线最难。每天描 20 格星图。报了 12 月考级。跟岚舟学。"}
+        ✓ {"now": "目标星图测绘三级，报了 12 月考级（到 2026-12-01）。等高线是瓶颈，每天描 20 格星图。跟岚舟每周三学（自 2026-09 起）。"}
 
         ### 交之前对一遍
         「现在」是连贯段落、没有列表行？每句有时间锚？\(seed ? "" : "没重抄人设？")不是碎片的逐条翻译？记录每行不超过 30 字、动词开头、有出处？钩子是「当……时」？行为模式页写的是路径？关系是四种之一？没写「用户 / AI / 助手 / 她 / 他」？旧记录没动？
@@ -859,16 +951,16 @@ extension CatalogPrompts {
         let u = names.user, c = names.char
         return """
         条目只有这几种：
-        - 新开一页：{"type":"new_page","path":"楼层/\(u)/身体","kind":"用户","title":"身体","triggers":["过敏","吃药","眼睛疼"],"hook":"当\(u)说过敏、吃药、身体不舒服、眼睛疼时先看这页","now":"对花生过敏，随身带肾上腺素笔（详见人设）。减糖中（自 2026-10 起）。喜欢面包，不吃香菜。","records":[记录…],"links":[{"to":"楼层/地点/新面包店","relation":"补充","why":"常去买面包"}]}
+        - 新开一页：{"type":"new_page","path":"{{user}}/月光体质","kind":"用户","title":"月光体质","triggers":["月光","打喷嚏","银纸伞"],"hook":"当\(u)说月光、打喷嚏、银纸伞、潮声吵时先看这页","now":"一晒月光就打喷嚏，夜里出门撑银纸伞（详见人设）。戒蜜露中（自 2026-10 起）。爱喝苦茴汤，不吃银鳞果。","records":[记录…],"links":[{"to":"地点/云桥城灯芯铺","relation":"补充","why":"常去买灯芯"}]}
         - 往已有页追加记录：{"type":"append","path":"…","records":[记录…],"judgment":"coexist"}
         - 改已有页的「现在」：{"type":"rewrite_now","path":"…","now":"改完的整段「现在」","judgment":"conflict"}
         - 已有页连线：{"type":"link","path":"从哪页","to":"连到哪页","relation":"矛盾","why":"一句为什么","judgment":"conflict"}
         - 改已有页的钩子 / 触发词：{"type":"retag","path":"…","hook":"…","triggers":["…"]}
-        记录 = {"text":"2026-10-15 发现公司附近新面包店，想再去","fragments":["f3"],"aline":[{"layer":"A2","window":"1a2b3c4d","segment":3}]}：fragments 写碎片编号；aline 写检索出处——A 线的 layer 为 A2 / A3 / A4，window = conv 后面那 8 位，A2 必须写已提供的段号；A4 一天一条（没有 conv 的那种）写 {"layer":"A4","day":"那天的日期"}；原文写 {"layer":"原文","nodeId":"实际提供的节点 id"}，window 可不写，若写必须与该节点窗口一致。两样至少一样。只能引用本次实际提供的出处，不得把 A4 当成 A2。原文里\(c)说的话是\(c)的发言，不是\(u)的事实：写进页要归给\(c)（「\(c)认为」「\(c)说」），不改写成\(u)自述。
+        记录 = {"text":"2026-10-15 发现云桥城新灯芯铺，想再去","fragments":["f3"],"aline":[{"layer":"A2","window":"1a2b3c4d","segment":3}]}：fragments 写碎片编号；aline 写检索出处——A 线的 layer 为 A2 / A3 / A4，window = conv 后面那 8 位，A2 必须写已提供的段号；A4 一天一条（没有 conv 的那种）写 {"layer":"A4","day":"那天的日期"}；原文写 {"layer":"原文","nodeId":"实际提供的节点 id"}，window 可不写，若写必须与该节点窗口一致。两样至少一样。只能引用本次实际提供的出处，不得把 A4 当成 A2。原文里\(c)说的话是\(c)的发言，不是\(u)的事实：写进页要归给\(c)（「\(c)认为」「\(c)说」），不改写成\(u)自述。
         valid_until（只写在 new_page / rewrite_now 上，可不写）："valid_until":"2026-12-01"。「现在」里写了「（到 YYYY-MM-DD）」才填，填那个日子，有好几个填最早的；日子只能来自原料里明确的日期，「现在」里没写到期日就不写。
         judgment 只写在 append / rewrite_now / link 上：新旧冲突写 conflict，共存写 coexist，没有新旧问题就不写。
         covered（和 items 同一层，可不写）：分到这个主题的碎片里，页上已经写过、不用再写的，编号写进 covered，比如 "covered":["f2"]；没用上、页上也没有的别写进去，它们留着下次再整理。covered_page（可不写；整理分组时必须写）：这些碎片写在哪一页上，必须是给过全文 / 读过的页。
-        single（和 items 同一层，可不写）：分到这个主题的碎片里，同时满足三条的小事不用进页，编号写进 single：几乎不变（会变的状态，比如最近在减糖，不算）；自己就完整；不属于任何已有页的话题范围。已有页优先：索引里有讲\(u)身体的页，「血型是 O 型」就归那一页（append 或 covered），不算 single；索引里没有任何相关的页，才算 single。它们留在碎片池里照样能被找到。
+        single（和 items 同一层，可不写）：分到这个主题的碎片里，同时满足三条的小事不用进页，编号写进 single：几乎不变（会变的状态，比如最近在戒蜜露，不算）；自己就完整；不属于任何已有页的话题范围。已有页优先：索引里有讲\(u)月光体质的页，「天生左手比右手凉」就归那一页（append 或 covered），不算 single；索引里没有任何相关的页，才算 single。它们留在碎片池里照样能被找到。
         """
     }
 }
@@ -928,6 +1020,7 @@ enum CatalogWriter {
         /// 原快照；编号不因检索排序、分配主题而改变。
         var fragments: [CatalogFragment]
         var assignedIds: Set<UUID>? = nil
+        var feedback: String? = nil
 
         var assigned: [CatalogFragment] { fragments.filter { assignedIds?.contains($0.id) ?? true } }
 
@@ -950,9 +1043,9 @@ enum CatalogWriter {
         }
     }
 
-    /// 相关索引：根两支下的分组行 + 这一页所在那层（方向指的是分组本身时，再加这一层）
+    /// 相关索引：根下各组、各组里的分组行 + 这一页所在那层（方向指的是分组本身时，再加这一层）
     static func relatedIndex(_ wiki: WikiStore, path: String) -> [String] {
-        var out: [String] = []
+        var out = wiki.layerLines("")
         for branch in WikiStore.branches { out += wiki.layerLines(branch).filter { $0.contains("/]]") } }
         let parent = path.split(separator: "/").dropLast().joined(separator: "/")
         if !parent.isEmpty, wiki.folderExists(parent) { out += wiki.layerLines(parent).filter { !out.contains($0) } }
@@ -977,6 +1070,9 @@ enum CatalogWriter {
             guard !cancel.isCancelled else {
                 return Material(topic: topic, floorPrompt: floorPrompt, indexLines: [], pageRaw: nil, search: search, fragments: [], assignedIds: [])
             }
+            let feedback = WikiFeedback.render(WikiFeedback.select(
+                WikiFeedback.query(targetPath: topic.path, fragmentIds: assignedIds, receipt: search.receipt),
+                wiki: wiki, now: now))
             if topic.group {
                 var given: [(path: String, text: String)] = []
                 var versions: [String: String] = [:]
@@ -989,7 +1085,7 @@ enum CatalogWriter {
                     return Material(topic: topic, floorPrompt: floorPrompt, indexLines: [], pageRaw: nil, search: search, fragments: [], assignedIds: [])
                 }
                 return Material(topic: topic, floorPrompt: floorPrompt, indexLines: relatedIndex(wiki, path: topic.path), pageRaw: nil,
-                                versions: versions, groupPages: given, search: search, fragments: pool, assignedIds: assignedIds)
+                                versions: versions, groupPages: given, search: search, fragments: pool, assignedIds: assignedIds, feedback: feedback)
             }
             let page = topic.existing ? wiki.readVersioned(topic.path) : nil
             guard !cancel.isCancelled else {
@@ -998,7 +1094,7 @@ enum CatalogWriter {
             var versions = wiki.versionSnapshot()
             versions[topic.path] = page?.version
             return Material(topic: topic, floorPrompt: floorPrompt, indexLines: relatedIndex(wiki, path: topic.path),
-                            pageRaw: page?.text, versions: versions, search: search, fragments: pool, assignedIds: assignedIds)
+                            pageRaw: page?.text, versions: versions, search: search, fragments: pool, assignedIds: assignedIds, feedback: feedback)
         }.value
         }
     }
@@ -1019,7 +1115,7 @@ enum CatalogWriter {
     static func userContent(_ m: Material, names: MemoryExtractor.Names) -> String {
         var out: [String] = []
         let labels = m.labels
-        out.append("【楼层提示词】（\(names.user)亲手写的人设，权威底图：已有的写「详见人设」，不重抄）\n" + (m.floorPrompt.isEmpty ? "（没写）" : m.floorPrompt))
+        out.append("【楼层提示词】（\(names.user)亲手写的人设，权威底图：已有的写「详见人设」，不重抄；\(CatalogPrompts.factDomainPrinciple)）\n" + (m.floorPrompt.isEmpty ? "（没写）" : m.floorPrompt))
         out.append("【相关索引】\n" + (m.indexLines.isEmpty ? "（wiki 还是空的）" : m.indexLines.joined(separator: "\n")))
         if let raw = m.pageRaw {
             out.append("【已有页全文】\(m.topic.path)\n\(raw)")
@@ -1037,6 +1133,7 @@ enum CatalogWriter {
         if !m.topic.reason.isEmpty {
             out.append("【为什么提这个方向】（自动发现时的线索，待核实：不是事实，也不是出处；页上只写下面原料支持的内容）\n\(m.topic.reason)")
         }
+        if let feedback = m.feedback { out.append(feedback) }
         out.append("【搜回来的原料】\n" + m.search.receipt.text)
         out.append("【分到这个主题的碎片】\n" + m.assigned.map { f in
             "- \(labels[f.id] ?? "") · \(f.day) · \(f.category) · \(f.attributionText) · \(f.content)"
@@ -1120,7 +1217,7 @@ enum CatalogWriter {
                 }
                 let reply: String?
                 do {
-                    reply = try await CatalogJSON.request(system: system, user: requestUser, caller: caller, run: run, name: round)
+                    reply = try await CatalogJSON.request(system: system, user: requestUser, caller: caller, run: run, name: round, userName: names.user)
                 } catch {
                     guard flagged != nil, !(error is CancellationError), cancel?.isCancelled != true else { throw error }
                     parsed = fallBack("那次出错（\(error.localizedDescription)）", round)
@@ -1132,11 +1229,11 @@ enum CatalogWriter {
                     parsed = fallBack("那次没回（预算闸或空输出）", round)
                     break
                 }
-                let saved = attempt
+                let saved = attempt, user = names.user
                 let result = await Task.detached(priority: .utility) {
                     var failure = ""
                     let text = FragmentPool.strictObjectText(raw) ?? raw
-                    let result = CatalogItems.parse(text, sources: sources, wiki: wiki) { failure = $0 }
+                    let result = CatalogItems.parse(text, sources: sources, wiki: wiki, user: user) { failure = $0 }
                     drafts?.saveSubmit(argumentsJSON: raw, text: "未知/不适用（自动写手仅返回 String，无额外正文信息）",
                                        truncated: nil, parsed: result, topic: m.topic.title, round: saved)
                     if let run {
@@ -1145,6 +1242,7 @@ enum CatalogWriter {
                     return (result, failure)
                 }.value
                 if var got = result.0 {
+                    if m.topic.group, let note = CatalogItems.coveredPageCheck(got, allowed: { m.versions[$0] != nil }) { got.checks.append(note) }
                     if flagged == nil, !got.revisionNotes.isEmpty {
                         flagged = (got, raw)
                         run?.section("\(round) · 没过检查，重写一次", body: "实际将追加到原始用户文本后的内容：\n"
@@ -1230,7 +1328,7 @@ enum CatalogRegrouper {
         - 每个子分组起一个短名字（比如 模型船 / 航线 / 船展），名字里不要有斜杠；
         - 每个子分组写一句钩子：什么时候会用到这一组，例：\(names.user)提到模型船、试航的时候先看这组；
         - members 只能写下面列出来的路径，一项只放进一组；每组至少 \(minMembers) 项；分不进去的留在原地，不用写。
-        只输出一个 JSON 对象，不要别的字：{"groups":[{"name":"航线","hook":"\(names.user)提到模型船、试航的时候先看这组","members":["楼层/事/灯塔航线试航","楼层/事/云桥航线试航"]}]}
+        只输出一个 JSON 对象，不要别的字：{"groups":[{"name":"航线","hook":"\(names.user)提到模型船、试航的时候先看这组","members":["事/灯塔航线试航","事/云桥航线试航"]}]}
         """
     }
 
@@ -1261,8 +1359,10 @@ enum CatalogRegrouper {
 
     /// nil = 整包不合格；[] = 没有能用的分组。校验：新分组名不带斜杠、这层里还没有同名的页 / 文件夹；
     /// 只挪这一层直接的子项、一项只挪一次；不够 2 项的组扔掉。读 wiki，后台调
-    static func parse(_ raw: String, layer: String, wiki: WikiStore) -> [WikiProposal.Item]? {
-        guard let text = FragmentPool.strictObjectText(raw), let env = CatalogJSON.decode(Envelope.self, text) else { return nil }
+    static func parse(_ raw: String, layer: String, wiki: WikiStore, user: String? = nil) -> [WikiProposal.Item]? {
+        guard let strict = FragmentPool.strictObjectText(raw) else { return nil }
+        let text = user.map { WikiStore.storedJSON(strict, fields: .regroup, user: $0) } ?? strict
+        guard let env = CatalogJSON.decode(Envelope.self, text) else { return nil }
         let (folders, pages) = wiki.children(layer)
         let allowed = Set(folders + pages)
         var taken = Set<String>()
@@ -1289,6 +1389,8 @@ enum CatalogRegrouper {
                     run: CatalogRunRecord? = nil) async throws -> [WikiProposal.Item]? {
         let lines = await Task.detached(priority: .utility) { wiki.layerLines(layer) }.value
         return try await CatalogJSON.call(system: systemPrompt(names: names), user: userContent(layer: layer, lines: lines), retries: 1,
-                                          caller: caller, drafts: drafts, name: "分组-\(layer)", cancel: cancel, run: run) { parse($0, layer: layer, wiki: wiki) }
+                                          caller: caller, drafts: drafts, name: "分组-\(layer)", userName: names.user, cancel: cancel, run: run) { [user = names.user] in
+            parse($0, layer: layer, wiki: wiki, user: user)
+        }
     }
 }

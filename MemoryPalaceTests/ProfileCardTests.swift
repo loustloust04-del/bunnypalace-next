@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -92,11 +93,11 @@ final class ProfileCardTests: XCTestCase {
         writeVoice(named: "2026-06-12-0700", text: "v5")
         writeVoice(named: "2026-06-12-1102", text: "v6")
 
-        let voices = HeartvoiceFileStore.recentVoices(profileId: pid, limit: 5)
+        let voices = HeartvoiceFileStore.recentVoices(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), limit: 5)
         XCTAssertEqual(voices.map(\.text), ["v6", "v5", "v4", "v3", "v2"], "新→旧取 5 条，跨天")
     }
 
     func testRecentVoicesEmptyDir() {
-        XCTAssertTrue(HeartvoiceFileStore.recentVoices(profileId: pid, limit: 5).isEmpty)
+        XCTAssertTrue(HeartvoiceFileStore.recentVoices(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), limit: 5).isEmpty)
     }
 }

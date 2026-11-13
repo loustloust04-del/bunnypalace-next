@@ -18,7 +18,7 @@ final class MemoryOrganizeFieldsTests: XCTestCase {
         m.organizedAt = Date()
         XCTAssertTrue(m.isOrganized)
         XCTAssertTrue(m.isSingleEnough, "整理过、没页 = 单条就够")
-        m.organizedPage = "楼层/人/小慧"
+        m.organizedPage = "人/小慧"
         XCTAssertTrue(m.isOrganized)
         XCTAssertFalse(m.isSingleEnough)
         XCTAssertEqual(MemoryAudit.state(of: m), .unreviewed, "不新增审计三态")
@@ -51,7 +51,7 @@ final class MemoryOrganizeFieldsTests: XCTestCase {
         full.embeddingData = Data([1]); full.embeddingRevision = 1; full.parentId = UUID()
         full.occurredDay = "2026-10-12"; full.importance = 3; full.emotion = 0; full.resolved = false
         full.reviewedAt = d; full.userEditedAt = d
-        full.organizedAt = d; full.organizedPage = "楼层/x"; full.organizeRejectedAt = d
+        full.organizedAt = d; full.organizedPage = "主题/x"; full.organizeRejectedAt = d
         full.subject = "虚构工程"; full.speaker = "用户自述"
         XCTAssertNoThrow(try SchemaCoverageCheck.compareFields(modelName: "Memory",
                                                                // feedbackDownCount 备份文档本来就没带（不是这一刀的）
@@ -63,12 +63,12 @@ final class MemoryOrganizeFieldsTests: XCTestCase {
 
         let t1 = Date(timeIntervalSince1970: 1_800_000_000), t2 = Date(timeIntervalSince1970: 1_800_000_100)
         m.organizedAt = t1
-        m.organizedPage = "楼层/身体"
+        m.organizedPage = "主题/身体"
         m.organizeRejectedAt = t2
         let doc = FullMemoryDocument(model: m)
         let back = try JSONDecoder().decode(FullMemoryDocument.self, from: JSONEncoder().encode(doc)).toModel()
         XCTAssertEqual(back.organizedAt, t1)
-        XCTAssertEqual(back.organizedPage, "楼层/身体")
+        XCTAssertEqual(back.organizedPage, "主题/身体")
         XCTAssertEqual(back.organizeRejectedAt, t2)
 
         let data = try JSONEncoder().encode(FullMemoryDocument(model: Memory(content: "y", category: "fact", profileId: pid)))

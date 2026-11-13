@@ -32,7 +32,6 @@ final class BubbleInputRegressionTests: XCTestCase {
         let marker = UUID().uuidString
         defaults.set(marker, forKey: "InputRegressionIsolation")
         try require(isolated.string(forKey: "InputRegressionIsolation") == marker, "standard defaults 未隔离")
-        defaults.set(bubble, forKey: "chatBubbleMode")
         defaults.set("", forKey: "selectedFont")
         defaults.set(17.0 / 13.5, forKey: "fontScale")
         defaults.set(13.5, forKey: "inputFontBase")
@@ -63,6 +62,7 @@ final class BubbleInputRegressionTests: XCTestCase {
         conversation.memoryEnabled = false
         conversation.selectedModelId = model.id
         conversation.nodeCount = 1
+        conversation.mode = bubble ? .bubble : .article
         context.insert(conversation)
         context.insert(MessageNode(id: "input-regression-root", role: "assistant", content: "Ready.",
                                    contentType: "text", createTime: Date(), parentId: nil, childrenIds: [],

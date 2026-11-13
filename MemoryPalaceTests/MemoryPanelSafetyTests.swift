@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 #if os(macOS)
 import AppKit
@@ -15,6 +16,84 @@ final class MemoryPanelSafetyTests: XCTestCase {
         let m = Memory(content: content, category: "fact", profileId: "xctest-panel-safety", isUserExplicit: pinned)
         m.supersededAt = superseded ? Date(timeIntervalSince1970: 100) : nil
         return m
+    }
+
+    // MARK: - 底栏四格（粟粟 10-24：记忆 / 窗口·时间轴 / wiki / 审计台）
+
+    func testBottomBarHasFourTabsInOrder() {
+        XCTAssertEqual(MemoryPanelTab.allCases.map(\.title), ["记忆", "窗口·时间轴", "wiki", "审计台"])
+        XCTAssertEqual(Set(MemoryPanelTab.allCases.map(\.icon)).count, MemoryPanelTab.allCases.count, "四格图标不重样")
+        XCTAssertEqual(MemoryWindowsSegment.allCases.map(\.title), ["窗口总结", "时间轴"], "窗口·时间轴格顶上两段")
+    }
+
+    /// 两段常驻（10-24 astra P2）：切段不重建视图、`.task` 不重跑，后台被 markStale 的那段要靠切段重读，另一段不动
+    @MainActor
+    func testSwitchingWindowsSegmentReloadsOnlyStaleTarget() throws {
+        let container = try ModelContainer(for: Conversation.self, MessageNode.self,
+                                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let pid = "xctest-windows-segment"
+        let timeline = MemoryTimelineModel(), sessions = MemorySessionsModel()
+        timeline.reload(profileId: pid, container: container)
+        sessions.reload(profileId: pid, container: container)
+        timeline.markStale()
+        sessions.markStale()
+
+        MemoryWindowsSegment.timeline.activate(timeline: timeline, sessions: sessions, profileId: pid, container: container)
+        XCTAssertFalse(timeline.stale, "切到时间轴：后台标脏的时间轴重读")
+        XCTAssertTrue(sessions.stale, "窗口总结没上台，留着脏等切过去再读")
+
+        MemoryWindowsSegment.sessions.activate(timeline: timeline, sessions: sessions, profileId: pid, container: container)
+        XCTAssertFalse(sessions.stale)
+    }
+
+    /// 重写状态在父级 model（10-24 astra 二审 P2）：mac 切格拆掉时间轴视图再回来，在跑的那次还挡着，不会再提交一次
+    @MainActor
+    func testTimelineRegenerateRejectsResubmitWhileRunning() async throws {
+        final class Calls { var n = 0 }
+        let container = try ModelContainer(for: Conversation.self, MessageNode.self,
+                                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let pid = "xctest-timeline-regenerate", day = "2026-10-23"
+        let model = MemoryTimelineModel(), calls = Calls()
+        let (gate, release) = AsyncStream<Void>.makeStream()
+        let report: TimelineDaily.Report = { var r = TimelineDaily.Report(); r.failed[day] = "模型没回"; return r }()
+        let run: () async -> TimelineDaily.Report? = {
+            calls.n += 1
+            for await _ in gate { break }
+            return report
+        }
+
+        XCTAssertTrue(model.regenerate(day, profileId: pid, container: container, run: run))
+        XCTAssertEqual(model.regenerating, day)
+        XCTAssertFalse(model.regenerate(day, profileId: pid, container: container, run: run), "同一天在跑：不再提交")
+        XCTAssertFalse(model.regenerate("2026-10-22", profileId: pid, container: container, run: run), "别的天也等这次跑完")
+
+        release.yield()
+        release.finish()
+        for _ in 0..<300 where model.regenerating != nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNil(model.regenerating)
+        XCTAssertEqual(calls.n, 1, "只调了一次模型")
+        XCTAssertEqual(model.notice, "模型没回")
+    }
+
+    /// 隐藏段的提示攒着（10-24 astra 二审）：时间轴不在台上不弹，切回来再弹
+    @MainActor
+    func testTimelineNoticeWaitsUntilTimelineVisible() {
+        XCTAssertTrue(MemoryWindowsSegment.timeline.isVisible(selected: .timeline, tab: .windows))
+        XCTAssertFalse(MemoryWindowsSegment.timeline.isVisible(selected: .sessions, tab: .windows), "在看窗口总结")
+        XCTAssertFalse(MemoryWindowsSegment.timeline.isVisible(selected: .timeline, tab: .wiki), "底栏在别的格")
+
+        let model = MemoryTimelineModel()
+        XCTAssertFalse(model.presentsNotice(active: true), "没提示不弹")
+        model.notice = "这天没写"
+        XCTAssertFalse(model.presentsNotice(active: false))
+        XCTAssertEqual(model.notice, "这天没写", "不弹也不丢")
+        XCTAssertTrue(model.presentsNotice(active: true))
+
+        model.clear()
+        XCTAssertNil(model.notice, "换楼层清掉旧提示")
+        XCTAssertNil(MemoryTimelineModel.regenerateNotice(day: "d", report: nil, timelineEnabled: false), "时间轴关着不报")
+        XCTAssertNil(MemoryTimelineModel.regenerateNotice(day: "d", report: { var r = TimelineDaily.Report(); r.written = ["d"]; return r }(),
+                                                          timelineEnabled: true), "写成了不弹")
     }
 
     // MARK: - 多选只留看得见的（10-16 astra #2）
@@ -135,6 +214,15 @@ extension MemoryPanelSafetyTests {
             deletedMemory: true,
             expected: ["还没有记忆", "加一条", "已删除1"],
             absent: ["还没有页"]
+        )
+    }
+
+    /// 底栏胶囊画出来的是新四格（粟粟 10-24），老的「窗口总结」「时间轴」不再单独占格
+    @MainActor
+    func testBottomBarRendersFourTabTitles() async throws {
+        try await assertRenderedMemoryPanel(
+            expected: ["记忆", "窗口时间轴", "wiki", "审计台"],
+            absent: ["窗口总结"]
         )
     }
 

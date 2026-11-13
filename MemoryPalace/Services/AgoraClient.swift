@@ -51,7 +51,8 @@ final class AgoraClient: NSObject, AgoraClientProtocol {
 
     init(
         baseURLs: [URL]? = nil,
-        tokenProvider: @escaping () -> String? = { HubTokenStore.get() },
+        // 主 hub 口令只认本机副本（plan-multi-hub impl1 #1），不读可能被 iCloud 改过的 cc-bridge
+        tokenProvider: @escaping () -> String? = { KeychainStore.get(account: CCHubRegistry.keychainAccount(for: CCHubRegistry.primaryId)) },
         sessionConfiguration: URLSessionConfiguration = .default,
         requestTimeout: TimeInterval = 10
     ) {
@@ -378,13 +379,16 @@ final class AgoraClient: NSObject, AgoraClientProtocol {
 
     private func startPing(for socket: URLSessionWebSocketTask) {
         stopPing()
-        pingTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self, weak socket] _ in
+        // 同 CC 桥 L4 P0a：scheduledTimer 只跑在 .default mode，滚动时 RunLoop 切 .tracking → ping 跳票 → 1006
+        let timer = Timer(timeInterval: 20, repeats: true) { [weak self, weak socket] _ in
             guard let self, let socket else { return }
             socket.sendPing { error in
                 guard let error else { return }
                 Task { @MainActor in self.handleSocketEnded(socket, error: error) }
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        pingTimer = timer
     }
 
     private func stopPing() {

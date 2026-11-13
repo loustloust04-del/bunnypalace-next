@@ -63,8 +63,9 @@ struct Page2HomeView: View {
     @State private var topSafeArea: CGFloat = 0
     @State private var pendingRelease: CGPoint?
     @State private var resetConfirmation = false
+    @State private var confirmUninstall: RightPanelTool?
     private var modalPresented: Bool {
-        showsWidgets || showsAppPicker || showsAppearance || showsWallpaper || showsPages || resetConfirmation ||
+        showsWidgets || showsAppPicker || showsAppearance || showsWallpaper || showsPages || resetConfirmation || confirmUninstall != nil ||
         menuItem != nil || containerItem != nil || presentedStack != nil || configuringWidget != nil || iconTool != nil ||
         home.errorMessage != nil || appearance.errorMessage != nil
     }
@@ -115,9 +116,26 @@ struct Page2HomeView: View {
         .alert("主屏外观", isPresented: Binding(get: { appearance.errorMessage != nil }, set: { if !$0 { appearance.errorMessage = nil } })) {
             Button("知道了", role: .cancel) { appearance.errorMessage = nil }
         } message: { Text(appearance.errorMessage ?? "") }
-        .confirmationDialog("恢复默认主屏布局？壁纸和图标保持不变。", isPresented: $resetConfirmation) {
-            Button("恢复默认布局", role: .destructive) { home.reset(toolIDs: tools?.pinnedTools.map(\.id) ?? []) }
+        .confirmationDialog("恢复默认主屏布局？壁纸和图标保持不变。", isPresented: $resetConfirmation, titleVisibility: .visible) {
+            Button("恢复成默认主屏", role: .destructive) { home.reset(toolIDs: tools?.pinnedTools.map(\.id) ?? []) }
         }
+        .confirmationDialog(confirmUninstall.map { "给 \(profiles?.currentProfile.name ?? "TA") 卸载\($0.name)？" } ?? "",
+                            isPresented: Binding(get: { confirmUninstall != nil }, set: { if !$0 { confirmUninstall = nil } }),
+                            titleVisibility: .visible, presenting: confirmUninstall) { tool in
+            Button("卸载", role: .destructive) {
+                if let pid = profiles?.currentProfile.id { Page2Apps.uninstallFromHome(tool.id, profileId: pid) }
+                confirmUninstall = nil
+            }
+        } message: { tool in
+            Text("TA 就用不了\(tool.name)里的东西了\(PersonAppSections.linkedCaption(tool.id).map { "（\($0)）" } ?? "")。以后在「设置」App 或 TA 的人页里装回来。")
+        }
+    }
+
+    /// 长按「给 TA 卸载」（atrium P4-b §4.3）：只对 App 图标，系统 / secret App 不出，只读楼层不出
+    private func uninstallTool(_ item: Page2Item) -> RightPanelTool? {
+        guard item.kind == "app", let id = item.toolID, Page2Apps.canUninstallFromHome(id),
+              let profiles, !profiles.isReadOnly else { return nil }
+        return tools?.tool(byId: id)
     }
 
     private var presentedHome: some View {
@@ -225,9 +243,12 @@ struct Page2HomeView: View {
 
     private var homeLifecycle: some View {
         homeSurface
+        #if DEBUG
+        .modifier(Page2DesktopProbeHook(dock: dockProbe, editing: editing))
+        #endif
         .task {
             guard let tools else { return }
-            home.bootstrap(toolIDs: tools.pinnedTools.map(\.id), dockIDs: Page2DesktopManager.shared.dockToolIds ?? Array(tools.pinnedTools.prefix(4).map(\.id)))
+            home.bootstrap(toolIDs: tools.pinnedTools.map(\.id), dockIDs: Page2HomeStore.bootstrapDock(Page2DesktopManager.shared.dockToolIds ?? Array(tools.pinnedTools.prefix(4).map(\.id))))
             home.ensureBoard(columns: columns, rows: rows)
             BunnyLaunchHooks.onHomeAppear(tools: tools, profiles: profiles)   // [Bunny patch BP-007] 补 Console 图标 + 后台同步
         }
@@ -643,6 +664,9 @@ struct Page2HomeView: View {
         if item.kind == "folder" {
             actions.append(UIAction(title: "重新命名", image: UIImage(systemName: "pencil")) { _ in editing = true; openFolder(item) })
         }
+        if let tool = uninstallTool(item) {
+            actions.append(UIAction(title: "给 \(profiles?.currentProfile.name ?? "TA") 卸载", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in confirmUninstall = tool })
+        }
         actions.append(UIAction(title: home.layout.dockItemIDs?.contains(id) == true ? "从 Dock 移除" : "从主屏移除", image: UIImage(systemName: "minus.circle"), attributes: .destructive) { _ in home.remove(item.id) })
         return UIMenu(children: actions)
     }
@@ -683,6 +707,12 @@ struct Page2HomeView: View {
                             }
                             menuItem = nil
                         }
+                    }
+                }
+                if let tool = uninstallTool(item) {
+                    Button("给 \(profiles?.currentProfile.name ?? "TA") 卸载", systemImage: "trash", role: .destructive) {
+                        menuItem = nil
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { confirmUninstall = tool }
                     }
                 }
                 Button("从主屏移除", systemImage: "minus.circle", role: .destructive) { home.remove(item.id); menuItem = nil }
@@ -1130,17 +1160,30 @@ struct Page2HomeView: View {
     private func capacityChanged() { cancelDrag(); home.ensureBoard(columns: columns, rows: rows) }
     private func openTool(_ id: String) {
         cancelDrag()
-        let shell = Page2AppShell.shared
-        shell.captureSnapshot(of: "home")
-        shell.launchFrames[id] = nil
+        let shell = Page2HomeOpenAction.prepare(id)
         if let item = home.layout.rootItems.first(where: { $0.toolID == id && $0.kind == "app" }),
            home.layout.dockItemIDs?.contains(item.id) == true || board.placements.contains(where: { $0.id == item.id && $0.pageID == pageID }) {
             let center = folderOrigin(item.id)
             let side = metrics.iconSide
             shell.launchFrames[id] = CGRect(x: center.x - side / 2, y: center.y - side / 2, width: side, height: side)
         }
+        Page2HomeOpenAction.select(id) { selectedToolId = $0 }
+    }
+
+}
+
+/// Shared desktop entry route; the existing shell owns launch and return navigation.
+enum Page2HomeOpenAction {
+    @MainActor
+    static func prepare(_ id: String) -> Page2AppShell {
+        let shell = Page2AppShell.shared
+        shell.captureSnapshot(of: "home")
+        shell.launchFrames[id] = nil
+        return shell
+    }
+    static func select(_ id: String, selection: (String) -> Void) {
         UserDefaults.standard.set(id, forKey: "page2RecentTool_v1")
-        selectedToolId = id
+        selection(id)
     }
 }
 #endif

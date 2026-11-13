@@ -1,32 +1,9 @@
+import MemoryCore
 import Foundation
 
-/// C 档案注入（plan-memory-c3-catalog 第六节）：根索引进稳定层；最近 4 条消息里逐字出现某页的标题 / 触发词，
-/// 这页「钩子 + 现在」进动态层，一轮最多 3 页。组装路径只读 `WikiInjectionCache` 里的快照，读盘都在后台
-struct WikiInjectionSnapshot: Equatable, Sendable {
-    struct Page: Equatable, Sendable {
-        let path: String
-        let title: String
-        let triggers: [String]
-        let hook: String
-        let now: String
-        /// 页上的 valid_until（「现在」该复核的日子）；旧页 nil
-        var validUntil: String? = nil
-    }
-
-    var indexLines: [String] = []
-    var pages: [Page] = []
-    var stopWords: [String] = []
-}
-
-struct WikiPageHit: Equatable, Sendable {
-    let page: WikiInjectionSnapshot.Page
-    /// 命中它的那个词（常驻页显示「小慧（“慧慧”）」）
-    let word: String
-}
-
 enum WikiInjection {
-    static let windowSize = 4
-    static let maxPages = 3
+    static let windowSize = RecallTuning.defaults.identityLookbackMessages
+    static let maxPages = RecallTuning.defaults.maximumPages
     static let indexTitle = "[C 档案 · 索引]"
     static let hitsTitle = "[C 档案 · 本轮相关]"
 
@@ -34,12 +11,23 @@ enum WikiInjection {
 
     static func load(_ wiki: WikiStore) -> WikiInjectionSnapshot {
         MainThreadIO.assertOffMain(.enumerate, "WikiInjection.load")
-        let index = (try? Data(contentsOf: wiki.folderURL("").appendingPathComponent(WikiStore.indexFileName)))
-            .map { String(decoding: $0, as: UTF8.self) } ?? ""
-        let pages = wiki.pagePaths().compactMap { path in
-            wiki.read(path).map { WikiInjectionSnapshot.Page(path: path, title: $0.title, triggers: $0.triggers, hook: $0.hook, now: $0.now, validUntil: $0.validUntil) }
+        let safe = SafeWiki.scan(wiki, memoryRoot: wiki.root.deletingLastPathComponent())
+        guard safe.refused == nil else { return WikiInjectionSnapshot() }
+        let pages = safe.pages.map { source in
+            let page = source.page
+            return WikiInjectionSnapshot.Page(path: source.path, title: page.title, triggers: page.triggers,
+                                              hook: WikiProposalSources.strippingPrivateLinks(page.hook),
+                                              now: WikiProposalSources.strippingPrivateLinks(page.now),
+                                              validUntil: page.validUntil, version: source.version,
+                                              document: WikiProposalSources.strippingPrivateLinks(source.text),
+                                              factDomain: page.factDomain)
         }
-        return WikiInjectionSnapshot(indexLines: indexLines(index), pages: pages, stopWords: wiki.stopWords())
+        // Never trust an old disk INDEX: its private/deleted rows may no longer be public.
+        let index = WikiProposalSources.strippingPrivateLinks(safe.index(""))
+        let lines = index.components(separatedBy: "\n").filter { $0.hasPrefix("## ") || $0.hasPrefix("- ") }
+        let stopURL = wiki.root.appendingPathComponent(WikiStore.stopWordsFileName)
+        let stopWords = SafeWiki.isPlainFile(stopURL) ? wiki.stopWords() : []
+        return WikiInjectionSnapshot(indexLines: lines, pages: pages, stopWords: stopWords)
     }
 
     /// 根 INDEX.md 里的条目行（「- 」开头）；文件头、两支的小标题、「待分组」标记都不要
@@ -54,7 +42,20 @@ enum WikiInjection {
     /// 最近 4 条（含本轮刚发的）逐字找每页的标题 + 触发词（英文不分大小写）；名字和「不触发的词」不算。
     /// 排序：最近一条里先出现的在前、同一条里次数多的在前，再往前一条条比；最多 3 页
     static func hits(_ snapshot: WikiInjectionSnapshot, recent: [String], excluding names: [String]) -> [WikiPageHit] {
-        let window = Array(recent.suffix(windowSize).reversed())
+        hits(snapshot, recent: recent, excluding: names, lookback: windowSize, limit: maxPages)
+    }
+
+    /// Chat-side X1 policy is explicit; catalog/resident callers retain their existing policy.
+    static func hits(_ snapshot: WikiInjectionSnapshot, recent: [String], excluding names: [String],
+                     tuning: RecallTuning) -> [WikiPageHit] {
+        guard tuning.archiveTriggerEnabled else { return [] }
+        return hits(snapshot, recent: recent, excluding: names,
+                    lookback: tuning.identityLookbackMessages, limit: tuning.maximumPages)
+    }
+
+    private static func hits(_ snapshot: WikiInjectionSnapshot, recent: [String], excluding names: [String],
+                             lookback: Int, limit: Int) -> [WikiPageHit] {
+        let window = Array(recent.suffix(max(0, lookback)).reversed())
         guard !window.isEmpty, !snapshot.pages.isEmpty else { return [] }
         let blocked = Set((names + snapshot.stopWords).map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty })
         typealias Found = (pos: Int, count: Int, word: String)
@@ -81,7 +82,7 @@ enum WikiInjection {
             }
             return a.page.path < b.page.path
         }
-        return scored.prefix(maxPages).compactMap { s in
+        return scored.prefix(max(0, limit)).compactMap { s in
             s.found.lazy.compactMap { $0 }.first.map { WikiPageHit(page: s.page, word: $0.word) }
         }
     }
@@ -104,20 +105,47 @@ enum WikiInjection {
 
     // MARK: 文字
 
-    static func indexBlock(_ snapshot: WikiInjectionSnapshot) -> String {
-        snapshot.indexLines.isEmpty ? "" : indexTitle + "\n" + snapshot.indexLines.joined(separator: "\n")
+    /// user = 楼层用户名：本人那组（落盘 {{user}}）给模型看成名字
+    static func indexBlock(_ snapshot: WikiInjectionSnapshot, user: String = "") -> String {
+        let lines = WikiProposalSources.strippingPrivateLinks(snapshot.indexLines.joined(separator: "\n"))
+        return lines.isEmpty ? "" : WikiStore.shown(indexTitle + "\n" + lines, user: user)
     }
 
-    /// 每页三行：标题、钩子、现在（不带「记录」）
-    static func hitsBlock(_ hits: [WikiPageHit], now: Date) -> String {
+    /// 标题、域（设定 / 待判）、钩子、现在（不带「记录」）
+    static func hitsBlock(_ hits: [WikiPageHit], now: Date, user: String = "") -> String {
         guard !hits.isEmpty else { return "" }
-        return hitsTitle + "\n" + hits.map { hit in
+        return WikiStore.shown(WikiProposalSources.strippingPrivateLinks(hitsTitle + "\n" + hits.map { hit in
             let p = hit.page
             var lines = ["[[\(p.path)]] \(p.title)"]
+            if let domain = domainLine(p.factDomain) { lines.append(domain) }
             if !p.hook.isEmpty { lines.append("钩子：\(p.hook)") }
             if !p.now.isEmpty { lines.append("现在：" + markExpired(p.now, now: now)) }
+            if let until = p.validUntil, until < MemoryDay.key(now) {
+                lines.append("有效期：\(until)（已过期）")
+            }
             return lines.joined(separator: "\n")
-        }.joined(separator: "\n\n")
+        }.joined(separator: "\n\n")), user: user)
+    }
+
+    static func cardBlock(_ card: RecallFullTextCandidates.Card, path: String, version: String,
+                          parents: [CatalogRecallIndexStore.Parent], user: String = "") -> String {
+        var lines = [hitsTitle, "条目：\(card.title)"]
+        if let domain = domainLine(card.factDomain) { lines.append(domain) }
+        lines.append("要点：\(card.gist)")
+        if !card.mentions.isEmpty { lines.append("提及：" + card.mentions.joined(separator: "、")) }
+        lines.append("下钻：\(path)|\(version)")
+        if !parents.isEmpty {
+            lines.append("公开父页：" + parents.map { "[[\($0.path)]]|\($0.version)" }.joined(separator: "、"))
+        }
+        return WikiStore.shown(WikiProposalSources.strippingPrivateLinks(lines.joined(separator: "\n")), user: user)
+    }
+
+    private static func domainLine(_ domain: SeedFactDomain?) -> String? {
+        switch domain {
+        case .inWorld: return "域：设定（非本人现实经历）"
+        case .mixed, .unspecified: return "域：待判（未确认为现实）"
+        case .realWorld, nil: return nil
+        }
     }
 
     private static let untilPattern = try! NSRegularExpression(pattern: #"([（(]到\s*)(\d{4}-\d{2}(?:-\d{2})?)(\s*[）)])"#)
@@ -150,9 +178,9 @@ enum WikiInjection {
     }
 
     /// 常驻页那一行
-    static func residentLine(indexCount: Int, hits: [WikiPageHit]) -> String {
+    static func residentLine(indexCount: Int?, hits: [WikiPageHit]) -> String {
         let tail = hits.isEmpty ? "本轮没命中" : "本轮命中：" + hits.map { "\($0.page.title)（“\($0.word)”）" }.joined(separator: "、")
-        return "根索引 \(indexCount) 行 · \(tail)"
+        return (indexCount.map { "根索引 \($0) 行" } ?? "根索引没勾") + " · \(tail)"
     }
 }
 
@@ -164,6 +192,7 @@ final class WikiInjectionCache: @unchecked Sendable {
     struct WarmedSnapshot: Equatable, Sendable {
         let generation: Int
         let snapshot: WikiInjectionSnapshot
+        var fullText: RecallFullTextCandidates? = nil
     }
 
     enum WarmError: Error, Equatable, LocalizedError {
@@ -341,7 +370,9 @@ final class WikiInjectionCache: @unchecked Sendable {
 
     /// 打开对话时先在后台备好（C 没勾不读）
     func prefetch(profileId: String) {
-        guard MemoryOpenWindow.injects(.c), !isFresh(profileId) else { return }
+        guard MemoryFlags.masterEnabled,
+              MemoryOpenWindow.isChecked(.c, profileId: profileId) || RecallTuningStore.load(profileId: profileId).archiveTriggerEnabled,
+              !isFresh(profileId) else { return }
         schedule(profileId, Self.source(profileId: profileId))
     }
 

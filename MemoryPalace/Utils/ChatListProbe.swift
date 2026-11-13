@@ -1,3 +1,4 @@
+import MemoryCore
 #if (DEBUG || PERF_BENCH) && os(iOS)
 import SwiftUI
 import UIKit

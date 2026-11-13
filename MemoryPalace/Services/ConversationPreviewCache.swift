@@ -14,7 +14,14 @@ enum ConversationPreviewCache {
     static func preview(for conversation: Conversation, context: ModelContext) -> String {
         let cacheKey = key(conversation)
         if let hit = cache[cacheKey] { return hit }
+        let result = compute(for: conversation, context: context)
+        if cache.count > 500 { cache.removeAll(keepingCapacity: true) }
+        cache[cacheKey] = result
+        return result
+    }
 
+    /// 不碰缓存的那半：后台 context 也能调（atrium 每层最近一句）
+    nonisolated static func compute(for conversation: Conversation, context: ModelContext) -> String {
         let pid = conversation.profileId
         var nodeId = conversation.currentNodeId
         var userFallback = ""
@@ -31,9 +38,6 @@ enum ConversationPreviewCache {
             nodeId = node.parentId ?? ""
         }
         if result.isEmpty { result = userFallback }
-        result = String(result.prefix(120))
-        if cache.count > 500 { cache.removeAll(keepingCapacity: true) }
-        cache[cacheKey] = result
-        return result
+        return String(result.prefix(120))
     }
 }

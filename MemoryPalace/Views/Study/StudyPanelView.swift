@@ -180,7 +180,8 @@ struct StudyPanelView: View {
 
     private func isClaudeCode(_ course: Conversation) -> Bool {
         guard let pm = providerManager else { return false }
-        let model = pm.resolveModel(conversationModelId: course.selectedModelId, globalFallbackId: globalModelId)
+        let model = pm.resolveModel(conversationModelId: course.selectedModelId, profileModelId: profileManager?.currentProfile.preferredModel,
+                                    globalFallbackId: globalModelId)
         guard let credential = pm.provider(for: model) else { return false }
         return credential.type == .ccBridge && credential.id != APIProvider.codexBridge.id
     }
@@ -232,7 +233,8 @@ struct StudyPanelView: View {
 
     private func toolsAvailable(_ conversation: Conversation) -> Bool {
         guard let pm = providerManager else { return true }
-        let model = pm.resolveModel(conversationModelId: conversation.selectedModelId, globalFallbackId: globalModelId)
+        let model = pm.resolveModel(conversationModelId: conversation.selectedModelId, profileModelId: profileManager?.currentProfile.preferredModel,
+                                    globalFallbackId: globalModelId)
         return pm.provider(for: model)?.toolsSupported != false
     }
 

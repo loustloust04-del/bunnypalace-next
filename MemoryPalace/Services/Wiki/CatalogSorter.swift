@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 import SwiftData
 
@@ -134,11 +135,9 @@ enum CatalogMaterial {
         }
     }
 
-    static func conversationIds(profileId: String, container: ModelContainer) async -> Set<String> {
+    static func conversationIds(profileId: String, source: any ConversationSource) async -> Set<String> {
         await Task.detached(priority: .utility) {
-            let pid = profileId
-            let context = ModelContext(container)
-            let rows = (try? context.fetch(FetchDescriptor<Conversation>(predicate: #Predicate { $0.profileId == pid && !$0.isTrashed }))) ?? []
+            let rows = (try? source.windows(profileId: profileId, updatedSince: nil, includeTrashed: false)) ?? []
             return Set(rows.map(\.id))
         }.value
     }
@@ -264,47 +263,23 @@ struct CatalogDrafts: Sendable {
     }
 }
 
-// MARK: - 停：两步、分组调整、它们的格式重试都看这一个
-
-final class CatalogCancel: @unchecked Sendable {
-    private let lock = NSLock()
-    private var flag = false
-
-    var isCancelled: Bool {
-        if Task.isCancelled { cancel() }
-        return lock.withLock { flag }
-    }
-
-    func cancel() {
-        lock.withLock { flag = true }
-    }
-
-    func check() throws {
-        if isCancelled { throw CancellationError() }
-    }
-
-    /// GCD / detached 不继承父任务取消；整个等待期间桥接到同一个 token。
-    func withTaskCancellation<T>(_ operation: () async throws -> T) async rethrows -> T {
-        try await withTaskCancellationHandler(operation: operation, onCancel: { self.cancel() })
-    }
-}
 
 // MARK: - 严格 JSON 调一次（照 C2：整包正好一个对象；不合格带提醒重来）
 
-enum CatalogJSON {
+extension CatalogJSON {
     static let retryNote = "\n\n（上一次不合格：只输出一个 JSON 对象，不要别的字，字段照上面的格式。）"
 
     /// 每次的原始输出先落盘再解析；不合格重来，最多 retries 次，还不合格抛 `.format`。nil = 预算闸 / 空输出（不算失败）。
     /// 停了：发请求前、请求回来后都查，抛 CancellationError
     static func call<T>(system: String, user: String, retries: Int, caller: SessionSegmentWriter.Caller,
-                        drafts: CatalogDrafts?, name: String, cancel: CatalogCancel? = nil,
+                        drafts: CatalogDrafts?, name: String, userName: String, cancel: CatalogCancel? = nil,
                         run: CatalogRunRecord? = nil, parse: (String) -> T?) async throws -> T? {
         do {
             for attempt in 0...retries {
                 try cancel?.check()
                 let requestUser = attempt == 0 ? user : user + retryNote
                 let round = "\(name) · 第 \(attempt + 1) 次"
-                let reply = try await request(system: system, user: requestUser, caller: caller, run: run, name: round)
+                let reply = try await request(system: system, user: requestUser, caller: caller, run: run, name: round, userName: userName)
                 try cancel?.check()
                 guard let raw = reply else { return nil }
                 if let drafts {
@@ -327,8 +302,11 @@ enum CatalogJSON {
     }
 
     /// 只观察模型调用；独立计量本次花费，并原额加回外层任务，包含抛错时已经发生的花费。
+    /// 发出去的提示词把本人那组 `{{user}}` 显示成名字（userName = 楼层用户名）；回复原样返回（落盘草稿、运行记录都是模型原文），
+    /// 各解析器恢复出正文后按自己的路径位置还原 {{user}}（WikiStore.storedJSON + WikiPathFields）
     static func request(system: String, user: String, caller: SessionSegmentWriter.Caller,
-                        run: CatalogRunRecord?, name: String) async throws -> String? {
+                        run: CatalogRunRecord?, name: String, userName: String) async throws -> String? {
+        let system = WikiStore.shown(system, user: userName), user = WikiStore.shown(user, user: userName)
         guard let run else { return try await caller(system, user) }
         run.section("\(name) · 模型请求 · 系统提示与用户文本", body: "系统文本：\n\(CatalogRunRecord.code(system))\n\n用户文本（含本次实际回灌）：\n\(CatalogRunRecord.code(user))")
         let outerMeter = MemoryWriteLog.meter
@@ -390,8 +368,8 @@ enum CatalogJSON {
 enum CatalogPrompts {
     static func pathRules(names: MemoryExtractor.Names) -> String {
         """
-        路径写成「支 / 分组 / 页名」：第一段只能是「工程」或「楼层」——工程 = 项目、代码、app；楼层 = \(names.user)本人（拆成多页，比如 楼层/\(names.user)/模型船收藏）、你们之间、生活里的人事物。第二段起是分组（人 / 地点 / 项目 / 主题……），最后一段是页名。
-        类只能是：用户 / 人 / 物 / 地点 / 时间 / 事 / 项目 / 主题。用户 = \(names.user)本人，页挂在 楼层/\(names.user)/ 下，按内容自己起页名，不预设子页；时间 = 纪念日、生日这类特定的日子，不是每天记账；事 = 一件事的起因、经过、结果，可以横跨很多窗口很多天；主题 = 关注的主题，比如模型船制作。
+        路径写成「组 / 页名」：第一段只能是这九组之一——\(WikiStore.branchesText)。{{user}} 这组 = \(names.user)本人（拆成多页，比如 {{user}}/模型船收藏）；工程 = 代码工程、app；别的按类放（人放 人/，地点放 地点/……）。中间可以再分组（比如 {{user}}/行为模式/涨潮前囤灯），最后一段是页名。
+        类只能是：用户 / 人 / 物 / 地点 / 时间 / 事 / 项目 / 主题。用户 = \(names.user)本人，页挂在 {{user}}/ 下，按内容自己起页名，不预设子页；时间 = 纪念日、生日这类特定的日子，不是每天记账；事 = 一件事的起因、经过、结果，可以横跨很多窗口很多天；主题 = 关注的主题，比如模型船制作。
         """
     }
 
@@ -422,7 +400,7 @@ enum CatalogSorter {
         var hook: String = ""
         /// 为什么分到这一组（方向提案上给她看）
         var reason: String = ""
-        /// 整理一个分组（path 是分组，比如 楼层/{用户}），不是写 path 这一页
+        /// 整理一个分组（path 是分组，比如 用户），不是写 path 这一页
         var group = false
         /// 碎片以外的线索的来源身份（A4 连续段 = 话题词 + 起始日；到期 = 页 + 期限）：提过的不再提
         var basis: [String] = []
@@ -460,7 +438,7 @@ enum CatalogSorter {
     }
 
     /// 代码基线（零模型）：碎片的 subject / tags / content 里逐字出现某页的标题 / 触发词 → 归那页（碰上不止一页 = 拿不准，留着）；
-    /// 没对上任何页的按规范化后的 subject 聚（真没有 subject 的旧碎片按第一个关键词），同组 ≥3 条 → 以它提开新页，路径先放「楼层/主题/」；
+    /// 没对上任何页的按规范化后的 subject 聚（真没有 subject 的旧碎片按第一个关键词），同组 ≥3 条 → 以它提开新页，路径先放「主题/」；
     /// subject 是{用户}本人的不以名字开页，凑够 3 条提一条「整理{用户}本人」（分组方向），归哪页、开不开页交写手。
     /// subject 是助手名、「不触发的词」的不开页。每组至少一条没整理过的（单条就够的只跟着新证据回来）
     static func group(_ pool: [CatalogFragment], pages: [WikiInjectionSnapshot.Page], blocked: [String], user: String = "") -> Grouped {
@@ -502,17 +480,17 @@ enum CatalogSorter {
             let subject = (f.subject ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let id: String
             if !me.isEmpty, key(subject) == key(me) {
-                id = target("楼层/\(me)", group: true)
+                id = target(WikiStore.userBranch, group: true)
                 if topics[id] == nil {
                     order.append(id)
-                    topics[id] = Topic(path: "楼层/\(me)", title: "\(me)本人", kind: .user, existing: false, group: true)
+                    topics[id] = Topic(path: WikiStore.userBranch, title: "\(me)本人", kind: .user, existing: false, group: true)
                 }
             } else {
                 guard !blockedSet.contains(key(subject)), let name = subject.isEmpty ? titleWords(f, blocked: blockedSet).first : subject else { continue }
                 if let known = newKeys[key(name)] {
                     id = known
                 } else {
-                    let candidate = "楼层/\(WikiPage.Kind.topic.rawValue)/" + name
+                    let candidate = WikiPage.Kind.topic.rawValue + "/" + name
                     guard !name.contains("/"), WikiStore.isValidPagePath(candidate), !pages.contains(where: { $0.path == candidate }) else { continue }
                     id = target(candidate, group: false)
                     newKeys[key(name)] = id
@@ -592,7 +570,7 @@ enum CatalogSorter {
                 guard seen.insert(id).inserted else { continue }
                 guard !pageTerms.contains(where: { !$0.isEmpty && WikiInjection.match($0, in: word) != nil }) else { continue }
                 guard !taken.contains(where: { key($0.title) == k || WikiInjection.match($0.terms, in: word) != nil }) else { continue }
-                let path = "楼层/\(WikiPage.Kind.topic.rawValue)/" + word
+                let path = WikiPage.Kind.topic.rawValue + "/" + word
                 guard WikiStore.isValidPagePath(path), !pages.contains(where: { $0.path == path }) else { continue }
                 var t = Topic(path: path, title: word, kind: .topic, existing: false)
                 t.reason = "A4 时间轴的话题「\(word)」\(CatalogTimeline.span(run))连续 \(run.count) 天出现，wiki 里没有页对上，本轮碎片也没分出这个主题；"

@@ -45,14 +45,6 @@ enum WebSearchProviderKind: String, Codable, CaseIterable, Identifiable {
         default: return true
         }
     }
-
-    /// 是否允许自定义 endpoint
-    var supportsCustomURL: Bool {
-        switch self {
-        case .tavily, .exa, .searxng: return true
-        default: return false
-        }
-    }
 }
 
 /// 持久化用——每家配置一个 case，关联值是字段 struct。Codable 走 type+payload 显式 tagging。

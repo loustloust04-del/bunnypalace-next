@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// 添加新登录入口 sheet：4-5 个常用站快捷按钮 + 自定义 URL 输入栏。
-/// 选中后 push 到 MiniBrowserView，用户在里面登录。
+/// 选中后打开浏览器（iOS 全屏花园浏览器 / mac push MiniBrowserView），用户在里面登录。
 /// 关 sheet 时不做特殊清理——cookie 会自动落 WKWebsiteDataStore.default()，下次 browse_url 同域自动用。
 struct WebLoginSheet: View {
     var onDone: () -> Void
@@ -28,9 +28,7 @@ struct WebLoginSheet: View {
             Section {
                 ForEach(quickSites) { site in
                     if let url = site.url {
-                        NavigationLink {
-                            MiniBrowserView(initialURL: url)
-                        } label: {
+                        browserLink(url) {
                             HStack {
                                 Image(systemName: "globe")
                                     .foregroundColor(Theme.branchIndicator)
@@ -60,9 +58,7 @@ struct WebLoginSheet: View {
                         .disableAutocorrection(true)
                         #endif
                     if let url = normalizedURL(customURL) {
-                        NavigationLink {
-                            MiniBrowserView(initialURL: url)
-                        } label: {
+                        browserLink(url) {
                             Text("打开")
                                 .font(.system(size: Theme.SettingsFont.body, weight: .medium))
                                 .foregroundColor(Theme.branchIndicator)
@@ -94,6 +90,16 @@ struct WebLoginSheet: View {
                 Button("完成") { onDone() }
             }
         }
+    }
+
+    /// 登录必须在 app 里（cookie 才留在 AI 用的那份库里），不跟「链接打开方式」走
+    @ViewBuilder
+    private func browserLink<Label: View>(_ url: URL, @ViewBuilder label: () -> Label) -> some View {
+        #if os(iOS)
+        Button { GardenBrowser.present(url) } label: { label() }
+        #else
+        NavigationLink { MiniBrowserView(initialURL: url) } label: { label() }
+        #endif
     }
 
     /// 用户输入兼容性：补 https://，trim

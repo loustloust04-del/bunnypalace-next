@@ -5,7 +5,7 @@ import SwiftData
 // 记忆 app 底栏「审计台」格 / mac 右栏：两列方块，一块一个台，照 `AuditStation.all` 画；点进去推那个台的页面。
 
 struct MemoryAuditHome: View {
-    /// 父级持有（mac 切格重建页面也不丢推到哪个台、wiki 台看哪段）
+    /// 父级持有（mac 切格重建页面也不丢推到哪个台）
     var viewState: MemoryAuditViewState
     let viewModel: ConversationViewModel?
 

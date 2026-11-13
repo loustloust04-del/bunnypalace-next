@@ -22,9 +22,9 @@ final class ChatBubbleRunCacheTests: XCTestCase {
         let result = layouts(&cache, path)
         XCTAssertEqual(result["a"], .init(spacingBefore: 0, hasTail: false))
         XCTAssertEqual(result["b"], .init(spacingBefore: 4, hasTail: true))
-        XCTAssertEqual(result["c"], .init(spacingBefore: 10, hasTail: false))
+        XCTAssertEqual(result["c"], .init(spacingBefore: 16, hasTail: false))
         XCTAssertEqual(result["d"], .init(spacingBefore: 4, hasTail: true))
-        XCTAssertEqual(result["e"], .init(spacingBefore: 10, hasTail: true))
+        XCTAssertEqual(result["e"], .init(spacingBefore: 16, hasTail: true))
     }
 
     func testAppendingSwitchingAndDeletingRestorePreviousTail() {
@@ -36,7 +36,7 @@ final class ChatBubbleRunCacheTests: XCTestCase {
         XCTAssertEqual(appended["c"], .init(spacingBefore: 4, hasTail: true))
         let branch = layouts(&cache, [a, user])
         XCTAssertEqual(branch["a"]?.hasTail, true)
-        XCTAssertEqual(branch["user"], .init(spacingBefore: 10, hasTail: true))
+        XCTAssertEqual(branch["user"], .init(spacingBefore: 16, hasTail: true))
         XCTAssertNil(branch["b"])
         XCTAssertEqual(layouts(&cache, [a]), ["a": .init(spacingBefore: 0, hasTail: true)])
         XCTAssertEqual(layouts(&cache, []), [:])
@@ -49,7 +49,7 @@ final class ChatBubbleRunCacheTests: XCTestCase {
         let replacement = node("b", role: "user")
         let result = layouts(&cache, [a, replacement])
         XCTAssertEqual(result["a"]?.hasTail, true)
-        XCTAssertEqual(result["b"], .init(spacingBefore: 10, hasTail: true))
+        XCTAssertEqual(result["b"], .init(spacingBefore: 16, hasTail: true))
     }
 
     func testSystemNoticesBreakSenderRuns() {
@@ -57,9 +57,9 @@ final class ChatBubbleRunCacheTests: XCTestCase {
         var cache = ChatBubbleRunCache()
         let result = layouts(&cache, path)
         XCTAssertEqual(result["a"]?.hasTail, true)
-        XCTAssertEqual(result["s1"]?.spacingBefore, 10)
-        XCTAssertEqual(result["s2"]?.spacingBefore, 10)
-        XCTAssertEqual(result["b"], .init(spacingBefore: 10, hasTail: true))
+        XCTAssertEqual(result["s1"]?.spacingBefore, 16)
+        XCTAssertEqual(result["s2"]?.spacingBefore, 16)
+        XCTAssertEqual(result["b"], .init(spacingBefore: 16, hasTail: true))
     }
 
     func testVisibleTimeDividerBreaksRunAndOwnsSpacing() {

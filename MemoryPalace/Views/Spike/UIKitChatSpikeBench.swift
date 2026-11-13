@@ -152,7 +152,7 @@ enum UIKitChatSpikeBench {
         SpikeProbes.logHandle = try? FileHandle(forWritingTo: logURL)
         SpikeBusyMonitor.shared.install()
         result = ["runId": runId, "scenario": scenario ?? "", "mode": modeName, "stableID": UIKitChatSpike.stableID,
-                  "bubbleMode": UserDefaults.standard.bool(forKey: "chatBubbleMode"),
+                  "bubbleMode": vm?.isBubbleMode ?? false,
                   "thermalStart": ProcessInfo.processInfo.thermalState.rawValue,
                   "launchConv": vm?.selectedConversation?.id ?? NSNull(),
                   "buildSha": env["MP_SPIKE_BUILDSHA"] ?? "unknown", "dirty": env["MP_SPIKE_DIRTY"] ?? "unknown",
@@ -610,7 +610,7 @@ enum UIKitChatSpikeBench {
         await open(PerfHarness.convA, name: "A-end", record: false)
     }
 
-    // MARK: anim：③ 气泡模式三种插入能不能弹（launch arg -chatBubbleMode YES）
+    // MARK: anim：③ 气泡模式三种插入能不能弹（launch arg -chatBubbleMode YES → bench 对话的 displayMode，见 PerfHarness.applyRunDisplayMode）
 
     /// 一个 cell（含所有子层）的表现层：最小不透明度、最小缩放
     static func layerStats(_ view: UIView) -> [Double] {

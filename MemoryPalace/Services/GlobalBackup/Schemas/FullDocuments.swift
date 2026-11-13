@@ -58,6 +58,19 @@ struct FullConversationDocument: Codable {
     var sourceMetadata: Data? = nil
     /// 卡库第二批 B4：optional 保旧备份可解码，缺键 = nil
     var cardVariablesData: Data? = nil
+    /// 召回缓存：旧包缺键为 nil，新包按原字节往返。
+    var recallStateData: Data? = nil
+    /// 本窗选择与上窗冻结：旧包缺键为 nil，保留原字节与交互时间。
+    var memoryWindowChoicesData: Data? = nil
+    var previousWindowId: String? = nil
+    var previousWindowSnapshotData: Data? = nil
+    var lastRealChatAt: Date? = nil
+    /// 气泡 / 文章：旧包缺键为 nil，还原成文章
+    var displayMode: String? = nil
+    var displayModeUpdatedAt: Date? = nil
+    /// 多 hub（plan-multi-hub B1）：旧包缺键为 nil = 主 hub
+    var ccHubId: String? = nil
+    var ccHubIdentity: String? = nil
 }
 
 /// 按 Models/Conversation.swift:94-231 的 MessageNode @Model 31 字段穷举
@@ -108,6 +121,14 @@ struct FullNodeDocument: Codable {
     var cardEditedAt: Date? = nil
     /// §13 网页卡事件捎带：optional 保旧备份可解码
     var cardEventsData: Data? = nil
+    var recallHitsData: Data? = nil
+    /// 召回事实与正文分开保存；旧包缺键为 nil。
+    var recallReceiptData: Data? = nil
+    /// 旧包缺键为 nil；保留节点的 agent 来源，不在还原时推断。
+    var agentOrigin: String? = nil
+    /// 回复结局 / 上游原样的 finish_reason（plan-reply-error-report-1106）；旧包缺键为 nil
+    var replyOutcome: String? = nil
+    var finishReason: String? = nil
 }
 
 // MARK: - UserCard
@@ -313,6 +334,21 @@ struct FullPlacedStickerDocument: Codable {
     let noteStyle: String?
     let isLocked: Bool
     let placedAt: Date
+    let profileId: String
+}
+
+/// 按 Models/ChatMeme.swift（表情包；文件在 stickers/{pid}/memes/，随贴纸目录一起拷）
+struct FullChatMemeDocument: Codable {
+    let schemaVersion: Int
+
+    let id: UUID
+    let name: String
+    let detail: String
+    let fileName: String
+    let mimeType: String
+    let isFavorite: Bool
+    let lastSentAt: Date?
+    let createdAt: Date
     let profileId: String
 }
 

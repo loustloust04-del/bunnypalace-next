@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -112,7 +113,7 @@ final class MemoryHealthWarningTests: XCTestCase {
         XCTAssertTrue(s.needsAttention, "第三包：状态卡那行变红")
         XCTAssertEqual(MemoryHealthWarning.text(profileId: pid), "最近记不住新东西了")
         MemoryWriteLog.flush()
-        let log = MemoryWriteLog.entries(profileId: pid).filter { $0.writer == "C2" }
+        let log = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).filter { $0.writer == "C2" }
         XCTAssertEqual(log.count, 3)
         XCTAssertTrue(log.allSatisfy { !$0.ok && $0.rejected == 1 }, "日志里拒收照记")
         XCTAssertTrue(log.allSatisfy { $0.note.contains("JSON") && $0.note.contains("1") })
@@ -160,7 +161,7 @@ final class MemoryHealthWarningTests: XCTestCase {
         XCTAssertTrue(status.lastErrorMessage?.contains("4") == true)
         XCTAssertTrue(status.lastErrorMessage?.contains("importance") == true)
         MemoryWriteLog.flush()
-        let log = MemoryWriteLog.entries(profileId: pid).filter { $0.writer == "C2" }
+        let log = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).filter { $0.writer == "C2" }
         XCTAssertEqual(log.count, 3)
         for packet in 1...3 {
             let entry = log.first { $0.rejected == packet }
@@ -185,7 +186,7 @@ final class MemoryHealthWarningTests: XCTestCase {
         XCTAssertNotEqual(MemoryHealthStore.status(.extract, profileId: pid).lastOK, lastOK)
         XCTAssertNil(MemoryHealthWarning.text(profileId: pid))
         MemoryWriteLog.flush()
-        XCTAssertEqual(MemoryWriteLog.entries(profileId: pid).filter { $0.writer == "C2" }.count, 4)
+        XCTAssertEqual(MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).filter { $0.writer == "C2" }.count, 4)
     }
 
     func testMixedRepairWritesGoodCardsOnceAndKeepsFirstRejection() async {
@@ -211,7 +212,7 @@ final class MemoryHealthWarningTests: XCTestCase {
         XCTAssertEqual(MemoryHealthStore.status(.extract, profileId: pid).failStreak, 0)
         XCTAssertNotNil(MemoryHealthStore.status(.extract, profileId: pid).lastOK)
         MemoryWriteLog.flush()
-        let log = MemoryWriteLog.entries(profileId: pid).filter { $0.writer == "C2" }
+        let log = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).filter { $0.writer == "C2" }
         XCTAssertEqual(log.count, 1)
         XCTAssertEqual(log.first?.ok, true)
         XCTAssertEqual(log.first?.rejected, 1)
@@ -234,7 +235,7 @@ final class MemoryHealthWarningTests: XCTestCase {
         XCTAssertEqual(MemoryHealthStore.status(.extract, profileId: pid).failStreak, 0)
         XCTAssertNotNil(MemoryHealthStore.status(.extract, profileId: pid).lastOK)
         MemoryWriteLog.flush()
-        let log = MemoryWriteLog.entries(profileId: pid).filter { $0.writer == "C2" }
+        let log = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).filter { $0.writer == "C2" }
         XCTAssertEqual(log.count, 1)
         XCTAssertEqual(log.first?.ok, true)
         XCTAssertNil(log.first?.rejected)
@@ -258,7 +259,7 @@ final class MemoryHealthWarningTests: XCTestCase {
         XCTAssertNil(status.lastOK)
         XCTAssertTrue(status.lastErrorMessage?.contains("content") == true)
         MemoryWriteLog.flush()
-        let log = MemoryWriteLog.entries(profileId: pid).filter { $0.writer == "C2" }
+        let log = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).filter { $0.writer == "C2" }
         XCTAssertEqual(log.count, 1)
         XCTAssertEqual(log.first?.ok, false)
         XCTAssertEqual(log.first?.rejected, 1, "第二轮 JSON 整包非法按 1 计")
@@ -299,7 +300,7 @@ final class MemoryHealthWarningTests: XCTestCase {
         XCTAssertEqual(calls, 8)
         XCTAssertEqual(writes, 0)
         MemoryWriteLog.flush()
-        let log = MemoryWriteLog.entries(profileId: pid).filter { $0.writer == "C2" }
+        let log = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).filter { $0.writer == "C2" }
         XCTAssertEqual(log.count, 4, "每个最终跳过仅一条诊断日志")
         XCTAssertTrue(log.allSatisfy { !$0.ok && $0.rejected == 2 })
         XCTAssertTrue(log.allSatisfy { $0.note.contains("content") && $0.note.contains("2") })

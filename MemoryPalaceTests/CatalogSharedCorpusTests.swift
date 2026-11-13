@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -62,7 +63,7 @@ final class CatalogSharedCorpusTests: XCTestCase {
         }
         let pool = fragments.map { CatalogFragment(id: UUID(), content: $0.body, category: "fact", day: MemoryDay.key(now)) }
         let wiki = WikiStore(root: root.appendingPathComponent("wiki"))
-        let material = await CatalogWriter.material(.init(path: "楼层/主题/异质语料", title: "quartz zephyr", kind: .topic, existing: false),
+        let material = await CatalogWriter.material(.init(path: "主题/异质语料", title: "quartz zephyr", kind: .topic, existing: false),
                                                      fragments: [], floorPrompt: "", wiki: wiki, memoryRoot: root, now: now,
                                                      snapshot: pool, embedder: CatalogFakeEmbedder.unavailable(),
                                                      originalSearch: { _, _, _ in originals })
@@ -70,7 +71,7 @@ final class CatalogSharedCorpusTests: XCTestCase {
         let parsed = try await CatalogWriter.write(material, names: .init(userName: "{u}", assistantName: "{c}"), wiki: wiki,
                                                    caller: { _, user in
             actual = user
-            return "{\"items\":[{\"type\":\"new_page\",\"path\":\"楼层/主题/异质语料\",\"records\":[{\"text\":\"虚构语料中的第三段\",\"aline\":[{\"layer\":\"A2\",\"window\":\"aline003\",\"segment\":1}]}]}]}"
+            return "{\"items\":[{\"type\":\"new_page\",\"path\":\"主题/异质语料\",\"records\":[{\"text\":\"虚构语料中的第三段\",\"aline\":[{\"layer\":\"A2\",\"window\":\"aline003\",\"segment\":1}]}]}]}"
         }, drafts: nil)
         let markers = Set((raw + aline + fragments).map(\.marker))
         let actualOrder = actual.components(separatedBy: CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz").inverted)

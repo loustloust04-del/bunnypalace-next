@@ -316,13 +316,35 @@ enum TestHostIsolation {
     /// `+[NSUserDefaults standardUserDefaults]` 换成本工位专属 suite（`@AppStorage` 默认 store 跟着走）。
     /// 直接 CFPreferences + bundle id 的代码不受影响，那些在适配层单独闸
     private static func swapStandardDefaults(suiteName: String) {
+        let cleared = clearPreferencesDomain(suiteName)
+        if cleared.left > 0 {
+            NSLog("[test-host] 偏好 suite 没清空：%@ 清前 %d 个 key，还剩 %d 个", suiteName, cleared.before, cleared.left)
+        } else {
+            NSLog("[test-host] 偏好 suite 清掉上次残留 %d 个 key：%@", cleared.before, suiteName)
+        }
         guard let suite = UserDefaults(suiteName: suiteName) else { fail("偏好 suite 建不出来：\(suiteName)") }
-        suite.removePersistentDomain(forName: suiteName)
         let selector = #selector(getter: UserDefaults.standard)
         guard let method = class_getClassMethod(UserDefaults.self, selector) else { fail("找不到 standardUserDefaults") }
         let block: @convention(block) (AnyObject) -> UserDefaults = { _ in suite }
         method_setImplementation(method, imp_implementationWithBlock(block))
         guard UserDefaults.standard === suite else { fail("standardUserDefaults 没换成 suite") }
+    }
+
+    /// 逐 key 删光偏好域，返回删前 / 删后 key 数。不用 removePersistentDomain：域里有 >1KB 的 key
+    /// （AppKit 存的 SwiftUI 窗口位置 key 带整棵视图类型名，~1.9KB）时，多 key 删除被 cfprefsd 整批静默丢掉，
+    /// 进程内缓存却显示已空（11-04 实测，同 09-25 CFPreferencesSetMultiple）——suite 从此只增不减；逐个删才落盘。
+    /// 删后计数读的是进程内缓存，只兜明面失败；静默丢掉的下次启动的「删前」会涨出来
+    static func clearPreferencesDomain(_ name: String) -> (before: Int, left: Int) {
+        let domain = name as CFString
+        func keys() -> [String] {
+            (CFPreferencesCopyKeyList(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? [String]) ?? []
+        }
+        let before = keys()
+        for key in before {
+            CFPreferencesSetValue(key as CFString, nil, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        }
+        CFPreferencesAppSynchronize(domain)
+        return (before.count, keys().count)
     }
 
     private static func fail(_ reason: String) -> Never {

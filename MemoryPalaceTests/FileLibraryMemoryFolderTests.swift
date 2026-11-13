@@ -79,7 +79,7 @@ final class FileLibraryMemoryFolderTests: XCTestCase {
             XCTAssertNil(FileLibraryMemoryFolder.wikiPagePath(path), "诊断记录不能走 wiki 页编辑器")
         }
         XCTAssertEqual(FileLibraryMemoryFolder.parentFolder(allowed[1]), FileLibraryMemoryFolder.draftsFolder)
-        XCTAssertEqual(FileLibraryMemoryFolder.parentFolder("memory/wiki/楼层/主题/电影.md"), "memory/wiki/楼层/主题")
+        XCTAssertEqual(FileLibraryMemoryFolder.parentFolder("memory/wiki/主题/电影.md"), "memory/wiki/主题")
         XCTAssertEqual(FileLibraryMemoryFolder.displayName(FileLibraryMemoryFolder.runsFolder, assistantName: "阿雾"), "整理记录")
         XCTAssertEqual(FileLibraryMemoryFolder.displayName(FileLibraryMemoryFolder.draftsFolder, assistantName: "阿雾"), "模型原始输出")
         XCTAssertTrue(FileLibraryMemoryFolder.isDiagnosticFolder(FileLibraryMemoryFolder.runsFolder))
@@ -151,11 +151,11 @@ final class FileLibraryMemoryFolderTests: XCTestCase {
             try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_800_000_000 + time)],
                                                   ofItemAtPath: url.path)
         }
-        let paths = ["self/事实.md", "wiki/楼层/主题/电影.md", "wiki/.runs/z-new.md", "wiki/.runs/a-old.md",
+        let paths = ["self/事实.md", "wiki/主题/电影.md", "wiki/.runs/z-new.md", "wiki/.runs/a-old.md",
                      "wiki/.proposals/drafts/z-new.txt", "wiki/.proposals/drafts/a-old.md", ".x/y.md"]
         for (offset, path) in paths.enumerated() { try write(path, time: TimeInterval(20 - offset)) }
         for path in ["self/INDEX.md", "wiki/.history/旧.md", "wiki/.proposals/p.json",
-                     "wiki/.proposals/drafts/p.json", "wiki/.proposals/other.txt", "wiki/楼层/.group.md",
+                     "wiki/.proposals/drafts/p.json", "wiki/.proposals/other.txt", "wiki/主题/.group.md",
                      "wiki/.runs/nested/run.md", "wiki/.runs/.hidden.md", "wiki/.runs/not-a-run.txt"] {
             try write(path)
         }

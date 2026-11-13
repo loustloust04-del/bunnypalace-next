@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -60,7 +61,7 @@ final class SelfMemoryToolTests: XCTestCase {
     func testRememberWritesFileAndIndex() {
         let r = run(SelfMemoryTool.rememberName, ["name": "复诊", "description": "她明天要去复诊", "body": "她说「明天要去复诊」", "asked_by_user": true, "importance": 4])
         XCTAssertFalse(r.isError, r.text)
-        let list = SelfMemoryStore.list(profileId: pid)
+        let list = SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked)
         XCTAssertEqual(list.count, 1)
         XCTAssertEqual(list[0].origin, "asked")
         XCTAssertEqual(list[0].importance, 4)
@@ -90,14 +91,14 @@ final class SelfMemoryToolTests: XCTestCase {
     func testEditAndForget() {
         _ = run(SelfMemoryTool.rememberName, ["name": "剧场", "description": "旧摘要", "body": "旧", "asked_by_user": true])
         XCTAssertFalse(run(SelfMemoryTool.editName, ["target": "剧场", "description": "新摘要", "importance": 5]).isError)
-        var m = SelfMemoryStore.list(profileId: pid)[0]
+        var m = SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked)[0]
         XCTAssertEqual(m.description, "新摘要")
         XCTAssertEqual(m.importance, 5)
         XCTAssertEqual(m.origin, "asked", "改不改变来源")
         XCTAssertFalse(run(SelfMemoryTool.forgetName, ["target": "剧场"]).isError)
-        m = SelfMemoryStore.list(profileId: pid)[0]
+        m = SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked)[0]
         XCTAssertNotNil(m.superseded, "标失效不删文件")
-        XCTAssertFalse(SelfMemoryStore.indexText(SelfMemoryStore.list(profileId: pid)).contains("新摘要"), "失效的出索引")
+        XCTAssertFalse(SelfMemoryStore.indexText(SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked)).contains("新摘要"), "失效的出索引")
         XCTAssertTrue(run(SelfMemoryTool.editName, ["target": "不存在"]).isError)
     }
 }

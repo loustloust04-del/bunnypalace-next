@@ -1,7 +1,7 @@
 #if os(iOS)
 import SwiftUI
 
-/// 设置 →「子应用」：Page2 各子应用的设置目录，每行打开该子应用自己的那一页设置。
+/// gardenOS 设置 App ›「App 设置」（原「子应用」，atrium P4-b 改名）：App 里没有自己 ⚙ 的那几个，每行打开它自己的那一页设置。
 struct SubAppsSettingsPage: View {
     @Environment(RightPanelToolManager.self) private var tools: RightPanelToolManager?
     #if PERSONAL_APPS
@@ -33,13 +33,12 @@ struct SubAppsSettingsPage: View {
             Section {
                 subAppRow(icon: "ri-emoji-sticker", title: "贴纸") { StickerPage() }
                 subAppRow(icon: "heart.text.square", title: "健康") { HealthSettingsTab() }
-                subAppRow(icon: "calendar", title: "日历") { CalendarSettingsTab() }
                 #if PERSONAL_APPS
                 subAppRow(icon: "chart.line.uptrend.xyaxis", title: "交易") { TradingSettingsTab() }
                 #endif
-                subAppRow(icon: "books.vertical", title: "书房") { ReadingSettingsTab() }
-                subAppRow(icon: "abc", title: "单词") { VocabSettingsTab() }
                 subAppRow(icon: "person.2", title: "群聊") { GroupChatSettingsTab() }
+            } footer: {
+                Text("日历、书房、单词、终端、小芽的设置在各自 App 里。")
             }
             .listRowBackground(Theme.mainBg)
 
@@ -56,12 +55,18 @@ struct SubAppsSettingsPage: View {
                 }
                 .listRowBackground(Theme.mainBg)
             }
+            if SkinState.shared.unlocked {
+                Section {
+                    subAppRow(icon: "hare", title: "caelumbunny") { TutuSkinSettingsPage() }
+                }
+                .listRowBackground(Theme.mainBg)
+            }
             #endif
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(Theme.sidebarBg)
-        .navigationTitle("子应用")
+        .navigationTitle("App 设置")
         .navigationBarTitleDisplayMode(.inline)
     }
 

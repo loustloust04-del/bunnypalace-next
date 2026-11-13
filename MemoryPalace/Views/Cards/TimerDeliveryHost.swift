@@ -60,6 +60,7 @@ private struct TimerDeliveryModifier: ViewModifier {
                 let preset = presetManager?.preset(byId: prof.presetId) ?? Preset.balanced
                 let model = providerManager.resolveModel(
                     conversationModelId: viewModel.selectedConversation?.selectedModelId,
+                    profileModelId: prof.preferredModel,
                     globalFallbackId: selectedModelId)
                 let accepted = viewModel.sendMessage(event.text, model: model, profile: prof, preset: preset,
                                                      providerManager: providerManager, context: modelContext, attachments: [])

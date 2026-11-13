@@ -90,9 +90,9 @@ struct ChatSelectionMark: View {
     var body: some View {
         let on = selection.selected.contains(nodeId)
         ZStack {
-            // 已选 = 醒目薄荷（Theme.branchIndicator #8EBD9F；Theme.accent 是浅底色不是强调色）
-            Circle().fill(on ? Theme.branchIndicator : ChatSelectionStyle.paper(scheme))
-            Circle().strokeBorder(on ? Theme.branchIndicator : ChatSelectionStyle.ring(scheme), lineWidth: 1.5)
+            // 已选 = 醒目薄荷（Theme.chat.branchIndicator #8EBD9F；Theme.chat.accent 是浅底色不是强调色）
+            Circle().fill(on ? Theme.chat.branchIndicator : ChatSelectionStyle.paper(scheme))
+            Circle().strokeBorder(on ? Theme.chat.branchIndicator : ChatSelectionStyle.ring(scheme), lineWidth: 1.5)
             if on {
                 Image(systemName: "checkmark")
                     .font(.system(size: 10, weight: .bold))

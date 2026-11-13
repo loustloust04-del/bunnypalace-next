@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -57,7 +58,7 @@ private struct SubRowLabel: View {
 }
 
 /// 数字步进器一行（值写在副标题里，390 宽右边只放 − +）
-private struct LimitStepper: View {
+struct LimitStepper: View {
     @Environment(\.settingsMetrics) private var m
     let title: String
     let value: String
@@ -169,6 +170,7 @@ struct MemoryWriterStatusRow: View {
 /// C3 的状态行：在整理就写到哪了，没在整理写最近一条日志
 private struct CatalogStatusRow: View {
     let profileId: String
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.settingsMetrics) private var m
     @AppStorage("mem_write_c3") private var writeC3 = true
     @State private var runner = CatalogRunner.shared
@@ -184,7 +186,7 @@ private struct CatalogStatusRow: View {
         if !writeC3 { return "关着，没在整理" }
         if paused { return WriteBudgetStore.pausedText(period: WriteBudgetStore.shared.period) }
         guard let e = latest else { return "还没整理过" }
-        return "\(MemoryHealthStatusView.relative(e.time)) · \(e.note)"
+        return "\(MemoryHealthStatusView.relative(e.time)) · " + WikiStore.shown(e.note, user: profileManager?.currentProfile.userName ?? "")
     }
 
     var body: some View {
@@ -208,7 +210,7 @@ private struct CatalogStatusRow: View {
     private func reload() async {
         let pid = profileId
         let (entry, over) = await Task.detached(priority: .utility) {
-            (MemoryWriteLog.latest(.c3, in: MemoryWriteLog.entries(profileId: pid)), WriteBudgetStore.exceeded())
+            (MemoryWriteLog.latest(.c3, in: MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))), WriteBudgetStore.exceeded())
         }.value
         latest = entry
         paused = over
@@ -224,7 +226,7 @@ private struct CatalogHealthRow: View {
     @State private var showDetails = false
 
     private var sub: String {
-        guard let health else { return "每天自动整理后查一次断链、孤页、目录漂移，只报告不改页" }
+        guard let health else { return "每天自动整理后查一次断链、目录漂移，只报告不改页" }
         return health.summary + " · " + MemoryHealthStatusView.relative(health.at)
     }
 
@@ -263,6 +265,7 @@ private struct CatalogHealthRow: View {
 
 private struct CatalogHealthSheet: View {
     let health: WikiHealth
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.settingsMetrics) private var m
 
@@ -270,7 +273,6 @@ private struct CatalogHealthSheet: View {
         NavigationStack {
             List {
                 section("断链", note: "「连到」指向的页不存在", health.brokenLinks.map { "\($0.from) → \($0.to)" })
-                section("孤页", note: "没有页连向它，也不在任何分组里", health.orphans)
                 section("目录漂移", note: health.drift.isEmpty ? "" : health.rebuildError.map { "索引没重建成：\($0)" } ?? "已按代码重建索引，这里是重建前的差异",
                         health.drift)
             }
@@ -296,7 +298,7 @@ private struct CatalogHealthSheet: View {
                 Text("没有").font(m.body).foregroundColor(Theme.textMuted)
             }
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                Text(row).font(m.body).foregroundColor(Theme.textPrimary).textSelection(.enabled)
+                Text(WikiStore.shown(row, user: profileManager?.currentProfile.userName ?? "")).font(m.body).foregroundColor(Theme.textPrimary).textSelection(.enabled)
             }
         } header: {
             Text("\(title) · \(rows.count)")
@@ -362,7 +364,7 @@ private struct CatalogSeedSection: View {
 
     var body: some View {
         Section {
-            Button { start(.persona) } label: { SubRowLabel(title: "从人设生成基础 wiki") }
+            Button { start(.persona) } label: { SubRowLabel(title: "从人设生成基础 wiki", sub: "先播人设再播 CC 记忆：人设里的人物 / 别名会成为后面对齐的锚") }
                 .buttonStyle(.plain)
                 .disabled(!canStart)
             Button { start(.cc) } label: { SubRowLabel(title: "从 CC 记忆播种") }
@@ -392,7 +394,7 @@ private struct CatalogSeedSection: View {
                         .buttonStyle(.borderless)
                 }
             } else if let report = runner.lastReport {
-                Text("上次：" + report.summary)
+                Text("上次：" + WikiStore.shown(report.summary, user: profileManager?.currentProfile.userName ?? ""))
                     .font(m.caption)
                     .foregroundColor(report.failures.isEmpty ? Theme.textMuted : Theme.danger)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -547,7 +549,6 @@ struct MemoryWriterPage: View {
     @AppStorage("mem_self_daily_limit") private var selfDailyLimit = 12
     @AppStorage("mem_self_body_limit") private var selfBodyLimit = 800
     @AppStorage(FragmentWatch.everyKey) private var c2Every = FragmentWatch.defaultEvery
-    @AppStorage("mem_a3_chars") private var a3Chars = 300
     @AppStorage(FragmentPool.customPromptKey) private var customFragmentPrompt = ""
     @AppStorage("memoryExtractModelId") private var memoryExtractModelId = ""
     @AppStorage(FragmentModelRoute.key) private var c2Choice = ""
@@ -620,6 +621,7 @@ struct MemoryWriterPage: View {
                 }
                 .panelRowBackground()
             }
+            if id == .a3 { WindowSummaryRewriteSection() }
         }
         .memorySubpage("\(id.code) \(id.title(assistant: assistantName))")
         .sheet(isPresented: $showLog) {
@@ -719,11 +721,12 @@ struct MemoryWriterPage: View {
             Section {
                 TriggerRows(id: id)
                 if id == .a2 {
-                    SubRowLabel(title: "CC 窗口", sub: "满 60 条或跨过 05:00 就写（只手动时不写）")
+                    SubRowLabel(title: "CC 窗口", sub: "满 60 条就写（只手动时不写）")
+                    SubRowLabel(title: "每天 05:00 切一刀", sub: "API 窗口也切（只手动时不写）")
                     SubRowLabel(title: "尾段", sub: "每次收尾整段重写，被正式压缩后换成正式段")
                 }
                 if id == .a3 {
-                    LimitStepper(title: "约多少字", value: "\(a3Chars) 字", number: $a3Chars, range: 100...1000, step: 50)
+                    SubRowLabel(title: "窗口总结", sub: "长度按窗口段数自动分档")
                 }
             } header: {
                 Text("什么时候写")
@@ -832,9 +835,9 @@ struct MemoryWriterPage: View {
         case .c:
             archiveCount = SwiftDataMemoryStore().listActive(profileId: pid, context: modelContext).count
         case .b4:
-            selfCount = await Task.detached { SelfMemoryStore.list(profileId: pid).filter(\.isActive).count }.value
+            selfCount = await Task.detached { SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked).filter(\.isActive).count }.value
         case .c2:
-            rejectedThisWeek = await Task.detached { MemoryWriteLog.rejectedThisWeek(MemoryWriteLog.entries(profileId: pid)) }.value
+            rejectedThisWeek = await Task.detached { MemoryWriteLog.rejectedThisWeek(MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))) }.value
         case .c3:
             stopWordCount = await Task.detached { WikiStore(profileId: pid).stopWords().count }.value
         default:
@@ -958,64 +961,121 @@ private struct TriggerRows: View {
 // MARK: - 开窗口带什么（plan §三）
 
 struct MemoryOpenWindowPage: View {
+    var searchTarget: String? = nil
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.settingsMetrics) private var m
-    @AppStorage(MemoryOpenWindow.a2Key) private var openA2 = true
-    @AppStorage(MemoryOpenWindow.a4Key) private var openA4 = true
-    @AppStorage(MemoryOpenWindow.b4Key) private var openB4 = true
-    @AppStorage(MemoryOpenWindow.cKey) private var openC = false
+    @State private var checks: [MemoryWriterID: Bool] = [:]
+    @State private var extras: [MemoryNoteItem: Bool] = [:]
+    @State private var noteOn = true
+    @AppStorage("mem_inject_catalog") private var memInjectCatalog = false
     @AppStorage("mem_session_full_segments") private var sessionFullSegments = 2
     @AppStorage("mem_timeline_inject_days") private var timelineInjectDays = 7
     @AppStorage("mem_self_recent_count") private var selfRecentCount = 5
     @AppStorage("mem_self_budget_percent") private var selfBudgetPercent = 100
 
     private var assistantName: String { floorAssistantName(profileManager) }
+    private var profileId: String { profileManager?.currentProfile.id ?? "" }
 
     var body: some View {
+        ScrollViewReader { proxy in
         SettingsSectionList(.list) {
             Section {
-                check("A2 上下文摘要", $openA2)
-                if openA2 {
+                check("A2 上下文摘要", checked(.a2))
+                if checked(.a2).wrappedValue {
                     LimitStepper(title: "带全文的最近几段", value: "\(sessionFullSegments) 段（更早的只带标题）",
                                  number: $sessionFullSegments, range: 1...4)
                 }
-                check("A4 时间轴", $openA4)
-                if openA4 {
+                check("A4 时间轴", checked(.a4))
+                if checked(.a4).wrappedValue {
                     LimitStepper(title: "最多往回看几天", value: "\(timelineInjectDays) 天（今天、昨天带各时段，更早的只带主调）",
                                  number: $timelineInjectDays, range: 2...30)
-                    SubRowLabel(title: "↳ 待续", sub: "只带「没做完」的，单独一段跟在时间轴后面")
                 }
-                check("B4 \(assistantName)的记忆", $openB4)
-                if openB4 {
+                check("待续", extra(.pending), sub: "只带「没做完」的，单独一段跟在时间轴后面；新开的窗口按这个起步")
+                check("B4 \(assistantName)的记忆", checked(.b4))
+                if checked(.b4).wrappedValue {
                     LimitStepper(title: "带全文的最近几条", value: "\(selfRecentCount) 条（重要度 5 的另算，全部带）",
                                  number: $selfRecentCount, range: 1...30)
                     LimitStepper(title: "最多占注入预算", value: "\(selfBudgetPercent)%（剩下的给档案）",
                                  number: $selfBudgetPercent, range: 10...100, step: 10)
                 }
-                check("C 档案", $openC)
-                if openC {
-                    SubRowLabel(title: "带哪些", sub: "按下面「检索」挑")
-                } else {
-                    Text("档案先不带，等 C3 整理好再开；聊天中靠「检索」按需想起")
+                check("档案根索引", checked(.c))
+                    .searchAnchor("leaf-mem-rootindex")
+                if checked(.c).wrappedValue {
+                    Text("每轮带档案目录（每页一行，不带正文）；聊到哪页才带那页由「自动想起」管。")
                         .font(m.caption)
                         .foregroundColor(Theme.textMuted)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Toggle(isOn: $memInjectCatalog) {
+                        SubRowLabel(title: "命中的只带一行目录")
+                    }
+                    .tint(Theme.branchIndicator)
+                    .searchAnchor("leaf-mem-catalog")
                 }
-                SubRowLabel(title: "目录", sub: "还没做")
-                    .opacity(0.5)
+                check("上一个窗口最后几条", extra(.previousWindow),
+                      sub: "开新窗口时记下最后聊的那个窗口最后 \(RecallTuningStore.load(profileId: profileId).previousWindowMessages) 条；新开的窗口按这个起步")
+                    .searchAnchor("leaf-mem-previouswindow")
+                check("钉住的", extra(.pinned), sub: "在记忆里钉住的条目；新开的窗口按这个起步")
+                    .searchAnchor("leaf-mem-pinned")
+                Toggle(isOn: noteBinding) {
+                    SubRowLabel(title: "新开窗口先弹纸条", sub: "新建对话时先选这个窗口带哪几样，每样多少 token")
+                }
+                .tint(Theme.branchIndicator)
+                .searchAnchor("leaf-mem-opennote")
             } footer: {
-                Text("勾上的这些每一轮都带进去（所有窗口）。聊天中按需想起来的，在「检索」里设。")
+                Text("勾上的这些每一轮都带进去。只管这一个楼层；新开的窗口按这里的勾起步，开出来以后各管各的。")
                     .font(m.caption)
             }
             .panelRowBackground()
         }
+            .onAppear {
+                if let target = searchTarget ?? SettingsSearchRouter.shared.flashingAnchor {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        proxy.scrollTo(target, anchor: .center)
+                    }
+                }
+            }
+        }
         .memorySubpage("开窗口带什么")
+        .task(id: profileId) { refreshChecks() }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification).receive(on: RunLoop.main)) { _ in
+            refreshChecks()
+        }
     }
 
-    private func check(_ title: String, _ on: Binding<Bool>) -> some View {
+    private func refreshChecks() {
+        checks = Dictionary(uniqueKeysWithValues: MemoryOpenWindow.rows.map {
+            ($0, MemoryOpenWindow.isChecked($0, profileId: profileId))
+        })
+        let defaults = MemoryWindowChoices.defaults(profileId: profileId)
+        extras = Dictionary(uniqueKeysWithValues: [MemoryNoteItem.pending, .previousWindow, .pinned].map { ($0, defaults[$0]) })
+        noteOn = MemoryOpenWindowNote.enabled(profileId: profileId)
+    }
+
+    /// 段④ 纸条新增的三勾（楼层默认，新窗口起步用）
+    private func extra(_ item: MemoryNoteItem) -> Binding<Bool> {
+        Binding(get: { extras[item] ?? MemoryWindowChoices.defaults(profileId: profileId)[item] }, set: { value in
+            MemoryWindowChoices.setDefault(item, value, profileId: profileId)
+            refreshChecks()
+        })
+    }
+
+    private var noteBinding: Binding<Bool> {
+        Binding(get: { noteOn }, set: { value in
+            MemoryOpenWindowNote.set(value, profileId: profileId)
+            refreshChecks()
+        })
+    }
+
+    private func checked(_ id: MemoryWriterID) -> Binding<Bool> {
+        Binding(get: { checks[id] ?? MemoryOpenWindow.isChecked(id, profileId: profileId) }, set: { value in
+            MemoryOpenWindowStore.save(id, value, profileId: profileId)
+            refreshChecks()
+        })
+    }
+
+    private func check(_ title: String, _ on: Binding<Bool>, sub: String? = nil) -> some View {
         Button { on.wrappedValue.toggle() } label: {
             HStack {
-                SubRowLabel(title: title)
+                SubRowLabel(title: title, sub: sub)
                 Image(systemName: on.wrappedValue ? "checkmark.circle.fill" : "circle")
                     .font(m.body)
                     .foregroundColor(on.wrappedValue ? Theme.branchIndicator : Theme.textMuted)
@@ -1024,6 +1084,170 @@ struct MemoryOpenWindowPage: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(on.wrappedValue ? .isSelected : [])
+    }
+}
+
+struct ArchiveTriggerPage: View {
+    var searchTarget: String? = nil
+    var body: some View {
+        RecallParametersPage(page: .archiveTrigger, searchTarget: searchTarget).memorySubpage("档案触发")
+            .searchAnchor("page-mem-archivetrigger")
+    }
+}
+
+struct RecallBrowsePage: View {
+    var searchTarget: String? = nil
+    var body: some View {
+        RecallParametersPage(page: .recallBrowse, searchTarget: searchTarget).memorySubpage("翻记忆")
+            .searchAnchor("page-mem-recallbrowse")
+    }
+}
+
+private struct RecallParametersPage: View {
+    let page: RecallTuning.Field.Page
+    var searchTarget: String? = nil
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+    @Environment(\.settingsMetrics) private var m
+    @State private var tuning = RecallTuning.defaults
+
+    private var profileId: String { profileManager?.currentProfile.id ?? "" }
+    private var assistantName: String { floorAssistantName(profileManager) }
+    private let defaults = RecallTuning.defaults
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            SettingsSectionList(.list) {
+                if page == .archiveTrigger {
+                    fieldGroup([.minimumEffectiveLength])
+                    fieldGroup([.minimumSharedTerms, .activeOverlapThreshold])
+                    fieldGroup([.cooldownTurns])
+                    fieldGroup([.identityLookbackMessages, .minimumHanTermLength, .minimumLatinTermLength])
+                    Section("全文兜底（还没接上）") {
+                        SubRowLabel(title: "页名没对上时搜全文",
+                                    sub: "一句话最多取几个词 \(defaults.maximumQueryTerms) · 命中至少几个词 \(defaults.minimumFullTextTerms) · 分量覆盖 \(String(format: "%.2f", defaults.fullTextCoverageThreshold))")
+                            .searchAnchor("leaf-mem-fulltextfallback")
+                    }
+                    .panelRowBackground()
+                    .opacity(0.5)
+                } else {
+                    fieldGroup([.maximumRecallCalls])
+                    Section("一次读多少") {
+                        SubRowLabel(title: "正文最多几个字 \(defaults.maximumBodyCharacters) · 连目录一共最多几个字 \(defaults.maximumResponseCharacters)")
+                            .searchAnchor("leaf-mem-readcharacters")
+                    }
+                    .panelRowBackground()
+                    .opacity(0.5)
+                    Section("每页多少") {
+                        SubRowLabel(title: "时间轴：一页 \(defaults.datePageDays) 天 · 最多 \(defaults.datePageEvents) 件事")
+                            .searchAnchor("leaf-mem-datepage")
+                        SubRowLabel(title: "窗口总结：一页 \(defaults.windowPageSegments) 段")
+                            .searchAnchor("leaf-mem-windowpage")
+                        SubRowLabel(title: "搜索：一页 \(defaults.searchPageResults) 条")
+                            .searchAnchor("leaf-mem-searchpage")
+                        SubRowLabel(title: "档案目录：一页 \(defaults.wikiIndexPageLines) 行 · 档案页记录：一页 \(defaults.wikiPageRecords) 条")
+                            .searchAnchor("leaf-mem-wikipage")
+                        SubRowLabel(title: "原文：一页 \(defaults.originalPageMessages) 条消息")
+                            .searchAnchor("leaf-mem-originalpage")
+                    }
+                    .panelRowBackground()
+                    .opacity(0.5)
+                }
+                Section {
+                    Button("恢复本楼层默认") {
+                        RecallTuningStore.reset(profileId: profileId, fields: page == .archiveTrigger
+                            ? RecallTuning.Field.archiveTriggerFields : RecallTuning.Field.recallBrowseFields)
+                        tuning = RecallTuningStore.load(profileId: profileId)
+                    }
+                    .foregroundColor(Theme.branchIndicator)
+                    .searchAnchor(page == .archiveTrigger ? "leaf-mem-archivereset" : "leaf-mem-browsereset")
+                } footer: {
+                    if page == .archiveTrigger {
+                        Text("只管这一个楼层，下一句生效。每一轮用了哪份数，记在那条消息的「想起来了」卡里。")
+                            .font(m.caption)
+                            .foregroundColor(Theme.textMuted)
+                    }
+                }
+                .panelRowBackground()
+            }
+            .onAppear {
+                if let target = searchTarget ?? SettingsSearchRouter.shared.flashingAnchor {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        proxy.scrollTo(target, anchor: .center)
+                    }
+                }
+            }
+        }
+        .task(id: profileId) { tuning = RecallTuningStore.load(profileId: profileId) }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification).receive(on: RunLoop.main)) { _ in
+            tuning = RecallTuningStore.load(profileId: profileId)
+        }
+    }
+
+    private func fieldGroup(_ fields: [RecallTuning.Field]) -> some View {
+        Section {
+            ForEach(fields, id: \.self) { field in
+                fieldRow(field).searchAnchor("leaf-mem-tuning-\(field.rawValue)")
+            }
+        } header: {
+            Text(fields[0].group)
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(fields[0].explanation.replacingOccurrences(of: "助手", with: assistantName))
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+                if fields[0] == .identityLookbackMessages {
+                    Text(RecallTuning.Field.minimumHanTermLength.explanation)
+                        .font(m.caption)
+                        .foregroundColor(Theme.textMuted)
+                }
+            }
+        }
+        .panelRowBackground()
+    }
+
+    @ViewBuilder
+    private func fieldRow(_ field: RecallTuning.Field) -> some View {
+        let value = field.value(in: tuning)
+        let bounds = field.range
+        let factory = field.value(in: defaults)
+        let changed = value == factory ? "" : " · 默认 " + formatted(factory, field: field)
+        if let path = field.integerKeyPath {
+            LimitStepper(title: field.title, value: "\(Int(value)) \(unit(field))\(changed)",
+                         number: Binding(get: { tuning[keyPath: path] }, set: { save(Double($0), field: field) }),
+                         range: Int(bounds.lowerBound)...Int(bounds.upperBound), step: Int(field.step))
+        } else {
+            Stepper(value: Binding(get: { field.value(in: tuning) }, set: { save($0, field: field) }),
+                    in: bounds, step: field.step) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(field.title).font(m.body).foregroundColor(Theme.textPrimary)
+                    Text("\(value, specifier: "%.2f")\(changed)")
+                        .font(m.caption.monospaced())
+                        .foregroundColor(Theme.textMuted)
+                }
+            }
+        }
+    }
+
+    private func formatted(_ value: Double, field: RecallTuning.Field) -> String {
+        field.isFraction ? String(format: "%.2f", value) : String(Int(value))
+    }
+
+    private func unit(_ field: RecallTuning.Field) -> String {
+        switch field {
+        case .minimumEffectiveLength, .minimumHanTermLength: "字"
+        case .cooldownTurns: "句"
+        case .identityLookbackMessages: "条"
+        case .maximumRecallCalls: "次"
+        default: "个"
+        }
+    }
+
+    private func save(_ value: Double, field: RecallTuning.Field) {
+        // 写前重读只更新这一项，让其它设置入口的最新修改不被旧页面覆盖。
+        var latest = RecallTuningStore.load(profileId: profileId)
+        field.set(value, in: &latest)
+        RecallTuningStore.save(latest, profileId: profileId)
+        tuning = RecallTuningStore.load(profileId: profileId)
     }
 }
 
@@ -1184,7 +1408,7 @@ struct PendingListPage: View {
         let (list, why) = await Task.detached { () -> ([PendingItem], String?) in
             var why: String?
             do { try TimelineDaily.preparePendingForEdit(profileId: pid) } catch { why = TimelineDaily.pendingProblem(error) }
-            return (PendingStore.load(profileId: pid) ?? [], why)
+            return (PendingStore.load(profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid)) ?? [], why)
         }.value
         guard pid == profileId else { return }
         problem = why
@@ -1203,7 +1427,7 @@ struct PendingListPage: View {
         let pid = profileId
         Task {
             let why = await Task.detached { () -> String? in
-                do { try PendingStore.setState(item.id, state, profileId: pid); return nil } catch { return TimelineDaily.pendingProblem(error) }
+                do { try PendingStore.setState(item.id, state, profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid)); return nil } catch { return TimelineDaily.pendingProblem(error) }
             }.value
             if let why { problem = why }
             NotificationCenter.default.post(name: .memoryDidChange, object: nil)
@@ -1216,7 +1440,7 @@ struct PendingListPage: View {
         let pid = profileId, text = editText
         Task {
             let why = await Task.detached { () -> String? in
-                do { try PendingStore.setText(item.id, text, profileId: pid); return nil } catch { return TimelineDaily.pendingProblem(error) }
+                do { try PendingStore.setText(item.id, text, profileId: pid, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: pid)); return nil } catch { return TimelineDaily.pendingProblem(error) }
             }.value
             if let why { problem = why }
             NotificationCenter.default.post(name: .memoryDidChange, object: nil)
@@ -1284,7 +1508,7 @@ struct SelfMemoryListPage: View {
 
     private func reload() async {
         let pid = profileId
-        list = await Task.detached { SelfMemoryStore.list(profileId: pid).filter(\.isActive) }.value
+        list = await Task.detached { SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked).filter(\.isActive) }.value
     }
 }
 
@@ -1303,6 +1527,7 @@ struct WriteMemoryNowButton: View {
             guard let pm = providerManager, let profile = profileManager?.currentProfile else { return }
             let preset = presetManager?.preset(byId: profile.presetId) ?? Preset.balanced
             let model = pm.resolveModel(conversationModelId: viewModel.selectedConversation?.selectedModelId,
+                                        profileModelId: profile.preferredModel,
                                         globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
             viewModel.writeMemoryNow(contextDepth: preset.sampling.contextDepth, profile: profile, model: model, providerManager: pm)
         } label: { Label("现在写", systemImage: "square.and.pencil") }
@@ -1531,7 +1756,7 @@ struct MemoryWriteLogSheet: View {
 
     private func load() async {
         let pid = profileId
-        let list = await Task.detached { MemoryWriteLog.entries(profileId: pid) }.value
+        let list = await Task.detached { MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)) }.value
         entries = list
         if let focus { highlighted = MemoryWriteLog.latest(focus, in: list)?.id }
         loaded = true

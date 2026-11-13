@@ -357,7 +357,6 @@ enum BookStore {
         }
 
         let hasChanges = context.hasChanges
-        let tSave0 = CFAbsoluteTimeGetCurrent()
         if hasChanges { try? context.save() }
         let now = CFAbsoluteTimeGetCurrent()
         KBProbe.log(String(format: "[BOOKREFRESH] scan(后台)=%.0fms main=%.0fms dirty=%@ books=%d",

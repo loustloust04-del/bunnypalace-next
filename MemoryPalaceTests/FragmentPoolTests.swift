@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -555,7 +556,7 @@ final class FragmentPoolTests: XCTestCase {
                 XCTAssertNotNil(status.lastError)
             }
             MemoryWriteLog.flush()
-            let log = MemoryWriteLog.entries(profileId: quotePid).filter { $0.writer == "C2" && $0.ok == repairs }
+            let log = MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: quotePid)).filter { $0.writer == "C2" && $0.ok == repairs }
             XCTAssertEqual(log.count, 1)
             XCTAssertTrue(log.first?.note.contains("JSON") == true)
             if !repairs { XCTAssertEqual(log.first?.rejected, 1) }

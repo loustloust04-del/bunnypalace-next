@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// 文件库工具定义（API 下发）+ executor（tool_call → FileLibraryStore → 回灌文本）。
@@ -59,12 +60,36 @@ enum FileLibraryTools {
     struct Result { let text: String; let isError: Bool }
 
     /// name + inputJSON(字符串) → 执行 → 回灌文本。失败也返回文本+isError，让模型自愈。
-    static func execute(name: String, inputJSON: String, profileId: String) -> Result {
+    /// userName = 楼层用户名：wiki 本人那组落盘是 {{user}}，模型看到 / 写的是名字——路径参数先还原成落盘写法再做一切检查，
+    /// 回执里只有 wiki 的路径和 wiki 文件正文显示成名字（别的文件里的 {{user}} 宏原样）
+    static func execute(name: String, inputJSON: String, profileId: String, userName: String = "") -> Result {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         let airSpan = AirProbeSections.enabled ? AirProbeSections.enter("FileLibraryTools.execute") : nil
         defer { if let airSpan { AirProbeSections.leave(airSpan) } }
         #endif
-        let args = (try? JSONSerialization.jsonObject(with: Data(inputJSON.utf8))) as? [String: Any] ?? [:]
+        var args = (try? JSONSerialization.jsonObject(with: Data(inputJSON.utf8))) as? [String: Any] ?? [:]
+        let shownArgs = args
+        for key in ["path", "old_path", "new_path"] {
+            if let p = args[key] as? String { args[key] = storedWikiPath(p, user: userName) }
+        }
+        let r = run(name: name, args: args, shownArgs: shownArgs, profileId: profileId, user: userName)
+        return Result(text: r.text, isError: r.isError)
+    }
+
+    /// `memory/wiki/名字/…` → `memory/wiki/{{user}}/…`（别的路径原样）
+    static func storedWikiPath(_ path: String, user: String) -> String {
+        let t = path.trimmingCharacters(in: .whitespaces)
+        let prefix = FileLibraryMemoryFolder.wikiFolder + "/"
+        guard t.hasPrefix(prefix) else { return path }
+        return prefix + WikiStore.stored(String(t.dropFirst(prefix.count)), user: user)
+    }
+
+    /// 一条文件库路径给模型看：wiki 里本人那组显示成名字
+    private static func shownPath(_ path: String, user: String) -> String {
+        path.hasPrefix(FileLibraryMemoryFolder.wikiFolder + "/") ? WikiStore.shown(path, user: user) : path
+    }
+
+    private static func run(name: String, args: [String: Any], shownArgs: [String: Any], profileId: String, user: String) -> Result {
 
         // memory/ 只读记忆树：读放行（映射 memoryRoot），写一律拒（plan-memory-tree-v1 刀2，v1 只读）
         let memPrefix = FileLibraryStore.memoryVirtualPrefix
@@ -72,11 +97,14 @@ enum FileLibraryTools {
         if pathArgs.contains(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix(memPrefix) }) {
             switch Name(rawValue: name) {
             case .read:
-                if hiddenFromAssistant(str(args, "path"), profileId: profileId) {
-                    return Result(text: "工具执行失败: 没有这个文件: \(str(args, "path"))", isError: true)
+                if hiddenFromAssistant(str(args, "path")) {
+                    return Result(text: "工具执行失败: 没有这个文件: \(str(shownArgs, "path"))", isError: true)
                 }
-                do { return readResult(try FileLibraryStore.memoryRead(str(args, "path"), profileId: profileId), args: args) }
-                catch { return Result(text: "工具执行失败: \(error.localizedDescription)", isError: true) }
+                do {
+                    let text = try FileLibraryStore.memoryRead(str(args, "path"), profileId: profileId)
+                    let isWiki = str(args, "path").trimmingCharacters(in: .whitespaces).hasPrefix(FileLibraryMemoryFolder.wikiFolder + "/")
+                    return readResult(isWiki ? WikiStore.shown(text, user: user) : text, args: shownArgs)
+                } catch { return Result(text: "工具执行失败: \(WikiStore.shown(error.localizedDescription, user: user))", isError: true) }
             case .write, .append, .edit, .rename, .delete:
                 return Result(text: SelfMemoryTool.enabled
                     ? "fs_* 工具对 memory/ 只读。改你自己的记忆（memory/self/）用 remember / edit_memory / forget_memory，资料卡用 update_profile_card；其它是系统生成的，不能改。"
@@ -114,14 +142,17 @@ enum FileLibraryTools {
             case .list:
                 let items = (FileLibraryStore.list(profileId: profileId) + FileLibraryStore.memoryList(profileId: profileId))
                     .filter { FileLibraryAccess.visible($0.path, profileId: profileId) && !FileLibraryMemoryFolder.isHiddenWikiPath($0.path) }
-                return ok(items.isEmpty ? "（空文件库）" : items.map { "\($0.path)  (\($0.bytes)B)" }.joined(separator: "\n"))
+                return ok(items.isEmpty ? "（空文件库）" : items.map { "\(shownPath($0.path, user: user))  (\($0.bytes)B)" }.joined(separator: "\n"))
             case .read:
                 return readResult(try FileLibraryStore.read(str(args, "path"), profileId: profileId), args: args)
             case .search:
                 let hits = (FileLibraryStore.search(str(args, "keyword"), profileId: profileId)
                     + FileLibraryStore.memorySearch(str(args, "keyword"), profileId: profileId))
                     .filter { FileLibraryAccess.visible($0.path, profileId: profileId) && !FileLibraryMemoryFolder.isHiddenWikiPath($0.path) }
-                return ok(hits.isEmpty ? "无命中" : hits.map { "\($0.path): \($0.line)" }.joined(separator: "\n"))
+                return ok(hits.isEmpty ? "无命中" : hits.map { hit in
+                    let wiki = hit.path.hasPrefix(FileLibraryMemoryFolder.wikiFolder + "/")
+                    return "\(shownPath(hit.path, user: user)): \(wiki ? WikiStore.shown(hit.line, user: user) : hit.line)"
+                }.joined(separator: "\n"))
             case .write:
                 let path = str(args, "path")
                 let before = try? FileLibraryStore.read(path, profileId: profileId)
@@ -281,12 +312,25 @@ enum FileLibraryTools {
     /// JSON 数字可能是 Int / Double / NSNumber，统一取整
     private static func int(_ d: [String: Any], _ k: String) -> Int? { (d[k] as? NSNumber)?.intValue }
 
-    /// wiki 里点开头的（.history / .proposals 含原始输出 / .group.md）不给助手看：规范化后按文件库列表同一条规则判
-    private static func hiddenFromAssistant(_ path: String, profileId: String) -> Bool {
-        guard let url = FileLibraryStore.resolveMemory(path, profileId: profileId) else { return false }
-        let root = FileLibraryStore.memoryRoot(profileId: profileId).standardizedFileURL.path
-        let rel = String(url.path.dropFirst(root.count + 1))
-        return FileLibraryMemoryFolder.isHiddenWikiPath((FileLibraryStore.memoryVirtualPrefix + rel).lowercased())
+    /// wiki 里点开头的（.history / .proposals 含原始输出 / .group.md）不给助手看：规范化后按文件库列表同一条规则判。
+    /// 顶层 `exports/`（楼层快照，整楼层原文）整目录不给看：挡住 fs_read 直接给路径（fs_list / fs_search 靠列表，不枚举它）。
+    static func hiddenFromAssistant(_ path: String) -> Bool {
+        let prefix = FileLibraryStore.memoryVirtualPrefix
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix(prefix) else { return false }
+        let rel = trimmed.dropFirst(prefix.count)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        var normalized: [String] = []
+        for component in rel.split(separator: "/") {
+            switch component {
+            case ".": continue
+            case "..": if !normalized.isEmpty { normalized.removeLast() }
+            default: normalized.append(String(component))
+            }
+        }
+        guard let first = normalized.first else { return false }
+        if first.lowercased() == FloorSnapshotExportFolder.name.lowercased() { return true }
+        return FileLibraryMemoryFolder.isHiddenWikiPath((prefix + normalized.joined(separator: "/")).lowercased())
     }
 
     /// fs_read 三种路径共用：范围读 + 头截 + 续读尾注（plan-B4 D3；实现在 ToolResultOffload.fileRead）

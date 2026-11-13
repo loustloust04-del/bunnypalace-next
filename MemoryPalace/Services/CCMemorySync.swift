@@ -1,10 +1,11 @@
+import MemoryCore
 import Foundation
 
 /// CC 小克的 memory → 选定楼层记忆树的 memory/cc/（plan-cc-memory-sync）。
 /// 手机来拉：连上 hub / 收到 cc_memory_changed / 手动 / 每 6 小时 → 要清单 → 按哈希差分批取 → 写入；
 /// 清单里没有的本地文件删掉。hub 已按名字排除（私人文件、名单、符号链接），这里按同一条私人文件规则再兜一遍。
 /// AI 侧仍只读：memory/ 写入一律被 fs 工具拒绝，这里是系统自己写。
-enum CCMemorySync {
+extension CCMemorySync {
     static let enabledKey = "ccMemorySyncEnabled"
     static let profileKey = "ccMemorySyncProfileId"
     static let lastSyncKey = "ccMemorySyncLastAt"
@@ -128,12 +129,6 @@ enum CCMemorySync {
 
     static func isSafeName(_ name: String) -> Bool {
         name.hasSuffix(".md") && !name.contains("/") && !name.contains("\\") && !name.hasPrefix(".") && name.count <= 200
-    }
-
-    /// 与 hub（isPrivateName）、种子（CatalogSeed）同一条：去掉路径后的文件名以 private_ 开头（不分大小写）就是私人文件，
-    /// 不同步、不打开；只是中间带 private_ 的（project_private_repo.md）是普通文件。名单由 hub 端挡，不按内容里的字样整份扔
-    static func isExcluded(name: String) -> Bool {
-        (name as NSString).lastPathComponent.lowercased().hasPrefix("private_")
     }
 
     static let headerPrefix = "<!-- 同步自 CC 的 memory（只读）"

@@ -54,7 +54,7 @@ final class VoiceServiceTests: XCTestCase {
         let reencoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(list[0])) as? [String: Any]
         XCTAssertEqual(reencoded?["kind"] as? String, "gemini")
         XCTAssertThrowsError(try awaitResult { try await list[0].makeSynthesizer(store: self.makeStore())
-            .synthesize(text: "x", voice: nil, model: nil, tuning: VoiceTuning.current()) }) { err in
+            .synthesize(text: "x", voice: nil, model: nil, tuning: VoiceTuning.defaults) }) { err in
             XCTAssertEqual(err as? VoiceSynthError, .notSupported)
         }
     }
@@ -219,7 +219,7 @@ final class VoiceServiceTests: XCTestCase {
         Task {
             do {
                 box.clip = try await SystemSynthesizer().synthesize(text: "你好，这是试听。", voice: nil, model: nil,
-                                                                    tuning: VoiceTuning.current())
+                                                                    tuning: VoiceTuning.defaults)
             } catch {
                 box.error = error
             }

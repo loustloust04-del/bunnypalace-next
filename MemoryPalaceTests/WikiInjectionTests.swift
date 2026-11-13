@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -8,7 +9,8 @@ final class WikiInjectionTests: XCTestCase {
 
     private let pid = "xctest-wiki-injection"
     private let keys = ["mem_inject_keyword", "mem_inject_full", "mem_inject_vector", "mem_inject_graph", "mem_master",
-                        MemoryOpenWindow.cKey, MemoryOpenWindow.b4Key, "mem_inject_budget", "mem_inject_catalog"]
+                        MemoryOpenWindow.cKey, MemoryOpenWindow.b4Key, "mem_inject_budget", "mem_inject_catalog",
+                        RecallTuningStore.storageKey, MemoryOpenWindowStore.storageKey]
     private var saved: [String: Any?] = [:]
     private var root: URL!
     private var wiki: WikiStore!
@@ -51,27 +53,42 @@ final class WikiInjectionTests: XCTestCase {
     // MARK: - 触发词
 
     func testWindowIsLastFourMessages() {
-        let s = WikiInjectionSnapshot(pages: [page("楼层/人/小慧", "小慧"), page("楼层/地点/五楼", "五楼")])
+        let s = WikiInjectionSnapshot(pages: [page("人/小慧", "小慧"), page("地点/五楼", "五楼")])
         let recent = ["五楼那间屋", "a", "b", "c", "小慧来了"]
-        XCTAssertEqual(WikiInjection.hits(s, recent: recent, excluding: []).map(\.page.title), ["小慧"], "第 5 条往前不扫")
-        XCTAssertEqual(WikiInjection.hits(s, recent: Array(recent.suffix(4)) + ["五楼"], excluding: []).map(\.page.title), ["五楼", "小慧"])
+        XCTAssertEqual(WikiInjection.hits(s, recent: recent, excluding: [], tuning: RecallTestTuning.make()).map(\.page.title), ["小慧"], "第 5 条往前不扫")
+        XCTAssertEqual(WikiInjection.hits(s, recent: Array(recent.suffix(4)) + ["五楼"], excluding: [], tuning: RecallTestTuning.make()).map(\.page.title), ["五楼", "小慧"])
+    }
+
+    func testExplicitTuningChangesIdentityLookbackAndPageLimit() {
+        let snapshot = WikiInjectionSnapshot(pages: [
+            page("人/林栖", "林栖"), page("地点/云桥城", "云桥城")
+        ])
+        var tuning = RecallTestTuning.make()
+        tuning.identityLookbackMessages = 1
+        tuning.maximumPages = 1
+        XCTAssertTrue(WikiInjection.hits(snapshot, recent: ["林栖", "独立合成问题"], excluding: [], tuning: tuning).isEmpty)
+        tuning.identityLookbackMessages = 2
+        XCTAssertEqual(WikiInjection.hits(snapshot, recent: ["林栖", "独立合成问题"], excluding: [], tuning: tuning).map(\.page.title), ["林栖"])
+        XCTAssertEqual(WikiInjection.hits(snapshot, recent: ["林栖 云桥城"], excluding: [], tuning: tuning).count, 1)
+        tuning.maximumPages = 2
+        XCTAssertEqual(WikiInjection.hits(snapshot, recent: ["林栖 云桥城"], excluding: [], tuning: tuning).count, 2)
     }
 
     func testExcludesNamesAndStopWordsEvenTitle() {
-        var s = WikiInjectionSnapshot(pages: [page("楼层/人/阿青", "阿青", triggers: ["青青"]), page("楼层/身体", "身体", triggers: ["复诊"]),
+        var s = WikiInjectionSnapshot(pages: [page("人/阿青", "阿青", triggers: ["青青"]), page("主题/身体", "身体", triggers: ["复诊"]),
                                               page("工程/记忆宫殿", "记忆宫殿", triggers: ["审计台"])])
         s.stopWords = ["复诊", "身体"]
-        let hits = WikiInjection.hits(s, recent: ["阿青说身体还行，复诊在下周，阿白记一下记忆宫殿"], excluding: ["阿青", "阿白"])
+        let hits = WikiInjection.hits(s, recent: ["阿青说身体还行，复诊在下周，阿白记一下记忆宫殿"], excluding: ["阿青", "阿白"], tuning: RecallTestTuning.make())
         XCTAssertEqual(hits.map(\.page.title), ["记忆宫殿"], "名字和不触发的词不算，就算是页的标题")
-        XCTAssertEqual(WikiInjection.hits(s, recent: ["青青来了"], excluding: ["阿青"]).map(\.word), ["青青"], "同页别的触发词照样触发")
+        XCTAssertEqual(WikiInjection.hits(s, recent: ["青青来了"], excluding: ["阿青"], tuning: RecallTestTuning.make()).map(\.word), ["青青"], "同页别的触发词照样触发")
     }
 
     func testCaseInsensitiveEnglishLiteralChinese() {
         let s = WikiInjectionSnapshot(pages: [page("工程/fable", "Fable", triggers: ["ccRP"])])
-        XCTAssertEqual(WikiInjection.hits(s, recent: ["今天 fable 又挂了"], excluding: []).first?.word, "Fable")
-        XCTAssertEqual(WikiInjection.hits(s, recent: ["CCRP 起不来"], excluding: []).first?.word, "ccRP")
-        let zh = WikiInjectionSnapshot(pages: [page("楼层/人/小慧", "小慧")])
-        XCTAssertTrue(WikiInjection.hits(zh, recent: ["小 慧"], excluding: []).isEmpty, "中文逐字")
+        XCTAssertEqual(WikiInjection.hits(s, recent: ["今天 fable 又挂了"], excluding: [], tuning: RecallTestTuning.make()).first?.word, "Fable")
+        XCTAssertEqual(WikiInjection.hits(s, recent: ["CCRP 起不来"], excluding: [], tuning: RecallTestTuning.make()).first?.word, "ccRP")
+        let zh = WikiInjectionSnapshot(pages: [page("人/小慧", "小慧")])
+        XCTAssertTrue(WikiInjection.hits(zh, recent: ["小 慧"], excluding: [], tuning: RecallTestTuning.make()).isEmpty, "中文逐字")
     }
 
     func testAtMostThreeAndOrdering() {
@@ -80,18 +97,83 @@ final class WikiInjectionTests: XCTestCase {
         ])
         // 最近一条：狗在最前；鱼和猫同一条里，猫出现两次但位置在鱼后面 → 位置先比
         let latest = "狗和鱼还有猫猫"
-        XCTAssertEqual(WikiInjection.hits(s, recent: ["鸟", latest], excluding: []).map(\.page.title), ["狗", "鱼", "猫"], "最多 3 页，鸟只在更早的那条")
+        XCTAssertEqual(WikiInjection.hits(s, recent: ["鸟", latest], excluding: [], tuning: RecallTestTuning.make()).map(\.page.title), ["狗", "鱼", "猫"], "最多 3 页，鸟只在更早的那条")
         // 同位置（同一个词起头）比次数：触发词不同但在同一处
         let tie = WikiInjectionSnapshot(pages: [page("x", "小慧", triggers: []), page("y", "小慧家", triggers: ["慧慧"])])
-        XCTAssertEqual(WikiInjection.hits(tie, recent: ["小慧家慧慧"], excluding: []).map(\.page.title), ["小慧家", "小慧"], "同位置次数多的在前")
+        XCTAssertEqual(WikiInjection.hits(tie, recent: ["小慧家慧慧"], excluding: [], tuning: RecallTestTuning.make()).map(\.page.title), ["小慧家", "小慧"], "同位置次数多的在前")
         // 最近一条都没有：往前一条比
-        XCTAssertEqual(WikiInjection.hits(s, recent: ["兔子和鸟", "别的", "今天"], excluding: []).map(\.page.title), ["兔", "鸟"])
+        XCTAssertEqual(WikiInjection.hits(s, recent: ["兔子和鸟", "别的", "今天"], excluding: [], tuning: RecallTestTuning.make()).map(\.page.title), ["兔", "鸟"])
     }
 
     func testIndexLinesOnlyEntries() {
-        let md = "# C 档案\n\(WikiStore.overfullMarker)\n\n## 工程（1 页）\n- [[工程/记忆宫殿]] 记忆宫殿 — 聊这个 app 时\n\n## 楼层（2 页）\n- [[楼层/人/]] 人 — 她提到身边的人时（2 页）\n"
-        XCTAssertEqual(WikiInjection.indexLines(md), ["- [[工程/记忆宫殿]] 记忆宫殿 — 聊这个 app 时", "- [[楼层/人/]] 人 — 她提到身边的人时（2 页）"])
+        let md = "# C 档案\n\(WikiStore.overfullMarker)\n\n## 人（2 页）\n- [[人/小慧]] 小慧 — 她提到小慧时\n\n## 工程（1 页）\n- [[工程/记忆宫殿]] 记忆宫殿 — 聊这个 app 时\n"
+        XCTAssertEqual(WikiInjection.indexLines(md), ["- [[人/小慧]] 小慧 — 她提到小慧时", "- [[工程/记忆宫殿]] 记忆宫殿 — 聊这个 app 时"])
         XCTAssertEqual(WikiInjection.indexBlock(WikiInjectionSnapshot()), "", "没条目不带这一块")
+    }
+
+    /// 聊天注入：本人那组落盘 {{user}}，给模型看是当前名字（改名后跟着变）
+    func testInjectionShowsUserBranchAsCurrentName() {
+        let snapshot = WikiInjectionSnapshot(indexLines: ["- [[{{user}}/品味]] 品味"])
+        XCTAssertEqual(WikiInjection.indexBlock(snapshot, user: "岚舟"), WikiInjection.indexTitle + "\n- [[岚舟/品味]] 品味")
+        XCTAssertEqual(WikiInjection.indexBlock(snapshot, user: "星砚"), WikiInjection.indexTitle + "\n- [[星砚/品味]] 品味")
+        let hit = WikiPageHit(page: .init(path: "{{user}}/品味", title: "品味", triggers: [], hook: "", now: ""), word: "品味")
+        XCTAssertTrue(WikiInjection.hitsBlock([hit], now: Date(), user: "星砚").contains("[[星砚/品味]] 品味"))
+    }
+
+    func testLoadedPagesKeepDomainWhenOnlyHookAndNowAreInjected() async throws {
+        let cases: [(String, SeedFactDomain?, String?)] = [
+            ("现实", .realWorld, nil), ("设定", .inWorld, "域：设定（非本人现实经历）"),
+            ("混合", .mixed, "域：待判（未确认为现实）"),
+            ("未判", .unspecified, "域：待判（未确认为现实）"), ("旧页", nil, nil),
+        ]
+        let wiki = wiki!
+        let snapshot = try await Task.detached {
+            for (title, domain, _) in cases {
+                try wiki.save(WikiPage(path: "主题/\(title)", hook: "虚构钩子", title: title,
+                                       now: "航线概览", records: ["不注入的记录"], factDomain: domain))
+            }
+            return WikiInjection.load(wiki)
+        }.value
+        for (title, domain, line) in cases {
+            let page = try XCTUnwrap(snapshot.pages.first { $0.title == title })
+            XCTAssertEqual(page.factDomain, domain)
+            let block = WikiInjection.hitsBlock([.init(page: page, word: title)], now: at(11, 12))
+            let expected = [WikiInjection.hitsTitle, "[[主题/\(title)]] \(title)"]
+                + (line.map { [$0] } ?? []) + ["钩子：虚构钩子", "现在：航线概览"]
+            XCTAssertEqual(block.components(separatedBy: "\n"), expected)
+            XCTAssertFalse(block.contains("不注入的记录"))
+        }
+    }
+
+    func testPageAndCardDomainLinesConsumeExistingWholePayloadBudget() throws {
+        for cardMode in [false, true] {
+            func select(_ domain: SeedFactDomain?, budget: Int) -> RecallTurnDecision {
+                let page = WikiInjectionSnapshot.Page(path: "主题/云桥城", title: cardMode ? "父页" : "云桥城",
+                    triggers: [], hook: "虚构钩子", now: "航线概览", version: "v1", factDomain: domain)
+                let path = "memory/cc/航线.md"
+                let hit = CatalogRecallIndexStore.Hit(docId: "fictional-card", kind: .card, path: path, version: "v1",
+                    cardKey: SeedNoteStore.key(path: path, version: "v1"), parents: [.init(path: page.path, version: page.version)],
+                    terms: ["cedar", "maple"], identities: ["云桥城"], updatedAt: at(11, 12),
+                    card: .init(title: "云桥城", gist: "cedar maple", mentions: [], factDomain: domain), bm25: -1)
+                let text = cardMode ? "cedar maple" : "云桥城的航线怎样"
+                let batch = RecallFullTextCandidates(profileId: pid, text: text, terms: ["cedar", "maple"],
+                    weights: [:], status: .init(state: .ready, epoch: 1), hits: [hit])
+                let inputs = MemoryInjector.RoundInputs(memories: [], selfMemory: nil, archiveBudget: budget,
+                    wiki: .init(pages: [page]), fullText: cardMode ? batch : nil)
+                return RecallSelection.prepare(profile: profile(), conversationId: "fictional-window", turnId: "u1",
+                    branchAnchor: "branch", text: text, state: .init(), existingDecision: nil, inputs: inputs,
+                    recentMessages: [text], now: at(11, 12), tuning: RecallTestTuning.make()).decision
+            }
+            let legacy = try XCTUnwrap(select(nil, budget: 1_000).selected.first)
+            for domain in [SeedFactDomain.inWorld, .mixed, .unspecified] {
+                let tagged = try XCTUnwrap(select(domain, budget: 1_000).selected.first)
+                XCTAssertEqual(tagged.source.kind, cardMode ? .card : .page)
+                XCTAssertEqual(tagged.tokenCost, Memory.estimateTokens(tagged.text))
+                XCTAssertGreaterThan(Memory.estimateTokens(tagged.text) - Memory.estimateTokens(legacy.text), 0)
+                XCTAssertTrue(select(domain, budget: legacy.tokenCost).selected.isEmpty)
+                XCTAssertEqual(select(domain, budget: tagged.tokenCost).selected, [tagged])
+            }
+        }
     }
 
     // MARK: - 已过期（05:00 分界）
@@ -112,7 +194,7 @@ final class WikiInjectionTests: XCTestCase {
         m.validUntil = try XCTUnwrap(FragmentPool.validUntilDate("2026-10-22"))
         XCTAssertFalse(WikiInjection.isExpired(m, now: at(23, 4)))
         XCTAssertTrue(WikiInjection.isExpired(m, now: at(23, 5)))
-        let (_, volatile, _) = MemoryInjector.buildInjectionSplit(memories: [m], now: at(23, 5))
+        let volatile = MemoryInjector.buildInjectionSplit(memories: [m], now: at(23, 5)).volatile
         XCTAssertEqual(volatile, "- 下周三复诊 [事实]（已过期）", "照带，行尾标，不删")
         XCTAssertEqual(MemoryInjector.buildInjectionSplit(memories: [m], now: at(23, 4)).volatile, "- 下周三复诊 [事实]")
     }
@@ -157,17 +239,17 @@ final class WikiInjectionTests: XCTestCase {
 
     func testLayersIndexPagesFragmentsAndDedup() {
         let snapshot = WikiInjectionSnapshot(
-            indexLines: ["- [[楼层/人/小慧]] 小慧 — 她提到小慧时", "- [[工程/项目/]] 项目（2 页）"],
-            pages: [page("楼层/人/小慧", "小慧", triggers: ["慧慧"], hook: "她提到小慧时", now: "室友（自 2026-09 起）。约了看房（到 2026-10-01）。")])
+            indexLines: ["- [[人/小慧]] 小慧 — 她提到小慧时", "- [[工程/项目/]] 项目（2 页）"],
+            pages: [page("人/小慧", "小慧", triggers: ["慧慧"], hook: "她提到小慧时", now: "室友（自 2026-09 起）。约了看房（到 2026-10-01）。")])
         let pinned = fragment("钉住的一条", pinned: true)
-        pinned.organizedPage = "楼层/人/小慧"
-        let into = fragment("小慧搬进来了", organizedPage: "楼层/人/小慧")
+        pinned.organizedPage = "人/小慧"
+        let into = fragment("小慧搬进来了", organizedPage: "人/小慧")
         let other = fragment("团子体检正常")
         let layers = PromptAssembler.memoryLayers(profile: profile(), selfMemory: nil, memories: [pinned, into, other],
                                                   recentMessages: ["慧慧今天回来"], budget: nil, wiki: snapshot, now: at(11, 12))
         XCTAssertEqual(layers.stable, """
         [C 档案 · 索引]
-        - [[楼层/人/小慧]] 小慧 — 她提到小慧时
+        - [[人/小慧]] 小慧 — 她提到小慧时
         - [[工程/项目/]] 项目（2 页）
 
         [关于阿青]
@@ -175,7 +257,7 @@ final class WikiInjectionTests: XCTestCase {
         """)
         XCTAssertEqual(layers.volatile, """
         [C 档案 · 本轮相关]
-        [[楼层/人/小慧]] 小慧
+        [[人/小慧]] 小慧
         钩子：她提到小慧时
         现在：室友（自 2026-09 起）。约了看房（到 2026-10-01，已过期）。
 
@@ -195,29 +277,6 @@ final class WikiInjectionTests: XCTestCase {
         XCTAssertFalse(empty.volatile.contains("C 档案"))
     }
 
-    /// 非缓存友好路（记忆插槽一整段）：B4 → 索引 → [关于X] → 命中页
-    func testMarkerPathCarriesWiki() {
-        let snapshot = WikiInjectionSnapshot(indexLines: ["- [[楼层/人/小慧]] 小慧 — 她提到小慧时"],
-                                             pages: [page("楼层/人/小慧", "小慧", hook: "她提到小慧时", now: "室友。")])
-        var preset = Preset.balanced
-        preset.sampling.cacheFriendly = false
-        let segs = PromptAssembler.assembleTagged(preset: preset, profile: profile(), memories: [fragment("团子体检正常")],
-                                                  chatHistory: [("user", "小慧回来了")], wiki: snapshot).segments
-        let memory = segs.first { $0.source == .memory }?.content ?? ""
-        XCTAssertEqual(memory, """
-        [C 档案 · 索引]
-        - [[楼层/人/小慧]] 小慧 — 她提到小慧时
-
-        [关于阿青]
-        - 团子体检正常 [事实]
-
-        [C 档案 · 本轮相关]
-        [[楼层/人/小慧]] 小慧
-        钩子：她提到小慧时
-        现在：室友。
-        """)
-    }
-
     // MARK: - 每轮的输入：钉住照带、按类别常驻停掉、只带留下的碎片、C 没勾三样都不带
 
     @MainActor
@@ -232,29 +291,32 @@ final class WikiInjectionTests: XCTestCase {
         gone.supersededAt = Date()
         [pinnedOld, relationOld, kept, unseen, gone].forEach { context.insert($0) }
         try context.save()
-        try wiki.save(WikiPage(path: "楼层/人/小慧", kind: .person, triggers: ["慧慧"], hook: "她提到小慧时", title: "小慧", now: "室友。"))
+        try wiki.save(WikiPage(path: "人/小慧", kind: .person, triggers: ["慧慧"], hook: "她提到小慧时", title: "小慧", now: "室友。"))
         try wiki.rebuildAllIndexes()
         _ = try await WikiInjectionCache.shared.warm(root.path) { [wiki] in wiki! }
 
         let store = SwiftDataMemoryStore()
         UserDefaults.standard.set(true, forKey: MemoryOpenWindow.cKey)
-        let on = MemoryInjector.roundInputs(profileId: pid, conversationMemoryEnabled: true, store: store, context: context, wikiStore: wiki)
+        RecallTuningStore.save(RecallTestTuning.make(), profileId: pid)
+        let on = MemoryInjector.roundInputs(profileId: pid, participation: .testValue(profileId: pid),
+                                            store: store, context: context, wikiStore: wiki)
         XCTAssertEqual(Set(on.memories.map(\.content)), ["钉住的旧档案", "留下的碎片"])
         XCTAssertEqual(on.wiki?.pages.map(\.title), ["小慧"])
         XCTAssertFalse(MemoryInjector.isPersistent(relationOld), "按类别常驻停掉")
 
         let layers = PromptAssembler.memoryLayers(profile: profile(), selfMemory: nil, memories: on.memories, recentMessages: ["慧慧"],
                                                   budget: on.archiveBudget, wiki: on.wiki)
-        XCTAssertTrue(layers.stable.contains("[C 档案 · 索引]\n- [[楼层/人/]] 人（1 页）"), "根索引的条目行（分组行）")
+        XCTAssertTrue(layers.stable.contains("[C 档案 · 索引]") && layers.stable.contains("- [[人/小慧]]"), "公开投影保留分组标题与条目行")
         XCTAssertTrue(layers.stable.contains("[关于阿青]\n- 钉住的旧档案 [事实]"))
         XCTAssertTrue(layers.volatile.contains("[C 档案 · 本轮相关]") && layers.volatile.contains("- 留下的碎片 [事实]"))
         XCTAssertFalse((layers.stable + layers.volatile).contains("关系类旧档案"))
         XCTAssertFalse((layers.stable + layers.volatile).contains("没看过的碎片"))
 
         UserDefaults.standard.set(false, forKey: MemoryOpenWindow.cKey)
-        let off = MemoryInjector.roundInputs(profileId: pid, conversationMemoryEnabled: true, store: store, context: context, wikiStore: wiki)
+        let off = MemoryInjector.roundInputs(profileId: pid, participation: .testValue(profileId: pid), store: store, context: context, wikiStore: wiki)
         XCTAssertTrue(off.memories.isEmpty, "C 没勾：钉住的也不带（同改前）")
-        XCTAssertNil(off.wiki, "C 没勾：根索引、命中页都不带")
+        XCTAssertEqual(off.wiki?.indexLines, [], "根索引取消后不带目录")
+        XCTAssertEqual(off.wiki?.pages.map(\.title), ["小慧"], "档案触发独立于根索引")
     }
 
     // MARK: - 缓存
@@ -264,13 +326,13 @@ final class WikiInjectionTests: XCTestCase {
         let cache = WikiInjectionCache.shared
         let key = root.path
         let source: WikiInjectionCache.Source = { [wiki] in wiki! }
-        try wiki.save(WikiPage(path: "楼层/人/小慧", title: "小慧"))
+        try wiki.save(WikiPage(path: "人/小慧", title: "小慧"))
         try wiki.rebuildAllIndexes()
         _ = try await cache.warm(key, source)
         XCTAssertTrue(cache.isFresh(key))
-        XCTAssertEqual(cache.snapshot(key, source)?.indexLines.count, 1, "新的：主线程直接给")
+        XCTAssertEqual(cache.snapshot(key, source)?.indexLines.filter { $0.hasPrefix("- ") }.count, 1, "新的：主线程直接给公开条目")
 
-        try wiki.save(WikiPage(path: "楼层/人/阿明", title: "阿明"))
+        try wiki.save(WikiPage(path: "人/阿明", title: "阿明"))
         XCTAssertFalse(cache.isFresh(key), "写了页就作废")
         XCTAssertEqual(cache.snapshot(key, source)?.pages.count, 1, "主线程不读盘：先给旧的")
         _ = try await cache.warm(key, source)
@@ -295,18 +357,18 @@ final class WikiInjectionTests: XCTestCase {
         let cache = WikiInjectionCache.shared
         let key = root.path
         let source: WikiInjectionCache.Source = { [wiki] in wiki! }
-        try wiki.save(WikiPage(path: "楼层/测试页", title: "测试页"))
+        try wiki.save(WikiPage(path: "主题/测试页", title: "测试页"))
         _ = try await cache.warm(key, source)
         let version = cache.version
         let unrelated = [
-            ".history/楼层/测试页/20261017-120000.md",
+            ".history/主题/测试页/20261017-120000.md",
             ".proposals/proposal.json",
             ".proposals/drafts/draft.md",
             ".proposals/drafts/INDEX.md",
             ".group.md",
-            "楼层/人/.group.md",
+            "人/.group.md",
             "notes.txt",
-            "楼层/notes.txt",
+            "主题/notes.txt",
         ]
         for path in unrelated {
             try WikiStore.writeAtomic(Data("内部资料".utf8), to: root.appendingPathComponent(path))
@@ -314,7 +376,7 @@ final class WikiInjectionTests: XCTestCase {
             XCTAssertTrue(cache.isFresh(key), path)
         }
 
-        for path in ["INDEX.md", "楼层/INDEX.md", "楼层/测试页.md", WikiStore.stopWordsFileName] {
+        for path in ["INDEX.md", "主题/INDEX.md", "主题/测试页.md", WikiStore.stopWordsFileName] {
             let url = root.appendingPathComponent(path)
             let data = Data("新内容 \(path)".utf8)
             let before = cache.version
@@ -347,13 +409,14 @@ final class WikiInjectionTests: XCTestCase {
         let container = try ModelContainer(for: Memory.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
         let context = ModelContext(container)
         UserDefaults.standard.set(true, forKey: MemoryOpenWindow.cKey)
-        let round = MemoryInjector.roundInputs(profileId: pid, conversationMemoryEnabled: true, store: SwiftDataMemoryStore(),
+        RecallTuningStore.save(RecallTestTuning.make(), profileId: pid)
+        let round = MemoryInjector.roundInputs(profileId: pid, participation: .testValue(profileId: pid), store: SwiftDataMemoryStore(),
                                                context: context, wikiStore: stores.new, warmedWiki: warmed, useCachedWiki: false)
         XCTAssertEqual(round.wiki, warmed.snapshot, "本轮不能再读预览缓存或改用新代次")
         let layers = PromptAssembler.memoryLayers(profile: profile(), selfMemory: nil, memories: round.memories,
                                                   recentMessages: ["旧页 新页"], budget: round.archiveBudget, wiki: round.wiki)
         XCTAssertTrue(layers.stable.contains("旧页"))
-        XCTAssertTrue(layers.volatile.contains("[[楼层/旧页]] 旧页"))
+        XCTAssertTrue(layers.volatile.contains("[[主题/旧页]] 旧页"))
         XCTAssertFalse((layers.stable + layers.volatile).contains("新页"))
     }
 
@@ -371,8 +434,8 @@ final class WikiInjectionTests: XCTestCase {
     private func cacheStores() throws -> (old: WikiStore, new: WikiStore) {
         let old = WikiStore(root: root.appendingPathComponent("old"))
         let new = WikiStore(root: root.appendingPathComponent("new"))
-        try old.save(WikiPage(path: "楼层/旧页", title: "旧页"))
-        try new.save(WikiPage(path: "楼层/新页", title: "新页"))
+        try old.save(WikiPage(path: "主题/旧页", title: "旧页"))
+        try new.save(WikiPage(path: "主题/新页", title: "新页"))
         return (old, new)
     }
 
@@ -576,35 +639,43 @@ final class WikiInjectionTests: XCTestCase {
 
     // MARK: - 常驻页那一行
 
-    func testResidentLine() {
-        let hits = [WikiPageHit(page: page("楼层/人/小慧", "小慧"), word: "慧慧"),
-                    WikiPageHit(page: page("工程/记忆宫殿", "记忆宫殿"), word: "审计台")]
-        XCTAssertEqual(WikiInjection.residentLine(indexCount: 12, hits: hits), "根索引 12 行 · 本轮命中：小慧（“慧慧”）、记忆宫殿（“审计台”）")
-        XCTAssertEqual(WikiInjection.residentLine(indexCount: 3, hits: []), "根索引 3 行 · 本轮没命中")
-    }
-
     @MainActor
     func testResidentSummaryWikiRow() async throws {
         let container = try ModelContainer(for: Memory.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
-        try wiki.save(WikiPage(path: "楼层/人/小慧", kind: .person, triggers: ["慧慧"], hook: "她提到小慧时", title: "小慧", now: "室友。"))
-        try wiki.save(WikiPage(path: "工程/记忆宫殿", kind: .project, triggers: ["审计台"], title: "记忆宫殿"))
+        try wiki.save(WikiPage(path: "人/林栖", kind: .person, title: "林栖"))
+        try wiki.save(WikiPage(path: "地点/云桥城", title: "云桥城"))
         try wiki.rebuildAllIndexes()
-        _ = try await WikiInjectionCache.shared.warm(root.path) { [wiki] in wiki! }
+        let warmed = try await WikiInjectionCache.shared.warm(root.path) { [wiki] in wiki! }
+        let snapshot = warmed.snapshot
+        XCTAssertEqual(snapshot.indexLines.filter { $0.hasPrefix("- ") }.count, 2)
+        XCTAssertTrue(snapshot.indexLines.contains { $0.hasPrefix("## ") }, "夹带分组标题的真实根索引")
         UserDefaults.standard.set(true, forKey: MemoryOpenWindow.cKey)
-        MainThreadIO.allowMainThreadInThisTest()
-
-        let s = MemoryResident.summary(profile: profile(), conversationMemoryEnabled: true, container: container, selfMemories: [],
-                                       recentMessages: ["审计台卡住了", "慧慧说没事"], wikiStore: wiki)
-        XCTAssertEqual(s.wiki?.text, "根索引 2 行 · 本轮命中：小慧（“慧慧”）、记忆宫殿（“审计台”）")
-        XCTAssertNil(s.wiki?.gate)
-        XCTAssertTrue(s.volatile.contains("[C 档案 · 本轮相关]"), "下半预览同一份")
-
+        UserDefaults.standard.set(true, forKey: "mem_master")
+        let on = MemoryResident.summary(profile: profile(), participation: .testValue(profileId: pid), container: container,
+                                        selfMemories: [], wikiStore: wiki)
+        XCTAssertEqual(on.wiki?.indexCount, 2, "面板只计条目，不把分组标题计为档案")
+        XCTAssertNil(on.wiki?.gate)
+        let off = MemoryResident.summary(profile: profile(), participation: .testValue(profileId: pid, window: false), container: container,
+                                         selfMemories: [], wikiStore: wiki)
+        XCTAssertEqual(off.wiki?.indexCount, 2, "关闭记忆后的灰行仍使用同一计数口径")
+        XCTAssertEqual(off.wiki?.gate, .memoryOff)
+        XCTAssertTrue(off.wiki?.hits.isEmpty == true)
+        let slotOff = MemoryResident.summary(profile: profile(), participation: .testValue(profileId: pid, slot: false), container: container,
+                                             selfMemories: [], wikiStore: wiki)
+        XCTAssertEqual(slotOff.wiki?.indexCount, 2)
+        XCTAssertEqual(slotOff.wiki?.gate, .slotOff)
         UserDefaults.standard.set(false, forKey: MemoryOpenWindow.cKey)
-        let off = MemoryResident.summary(profile: profile(), conversationMemoryEnabled: true, container: container, selfMemories: [],
-                                         recentMessages: ["慧慧"], wikiStore: wiki)
-        XCTAssertEqual(off.wiki?.text, "根索引 2 行 · 本轮没命中")
-        XCTAssertEqual(off.wiki?.gate, .archiveUnchecked)
-        XCTAssertFalse(off.stable.contains("C 档案"))
+        let unchecked = MemoryResident.summary(profile: profile(), participation: .testValue(profileId: pid), container: container,
+                                               selfMemories: [], wikiStore: wiki)
+        XCTAssertNil(unchecked.wiki?.indexCount)
+        XCTAssertEqual(unchecked.wiki?.gate, .archiveUnchecked)
+    }
+
+    func testResidentLine() {
+        let hits = [WikiPageHit(page: page("人/小慧", "小慧"), word: "慧慧"),
+                    WikiPageHit(page: page("工程/记忆宫殿", "记忆宫殿"), word: "审计台")]
+        XCTAssertEqual(WikiInjection.residentLine(indexCount: 12, hits: hits), "根索引 12 行 · 本轮命中：小慧（“慧慧”）、记忆宫殿（“审计台”）")
+        XCTAssertEqual(WikiInjection.residentLine(indexCount: 3, hits: []), "根索引 3 行 · 本轮没命中")
     }
 
     func testSettingsStampCarriesWikiVersion() {

@@ -63,12 +63,6 @@ final class GlobalBackupProgress: ObservableObject {
         recomputeOverall()
     }
 
-    func updateSection(_ name: String, fraction: Double) {
-        currentSection = name
-        sectionFraction = max(0, min(1, fraction))
-        recomputeOverall()
-    }
-
     func completeSection(_ name: String) {
         completedSections.insert(name)
         sectionFraction = 1

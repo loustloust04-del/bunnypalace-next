@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -24,7 +25,7 @@ final class CatalogJSONRepairTests: XCTestCase {
         return value
     }
 
-    private let items = #"[{"type":"new_page","path":"楼层/主题/书单","kind":"主题","title":"书单","now":"正在读「测试书」（自 2026-10 起）。","records":[{"text":"2026-10-12 开始整理书单","fragments":["f1"]},{"text":"没有出处"}]}]"#
+    private let items = #"[{"type":"new_page","path":"主题/书单","kind":"主题","title":"书单","now":"正在读「测试书」（自 2026-10 起）。","records":[{"text":"2026-10-12 开始整理书单","fragments":["f1"]},{"text":"没有出处"}]}]"#
 
     private func encoded(_ text: String) throws -> String {
         String(decoding: try JSONEncoder().encode(text), as: UTF8.self)
@@ -36,7 +37,7 @@ final class CatalogJSONRepairTests: XCTestCase {
         XCTAssertEqual(value.dropped, 1, "修复不能绕过出处校验", file: file, line: line)
         let item = try XCTUnwrap(value.items.first, file: file, line: line)
         guard case .newPage(let page) = item.change else { return XCTFail("应生成新页提案", file: file, line: line) }
-        XCTAssertEqual(page.path, "楼层/主题/书单", file: file, line: line)
+        XCTAssertEqual(page.path, "主题/书单", file: file, line: line)
         XCTAssertEqual(page.now, now, file: file, line: line)
         XCTAssertEqual(page.records, ["2026-10-12 开始整理书单（出处：碎片 \(fragment.id.uuidString.prefix(8).lowercased())）"], file: file, line: line)
         XCTAssertEqual(item.fragmentIds, [fragment.id], file: file, line: line)
@@ -55,7 +56,7 @@ final class CatalogJSONRepairTests: XCTestCase {
     }
 
     func testUnrecoverableJSONReportsParserPosition() throws {
-        let broken = "[\n  {\"type\":\"new_page\",\n    \"path\":\"楼层/主题/书单\",\n    \"records\": ???\n  }\n]"
+        let broken = "[\n  {\"type\":\"new_page\",\n    \"path\":\"主题/书单\",\n    \"records\": ???\n  }\n]"
         let json = "{\"items\":\(try encoded(broken))}"
         var error = ""
         XCTAssertNil(CatalogItems.parse(json, sources: sources, wiki: wiki) { error = $0 })
@@ -71,8 +72,8 @@ final class CatalogJSONRepairTests: XCTestCase {
 
     func testRepairDoesNotSwallowMissingSeparatorsOrTruncation() throws {
         for broken in [
-            #"[{"type":"new_page" "path":"楼层/主题/书单"}]"#,
-            #"[{"type":"new_page","path":"楼层/主题/书单","now":"正文" "records":[]}]"#,
+            #"[{"type":"new_page" "path":"主题/书单"}]"#,
+            #"[{"type":"new_page","path":"主题/书单","now":"正文" "records":[]}]"#,
             String(items.dropLast()),
             items + " trailing junk"
         ] {
@@ -108,7 +109,7 @@ final class CatalogJSONRepairTests: XCTestCase {
     }
 
     func testAutomaticWriterRecoversAndFeedsBackUnrecoverablePosition() async throws {
-        let topic = CatalogSorter.Topic(path: "楼层/主题/书单", title: "书单", kind: .topic, existing: false, fragmentIds: [fragment.id])
+        let topic = CatalogSorter.Topic(path: "主题/书单", title: "书单", kind: .topic, existing: false, fragmentIds: [fragment.id])
         let material = await CatalogWriter.material(topic, fragments: [fragment], floorPrompt: "", wiki: wiki, memoryRoot: root, now: Date(),
                                                    embedder: CatalogFakeEmbedder.unavailable())
         let broken = items.replacingOccurrences(of: "「测试书」", with: "\"测试书\"")

@@ -1,3 +1,4 @@
+import MemoryCore
 import SwiftUI
 import SwiftData
 
@@ -10,12 +11,13 @@ enum MemoryPageLayout {
         case master, startDay, extractModel, writeBudget, complexity
         // 写入 · 记什么（一个编号一行）
         case writerA2, writerA3, writerA4, writerB1, writerB2, writerB3, writerB4, writerC, writerC2, writerC3
+        case ccMemorySync
         // 整理 · 怎么管
         case audit, pending, trash
-        // 注入 · 塞什么进 prompt
-        case openWindow, catalog, recall, feedback, injectBudget
-        // 检索 · 怎么挑记忆（整节不动）
+        // 回想 · 怎么想起来
+        case everyRound, openWindow, injectBudget, automatic, archiveTrigger, maximumPages, cooldown, oldFragments, recall
         case injectFull, injectKeyword, injectVector, injectGraph, convHistory
+        case browse, seen
 
         var writer: MemoryWriterID? {
             switch self {
@@ -42,10 +44,12 @@ enum MemoryPageLayout {
     static let sections: [Section] = [
         Section(title: "", rows: [.master, .startDay, .extractModel, .writeBudget, .complexity]),
         Section(title: "写入 · 记什么", rows: [.writerA2, .writerA3, .writerA4, .writerB1, .writerB2, .writerB3, .writerB4,
-                                          .writerC, .writerC2, .writerC3]),
+                                          .writerC, .writerC2, .writerC3, .ccMemorySync]),
         Section(title: "整理 · 怎么管", rows: [.audit, .pending, .trash]),
-        Section(title: "注入 · 塞什么进 prompt", rows: [.openWindow, .catalog, .recall, .feedback, .injectBudget]),
-        Section(title: "检索 · 怎么挑记忆（可叠加）", rows: [.injectFull, .injectKeyword, .injectVector, .injectGraph, .convHistory]),
+        Section(title: "回想 · 怎么想起来", rows: [.everyRound, .openWindow, .injectBudget,
+            .automatic, .archiveTrigger, .maximumPages, .cooldown, .oldFragments,
+            .injectFull, .injectKeyword, .injectVector, .injectGraph,
+            .browse, .convHistory, .seen, .recall]),
     ]
 }
 
@@ -56,6 +60,7 @@ enum MemoryPageLayout {
 struct MemoryPageContent: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+    @Environment(\.settingsRoutePush) private var pushRoute
     @Environment(ProviderManager.self) private var providerManager: ProviderManager?
     /// B15：共用核搬进 mac 设置窗后，raw `Theme.F`（mac 表 11/9）比 J2 小一档 → 全部走 `m.*`（iOS 不变，mac 13/10）
     @Environment(\.settingsMetrics) private var m
@@ -69,9 +74,6 @@ struct MemoryPageContent: View {
     @AppStorage("mem_inject_vector") private var memInjectVector = false
     @AppStorage("mem_inject_graph") private var memInjectGraph = false
     @AppStorage("mem_content_convhistory") private var memContentConvHistory = true
-    @AppStorage("mem_inject_catalog") private var memInjectCatalog = false
-    @AppStorage(DisclosureKind.recall.key) private var recallModeRaw = DisclosureKind.recall.migratedDefault.rawValue
-    @AppStorage("mem_recall_feedback") private var memRecallFeedback = true
     @AppStorage("mem_inject_budget") private var memInjectBudget = 10000
     // 写入开关（行上的开关和二级页顶上的同一个键）；只为跟着刷新，读写都过 MemoryWriterSettings（A3 没写过跟老键）
     @AppStorage("mem_content_summary") private var writeA2 = true
@@ -86,10 +88,6 @@ struct MemoryPageContent: View {
     @AppStorage("mem_model_a4") private var modelA4 = ""
     @AppStorage(FragmentModelRoute.key) private var modelC2 = ""
     @AppStorage(CatalogModelRoute.key) private var modelC3 = ""
-    @AppStorage(MemoryOpenWindow.a2Key) private var openA2 = true
-    @AppStorage(MemoryOpenWindow.a4Key) private var openA4 = true
-    @AppStorage(MemoryOpenWindow.b4Key) private var openB4 = true
-    @AppStorage(MemoryOpenWindow.cKey) private var openC = false
 
     @State private var writeBudget = WriteBudgetStore.shared
     @State private var localModels = AssistantModelStore.shared
@@ -97,6 +95,8 @@ struct MemoryPageContent: View {
     @State private var deletedSelfCount = 0
     @State private var memoryStats = MemoryStats()
     @State private var pending = PendingCounts()
+    @State private var recallTuning = RecallTuning.defaults
+    @State private var openWindowChecked = 0
 
     private struct MemoryStats {
         var total: Int = 0
@@ -126,6 +126,14 @@ struct MemoryPageContent: View {
             MemoryTrashSheet(profileId: profileManager?.currentProfile.id ?? "")
         }
         .onAppear { refresh() }
+        .onChange(of: profileManager?.currentProfile.id) { _, _ in refreshRecallSettings() }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification).receive(on: RunLoop.main)) { _ in
+            refreshRecallSettings()
+        }
+        .onReceive(SettingsSearchRouter.shared.$flashingAnchor) { anchor in
+            guard let anchor, let route = SettingsSearchEntry.memorySubpage(for: anchor) else { return }
+            if let pushRoute { pushRoute(route) }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .profileWillSwitch)) { _ in
             memoryStats = MemoryStats()
             deletedSelfCount = 0
@@ -147,10 +155,9 @@ struct MemoryPageContent: View {
             }
         } header: {
             if !section.title.isEmpty {
-                // section 级搜索锚点：注入 / 检索沿用老锚
+                // section 级搜索锚点：回想节沿用老锚 leaf-mem-content
                 switch section.rows.first {
-                case .some(.openWindow): Text(section.title).searchAnchor("leaf-mem-content")
-                case .some(.injectFull): Text(section.title).searchAnchor("leaf-mem-inject")
+                case .some(.everyRound): Text(section.title).searchAnchor("leaf-mem-content")
                 default: Text(section.title)
                 }
             }
@@ -169,20 +176,43 @@ struct MemoryPageContent: View {
         case .extractModel: extractModelRow
         case .writeBudget: writeBudgetRow
         case .complexity: complexityRow
+        case .ccMemorySync: CCMemorySyncCard()
         case .pending: pendingRow
         case .audit: auditRow
         case .trash: trashRow
         case .openWindow: openWindowRow
-        case .catalog:
-            memSwitchRow("目录式注入", "命中记忆只注一行目录，细节按需取回", $memInjectCatalog)
-                .searchAnchor("leaf-mem-catalog")
+        case .everyRound: recallGroup("每轮都带的")
+        case .automatic: recallGroup("自动想起 · 聊到了才带").searchAnchor("leaf-mem-inject")
+        case .browse: recallGroup("翻记忆 · \(assistantName)自己翻")
+        case .seen: recallGroup("看到了什么")
+        case .oldFragments: recallGroup("── 旧碎片记忆（整理完一起退）──")
+        case .archiveTrigger:
+            SettingsNavRow(.memoryArchiveTrigger) {
+                ArchiveTriggerPage()
+            } label: {
+                HStack(spacing: 10) {
+                    rowLabel("档案触发", "聊到哪页带哪页")
+                    Toggle("", isOn: tuningSwitch(\.archiveTriggerEnabled))
+                        .labelsHidden()
+                        .tint(Theme.branchIndicator)
+                }
+            }
+            .searchAnchor("leaf-mem-archivetrigger")
+        case .maximumPages:
+            LimitStepper(title: "一轮最多几页", value: "\(recallTuning.maximumPages) 页",
+                         number: Binding(get: { recallTuning.maximumPages }, set: { value in
+                             var latest = RecallTuningStore.load(profileId: profileId)
+                             latest.maximumPages = value
+                             RecallTuningStore.save(latest, profileId: profileId)
+                             refreshRecallSettings()
+                         }), range: 1...20)
+                .searchAnchor("leaf-mem-maximumpages")
+        case .cooldown:
+            memSwitchRow("冷却", "带了你没接茬就先停几句", tuningSwitch(\.cooldownEnabled))
+                .searchAnchor("leaf-mem-cooldown")
         case .recall:
             DisclosureModeRow(kind: .recall, fontSize: Theme.F.body, valueSize: Theme.F.secondary)
-        case .feedback:
-            if recallModeRaw != DisclosureMode.hidden.rawValue {
-                memSwitchRow("召回反馈", "卡片上显示点赞点踩，点了会调整这条记忆的权重", $memRecallFeedback)
-                    .searchAnchor("leaf-mem-feedback")
-            }
+                .searchAnchor("leaf-mem-recall")
         case .injectBudget: injectBudgetRow
         case .injectFull:
             memSwitchRow("全量注入", "不筛选，全部注入", $memInjectFull)
@@ -195,8 +225,17 @@ struct MemoryPageContent: View {
             memSwitchRow("关联扩展", "命中一条顺带它的关联记忆", $memInjectGraph)
                 .searchAnchor("leaf-mem-injectgraph")
         case .convHistory:
-            memSwitchRow("对话历史搜索", "\(assistantName)可以搜旧对话原话和记忆（带出处）", $memContentConvHistory)
-                .searchAnchor("leaf-mem-convhistory")
+            SettingsNavRow(.memoryRecallBrowse) {
+                RecallBrowsePage()
+            } label: {
+                HStack(spacing: 10) {
+                    rowLabel("对话历史搜索", "\(assistantName)可以搜旧对话原话和记忆（带出处）")
+                    Toggle("", isOn: $memContentConvHistory)
+                        .labelsHidden()
+                        .tint(Theme.branchIndicator)
+                }
+            }
+            .searchAnchor("leaf-mem-convhistory")
         default:
             if let id = row.writer { writerRow(id) }
         }
@@ -204,12 +243,12 @@ struct MemoryPageContent: View {
 
     // MARK: - 顶上
 
-    private var masterOn: Bool { memMaster && PermissionCenter.level(.memory) == .bypass }
+    private var masterOn: Bool { memMaster && PermissionCenter.defaultLevel(.memory) == .bypass }
 
     private var masterRow: some View {
         Toggle(isOn: Binding(
-            get: { PermissionCenter.level(.memory) == .bypass },
-            set: { PermissionCenter.setLevel($0 ? .bypass : .notAllowed, for: .memory); memMaster = $0 }
+            get: { PermissionCenter.defaultLevel(.memory) == .bypass },
+            set: { PermissionCenter.setDefaultLevel($0 ? .bypass : .notAllowed, for: .memory); memMaster = $0 }
         )) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("记忆系统总开关")
@@ -441,14 +480,14 @@ struct MemoryPageContent: View {
         }
     }
 
-    // MARK: - 注入 · 塞什么进 prompt
+    // MARK: - 回想 · 每轮都带的
 
     private var openWindowRow: some View {
-        let checked = [openA2, openA4, openB4, openC].filter { $0 }.count
+        let checked = openWindowChecked
         return SettingsNavRow(.memoryOpenWindow) {
             MemoryOpenWindowPage()
         } label: {
-            rowLabel("开窗口带什么", "每一轮带进去的 · 勾了 \(checked) 项")
+            rowLabel("开窗口带什么", "勾了 \(checked) 项 · 按楼层")
         }
         .searchAnchor("leaf-mem-openwindow")
     }
@@ -507,6 +546,27 @@ struct MemoryPageContent: View {
     }
 
     // MARK: - Helpers
+
+    private var profileId: String { profileManager?.currentProfile.id ?? "" }
+
+    private func refreshRecallSettings() {
+        recallTuning = RecallTuningStore.load(profileId: profileId)
+        openWindowChecked = MemoryOpenWindow.rows.filter { MemoryOpenWindow.isChecked($0, profileId: profileId) }.count
+    }
+
+    private func tuningSwitch(_ path: WritableKeyPath<RecallTuning, Bool>) -> Binding<Bool> {
+        Binding(get: { recallTuning[keyPath: path] }, set: { value in
+            var latest = RecallTuningStore.load(profileId: profileId)
+            latest[keyPath: path] = value
+            RecallTuningStore.save(latest, profileId: profileId)
+            refreshRecallSettings()
+        })
+    }
+
+    private func recallGroup(_ title: String) -> some View {
+        Text(title).font(m.caption).foregroundColor(Theme.textMuted)
+            .listRowSeparator(.hidden)
+    }
 
     /// UI 名字用楼层变量，不写死
     private var assistantName: String {
@@ -573,6 +633,7 @@ struct MemoryPageContent: View {
     // MARK: - Actions
 
     private func refresh() {
+        refreshRecallSettings()
         let profileId = profileManager?.currentProfile.id ?? ""
         let all = SwiftDataMemoryStore().listAll(profileId: profileId, context: modelContext)
         let active = all.filter { $0.supersededAt == nil }
@@ -586,7 +647,7 @@ struct MemoryPageContent: View {
                 // 待续单独存：第一次进来顺手迁移（先备份、严格读、补齐，时间轴条目不动）；迁不好照实说
                 var problem: String?
                 do { try TimelineDaily.preparePendingForEdit(profileId: profileId) } catch { problem = TimelineDaily.pendingProblem(error) }
-                return (SelfMemoryStore.list(profileId: profileId).filter { !$0.isActive }.count, PendingStore.load(profileId: profileId), problem)
+                return (SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId), checkPath: AppPaths.checked).filter { !$0.isActive }.count, PendingStore.load(profileId: profileId, floorMemoryRoot: FileLibraryStore.memoryRoot(profileId: profileId)), problem)
             }.value
             guard profileId == profileManager?.currentProfile.id else { return }
             deletedSelfCount = n
@@ -596,3 +657,4 @@ struct MemoryPageContent: View {
         }
     }
 }
+

@@ -20,6 +20,7 @@ struct StickerPage: View {
     @State private var isImporting = false
     @State private var showFileImporter = false
     @State private var statusMessage: String? = nil
+    @AppStorage(MemeStore.lookAtImageKey) private var memeSendImageToModel = true
 
     var body: some View {
         SettingsSectionList(.list) {
@@ -36,6 +37,15 @@ struct StickerPage: View {
             BrushSettingsSection()
                 .listRowBackground(Theme.mainBg)
                 .listRowSeparator(.hidden)
+
+            Section("表情包") {
+                Toggle("AI 看原图", isOn: $memeSendImageToModel)
+                    .accessibilityIdentifier("meme-send-image-toggle")
+                Text("只在你发出表情包的那一轮把图给模型看；以后它只看名字和描述。模型不能看图时关掉。")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+            }
+            .listRowBackground(Theme.mainBg)
 
             Section("贴纸数据") {
                 Text("导出包含贴纸资产（图片+描边）和画布布局（位置/旋转/缩放）。导入后贴纸归位。")

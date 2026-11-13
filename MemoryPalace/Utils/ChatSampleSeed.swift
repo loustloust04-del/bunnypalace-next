@@ -73,8 +73,8 @@ enum ChatSampleSeed {
         }
         assistant.setRecallHits(hits)
         _ = node("sample-next", "user", "继续展示部分报错、完整报错和系统通知。", "sample-tools", ["sample-partial"])
-        _ = node("sample-partial", "assistant", "这段正文在报错后仍然保留。\n\n⚠️ 示例：请求超时，错误在气泡外居中显示。", "sample-next", ["sample-full-error"])
-        _ = node("sample-full-error", "assistant", "⚠️ 示例：服务暂时不可用。", "sample-partial", ["sample-notice"])
+        _ = node("sample-partial", "assistant", "这段正文在报错后仍然保留。\n\n" + ChatSystemMessage.errorLine("示例：请求超时，错误在气泡外居中显示。"), "sample-next", ["sample-full-error"])
+        _ = node("sample-full-error", "assistant", ChatSystemMessage.errorLine("示例：服务暂时不可用。"), "sample-partial", ["sample-notice"])
         _ = node("sample-notice", "assistant", "（已停止）", "sample-full-error", ["sample-ask"])
         let ask = ChatCard.ask(AskCard(id: "q-demo", question: "示例密码卡：请只填随意的测试文本", secure: true))
         _ = node("sample-ask", "assistant", "点绿色的「填写」体验输入面板；填完后按钮变为「修改」。请勿填真实密码。\n\n" + ask.blockText + "\n\n向上滑可看工具与召回。到设置 → 外观 → 消息显示，分别切换工具和召回的行内／弹出模式。", "sample-notice", [])

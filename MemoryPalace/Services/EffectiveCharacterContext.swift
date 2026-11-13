@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// 有效角色 / 身份上下文（卡库 ③b 轻量版，plan §3.5）：当前楼层的角色名 + 用户名（persona 名）。
@@ -15,7 +16,7 @@ struct EffectiveCharacterContext: Equatable {
     }
 
     /// 楼层版：`{{user}}` 取 Profile.userName，空了退回 @AppStorage("userName")，再空「你」
-    init(profile: Profile, defaults: UserDefaults = .standard) {
+    init(profile: Profile, defaults: UserDefaults = MemoryReadEnvironment.defaults) {
         let user = profile.userName.isEmpty ? (defaults.string(forKey: "userName") ?? "") : profile.userName
         self.init(charName: profile.assistantName, userName: user)
     }

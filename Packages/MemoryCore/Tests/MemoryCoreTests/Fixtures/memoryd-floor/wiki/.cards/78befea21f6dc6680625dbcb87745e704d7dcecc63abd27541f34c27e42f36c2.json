@@ -1,0 +1,22 @@
+{
+  "path": "memory/cc/seedlab-001.md",
+  "version": "8c20f7454bf168f3423a7211f340dde7e0b6a74b0ea57b9a5819ccbf48bd395f",
+  "name": "岚舟的码头写生",
+  "layer": "CC",
+  "title": "草图要点卡",
+  "gist": "码头旧草图",
+  "mentions": [
+    {
+      "name": "草图",
+      "group": "主题"
+    }
+  ],
+  "aboutUser": false,
+  "group": "主题",
+  "when": [],
+  "model": "fixture",
+  "madeAt": 1700000000,
+  "run": {
+    "path": "seedlab/fixture"
+  }
+}

@@ -11,8 +11,8 @@ final class ToolDrawerTests: XCTestCase {
 
     override func setUp() async throws {
         savedPerm = permKeys.map { UserDefaults.standard.object(forKey: $0) }
-        PermissionCenter.setLevel(.bypass, for: .toolsMaster)
-        PermissionCenter.setLevel(.bypass, for: .fileLibrary)
+        PermissionCenter.setDefaultLevel(.bypass, for: .toolsMaster)
+        PermissionCenter.setDefaultLevel(.bypass, for: .fileLibrary)
     }
 
     override func tearDown() async throws {
@@ -64,7 +64,7 @@ final class ToolDrawerTests: XCTestCase {
     }
 
     func testDrawerCannotOverrideUpstreamGate() {
-        PermissionCenter.setLevel(.notAllowed, for: .fileLibrary)
+        PermissionCenter.setDefaultLevel(.notAllowed, for: .fileLibrary)
         let c = ctx(drawer([(FileLibraryTools.Name.delete.rawValue, .inline)]))
         XCTAssertFalse(names(ToolRegistry.enabledDefinitions(c)).contains(FileLibraryTools.Name.delete.rawValue), "抽屉只收窄")
         XCTAssertEqual(ToolRegistry.availability(of: FileLibraryTools.Name.delete.rawValue, c), false)

@@ -1,3 +1,4 @@
+import MemoryCore
 import Foundation
 
 /// Kelivo 中间模型 → `ImportedConversationPayload`（#049）。

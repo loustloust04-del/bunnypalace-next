@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 @testable import 记忆花园
 
@@ -52,15 +53,46 @@ final class MainThreadIOBudgetTests: XCTestCase {
         guard !pid.isEmpty else { return }
         let pid = pid
         self.pid = ""
+        // harness.tearDown 的 WikiInjectionCache.invalidate() 给本楼层排了后台重建（150ms 后 WikiStore → memoryRoot 建 memory/）。
+        // 不等它读完就删，删到一半被建目录 → removeItem 513 / EPERM（大库删得久才撞上）。等它这一代建完再删
+        _ = try? await WikiInjectionCache.shared.warm(pid, WikiInjectionCache.source(profileId: pid))
         let floors = await Task.detached {
             Set([FileLibraryStore.libraryRoot(profileId: pid), FileLibraryStore.memoryRoot(profileId: pid)]
                 .map { $0.deletingLastPathComponent() })
         }.value
         for floor in floors where FileManager.default.fileExists(atPath: floor.path) {
-            try FileManager.default.removeItem(at: floor)
+            do { try FileManager.default.removeItem(at: floor) } catch { Self.removeOneByOne(floor, error) }
         }
         FileLibraryStore.forgetSlug(profileId: pid)
         FileLibraryStore.ListCache.forget(profileId: pid)
+    }
+
+    /// 整层删不掉：深度优先逐个删，第一个删不掉的打一行诊断（路径 / 错误 / 本项和上级属性）后留下，不判红
+    private static func removeOneByOne(_ floor: URL, _ first: Error) {
+        let fm = FileManager.default
+        func err(_ e: Error) -> String {
+            let ns = e as NSError
+            let u = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+            return "\(ns.domain) \(ns.code) underlying=\(u.map { "\($0.domain) \($0.code)" } ?? "-")"
+        }
+        func attrs(_ url: URL) -> String {
+            guard let a = try? fm.attributesOfItem(atPath: url.path) else { return "取不到属性" }
+            let perm = (a[.posixPermissions] as? NSNumber).map { String($0.intValue, radix: 8) } ?? "?"
+            return "type=\((a[.type] as? FileAttributeType)?.rawValue ?? "?") perm=\(perm) owner=\(a[.ownerAccountName] as? String ?? "?")"
+                + " immutable=\(a[.immutable] as? Bool ?? false) appendOnly=\(a[.appendOnly] as? Bool ?? false)"
+        }
+        func remove(_ url: URL) -> Bool {
+            let type = (try? fm.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType
+            if type == FileAttributeType.typeDirectory, let kids = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil) {
+                for kid in kids where !remove(kid) { return false }
+            }
+            do { try fm.removeItem(at: url); return true } catch {
+                print("[budget-cleanup] 删不掉 \(url.path)：\(err(error)) · 本项 \(attrs(url)) · 上级 \(attrs(url.deletingLastPathComponent()))")
+                return false
+            }
+        }
+        print("[budget-cleanup] 整层删失败 \(floor.path)：\(err(first))，改逐个删")
+        if !remove(floor) { print("[budget-cleanup] 留下 \(floor.path)，下次 mac-budget 开跑前清") }
     }
 
     // MARK: - 夹具
@@ -89,7 +121,7 @@ final class MainThreadIOBudgetTests: XCTestCase {
             for i in 0..<size.anniversaries {
                 try put(root.appendingPathComponent("calendar/anniversaries/budget-\(i).json"), "{}")
             }
-            let selfDir = SelfMemoryStore.directory(profileId: pid)
+            let selfDir = SelfMemoryStore.directory(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), checkPath: AppPaths.checked)
             for i in 0..<size.selfMemories {
                 try put(selfDir.appendingPathComponent("budget-\(i).md"), "---\nname: budget-\(i)\ntype: user\n---\n自记 \(i)")
             }

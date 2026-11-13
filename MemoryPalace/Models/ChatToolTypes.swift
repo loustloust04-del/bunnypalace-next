@@ -43,6 +43,10 @@ struct ToolTurn {
     var reasoning: ReasoningCapture? = nil
     /// 这一轮跟着工具调用一起说的正文（种子 checkpoint 存下来原样回灌；主聊天不填 = 老形状）
     var text: String? = nil
+    /// 回执之后、下一个工具回合之前：模型只回了字（没调工具）和随后补的提醒，按顺序接在回执后面（C3 整理 / 种子用；主聊天不填）
+    var followUps: [ToolFollowUp] = []
+    /// 这个回合最后一条回执上已经接过一条收尾提醒（CatalogAgent.remind 的 reply = nil 路径）：再来一条不再叠
+    var reminded = false
 
     /// 去掉当轮的思考 / redacted 块（预算收尾 tools 变了、思考块被拒重发那一次）。
     /// thinkingTokens 跟着清掉（不回传就不按输入计，同改前）；reasoning 不去：DeepSeek 预算收尾那次照样要回传
@@ -55,6 +59,15 @@ struct ToolTurn {
     }
 
     var thinkingBlockCount: Int { assistantContent?.filter(ReplyBlock.isThinking).count ?? 0 }
+}
+
+/// 工具回合之后的一来一回：assistant = 模型那段纯文字回复（原样；空 = 没说话，只发提醒），user = app 补的提醒
+struct ToolFollowUp: Equatable {
+    var reply: String
+    var note: String
+
+    /// 这段回复要不要发成一条 assistant 消息（空白不发：Anthropic 不收空 text 块）
+    var hasReply: Bool { !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 }
 
 /// Anthropic 一次回复里的一个内容块，原样（JSON 对象，plan-thinking §3.1）。

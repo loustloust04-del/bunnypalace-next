@@ -1,3 +1,4 @@
+import MemoryCore
 import XCTest
 import SwiftData
 @testable import 记忆花园
@@ -21,6 +22,9 @@ struct PromptScenario {
     var modelId: String? = nil
     /// 「思考过程」显示设置（决定发不发 thinking.display），隔离本机设置
     var thinkingDisplay: DisclosureMode = .inline
+    var secondUserMessage: String? = nil
+    /// 10-29：气泡对话（金样 G10 / 贴表情测试）
+    var bubbleMode = false
 }
 
 @MainActor
@@ -38,7 +42,7 @@ final class PromptRealPathHarness {
     private var budgetSnapshot: (enabled: Bool, isSet: Bool, budget: Double, spent: Double)?
     /// resetSpent 会把「已用从何时算起」挪到现在（账本校准按它算）；tearDown 放回原值
     private var savedSpentResetAt: Any?
-    private var savedVoiceEnabled: (() -> Bool)?
+    private var savedVoiceEnabled: ((String) -> Bool)?
     private var savedVoiceService: ((String) -> VoiceService?)?
     private var savedVoiceKey: ((String) -> String?)?
     private static let voiceServiceId = "xctest-voice-svc"
@@ -57,7 +61,8 @@ final class PromptRealPathHarness {
         self.preset = preset
     }
 
-    static func make(_ s: PromptScenario) async throws -> PromptRealPathHarness {
+    static func make(_ s: PromptScenario,
+                     beforeSecondUserMessage: ((PromptRealPathHarness) async throws -> Void)? = nil) async throws -> PromptRealPathHarness {
         // 文件清单缓存是进程级的：每个场景从干净的清单开始（前一个场景的附件已被删掉）
         FileLibraryStore.ListCache.forget(profileId: s.profileId)
         // #089〔状态〕第一行是「现在」：钉住时刻和时区（金样里有时区名，不随录制机器变）
@@ -91,7 +96,7 @@ final class PromptRealPathHarness {
                                                     toolsSupported: s.cardToolsSupported))
         providerManager.setApiKey("test-key", for: credentialId)
         h.credentialIds.append(credentialId)
-        try await h.buildConversation(s)
+        try await h.buildConversation(s, beforeSecondUserMessage: beforeSecondUserMessage)
         if s.memoryFixtures { try h.seedMemoryFixtures() }
         return h
     }
@@ -135,14 +140,24 @@ final class PromptRealPathHarness {
         if s.healthWeightAskOnceAllowed {
             setDefault(PermissionDomain.healthWeight.storageKey, PermissionLevel.askOnce.rawValue)
         }
+        // atrium P3⑤ 档位按层：本机单独给哪层设过也不影响金样（层恒空 = 全按上面的默认）
+        setDefault(PermissionCenter.floorsKey, nil)
+        // atrium P3⑥ App 装卸按层：同上，本机单独给哪层装卸过也不影响金样
+        setDefault(Page2Apps.floorsKey, nil)
+        // ⑥a 起 App 没装 = 对应域不允许：默认装没装也钉成内置表（文件库 / 推特 / 健康 / 交易 / 话题盒都装着），本机右栏关过也不影响金样
+        setDefault(RightPanelToolManager.storageKey, nil)
         setDefault("mem_master", true)
         setDefault("mem_content_summary", true)
+        setDefault("mem_content_heartvoice", false)
         // v5【开窗口】A2 / A4 / B4 + B4 写入：钉成没写过（= 今天的值），本机设置过也不影响金样
         setDefault(MemoryOpenWindow.a2Key, nil)
         setDefault(MemoryOpenWindow.a4Key, nil)
         setDefault(MemoryOpenWindow.b4Key, nil)
         // C 10-16 起没写过 = 不勾；金样代表「勾着 C 的老用户」，钉成 true（没写过 = 不带由 OpenWindowInjectionTests 锁）
         setDefault(MemoryOpenWindow.cKey, true)
+        setDefault(MemoryOpenWindowStore.storageKey, nil)
+        setDefault(RecallTuningStore.storageKey, nil)
+        RecallTuningStore.save(RecallTestTuning.make(), profileId: s.profileId)
         setDefault("mem_write_b4", nil)
         // 时间轴（A4）开着：注入时间轴 + 下发 pending_notes（金样录的就是开着的样子，钉死不吃本机偏好）
         setDefault("mem_content_timeline", true)
@@ -170,7 +185,7 @@ final class PromptRealPathHarness {
         savedVoiceEnabled = VoiceMessageWriter.proactiveEnabledProvider
         savedVoiceService = VoiceMessageWriter.serviceProvider
         savedVoiceKey = VoiceMessageWriter.serviceKeyProvider
-        VoiceMessageWriter.proactiveEnabledProvider = { s.voiceHint }
+        VoiceMessageWriter.proactiveEnabledProvider = { _ in s.voiceHint }
         // 楼层挂一个 ElevenLabs 服务（认标签 → 标签版文案）
         VoiceMessageWriter.serviceProvider = { id in
             id == Self.voiceServiceId ? VoiceService(id: id, name: "xctest", kind: .elevenLabs) : nil
@@ -179,9 +194,10 @@ final class PromptRealPathHarness {
     }
 
     /// 历史 u1(带图)/a1/u2/a2 + 记忆 + 三本世界书 + 全局条目 + 文件夹说明 + 写作风格（+ 场景开关）
-    private func buildConversation(_ s: PromptScenario) async throws {
+    private func buildConversation(_ s: PromptScenario,
+                                   beforeSecondUserMessage: ((PromptRealPathHarness) async throws -> Void)?) async throws {
         let vm = viewModel
-        vm.startDraftConversation(profileId: profile.id)
+        vm.startDraftConversation(profileId: profile.id, displayMode: s.bubbleMode ? .bubble : .article)
         let conv = try XCTUnwrap(vm.selectedConversation)
         conv.memoryEnabled = s.memoryEnabled
         conv.selectedModelId = model.id
@@ -226,7 +242,8 @@ final class PromptRealPathHarness {
                                      providerManager: providerManager, context: context, attachments: [img]))
         await waitForTurn()
         try XCTUnwrap(vm.currentPath.last { $0.role == "assistant" }).content = "回复一"
-        XCTAssertTrue(vm.sendMessage("第二条", model: model, profile: profile, preset: preset,
+        try await beforeSecondUserMessage?(self)
+        XCTAssertTrue(vm.sendMessage(s.secondUserMessage ?? "第二条", model: model, profile: profile, preset: preset,
                                      providerManager: providerManager, context: context))
         await waitForTurn()
         let a2 = try XCTUnwrap(vm.currentPath.last { $0.role == "assistant" })
@@ -265,9 +282,14 @@ final class PromptRealPathHarness {
         }
         credentialIds.forEach { providerManager.removeCredential(id: $0) }
         MemoryInjectionMeter.clear(profileId: profile.id)
+        if CatalogRecallIndexer.shared.status(profileId: profile.id).state != .empty {
+            CatalogRecallIndexer.shared.deleteProfile(profile.id)
+            try? await CatalogRecallIndexer.shared.waitUntilIdle(profileId: profile.id)
+        }
         fixtureFiles.forEach { try? FileManager.default.removeItem(at: $0) }
         // C 档案快照是进程级缓存：删了夹具的 wiki 要作废，不然下一个场景（同一个测试楼层）还拿着旧快照
-        WikiInjectionCache.shared.invalidate()
+        // 没有记忆文件要清理时不作废：全局重建会复活已删的测试楼层，和下一份夹具 seed 争写 slug 映射。
+        if !fixtureFiles.isEmpty { WikiInjectionCache.shared.invalidate() }
         MemoryClock.fixedForTests = nil
         if let tz = Self.savedTimeZone { NSTimeZone.default = tz }
         let d = UserDefaults.standard
@@ -329,7 +351,7 @@ final class PromptRealPathHarness {
             seg(.rolling, "挤出视野的一段", at(9, 14), Self.goneNodeId),
             seg(.closeout, "老收尾段（不该注入）", at(10, 20), "xctest-closeout-last"),
             seg(.rolling, "和窗口原文重叠的一段（不该注入）", at(11, 9), u2.id),
-        ], updatedAt: at(11, 10)), profileId: profile.id)
+        ], updatedAt: at(11, 10)), memoryRoot: FileLibraryStore.memoryRoot(profileId: profile.id))
         fixtureFiles = [tl.appendingPathComponent("2026-10.md"), SessionSummaryStore.dir(root: root)]
     }
 

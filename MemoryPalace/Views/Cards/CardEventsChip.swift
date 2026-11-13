@@ -6,7 +6,7 @@ struct CardEventsChip: View {
     @State private var showing = false
 
     var body: some View {
-        let events = node.role == "user" ? node.cardEvents : []
+        let events = node.role == "user" ? node.visibleCardEvents : []
         if !events.isEmpty {
             Button { showing = true } label: {
                 HStack(spacing: 2) {

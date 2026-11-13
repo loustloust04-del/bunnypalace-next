@@ -126,7 +126,7 @@ struct RunRecordBlockSheet: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("复制")
                 }
-                RunRecordTextView(text: block.text, fontSize: typography.code)
+                LongTextView(text: block.text, fontSize: typography.code)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .id(block.id)
             }
@@ -433,30 +433,6 @@ final class RunRecordCodeLineCell: UICollectionViewCell {
     }
 }
 
-/// sheet 里的全文：UITextView TextKit 2，只读可选中，自己滚
-struct RunRecordTextView: UIViewRepresentable {
-    let text: String
-    let fontSize: CGFloat
-
-    func makeUIView(context: Context) -> UITextView {
-        let view = UITextView(usingTextLayoutManager: true)
-        view.isEditable = false
-        view.isSelectable = true
-        view.dataDetectorTypes = []
-        view.backgroundColor = .clear
-        view.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        view.textColor = UIColor(Theme.textPrimary)
-        view.textContainerInset = UIEdgeInsets(top: 4, left: 0, bottom: 24, right: 0)
-        view.alwaysBounceVertical = true
-        view.text = text
-        return view
-    }
-
-    func updateUIView(_ view: UITextView, context: Context) {
-        if view.font?.pointSize != fontSize { view.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular) }
-    }
-}
-
 // MARK: - mac：NSTableView（行高按宽度 + 字号算准）
 
 #else
@@ -714,34 +690,6 @@ final class RunRecordRowCell: NSView {
                            height: max(1, bounds.height - pad.top - pad.bottom))
         label.frame = frame
         card?.frame = frame
-    }
-}
-
-/// sheet 里的全文：NSTextView TextKit 2，只读可选中，自己滚
-struct RunRecordTextView: NSViewRepresentable {
-    let text: String
-    let fontSize: CGFloat
-
-    func makeNSView(context: Context) -> NSScrollView {
-        // 系统工厂建的就是 TextKit 2；离屏实测上屏 12ms，自己拼的那套 50ms
-        let scroll = NSTextView.scrollableTextView()
-        scroll.drawsBackground = false
-        if let textView = scroll.documentView as? NSTextView {
-            textView.isEditable = false
-            textView.isSelectable = true
-            textView.isRichText = false
-            textView.drawsBackground = false
-            textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
-            textView.textColor = NSColor(Theme.textPrimary)
-            textView.textContainerInset = NSSize(width: 0, height: 4)
-            textView.string = text
-        }
-        return scroll
-    }
-
-    func updateNSView(_ view: NSScrollView, context: Context) {
-        guard let textView = view.documentView as? NSTextView, textView.font?.pointSize != fontSize else { return }
-        textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
     }
 }
 #endif
