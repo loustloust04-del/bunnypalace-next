@@ -46,7 +46,7 @@ enum BunnyIntimacySync {
     }
 
     /// 本地展示文本
-    static func compose(_ r: Remote) -> String {
+    private static func compose(_ r: Remote) -> String {
         var parts: [String] = []
         if let m = r.milestone?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty { parts.append("✦ \(m)") }
         if let t = r.tags, !t.isEmpty { parts.append(t.map { "#\($0)" }.joined(separator: " ")) }

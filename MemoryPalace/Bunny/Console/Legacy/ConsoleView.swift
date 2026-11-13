@@ -864,7 +864,7 @@ struct MurmurFeedSheet: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
             .sheet(isPresented: Binding(get: { thinkingText != nil }, set: { if !$0 { thinkingText = nil } })) {
                 if let t = thinkingText {
-                    BunnyLegacyThinkingSheet(text: t)
+                    ThinkingSheet(text: t)   // [Bunny] 用上游同名页（大肥兔这页本就源自上游）
                 }
             }
         }
