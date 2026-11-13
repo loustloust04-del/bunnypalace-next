@@ -10,6 +10,7 @@ import SwiftData
 enum BunnyLaunchHooks {
     static func onHomeAppear(tools: RightPanelToolManager, profiles: ProfileManager?) {
         BunnyDesktopMigration.runIfNeeded(tools: tools)
+        if let profiles { BunnyVoiceResume.attach(profiles) }   // Caelum 语音条：回前台续跑卡住的「生成中」
         guard let profiles, BunnyGateway.isConfigured else { return }
         let context = profiles.container.mainContext
         let pid = profiles.currentProfile.id

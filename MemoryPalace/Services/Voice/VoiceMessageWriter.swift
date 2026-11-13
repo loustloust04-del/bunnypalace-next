@@ -191,12 +191,13 @@ enum VoiceMessageWriter {
     // MARK: - 生成
 
     @MainActor
-    private static func generate(script: String, nodeId: String, setup: VoiceSetup,
+    static func generate(script: String, nodeId: String, setup: VoiceSetup,   // [Bunny patch BP-009] 去 private：回前台续跑要调
                                  speaker: String?, voiceName: String?, context: ModelContext) {
         guard !inFlight.contains(nodeId) else { return }
         inFlight.insert(nodeId)
+        BunnyVoiceResume.begin(nodeId: nodeId, script: script)   // [Bunny patch BP-009] 后台执行时间 + 记下待续
         Task { @MainActor in
-            defer { inFlight.remove(nodeId) }
+            defer { inFlight.remove(nodeId); BunnyVoiceResume.end(nodeId: nodeId) }   // [Bunny patch BP-009]
             do {
                 let clip = try await synthesize(script, setup: setup)
                 // 收尾时 node 可能已被删/换楼层——fetch 不到就静默放弃（孤儿音频不落盘）

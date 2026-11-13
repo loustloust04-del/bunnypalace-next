@@ -1112,6 +1112,7 @@ enum ChatCard: Equatable {
     }
 
     static func parse(language: String, code: String) -> ChatCard? {
+        let code = BunnyLegacyCardShim.normalize(language: language, code: code)   // [Bunny patch BP-008] 大肥兔旧写法卡片
         guard let data = code.trimmingCharacters(in: .whitespacesAndNewlines).data(using: .utf8) else { return nil }
         let lang = language.lowercased()
         switch shortAliases.contains(lang) ? "card-" + lang : lang {
