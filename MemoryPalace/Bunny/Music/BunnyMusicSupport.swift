@@ -36,8 +36,9 @@ enum LivelineReporter {
 
 /// 桌面「音乐」App 的入口：给音乐面板挂上兔兔自己的容器
 struct BunnyMusicAppView: View {
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     var body: some View {
-        MusicPanelView().modelContainer(BunnyMusicStore.container)
+        MusicPanelView(profileId: profileManager?.currentProfile.id ?? "").modelContainer(BunnyMusicStore.container)
     }
 }
 #endif
