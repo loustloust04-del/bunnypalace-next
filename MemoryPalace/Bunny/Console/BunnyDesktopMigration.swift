@@ -8,16 +8,20 @@ import Foundation
 
 @MainActor
 enum BunnyDesktopMigration {
-    static let doneKey = "bunny.desktop.consoleIcon.v1"
-    static let toolId = "bunnyConsole"
+    /// 每个兔兔 App 各补一次（各自的完成标记）
+    static let apps: [(toolId: String, doneKey: String)] = [
+        ("bunnyConsole", "bunny.desktop.consoleIcon.v1"),
+        ("bunnyMusic", "bunny.desktop.musicIcon.v1"),
+    ]
 
     static func runIfNeeded(tools: RightPanelToolManager) {
-        guard !UserDefaults.standard.bool(forKey: doneKey) else { return }
-        Page2DesktopManager.shared.addToDesktop(toolId, tm: tools)   // 已在名单里则什么都不做
-        let home = Page2HomeStore.shared
-        guard let board = home.layout.boards.first else { return }   // 自由桌面未初始化：下次再来
-        let exists = home.layout.items.contains { $0.kind == "app" && $0.toolID == toolId }
-        if !exists, !home.insert(.app(toolId), capacity: board.capacityKey) { return }   // 落盘失败：下次再来
-        UserDefaults.standard.set(true, forKey: doneKey)
+        for app in apps where !UserDefaults.standard.bool(forKey: app.doneKey) {
+            Page2DesktopManager.shared.addToDesktop(app.toolId, tm: tools)   // 已在名单里则什么都不做
+            let home = Page2HomeStore.shared
+            guard let board = home.layout.boards.first else { return }   // 自由桌面未初始化：下次再来
+            let exists = home.layout.items.contains { $0.kind == "app" && $0.toolID == app.toolId }
+            if !exists, !home.insert(.app(app.toolId), capacity: board.capacityKey) { continue }   // 落盘失败：下次再来
+            UserDefaults.standard.set(true, forKey: app.doneKey)
+        }
     }
 }

@@ -18,6 +18,8 @@ enum BunnyGateway {
         KeychainStore.get(account: tokenAccount) ?? UserDefaults.standard.string(forKey: legacyTokenKey) ?? ""
     }
     static var isConfigured: Bool { !baseURL.isEmpty && !token.isEmpty }
+    /// 放进 ?key= 的口令（个别旧接口只认地址参数）
+    static var tokenQuery: String { token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "" }
 
     static func save(baseURL: String, token: String) {
         UserDefaults.standard.set(baseURL.trimmingCharacters(in: .whitespacesAndNewlines), forKey: baseURLKey)

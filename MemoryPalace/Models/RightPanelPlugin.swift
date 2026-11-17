@@ -32,6 +32,7 @@ final class RightPanelToolManager {
             "health", "reading", "vocab",
             "xiaoya",   // 小芽助手：创作门槛恰恰压在 lite 用户身上（plan-小芽助手 Q2）
             "bunnyConsole",   // [Bunny patch BP-007] Caelum's Console：lite 模式也要看得见
+            "bunnyMusic",     // [Bunny patch BP-007] 一起听
             "study",    // 学堂：点一下就能开课，lite 新用户也要看得见（plan-study-zero-engine P4）
             gardenOSToolId,   // 设置 App：lite 下看不见就找不到主屏设置（atrium P4 §1）
         ]
@@ -296,6 +297,7 @@ final class RightPanelToolManager {
         // 状态面板（plan-status-panel）：外部检修源 + 花园自检；两端都上，lite 白名单不加。23 是死亡天平
         RightPanelTool(id: "status",      name: "状态",    icon: "stethoscope",                    order: 24),
         RightPanelTool(id: "bunnyConsole", name: "Caelum's Console", icon: "house", order: 25),   // [Bunny patch BP-007]
+        RightPanelTool(id: "bunnyMusic", name: "一起听", icon: "music.note", order: 26),   // [Bunny patch BP-007] 大肥兔的听歌房
         ]
         #if PERSONAL_APPS
         tools += [

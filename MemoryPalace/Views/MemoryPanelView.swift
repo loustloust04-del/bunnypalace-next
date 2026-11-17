@@ -157,6 +157,10 @@ struct RightPanelToolContent: View {
             TwitterPanelView(profileId: profileManager?.currentProfile.id ?? "")
         case "bunnyConsole":   // [Bunny patch BP-007]
             BunnyConsoleView()
+        #if os(iOS)
+        case "bunnyMusic":     // [Bunny patch BP-007] 一起听
+            BunnyMusicAppView()
+        #endif
         case "study":
             StudyPanelView(viewModel: viewModel)
         case "status":

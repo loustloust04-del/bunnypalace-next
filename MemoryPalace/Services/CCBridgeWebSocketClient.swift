@@ -3007,6 +3007,10 @@ final class CCBridgeWebSocketClient: NSObject {
                     }
                 }
             }
+        #if os(iOS)
+        case "music_command":   // [Bunny patch BP-011] Caelum 放歌（一起听）
+            BunnyMusicDJ.handle(obj)
+        #endif
         case "ask_user_question":
             if let chatId = obj["chat_id"] as? String,
                let toolUseId = obj["tool_use_id"] as? String,
