@@ -49,7 +49,7 @@ final class HTTPServerTests: XCTestCase {
         let port = try server.start()
         let (html, response) = try await URLSession.shared.data(from: url("/", port: port))
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-        XCTAssertTrue(String(decoding: html, as: UTF8.self).contains("测试台"))
+        XCTAssertTrue(String(decoding: html, as: UTF8.self).contains("实验记录"))
         let (js, jsResponse) = try await URLSession.shared.data(from: url("/app.js", port: port))
         XCTAssertEqual((jsResponse as? HTTPURLResponse)?.statusCode, 200)
         XCTAssertTrue(String(decoding: js, as: UTF8.self).contains("/api/bench/sets"))

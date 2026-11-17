@@ -227,6 +227,128 @@ final class MemoryAuditTests: XCTestCase {
         XCTAssertNil(dead.reviewedAt, "已失效的不动")
     }
 
+    /// 改写手给的四项：subject / 标签去空白、空的当没有、标签去重保序；置信度夹 0–100、能清空；speaker 不认清单；算「留」不算改字
+    func testSetTraitsNormalizesAndMarksKept() {
+        let m = mem("麦芽怕打雷。", created: now, fragment: true)
+        m.subject = "麦芽"
+        m.speaker = "用户自述"
+        m.keywords = ["日常", "会变"]
+        m.confidence = 80
+        XCTAssertFalse(MemoryAudit.setTraits(m, subject: "麦芽", speaker: "用户自述", keywords: ["日常", "会变"], confidence: 80, now: now), "没变不改")
+        XCTAssertNil(m.reviewedAt)
+
+        XCTAssertTrue(MemoryAudit.setTraits(m, subject: "  岚舟 ", speaker: "星砚转述", keywords: [" 宠物 ", "", "日常", "宠物", "  "], confidence: 140, now: now))
+        XCTAssertEqual(m.subject, "岚舟")
+        XCTAssertEqual(m.speaker, "星砚转述", "不在那三个词里的也原样存")
+        XCTAssertEqual(m.keywords, ["宠物", "日常"], "去空白、去空、去重保序")
+        XCTAssertEqual(m.confidence, 100, "夹到 100")
+        XCTAssertEqual([m.updatedAt, m.reviewedAt], [now, now], "算「留」（同改类别）")
+        XCTAssertNil(m.userEditedAt, "不算改字")
+        XCTAssertEqual(m.content, "麦芽怕打雷。")
+
+        let later = now.addingTimeInterval(60)
+        XCTAssertTrue(MemoryAudit.setTraits(m, subject: " ", speaker: "", keywords: [" "], confidence: -3, now: later))
+        XCTAssertNil(m.subject, "空的当没有")
+        XCTAssertNil(m.speaker)
+        XCTAssertEqual(m.keywords, [])
+        XCTAssertEqual(m.confidence, 0, "夹到 0")
+        XCTAssertTrue(MemoryAudit.setTraits(m, subject: nil, speaker: nil, keywords: [], confidence: nil, now: later))
+        XCTAssertNil(m.confidence, "能清成空")
+        XCTAssertFalse(MemoryAudit.setTraits(m, subject: "  ", speaker: nil, keywords: [""], confidence: nil, now: later), "规整完和卡上一样 = 没变")
+
+        let dead = mem("删了的", created: now, trashed: true)
+        XCTAssertFalse(MemoryAudit.setTraits(dead, subject: "岚舟", speaker: nil, keywords: ["日常"], confidence: 50, now: now))
+        XCTAssertNil(dead.subject, "已失效的不动")
+    }
+
+    /// Edit 页一次交回：`Edit(memory)` 原样交回什么都不动（卡上本来不规整的老值也不顺手洗）；改哪项动哪项
+    func testApplyEdit() {
+        let m = mem("麦芽怕打雷。", created: now, fragment: true)
+        m.subject = " 麦芽"
+        m.keywords = ["日常", "日常"]
+        m.confidence = 300
+        XCTAssertFalse(MemoryAudit.apply(MemoryAudit.Edit(m), to: m, now: now), "原样交回不动")
+        XCTAssertEqual([m.subject, m.keywords.joined(separator: ","), m.confidence.map(String.init)], [" 麦芽", "日常,日常", "300"])
+        XCTAssertNil(m.reviewedAt)
+
+        var edit = MemoryAudit.Edit(m)
+        edit.text = "  "
+        edit.subject = "岚舟"
+        XCTAssertFalse(MemoryAudit.apply(edit, to: m, now: now), "空正文整个不存")
+        XCTAssertEqual(m.subject, " 麦芽")
+
+        edit = MemoryAudit.Edit(m)
+        edit.text = "麦芽怕打雷，要抱着。"
+        edit.category = "preference"
+        edit.importance = 5
+        edit.keywords = ["日常", "做法"]
+        XCTAssertTrue(MemoryAudit.apply(edit, to: m, now: now))
+        XCTAssertEqual([m.content, m.category], ["麦芽怕打雷，要抱着。", "preference"])
+        XCTAssertEqual(m.importance, 5)
+        XCTAssertEqual(m.keywords, ["日常", "做法"])
+        XCTAssertEqual(m.subject, " 麦芽", "没改的那几项不动")
+        XCTAssertEqual(m.confidence, 100, "她改过、没碰置信度 = 100")
+        XCTAssertEqual([m.userEditedAt, m.reviewedAt], [now, now])
+
+        edit = MemoryAudit.Edit(m)
+        edit.confidence = nil
+        XCTAssertTrue(MemoryAudit.apply(edit, to: m, now: now), "只改四项里的一项也算改了")
+        XCTAssertNil(m.confidence)
+    }
+
+    /// 粟粟 11-13「如果人改过就confidence=100」：改了正文或任何一项就是 100；她同一次里亲手填了置信度的以她填的为准；
+    /// 什么都没改不动；Approve / Delete / Restore 不算改过
+    func testHandEditSetsConfidenceTo100() {
+        func card(_ confidence: Int?) -> Memory {
+            let m = mem("岚舟在云桥城学陶艺。", created: now, fragment: true)
+            m.subject = "岚舟"
+            m.speaker = "用户自述"
+            m.keywords = ["陶艺"]
+            m.confidence = confidence
+            return m
+        }
+        /// 从卡上现在的值起一份草稿、改、存，返回存完的置信度
+        func saved(_ m: Memory, _ change: (inout MemoryAudit.Edit) -> Void) -> Int? {
+            var edit = MemoryAudit.Edit(m)
+            change(&edit)
+            MemoryAudit.apply(edit, to: m, now: now)
+            return m.confidence
+        }
+
+        XCTAssertEqual(saved(card(60)) { _ in }, 60, "什么都没改不动")
+        XCTAssertEqual(saved(card(60)) { $0.text = "岚舟在云桥城南岸学陶艺。" }, 100, "改正文")
+        XCTAssertEqual(saved(card(60)) { $0.category = "preference" }, 100, "改类别")
+        XCTAssertEqual(saved(card(60)) { $0.importance = 5 }, 100, "改重要度")
+        XCTAssertEqual(saved(card(60)) { $0.subject = "星砚" }, 100, "改说的是谁")
+        XCTAssertEqual(saved(card(60)) { $0.speaker = "AI 观察" }, 100, "改谁说的")
+        XCTAssertEqual(saved(card(60)) { $0.keywords = ["陶艺", "日常"] }, 100, "改标签")
+        XCTAssertEqual(saved(card(nil)) { $0.keywords = ["日常"] }, 100, "老卡没有置信度，她改了也是 100")
+        XCTAssertEqual(saved(card(100)) { $0.text = "岚舟学陶艺。" }, 100)
+
+        XCTAssertEqual(saved(card(60)) { $0.confidence = 85 }, 85, "只改置信度：她填多少是多少")
+        XCTAssertEqual(saved(card(60)) { $0.text = "岚舟学陶艺。"; $0.confidence = 85 }, 85, "改了别的又亲手填了置信度：以她填的为准")
+        XCTAssertEqual(saved(card(60)) { $0.category = "goal"; $0.importance = 1; $0.keywords = []; $0.confidence = 30 }, 30)
+        XCTAssertEqual(saved(card(60)) { $0.text = "岚舟学陶艺。"; $0.confidence = 250 }, 100, "她填的照旧夹到 0–100")
+        XCTAssertNil(saved(card(60)) { $0.text = "岚舟学陶艺。"; $0.confidence = nil }, "她亲手清空的照她的")
+        XCTAssertEqual(saved(card(60)) { $0.text = "岚舟学陶艺。"; $0.confidence = 60 }, 100, "置信度和原来一样 = 没碰")
+
+        let m = card(60)
+        MemoryAudit.keep([m], now: now)
+        MemoryAudit.trash([m], now: now)
+        MemoryAudit.restore([m])
+        XCTAssertEqual(m.confidence, 60, "Approve / Delete / Restore 不算改过")
+        MemoryAudit.setCategory(m, m.category, now: now)
+        XCTAssertTrue(MemoryAudit.editText(m, m.content, now: now))
+        XCTAssertFalse(MemoryAudit.setImportance(m, 3, now: now))
+        XCTAssertEqual(m.confidence, 60, "值没变的单项动作也不算")
+        XCTAssertTrue(MemoryAudit.setTraits(m, subject: "岚舟", speaker: "用户自述", keywords: ["陶艺", "日常"], confidence: 60, now: now))
+        XCTAssertEqual(m.confidence, 100, "不走 Edit 页、单改四项里别的也一样")
+
+        let dead = card(60)
+        dead.supersededAt = now
+        XCTAssertEqual(saved(dead) { $0.text = "岚舟学陶艺。" }, 60, "已失效的整个不动")
+    }
+
     // MARK: - 牌堆
 
     /// 压住的那张永远第一（改完不匹配筛选 / 已经算「留」也不走）；新写进来的排在它后面；过掉的不再出
@@ -249,6 +371,45 @@ final class MemoryAuditTests: XCTestCase {
         // 过掉的不出；过掉的不再压住
         XCTAssertEqual(MemoryAudit.deck(rows: rows2, all: all2, state: .unreviewed, top: nil, passed: [late.id]).map(\.content), ["甲", "丙"])
         XCTAssertEqual(MemoryAudit.deck(rows: rows2, all: all2, state: .unreviewed, top: b.id, passed: [b.id]).map(\.content), ["新来的", "甲", "丙"])
+    }
+
+    /// Draft 里 Skip：这张原样留在 Draft（不算 Approve、一个字段不动），这一轮牌堆不再出；Undo 放回最上面；重置牌堆后又从头出
+    func testDraftSkipLeavesCardInDraft() throws {
+        let a = mem("甲", created: now), b = mem("乙", created: now.addingTimeInterval(-60))
+        let all = [a, b]
+        let rows = { MemoryAudit.apply(all, filter: MemoryAudit.Filter(), state: .unreviewed, now: self.now) }
+        let ui = MemoryAuditViewState()
+        ui.resetDeck(rows: rows())
+        let deck = { MemoryAudit.deck(rows: rows(), all: all, state: .unreviewed, top: ui.topId, passed: ui.passed).map(\.content) }
+        XCTAssertEqual(deck(), ["甲", "乙"])
+
+        let before = MemoryAudit.Fields(a)
+        let skip = MemoryAudit.DeckAction(profileId: a.profileId, generation: ui.deckGeneration, id: a.id, kind: .pass)
+        XCTAssertTrue(MemoryAudit.canCommit(skip, profileId: a.profileId, generation: ui.deckGeneration, target: a))
+        // 页面 commit(.pass) 做的三件事
+        ui.passed.insert(a.id)
+        ui.topId = nil
+        ui.lastAction = MemoryAudit.Undo(id: a.id, kind: .passed)
+        XCTAssertEqual(deck(), ["乙"], "跳过的这一轮不再出")
+        XCTAssertEqual(MemoryAudit.Fields(a), before, "一个字段不动")
+        XCTAssertEqual(MemoryAudit.state(of: a), .unreviewed, "还在 Draft，不算 Approve")
+        XCTAssertEqual(rows().map(\.content), ["甲", "乙"], "List 里照旧看得到")
+
+        // Undo（页面 undoTapped 的那一支）：从过掉的里拿出来、压回最上面，不碰库
+        let u = try XCTUnwrap(ui.lastAction)
+        XCTAssertTrue(MemoryAudit.canUndo(u, in: all))
+        XCTAssertFalse(MemoryAudit.undo(u, in: all), "过掉的不碰库")
+        ui.passed.remove(u.id)
+        ui.lastAction = nil
+        ui.topId = u.id
+        XCTAssertEqual(deck(), ["甲", "乙"])
+
+        // 两张都跳过 → 这一叠看完；换段回来（重置牌堆）又从头出
+        ui.passed = [a.id, b.id]
+        ui.topId = nil
+        XCTAssertEqual(deck(), [])
+        ui.resetDeck(rows: rows())
+        XCTAssertEqual(deck(), ["甲", "乙"])
     }
 
     /// 压住的那张离开了这一段（别处删了 / 彻底删了 / 在「删了」里恢复了）就松开
@@ -303,13 +464,13 @@ final class MemoryAuditTests: XCTestCase {
         XCTAssertEqual(byId[.recall]?.isOpen, true, "召回测试台已点亮")
         XCTAssertEqual(byId[.recall]?.placeholder, "")
         XCTAssertNotNil(byId[.recall]?.pulse)
-        for s in all { XCTAssertFalse(s.name.isEmpty || s.icon.isEmpty || s.note.isEmpty, "\(s.id) 缺名字 / 图标 / 小字") }
+        for s in all { XCTAssertFalse(s.name.isEmpty || s.icon.isEmpty, "\(s.id) 缺名字 / 图标") }
     }
 
     /// 方块现场数字：有数写数，没事写一句状态
     func testAuditStationPulses() {
-        XCTAssertEqual(AuditStation.deskPulse(unreviewed: 12), AuditStationPulse(figure: "12", label: "没看过"))
-        XCTAssertEqual(AuditStation.deskPulse(unreviewed: 0), AuditStationPulse(figure: nil, label: "都看过了"))
+        XCTAssertEqual(AuditStation.deskPulse(unreviewed: 12), AuditStationPulse(figure: "12", label: "Draft"), "11-15：方块只留数字「12 Draft」")
+        XCTAssertEqual(AuditStation.deskPulse(unreviewed: 0), AuditStationPulse(figure: "0", label: "Draft"))
         XCTAssertEqual(AuditStation.wikiPulse(pending: 3, unread: 0, pages: 9), AuditStationPulse(figure: "3", label: "待批"))
         XCTAssertEqual(AuditStation.wikiPulse(pending: 3, unread: 2, pages: 9), AuditStationPulse(figure: "3", label: "待批 · 2 待阅"),
                        "两样都有就两样都写")
@@ -555,5 +716,153 @@ final class MemoryAuditTests: XCTestCase {
 
         let crossFloor = MemoryAudit.TrashSnapshot(profileId: pid, ids: [other.id])
         XCTAssertTrue(MemoryAudit.trashTargets(crossFloor, in: [other]).isEmpty, "不是快照那层楼的不删")
+    }
+
+    /// 11-15：牌堆卡上的灰小字收进 chip（和详情页同一套写法）：没有的不出；标签最多三个，多的写 +N；类别当第一个标签、「事实」不出
+    func testChipTexts() {
+        XCTAssertEqual(MemoryChipText.about(" 麦芽 "), "About 麦芽")
+        XCTAssertNil(MemoryChipText.about(" "))
+        XCTAssertEqual(MemoryAuditTraits.fromChip("用户自述", assistant: "星砚"), "From you")
+        XCTAssertEqual(MemoryAuditTraits.fromChip("AI 观察", assistant: "星砚"), "星砚 noticed")
+        XCTAssertEqual(MemoryChipText.sure(80), "80% sure")
+        XCTAssertNil(MemoryChipText.sure(nil))
+        XCTAssertEqual(MemoryChipText.importance(3), "Importance 3")
+        XCTAssertEqual(MemoryChipText.tags(MemoryAuditTraits.shownTags(category: "context", keywords: ["陶艺", "近况"])), "#近况 #陶艺",
+                       "类别当第一个标签，同名的普通标签不再出一遍")
+        XCTAssertEqual(MemoryChipText.tags(MemoryAuditTraits.shownTags(category: "fact", keywords: ["陶艺"])), "#陶艺", "「事实」不当标签显示")
+        XCTAssertEqual(MemoryChipText.tags(["a", "b", "c", "d", "e"]), "#a #b #c +2")
+        XCTAssertNil(MemoryChipText.tags([]))
+    }
+
+    /// 11-13：From 托盘四档的名字；助手名走变量
+    func testFromLabels() {
+        XCTAssertEqual(MemoryAuditTraits.from("用户自述", assistant: "星砚"), "You")
+        XCTAssertEqual(MemoryAuditTraits.from("AI 观察", assistant: "星砚"), "星砚 noticed")
+        XCTAssertEqual(MemoryAuditTraits.from("AI 承诺", assistant: "岚舟"), "岚舟 promised")
+        XCTAssertNil(MemoryAuditTraits.from(" ", assistant: "星砚"))
+        XCTAssertEqual(MemoryAuditTraits.from("星砚转述", assistant: "星砚"), "星砚转述", "不认得的原样")
+        XCTAssertEqual(MemoryAuditTraits.fromChip("用户自述", assistant: "星砚"), "From you")
+        XCTAssertEqual(MemoryAuditTraits.fromChip("AI 观察", assistant: "星砚"), "星砚 noticed")
+    }
+
+    /// 11-13「旧的五个类别也是标签一种」：只是显示层，「事实」不出；一张卡只显示一个类别
+    func testCategoryShownAsTag() {
+        XCTAssertEqual(MemoryAuditTraits.shownTags(category: "context", keywords: [" 陶艺", "近况", "日常"]), ["近况", "陶艺", "日常"])
+        XCTAssertEqual(MemoryAuditTraits.shownTags(category: "fact", keywords: ["陶艺"]), ["陶艺"])
+        XCTAssertEqual(MemoryAuditTraits.categoryKey(forTag: "偏好"), "preference")
+        XCTAssertNil(MemoryAuditTraits.categoryKey(forTag: "事实"), "「事实」不当标签，加它就是普通标签")
+        XCTAssertNil(MemoryAuditTraits.categoryKey(forTag: "陶艺"))
+
+        // 加另一个类别名 = 换类别，标签不动
+        let swapped = MemoryAuditEditPage.adding("#目标", to: ["陶艺"], category: "context")
+        XCTAssertEqual(swapped.tags, ["陶艺"])
+        XCTAssertEqual(swapped.category, "goal")
+        let plain = MemoryAuditEditPage.adding("日常", to: ["陶艺"], category: "context")
+        XCTAssertEqual(plain.tags, ["陶艺", "日常"])
+        XCTAssertEqual(plain.category, "context")
+
+        // 去掉类别标签 = 存回「事实」，同名的普通标签一起去掉
+        let removed = MemoryAuditEditPage.removing("近况", from: ["陶艺", " 近况"], category: "context")
+        XCTAssertEqual(removed.tags, ["陶艺"])
+        XCTAssertEqual(removed.category, "fact")
+        let removedTag = MemoryAuditEditPage.removing("陶艺", from: ["陶艺", "日常"], category: "context")
+        XCTAssertEqual(removedTag.tags, ["日常"])
+        XCTAssertEqual(removedTag.category, "context")
+    }
+
+    /// Tags 托盘候选：库里的在前，库里没出现过的另几个类别补在后面；卡上显示着的不出；打了字只留含这段字的
+    func testTagSuggestionsIncludeCategories() {
+        let pool = ["日常", "近况", "陶艺"]
+        let all = MemoryAuditEditPage.tagSuggestions(pool, shown: ["近况"], typed: "")
+        XCTAssertEqual(Array(all.prefix(2)), ["日常", "陶艺"])
+        XCTAssertEqual(Set(all.dropFirst(2)), ["偏好", "关系", "目标"])
+        XCTAssertFalse(all.contains("事实"))
+        XCTAssertEqual(MemoryAuditEditPage.tagSuggestions(pool, shown: [], typed: "#陶"), ["陶艺"])
+    }
+
+    func testSubjectRankingAndSuggestions() {
+        let a = mem("x", created: now); a.subject = "岚舟"
+        let b = mem("x", created: now); b.subject = " 岚舟 "
+        let c = mem("x", created: now); c.subject = "星砚"
+        let d = mem("x", created: now, trashed: true); d.subject = "删掉的"
+        let e = mem("x", created: now); e.subject = " "
+        XCTAssertEqual(MemoryAuditEditPage.subjectRanking([a, b, c, d, e]), ["岚舟", "星砚"])
+        XCTAssertEqual(MemoryAuditEditPage.subjectSuggestions(["岚舟", "星砚"], typed: "岚舟", original: "岚舟"), ["星砚"], "没改过：全给，去掉填着的")
+        XCTAssertEqual(MemoryAuditEditPage.subjectSuggestions(["岚舟", "星砚"], typed: "星", original: "岚舟"), ["星砚"], "打了别的字：只留含这段字的")
+    }
+
+    // MARK: - Edit 页四项（11-13：About / From（原 Said by）/ Confidence / Tags 能改）
+
+    /// 候选标签：只数活着的卡、一张卡同一个只算一次、去空白；多→少，同数按字排；取前 limit 个
+    func testTagRankingCountsLiveCardsOnly() {
+        func card(_ tags: [String], trashed: Bool = false) -> Memory {
+            let m = mem("x", created: now, trashed: trashed)
+            m.keywords = tags
+            return m
+        }
+        let ms = [card(["麦芽", "云桥城"]), card([" 麦芽 ", "麦芽", "岚舟"]), card(["云桥城", "星砚"]),
+                  card(["麦芽"]), card(["删掉的", "删掉的"], trashed: true), card(["", " "]), card(["删掉的"], trashed: true)]
+        XCTAssertEqual(MemoryAuditEditPage.tagRanking(ms), ["麦芽", "云桥城", "岚舟", "星砚"])
+        XCTAssertEqual(MemoryAuditEditPage.tagRanking(ms, limit: 2), ["麦芽", "云桥城"])
+        XCTAssertEqual(MemoryAuditEditPage.tagRanking([]), [])
+
+        // 11-13：类别当标签算（「事实」不算），和同名普通标签在一张卡上只算一次
+        let ctx = card(["近况", "陶艺"])
+        ctx.category = "context"
+        let ctx2 = card([])
+        ctx2.category = "context"
+        XCTAssertEqual(MemoryAuditEditPage.tagRanking([ctx, ctx2, card(["陶艺"])]), ["近况", "陶艺"])
+    }
+
+    func testTagSuggestionsSkipTagsOnCard() {
+        let pool = ["麦芽", "云桥城", "岚舟", "星砚"]
+        XCTAssertEqual(MemoryAuditEditPage.suggestions(pool, excluding: [" 云桥城", "别的"]), ["麦芽", "岚舟", "星砚"])
+        XCTAssertEqual(MemoryAuditEditPage.suggestions(pool, excluding: [], limit: 2), ["麦芽", "云桥城"])
+        XCTAssertEqual(MemoryAuditEditPage.suggestions(pool, excluding: pool), [])
+    }
+
+    func testAddingTag() {
+        XCTAssertEqual(MemoryAuditEditPage.adding(" 岚舟 ", to: ["麦芽"]), ["麦芽", "岚舟"])
+        XCTAssertEqual(MemoryAuditEditPage.adding("##星砚", to: ["麦芽"]), ["麦芽", "星砚"], "打在前面的 # 去掉")
+        XCTAssertEqual(MemoryAuditEditPage.adding("麦芽", to: [" 麦芽 "]), [" 麦芽 "], "已经有的不加，原数组原样")
+        XCTAssertEqual(MemoryAuditEditPage.adding("  ", to: ["麦芽"]), ["麦芽"])
+        XCTAssertEqual(MemoryAuditEditPage.adding("#", to: []), [])
+    }
+
+    func testSpeakerOptionsKeepUnknownValue() {
+        let three: [String?] = [nil, "用户自述", "AI 观察", "AI 承诺"]
+        XCTAssertEqual(MemoryAuditEditPage.speakerOptions(current: nil), three)
+        XCTAssertEqual(MemoryAuditEditPage.speakerOptions(current: "AI 观察"), three)
+        XCTAssertEqual(MemoryAuditEditPage.speakerOptions(current: " "), three)
+        XCTAssertEqual(MemoryAuditEditPage.speakerOptions(current: "星砚转述"), three + ["星砚转述"], "不在三种里的原样多一项")
+        XCTAssertEqual(MemoryAuditTraits.origin("星砚转述", assistant: "星砚"), "星砚转述")
+    }
+
+    func testConfidenceInput() {
+        XCTAssertEqual(MemoryAuditEditPage.confidenceInput("8a5"), "85")
+        XCTAssertEqual(MemoryAuditEditPage.confidenceInput("12345"), "123")
+        XCTAssertEqual(MemoryAuditEditPage.confidenceInput("８５"), "", "全角数字不收")
+        XCTAssertNil(MemoryAuditEditPage.confidence(from: ""))
+        XCTAssertEqual(MemoryAuditEditPage.confidence(from: "085"), 85)
+        XCTAssertEqual(MemoryAuditEditPage.confidence(from: "250"), 100)
+        XCTAssertEqual(MemoryAuditEditPage.confidence(from: "0"), 0)
+    }
+
+    /// Edit 页什么都没碰：四项原样传回，卡不动；只改了标签：只动标签、算 Approve
+    func testEditPageDraftRoundTrip() {
+        let m = mem("岚舟住在云桥城", created: now)
+        m.subject = "岚舟"
+        m.speaker = "星砚转述"
+        m.keywords = ["云桥城", " "]
+        m.confidence = 70
+        XCTAssertFalse(MemoryAudit.apply(MemoryAudit.Edit(m), to: m, now: now))
+
+        var edit = MemoryAudit.Edit(m)
+        edit.keywords = MemoryAuditEditPage.adding("麦芽", to: edit.keywords)
+        XCTAssertTrue(MemoryAudit.apply(edit, to: m, now: now))
+        XCTAssertEqual(m.keywords, ["云桥城", "麦芽"])
+        XCTAssertEqual(m.speaker, "星砚转述", "不认得的 speaker 没碰")
+        XCTAssertEqual(m.confidence, 100, "只加了一个标签也是她改过")
+        XCTAssertNotNil(m.reviewedAt)
     }
 }

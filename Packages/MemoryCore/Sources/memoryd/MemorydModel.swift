@@ -33,6 +33,10 @@ struct MemorydModel: Sendable {
     var key: String
     var wire: Wire = .anthropic
     var maxTokens = MemorydModel.maxTokens
+    /// 等一次回复最多等多久（秒）。不带流式：模型想得久就是整段没动静
+    var timeout: TimeInterval = 300
+    /// Anthropic 接口：system 整段打缓存断点（同一段 system 反复用的调用才开；别的调用开了白付写缓存的钱）
+    var cacheSystem = false
     var transport: Transport = { try await URLSession.shared.data(for: $0) }
 
     var ref: MemoryBenchModelRef {
@@ -69,7 +73,7 @@ struct MemorydModel: Sendable {
     func request(system: String, user: String) throws -> URLRequest {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 300
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         var body: [String: Any] = ["model": modelId, "max_tokens": maxTokens]
         switch wire {
@@ -77,7 +81,11 @@ struct MemorydModel: Sendable {
             request.setValue(key, forHTTPHeaderField: "x-api-key")
             request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
             body["messages"] = [["role": "user", "content": user]]
-            if !system.isEmpty { body["system"] = system }
+            if !system.isEmpty {
+                body["system"] = cacheSystem
+                    ? [["type": "text", "text": system, "cache_control": ["type": "ephemeral"]] as [String: Any]]
+                    : system
+            }
         case .openai:
             request.setValue("Bearer " + key, forHTTPHeaderField: "authorization")
             var messages: [[String: String]] = []
@@ -97,6 +105,8 @@ struct MemorydModel: Sendable {
         struct Usage: Decodable {
             let input_tokens: Int?
             let output_tokens: Int?
+            let cache_creation_input_tokens: Int?
+            let cache_read_input_tokens: Int?
         }
         let content: [Block]
         let usage: Usage?
@@ -143,7 +153,9 @@ struct MemorydModel: Sendable {
             text = reply.content.filter { $0.type == "text" }.compactMap(\.text).joined()
             stop = reply.stop_reason
             if let input = reply.usage?.input_tokens, let output = reply.usage?.output_tokens {
-                usage = MemoryBenchUsage(input: input, output: output)
+                // 走了缓存时 input_tokens 只剩没进缓存的那截：读的、写的都算回输入里，账才对得上
+                usage = MemoryBenchUsage(input: input + (reply.usage?.cache_creation_input_tokens ?? 0) + (reply.usage?.cache_read_input_tokens ?? 0),
+                                         output: output)
             }
         case .openai:
             guard let reply = try? JSONDecoder().decode(OpenAIReply.self, from: data) else {

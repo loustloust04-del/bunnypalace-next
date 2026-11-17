@@ -30,7 +30,6 @@ final class CatalogSettingsTests: XCTestCase {
         XCTAssertTrue(MemoryWriterSettings.isOn(.c3, defaults: defaults))
         MemoryWriterSettings.set(.c3, false, defaults: defaults)
         XCTAssertFalse(MemoryWriterSettings.writes(.c3, defaults: defaults))
-        XCTAssertFalse(MemoryWriterSettings.switchable.contains(.c3), "复杂度滑条不动 C3")
     }
 
     func testCatalogDefaultsAndClamp() {
@@ -64,7 +63,7 @@ final class CatalogSettingsTests: XCTestCase {
 
     func testBudgetAndLedger() {
         XCTAssertTrue(WriteBudgetStore.kinds.contains(.catalog), "C3 算写入预算")
-        XCTAssertEqual(UsageKind.catalog.label, "整理编目")
+        XCTAssertEqual(UsageKind.catalog.label, "wiki 整理")
         XCTAssertEqual(MemoryWriterSpend.kind(.c3), .catalog)
         XCTAssertEqual(UsageKind(rawValue: "catalog"), .catalog)
     }

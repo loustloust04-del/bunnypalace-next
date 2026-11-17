@@ -64,6 +64,7 @@ final class RightPanelToolManager {
     /// 上次算生效值时的层设置 Data：别处（备份恢复）改了键才重算
     private var lastFloorsData: Data?
     private var floorsObserver: NSObjectProtocol?
+    private var webAppsObserver: NSObjectProtocol?
 
     /// 当前是否 pro 模式（macOS 没有 lite 模式，恒 true）。
     /// 监听 UserDefaults 变更保持可观察，切开关时 dock/桌面即时刷新。
@@ -95,6 +96,7 @@ final class RightPanelToolManager {
         let loaded = Self.decodedTools(defaults.data(forKey: Self.storageKey))
         self.defaultTools = loaded
         self.tools = loaded
+        parkPMBoardOnce()
         #if os(iOS)
         NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
@@ -114,10 +116,29 @@ final class RightPanelToolManager {
                 DispatchQueue.main.async { self?.recomputeIfFloorsChanged() }
             }
         }
+        webAppsObserver = NotificationCenter.default.addObserver(
+            forName: .webAppsDidChange, object: nil, queue: .main
+        ) { [weak self] _ in self?.recomputeTools() }
+        recomputeTools()
     }
 
     deinit {
         if let floorsObserver { NotificationCenter.default.removeObserver(floorsObserver) }
+        if let webAppsObserver { NotificationCenter.default.removeObserver(webAppsObserver) }
+    }
+
+    /// pmBoard 入口先停（plan-folder-floor §5 Q1，粟粟 11-16）：老存档里开着的关一次、清掉按人装的；
+    /// 界面代码留着，要回来在设置里把它重新打开。只跑一次，之后她自己开的不再动
+    private func parkPMBoardOnce() {
+        let key = "rightPanel.pmBoardParked.v1"
+        guard !defaults.bool(forKey: key) else { return }
+        defaults.set(true, forKey: key)
+        guard let idx = defaultTools.firstIndex(where: { $0.id == "pmBoard" }) else { return }
+        if !Page2Apps.overrides("pmBoard").isEmpty { Page2Apps.clearFloor("pmBoard") }
+        guard defaultTools[idx].isEnabled else { return }
+        defaultTools[idx].isEnabled = false
+        defaultTools[idx].isPinned = false
+        persist()
     }
 
     // MARK: - Enable / Disable（toolbar 移除 和 设置页 Toggle 统一入口）
@@ -135,7 +156,7 @@ final class RightPanelToolManager {
             defaultTools[idx].isPinned = enabled // 同步
             persist()
         case .floor(let profileId):
-            guard defaultTools.contains(where: { $0.id == id }) else { return }
+            guard defaultTools.contains(where: { $0.id == id }) || WebAppStore.appID(fromToolID: id) != nil else { return }
             Page2Apps.setFloor(enabled, for: id, profileId: profileId)
         }
         recomputeTools()
@@ -180,7 +201,7 @@ final class RightPanelToolManager {
     private func recomputeTools() {
         let floors = Page2Apps.floors()
         lastFloorsData = Page2Apps.defaults.data(forKey: Page2Apps.floorsKey)
-        let effective: [RightPanelTool] = defaultTools.map { tool in
+        let effective: [RightPanelTool] = (defaultTools + webAppTools()).map { tool in
             guard let activeProfileId, !Self.systemToolIds.contains(tool.id),
                   let installed = floors.stored(tool.id, profileId: activeProfileId) else { return tool }
             var t = tool
@@ -189,6 +210,19 @@ final class RightPanelToolManager {
             return t
         }
         if effective != tools { tools = effective }
+    }
+
+    /// 网页应用（plan-webapp-as-file）：这一层文件库里放到桌面的 html，接在内置表后面，不进 `rightPanelTools` 存档；只在 iPhone 花园桌面
+    private func webAppTools() -> [RightPanelTool] {
+        #if os(iOS)
+        guard let activeProfileId else { return [] }
+        let base = (defaultTools.map(\.order).max() ?? 0) + 1
+        return WebAppStore.storedApps(profileId: activeProfileId).enumerated().map { i, app in
+            RightPanelTool(id: app.toolID, name: app.title, icon: "globe", order: base + i)
+        }
+        #else
+        return []
+        #endif
     }
 
     private func recomputeIfFloorsChanged() {
@@ -318,7 +352,7 @@ final class RightPanelToolManager {
     /// 只进粟粟的 Debug 包：pmBoard = 手机上看 / 跟 Mac 上各 session 说话（plan-dev-subapp-v2，数据靠她 Mac 上的看板服务 4793）
     private static var debugTools: [RightPanelTool] {
         #if DEBUG
-        [RightPanelTool(id: "pmBoard", name: "pmBoard", icon: "person.3", order: 21)]
+        [RightPanelTool(id: "pmBoard", name: "pmBoard", icon: "person.3", isEnabled: false, order: 21)]
         #else
         []
         #endif
@@ -344,7 +378,9 @@ final class RightPanelToolManager {
          // 小芽助手：椭圆肖像（plan-小芽-v2 §3.4，template 随主题染色）
          RightPanelTool(id: "xiaoya", name: "小芽", icon: "xiaoya-cameo", order: 19),
          // gardenOS 设置（atrium P4）：系统 App，见 `systemToolIds`；order 接 status(24) 之后
-         RightPanelTool(id: gardenOSToolId, name: "设置", icon: "gearshape", order: 25)]
+         RightPanelTool(id: gardenOSToolId, name: "设置", icon: "gearshape", order: 25),
+         // 影院（plan-cinema-app V1）：看过的视频、续播；放映页用系统播放器 / 站方嵌入页
+         RightPanelTool(id: "cinema", name: "影院", icon: "film", order: 26)]
         #endif
     }
 }

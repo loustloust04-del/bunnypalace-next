@@ -3,16 +3,27 @@ import SwiftUI
 import UIKit
 import WebKit
 
-/// AI 在花园浏览器里动手（docs/plan-ai-browser-operate.md）：工具调用落到「正开着的那个花园浏览器」上，
+/// AI 在花园浏览器里动手（docs/plan-ai-browser-operate.md）：工具调用落到「最上面那个开着的浏览器」上
+/// （一起看小窗也算一个，花园浏览器盖上来就落到花园浏览器，关掉回到小窗；plan-chat-watch-together W3），
 /// 同时驱动叠在网页上的流光 / 箭头 / 写动作确认卡（`AIOperatorOverlay`）。
 @MainActor
 @Observable
 final class BrowserOperator {
     static let shared = BrowserOperator()
 
-    /// 正开着的那个浏览器（`GardenBrowserView` 出现时挂上、消失时摘掉）
-    private(set) weak var controller: MiniBrowserController?
-    private(set) var identity: BrowserIdentity = .main
+    /// 开着的浏览器，后挂上的在上面（`GardenBrowserView` 出现时挂上、消失时摘掉；一起看小窗开网页时挂上、关掉时摘掉）
+    private var mounts: [Mount] = []
+
+    private struct Mount {
+        weak var controller: MiniBrowserController?
+        let identity: BrowserIdentity
+        /// 盖住聊天（花园浏览器）；小窗不盖，聊天里的权限卡看得见
+        let covers: Bool
+    }
+
+    /// 最上面那个，AI 的动作落在它上面
+    var controller: MiniBrowserController? { mounts.last { $0.controller != nil }?.controller }
+    var identity: BrowserIdentity { mounts.last { $0.controller != nil }?.identity ?? .main }
 
     // MARK: 叠层状态
     /// AI 这一轮在用浏览器：流光亮着、底栏变淡
@@ -50,14 +61,22 @@ final class BrowserOperator {
 
     // MARK: 浏览器挂上 / 摘掉
 
-    func attach(_ controller: MiniBrowserController, identity: BrowserIdentity) {
-        self.controller = controller
-        self.identity = identity
+    /// 最近出现的挪到最上面（页 2 浏览器 app 翻回来、小窗换对话重开都算出现）
+    func attach(_ controller: MiniBrowserController, identity: BrowserIdentity, covers: Bool = true) {
+        let previous = self.controller
+        mounts.removeAll { $0.controller == nil || $0.controller === controller }
+        mounts.append(Mount(controller: controller, identity: identity, covers: covers))
+        if previous != nil, previous !== controller { leave() }
     }
 
     func detach(_ controller: MiniBrowserController) {
-        guard self.controller === controller else { return }
-        self.controller = nil
+        let wasTop = self.controller === controller
+        mounts.removeAll { $0.controller == nil || $0.controller === controller }
+        if wasTop { leave() }
+    }
+
+    /// 换了一个浏览器在上面：编号、箭头、没答的卡都作废
+    private func leave() {
         refs = [:]
         resolveConfirm(.deny)
         cursor = nil
@@ -66,8 +85,8 @@ final class BrowserOperator {
 
     func isOperating(_ controller: MiniBrowserController) -> Bool { active && self.controller === controller }
 
-    /// 有花园浏览器开着（盖在聊天上时聊天里的审批卡看不见，权限卡改出在浏览器里）
-    var hasOpenBrowser: Bool { controller != nil }
+    /// 有花园浏览器盖着聊天（聊天里的审批卡看不见，权限卡改出在浏览器里）；只开着一起看小窗不算
+    var hasOpenBrowser: Bool { mounts.last { $0.controller != nil }?.covers == true }
 
     func hasWriteGrant(conversationId: String, host: String) -> Bool {
         (defaults.dictionary(forKey: Self.writeGrantsKey)?[conversationId] as? [String])?.contains(host) == true
@@ -128,17 +147,32 @@ final class BrowserOperator {
         }
         if WebSearchSettings.shared.isBlocked(host: url.host()) { return ("这个网站在黑名单里，不能打开", true) }
         begin("打开 \(url.host() ?? raw)")
-        if let controller {
-            controller.load(url)
+        let previous = controller
+        let tabs = BrowserTabs.shared
+        if let previous, tabs.owns(previous), previous.webView.map(BrowserTabHost.isVisible) == true {
+            // 花园浏览器开着、看得见：新开一个标签页，不覆盖她正在看的那页（plan-browser-tabs §2）
+            tabs.open(url, identity: identity)
+            guard await waitForNewController(than: previous) else { return ("浏览器没能打开", true) }
+        } else if let previous, !tabs.owns(previous) {
+            // 最上面是一起看小窗：开在小窗里
+            previous.load(url)
+        } else if ChatWatch.shared.isOpen {
+            // 一起看小窗开着还没网页：开在小窗里
+            ChatWatch.shared.load(url)
+            guard await waitForNewController(than: previous) else { return ("小窗没能打开", true) }
         } else {
-            let current = BrowserIdentityStore.current()
-            guard GardenBrowser.presentForAI(url, identity: current) else { return ("浏览器没能打开", true) }
-            for _ in 0..<50 where controller == nil { try? await Task.sleep(for: .milliseconds(100)) }
-            guard controller != nil else { return ("浏览器没能打开", true) }
+            // 没有看得见的浏览器（page2 浏览器在后台也算没有）：新开一页、弹出来铺满
+            guard GardenBrowser.presentForAI(url, identity: BrowserIdentityStore.current()) else { return ("浏览器没能打开", true) }
+            guard await waitForNewController(than: previous) else { return ("浏览器没能打开", true) }
         }
         await waitStable()
         refs = [:]
         return (pageLine(), false)
+    }
+
+    private func waitForNewController(than previous: MiniBrowserController?) async -> Bool {
+        for _ in 0..<50 where controller == nil || controller === previous { try? await Task.sleep(for: .milliseconds(100)) }
+        return controller != nil && controller !== previous
     }
 
     func look() async -> Result {
@@ -244,7 +278,7 @@ final class BrowserOperator {
 
     private func notReady() -> Result { ("浏览器没开：先用 browser_open 打开一个网址", true) }
 
-    private func begin(_ what: String) {
+    func begin(_ what: String) {
         active = true
         status = what
     }
@@ -252,7 +286,9 @@ final class BrowserOperator {
     private func pageLine() -> String {
         let title = controller?.title ?? ""
         let url = controller?.url?.absoluteString ?? ""
-        return "现在这页：\(title.isEmpty ? "（无标题）" : title)　\(url)"
+        // 落在一起看小窗里时说清楚（11-12 Air 实测：模型以为找到的片「进不了小窗」，把链接甩给她贴）
+        let inWatch = controller === ChatWatch.shared.controller ? "（在一起看小窗里，她正看着）" : ""
+        return "现在这页：\(title.isEmpty ? "（无标题）" : title)　\(url)\(inWatch)"
     }
 
     /// 页面加载完再等 0.5 秒（最多 15 秒）

@@ -185,6 +185,35 @@ struct CCHubBlockedBanner: View {
     }
 }
 
+/// 输入框上方的提示位（聊天页只放这一个）：连的那台用不了 → 带「换一台」的那条；电脑上同步来的 session → 只读那句。都没有就什么都不画
+struct CCHubComposerNotices: View {
+    let conversation: Conversation?
+    let blocker: CCHubRegistry.Unavailable?
+    let viewModel: ConversationViewModel
+
+    var body: some View {
+        if let blocker, let conversation { CCHubBlockedBanner(conversation: conversation, blocker: blocker, viewModel: viewModel) }
+        if conversation?.isFolderSession == true { FolderSessionReadOnlyBar() }
+    }
+}
+
+/// 输入框上方：电脑上同步来的 session 现在只能看（文件夹楼层看历史；插话做完前不能发）。位置、底色和上面那条一样，只有一句话
+struct FolderSessionReadOnlyBar: View {
+    var body: some View {
+        Text("电脑上的对话，现在只能看")
+            .font(.system(size: 12.5))
+            .foregroundColor(Theme.chat.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Theme.chat.textPrimary.opacity(0.05))
+                    .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.chat.textPrimary.opacity(0.07), lineWidth: 0.5))
+            )
+    }
+}
+
 /// 对话菜单里那行「连哪台电脑」：hub 对话、≥2 台或者连的那台用不了才出
 struct CCHubMenuEntry: View {
     let conversation: Conversation

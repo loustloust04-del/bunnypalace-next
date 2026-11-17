@@ -3,22 +3,16 @@ import Foundation
 import SwiftData
 
 /// 常驻记忆（plan-memory-audit-desk 第八½节）：每一轮都带的有哪些、为什么带、这一轮带没带。
-/// 规则不另写一份：档案常驻层直接用 `activeRetrievers()` 里那一路 `PersistentRetriever`，{助手}的记忆用 `SelfMemoryInjection.fullCandidates`；
+/// 规则不另写一份：档案常驻层直接用实发那一路 `PersistentRetriever`，{助手}的记忆用 `SelfMemoryInjection.fullCandidates`；
 /// 「带没带」看同一次 `roundInputs` + `memoryLayers` 的结果（预览 = 实发）。只把现状摆出来，不改规则本身
 enum MemoryResident {
 
     // MARK: - 规则
 
-    /// 档案常驻层收谁：只有钉住的（C3 ② 起按类别常驻停掉）；三个检索开关都关 → nil（一条都不带）
-    static func archiveRule() -> ((Memory) -> Bool)? {
-        guard let persistent = MemoryInjector.activeRetrievers().lazy.compactMap({ $0 as? PersistentRetriever }).first else { return nil }
+    /// 档案常驻层收谁：只有钉住的（C3 ② 起按类别常驻停掉）
+    static func archiveRule() -> (Memory) -> Bool {
+        let persistent = PersistentRetriever()
         return { !persistent.retrieve([$0], recent: []).isEmpty }
-    }
-
-    /// 记忆格普通列表里列谁（第八½节）：不搜的时候常驻的挪到常驻页、这里不列；搜索时照旧全列（不然搜不到钉住的）
-    static func panelListed(_ active: [Memory], searching: Bool, rule: ((Memory) -> Bool)?) -> [Memory] {
-        guard !searching, let rule else { return active }
-        return active.filter { !rule($0) }
     }
 
     /// 实发的最后一道关卡（10-16 astra #6）：预设里记忆插槽关着（或被改成普通插槽）= 组装跳过整段记忆，同 `PromptAssembler` 的 activeSlots + isMarker
@@ -134,11 +128,10 @@ enum MemoryResident {
         }
     }
 
-    /// 刷新键里的注入设置（10-16 astra #7）：总开关、C / B4 勾、预算、{助手}的记忆预算比例和最近 N 条、三个检索开关、目录模式。
+    /// 刷新键里的注入设置（10-16 astra #7）：总开关、C / B4 勾、预算、{助手}的记忆预算比例和最近 N 条、试验的按意思找、目录模式。
     /// 读 UserDefaults 内存值，不碰盘；别的窗口（mac 设置窗）改了，比这份快照就知道要重算
     static let settingsKeys = ["mem_master", MemoryOpenWindow.cKey, MemoryOpenWindow.b4Key, "mem_inject_budget",
-                               "mem_self_budget_percent", "mem_self_recent_count", "mem_inject_keyword", "mem_inject_full",
-                               "mem_inject_vector", "mem_inject_catalog"]
+                               "mem_self_budget_percent", "mem_self_recent_count", "mem_inject_vector", "mem_inject_catalog"]
 
     /// 末尾带 C 档案的版本（wiki 页 / 索引 / 不触发的词改了就变，`WikiInjectionCache`，只读内存）
     static func settingsStamp(_ defaults: UserDefaults = .standard, wikiVersion: Int = WikiInjectionCache.shared.version) -> [String] {
@@ -165,7 +158,8 @@ enum MemoryResident {
     enum Gate: Equatable {
         case memoryOff          // 总开关关 / 这个对话关了记忆
         case slotOff            // 当前预设没开记忆插槽（10-16 astra #6）
-        case archiveUnchecked   // 【开窗口】C 没勾
+        case archiveUnchecked   // 【开窗口】C 没勾（wiki 那一行）
+        case pinnedUnchecked    // 【开窗口】「钉住的」没勾
         case selfUnchecked      // 【开窗口】B4 没勾
         case overBudget         // 规则上算常驻，预算装不下
 
@@ -174,6 +168,7 @@ enum MemoryResident {
             case .memoryOff: return "记忆关着，现在不带"
             case .slotOff: return "预设没开记忆插槽，现在不带"
             case .archiveUnchecked: return "\(MemoryWriterID.c.code) 没勾，现在不带"
+            case .pinnedUnchecked: return "「钉住的」没勾，现在不带"
             case .selfUnchecked: return "\(MemoryWriterID.b4.code) 没勾，现在不带"
             case .overBudget: return "超出注入预算，这一轮没带"
             }
@@ -212,8 +207,10 @@ enum MemoryResident {
     struct Summary {
         var archive: [ArchiveGate] = []
         var selfRows: [SelfRow] = []
-        /// 全量注入开着时，常驻层以外也每一轮都带的档案条数（预算内）
+        /// 「每轮全带」勾着时，钉住的以外也每一轮都带的记忆条目数（预算内）
         var fullFallbackCount = 0
+        /// 这一轮批过的记忆条目是不是每轮全带（下半第二段的标题按它写）
+        var everyRound = false
         /// 下半「下一轮会看见什么」：同一次 memoryLayers 的两段
         var stable = ""
         var volatile = ""
@@ -227,11 +224,11 @@ enum MemoryResident {
 
         /// 主线程复核（10-16 astra #3）：后台算完到交回主线程之间被删（失效 / 彻底删）、取消钉住、规则变了的档案不再列。
         /// memories = 主线程这边的最新档案（按 id 找，找不到 = 彻底删了）
-        func revalidated(_ memories: [Memory], rule: ((Memory) -> Bool)? = MemoryResident.archiveRule()) -> Summary {
+        func revalidated(_ memories: [Memory], rule: (Memory) -> Bool = MemoryResident.archiveRule()) -> Summary {
             let byId = Dictionary(memories.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
             var s = self
             s.archive = archive.filter { g in
-                guard let m = byId[g.id], m.supersededAt == nil, let rule else { return false }
+                guard let m = byId[g.id], m.supersededAt == nil else { return false }
                 return rule(m)
             }
             return s
@@ -257,6 +254,7 @@ enum MemoryResident {
 
         var selfRows: [SelfRow] { summary.selfRows }
         var fullFallbackCount: Int { summary.fullFallbackCount }
+        var everyRound: Bool { summary.everyRound }
         var stable: String { summary.stable }
         var volatile: String { summary.volatile }
         var memoryCount: Int { summary.memoryCount }
@@ -285,15 +283,16 @@ enum MemoryResident {
     }
 
     /// 纯函数：把已经算好的（同一次 roundInputs + memoryLayers）摆成每一行。
-    /// - archive：规则上常驻的档案（活着的，按创建时间旧→新，同常驻层的行序）；injectedIds = hits 里 `persistent` 那一路
+    /// - archive：规则上常驻的档案（活着的，按创建时间旧→新，同常驻层的行序）；injectedIds = hits 里 `persistent` 那一路；
+    ///   pinnedChecked = 这个窗口「钉住的」那一项勾没勾
     /// - selfCandidates：全文候选；fullSlugs = 实际装进全文的（B4 没勾时 nil）
     /// - slotOn：当前预设开没开记忆插槽；关着 = 整段不发，全部灰字（记忆关着优先说那个）
     static func compute(archive: [Memory], injectedIds: Set<UUID>, selfCandidates: [(memory: SelfMemory, reason: SelfMemoryInjection.Reason)],
-                        fullSlugs: Set<String>?, memoryOn: Bool, cChecked: Bool, assistant: String, recentCount: Int,
+                        fullSlugs: Set<String>?, memoryOn: Bool, pinnedChecked: Bool, assistant: String, recentCount: Int,
                         slotOn: Bool = true) -> Summary {
         var s = Summary()
         s.archive = archive.map { m in
-            ArchiveGate(id: m.id, gate: !memoryOn ? .memoryOff : !slotOn ? .slotOff : !cChecked ? .archiveUnchecked
+            ArchiveGate(id: m.id, gate: !memoryOn ? .memoryOff : !slotOn ? .slotOff : !pinnedChecked ? .pinnedUnchecked
                         : injectedIds.contains(m.id) ? nil : .overBudget)
         }
         s.selfRows = selfCandidates.map { c in
@@ -337,26 +336,37 @@ enum MemoryResident {
         let inputs = MemoryInjector.roundInputs(profileId: profile.id, participation: .init(switches),
                                                 store: store, context: context, wikiStore: wikiStore,
                                                 previousWindow: previous, hiddenSources: hiddenSources)
+        // 批过的记忆条目和实发同一套：每轮全带勾着 = 都带；否则聊到才带开着时只在聊到时带（`RecallSelection` 的 X3），
+        // 这里不把它们算成「会带」，每轮都在的只有卡的目录（和实发同一个函数、同一个位置）
+        let triggerOn = EffectiveMemoryParticipation(switches).pages
+        let cards = inputs.memories.filter {
+            !$0.isUserExplicit && !($0.organizedPage.map(WikiProposalSources.isPrivate) ?? false)
+        }
         let layers = PromptAssembler.memoryLayers(profile: profile,
                                                   selfMemory: (inputs.selfMemory?.text).flatMap { $0.isEmpty ? nil : $0 },
-                                                  memories: inputs.memories, recentMessages: recentMessages, budget: inputs.archiveBudget,
-                                                  wiki: inputs.wiki)
+                                                  memories: inputs.memories,
+                                                  recentMessages: recentMessages, budget: inputs.archiveBudget,
+                                                  wiki: inputs.wiki,
+                                                  cardIndex: triggerOn && !inputs.everyRound ? MemoryInjector.cardIndex(cards).text : "",
+                                                  cards: MemoryInjector.cardRetrievers(everyRound: inputs.everyRound,
+                                                                                       triggerOn: participation.switches.archiveTrigger))
         let cChecked = participation.choices.archive
-        // C 没勾 / 记忆关着时 roundInputs 给的档案是空的：列表另取活着的，全部标灰；
+        let pinnedChecked = participation.choices.pinned
+        // 「钉住的」没勾 / 记忆关着时 roundInputs 给的原料里没有钉住的：列表另取活着的，全部标灰；
         // 来源窗过滤与实发同一条规则（钉住豁免，隐藏来源的碎片不列）
-        let active = memoryOn && cChecked
+        let active = memoryOn && pinnedChecked
             ? inputs.memories
             : store.listActive(profileId: profile.id, context: context).filter {
                 MemoryInjector.passesSourceWindow($0, hidden: hiddenSources)
             }
-        let archive = archiveRule().map { rule in active.filter(rule).sorted { $0.createdAt < $1.createdAt } } ?? []
+        let archive = active.filter(archiveRule()).sorted { $0.createdAt < $1.createdAt }
         let recentCount = MemoryFlags.selfRecentCount
         let assistant = profile.assistantName.trimmingCharacters(in: .whitespacesAndNewlines)
         var s = compute(archive: archive,
                         injectedIds: Set(layers.hits.filter { $0.retrieverId == "persistent" }.map(\.memoryId)),
                         selfCandidates: SelfMemoryInjection.fullCandidates(selfMemories ?? SelfMemoryStore.list(memoryRoot: FileLibraryStore.memoryRoot(profileId: profile.id), checkPath: AppPaths.checked),
                                                                            recentCount: recentCount),
-                        fullSlugs: inputs.selfMemory?.fullSlugs, memoryOn: memoryOn, cChecked: cChecked,
+                        fullSlugs: inputs.selfMemory?.fullSlugs, memoryOn: memoryOn, pinnedChecked: pinnedChecked,
                         assistant: assistant.isEmpty ? "助手" : assistant, recentCount: recentCount, slotOn: slotOn)
         // C 档案：没勾 / 记忆关着也列出来（灰字），快照另取
         let wiki = inputs.wiki ?? WikiInjectionCache.shared.snapshot(profileId: profile.id, store: wikiStore)
@@ -365,8 +375,9 @@ enum MemoryResident {
             let indexCount = wiki.indexLines.lazy.filter { $0.hasPrefix("- ") }.count
             s.wiki = WikiRow(indexCount: cChecked ? indexCount : nil, hits: gate == nil ? layers.pages : [], gate: gate)
         }
-        // 插槽关着：实发整段跳过，下半预览、「共 N 条」、全量兜底都是空的
+        // 插槽关着：实发整段跳过，下半预览、「共 N 条」、每轮全带都是空的
         guard slotOn else { return s }
+        s.everyRound = inputs.everyRound
         s.fullFallbackCount = layers.hits.filter { $0.retrieverId == "fullFallback" }.count
         let previousText = inputs.previousWindow.map { snapshot in
             let names = EffectiveCharacterContext(profile: profile)
@@ -376,7 +387,7 @@ enum MemoryResident {
             : previousText.isEmpty ? layers.stable : layers.stable + "\n\n" + previousText
         s.stable = availableTools.map { PromptAssembler.droppingOffToolMentions(stable, available: $0) } ?? stable
         s.volatile = availableTools.map { PromptAssembler.droppingOffToolMentions(layers.volatile, available: $0) } ?? layers.volatile
-        s.memoryCount = inputs.memories.count + (inputs.selfMemory?.fullCount ?? 0) + (inputs.selfMemory?.indexCount ?? 0)
+        s.memoryCount = inputs.everyRoundMemories.count + (inputs.selfMemory?.fullCount ?? 0) + (inputs.selfMemory?.indexCount ?? 0)
         return s
     }
 

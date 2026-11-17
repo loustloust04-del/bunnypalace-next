@@ -70,6 +70,21 @@ struct MessageSegmentsView: View {
         case attachment(name: String, type: String?, content: String?)
         case imageStrip(images: [(name: String, type: String?, data: Data)])
         case file(name: String)
+        case meme(UUID)
+    }
+
+    /// AI 发的表情包（plan-AI表情包）：工具轮消息不拆泡，文字段里独立一段的 [meme:UUID] 拆出来画图
+    private static func splittingMemes(_ s: String) -> [Item] {
+        guard s.contains("[meme:") else { return [.text(s)] }
+        var out: [Item] = []
+        var buf: [String] = []
+        for para in s.components(separatedBy: "\n\n") {
+            guard let id = MemeToken.match(para) else { buf.append(para); continue }
+            if !buf.isEmpty { out.append(.text(buf.joined(separator: "\n\n"))); buf = [] }
+            out.append(.meme(id))
+        }
+        if !buf.isEmpty { out.append(.text(buf.joined(separator: "\n\n"))) }
+        return out
     }
 
     private var items: [Item] {
@@ -85,7 +100,7 @@ struct MessageSegmentsView: View {
             let seg = segments[i]
             switch seg {
             case .text(let s):
-                result.append(.text(s))
+                result += Self.splittingMemes(s)
                 i += 1
             case .thinking(let text, _, _):
                 // 原生思考 omitted / redacted / 进度更新为空：不画（plan-thinking §3.8）
@@ -280,6 +295,8 @@ struct MessageSegmentsView: View {
                     .font(.system(size: 12))
                     .foregroundColor(palette.textMuted)
             }
+        case .meme(let id):
+            MemeMessageView(memeId: id)
         }
     }
 }

@@ -77,6 +77,11 @@ final class MiniBrowserController: NSObject, ObservableObject, WKNavigationDeleg
 
     /// 这个网页开在哪个身份里（历史记到这个身份）
     var identityID = BrowserIdentity.mainID
+    /// 花园浏览器的标签页：网页要开新窗口（target=_blank / window.open）时交给它开新标签页，回新网页；
+    /// nil（一起看小窗、影院）= 照旧在当前页打开
+    var onOpenWindow: ((WKWebViewConfiguration, URLRequest) -> WKWebView?)?
+    /// 网页自己 window.close()
+    var onCloseWindow: (() -> Void)?
 
     private var observations: [NSKeyValueObservation] = []
     private var lastScrollY: CGFloat = 0
@@ -100,7 +105,12 @@ final class MiniBrowserController: NSObject, ObservableObject, WKNavigationDeleg
     }
     func load(_ url: URL) {
         if showBenchOfflinePage() { return }
-        webView?.load(URLRequest(url: url))
+        var request = URLRequest(url: url)
+        // YouTube 嵌入页没有来源会报「Error 153 Video player configuration error」（11-12 sim 实测），App 里按它的要求报 bundle id
+        if ChatWatchPerception.isEmbed(url), ChatWatchPerception.videoRef(url)?.site == .youtube {
+            request.setValue("https://\(Bundle.main.bundleIdentifier ?? "com.susu.MemoryPalace")", forHTTPHeaderField: "Referer")
+        }
+        webView?.load(request)
     }
     func stopLoading() {
         webView?.stopLoading()
@@ -198,11 +208,16 @@ final class MiniBrowserController: NSObject, ObservableObject, WKNavigationDeleg
     }
 
     #if os(iOS)
-    /// 底栏盖住的高度：让网页最底下的内容能滚到底栏上面
-    func setBottomObscuredHeight(_ h: CGFloat) {
-        guard let sv = webView?.scrollView, sv.contentInset.bottom != h else { return }
-        sv.contentInset.bottom = h
-        sv.verticalScrollIndicatorInsets.bottom = h
+    /// 底栏盖住的高度。用 iOS 26 的 `obscuredContentInsets`（Safari 浮动工具栏同款）：
+    /// 网页知道底下被遮了多少，最底下的内容能滚上来，`position: fixed; bottom: 0` 的底部导航 / 「打开 App」条 / 评论框也让到底栏上面
+    /// （只设 scrollView.contentInset 时这些照旧贴屏幕最底、被玻璃底栏压住，粟粟 11-12）。
+    /// 设了它 WebKit 就不再自己让安全区，所以顶上的状态栏、底下的 home 条都要算进来（粟粟 11-15）
+    func setObscuredInsets(top: CGFloat, bottom: CGFloat) {
+        guard let webView else { return }
+        let insets = UIEdgeInsets(top: top, left: 0, bottom: bottom, right: 0)
+        guard webView.obscuredContentInsets != insets else { return }
+        webView.obscuredContentInsets = insets
+        webView.scrollView.verticalScrollIndicatorInsets = UIEdgeInsets(top: top, left: 0, bottom: bottom, right: 0)
     }
 
     @objc func pullToRefresh(_ sender: UIRefreshControl) {
@@ -238,17 +253,23 @@ final class MiniBrowserController: NSObject, ObservableObject, WKNavigationDeleg
         decisionHandler(.cancel)
     }
 
-    /// target=_blank / window.open → 当前 webview 里打开，不开新窗
+    /// target=_blank / window.open：花园浏览器开新标签页（用 WebKit 给的 configuration 建，先开空白再跳的登录弹窗也接得住）；
+    /// 别的地方照旧在当前页打开
     func webView(
         _ webView: WKWebView,
         createWebViewWith configuration: WKWebViewConfiguration,
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
+        if let onOpenWindow { return onOpenWindow(configuration, navigationAction.request) }
         if let url = navigationAction.request.url {
             load(url)
         }
         return nil
+    }
+
+    func webViewDidClose(_ webView: WKWebView) {
+        onCloseWindow?()
     }
 }
 
@@ -261,6 +282,8 @@ struct BrowserWebView {
     let controller: MiniBrowserController
     /// 主号 = `.default()`；别的身份各用自己的数据仓（plan-garden-browser-identities §3）
     var identity: BrowserIdentity = .main
+    /// 带声音的视频不用点就能自己放（影院放映页）
+    var autoplay = false
 
     @MainActor
     func makeWebView() -> WKWebView {
@@ -269,11 +292,20 @@ struct BrowserWebView {
         #if os(iOS)
         // 视频在页面里播，不强制跳全屏播放器
         configuration.allowsInlineMediaPlayback = true
+        if autoplay { configuration.mediaTypesRequiringUserActionForPlayback = [] }
         #endif
         #if os(macOS) && (DEBUG || PERF_BENCH)
         if BenchIsolation.active { configuration.websiteDataStore = .nonPersistent() }
         #endif
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        Self.setUp(webView, controller: controller, identity: identity)
+        controller.load(initialURL)
+        return webView
+    }
+
+    /// 委托 / UA / 手势 / 下拉刷新；网页开新窗口时 WebKit 给的那个也走这里（不 load，WebKit 自己加载）
+    @MainActor
+    static func setUp(_ webView: WKWebView, controller: MiniBrowserController, identity: BrowserIdentity) {
         webView.navigationDelegate = controller
         webView.uiDelegate = controller
         // satyricon §4：阻止 Universal Links 把用户踢出 app（点 zhihu/X 链接被踢去装原生 app 这种）
@@ -291,8 +323,6 @@ struct BrowserWebView {
         #endif
         controller.webView = webView
         controller.identityID = identity.id
-        controller.load(initialURL)
-        return webView
     }
 }
 
@@ -319,7 +349,8 @@ struct MiniBrowserView: View {
 
     var body: some View {
         #if os(iOS)
-        GardenBrowserView(initialURL: initialURL, onClose: { dismiss() })
+        GardenBrowserView(onClose: { dismiss() })
+            .onAppear { BrowserTabs.shared.open(initialURL, identity: .main) }
         #else
         NavigationStack {
             BrowserWebView(initialURL: initialURL, controller: controller)

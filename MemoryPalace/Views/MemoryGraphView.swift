@@ -139,7 +139,7 @@ struct MemoryGraphView: View {
             // 选中内容卡
             if let sid = selected, let mem = memories.first(where: { $0.id == sid }) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(mem.content)
+                    Text(mem.lineText)
                         .font(m.body)
                         .foregroundColor(Theme.textPrimary)
                         .lineLimit(4)

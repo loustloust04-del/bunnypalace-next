@@ -1160,7 +1160,7 @@ final class RecallRealPathTests: XCTestCase {
         XCTAssertEqual(triggered.delivery.route, "local")
         assertFull(triggered.delivery, [RecallDeliveryItem.Kind.selfMemory, RecallDeliveryItem.Kind.rootIndex,
                                        RecallDeliveryItem.Kind.pinned, RecallDeliveryItem.Kind.page], "触发开")
-        // 触发关：legacy 碎片也在账上（同一条本机口径）
+        // 触发关 + 每轮全带：每轮都带的碎片也在账上（同一条本机口径）
         let fragment = Memory(content: "合成碎片：云桥城地图带尺", category: "fact", profileId: pid)
         fragment.occurredDay = "2026-10-28"
         fragment.reviewedAt = Date()
@@ -1169,14 +1169,15 @@ final class RecallRealPathTests: XCTestCase {
         var tuning = RecallTestTuning.make()
         tuning.archiveTriggerEnabled = false
         RecallTuningStore.save(tuning, profileId: pid)
+        MemoryOpenWindow.setEveryRound(true, profileId: pid)
         let legacy = compose()
         assertFull(legacy.delivery, [RecallDeliveryItem.Kind.selfMemory, RecallDeliveryItem.Kind.rootIndex,
-                                     RecallDeliveryItem.Kind.legacyFragment], "触发关")
+                                     RecallDeliveryItem.Kind.legacyFragment], "触发关 + 每轮全带")
     }
 
-    /// P2-a 必修 2：触发关的内层 stable 命中不在这段 wire 上，不记账；内层过期提醒实际拼进 volatile，要单独进账
+    /// P2-a 必修 2：每轮全带那一路的内层 stable 命中不在这段 wire 上，不记账；内层过期提醒实际拼进 volatile，要单独进账
     func testTriggerOffNestedReminderAndStableHitAreDelivered() throws {
-        let keys = ["mem_inject_keyword", "mem_inject_vector", "mem_inject_graph", "mem_inject_catalog", "mem_inject_full"]
+        let keys = ["mem_inject_vector", "mem_inject_graph", "mem_inject_catalog"]
         var savedDefaults: [String: Any] = [:]
         for key in keys {
             if let value = UserDefaults.standard.object(forKey: key) { savedDefaults[key] = value }
@@ -1188,7 +1189,6 @@ final class RecallRealPathTests: XCTestCase {
                 else { UserDefaults.standard.removeObject(forKey: key) }
             }
         }
-        UserDefaults.standard.set(true, forKey: "mem_inject_full")
         let pid = "xctest-recall-nested-reminder"
         // 长称呼让常驻层的头部（`[关于…]`）比提醒本身贵：外层装不下那条钉住项，内层（无头部计费）装得下
         let profile = Profile(id: pid, name: "云桥城", emoji: "", description: "",
@@ -1212,6 +1212,7 @@ final class RecallRealPathTests: XCTestCase {
         XCTAssertLessThanOrEqual(reminderCost + fragmentPayload.cost, headerCost, "提醒 + 碎片行必须比头部便宜")
         var inputs = MemoryInjector.RoundInputs(memories: [pinned, fragment], selfMemory: nil, archiveBudget: budget)
         inputs.rootIndex = false
+        inputs.everyRound = true
         let layers = RecallSelection.prepare(profile: profile, conversationId: "fictional-window", turnId: "u1",
                                              branchAnchor: "branch", text: "复诊和云桥展怎么安排",
                                              state: .init(), existingDecision: nil, inputs: inputs,
@@ -1239,6 +1240,7 @@ final class RecallRealPathTests: XCTestCase {
         let fragment = Memory(content: "合成碎片：云桥城地图带尺", category: "fact", profileId: pid)
         fragment.occurredDay = "2026-11-01"
         fragment.reviewedAt = Date()
+        fragment.subject = "林栖"   // 这一句点了林栖的名字，这张卡才带
         h.context.insert(fragment)
         try h.context.save()
         ToolDrawerStore.shared.update { state in state.set(.off, for: RecallTool.toolName, profileId: nil) }
@@ -1259,7 +1261,7 @@ final class RecallRealPathTests: XCTestCase {
         XCTAssertTrue(wire.contains("合成碎片：云桥城地图带尺"), "碎片本体照发")
     }
 
-    /// P2-a/b：触发关走 legacy 碎片注入，单位文本与 `tryAppend` 一字不差才能核到 wire 上
+    /// P2-a/b：触发关 + 每轮全带走每轮都带的碎片注入，单位文本与 `tryAppend` 一字不差才能核到 wire 上
     func testTriggerOffLegacyFragmentsInDelivery() async throws {
         let server = try scripted { _, _ in .init(status: 200, contentType: "text/event-stream", body: Self.textChunk) }
         let h = try await make(baseURL: server.baseURL)
@@ -1267,6 +1269,7 @@ final class RecallRealPathTests: XCTestCase {
         var tuning = RecallTestTuning.make()
         tuning.archiveTriggerEnabled = false
         RecallTuningStore.save(tuning, profileId: pid)
+        MemoryOpenWindow.setEveryRound(true, profileId: pid)
         let fragment = Memory(content: "合成碎片：云桥城地图带尺", category: "fact", profileId: pid)
         fragment.occurredDay = "2026-11-01"
         fragment.reviewedAt = Date()
@@ -1282,6 +1285,7 @@ final class RecallRealPathTests: XCTestCase {
         let assistant = try XCTUnwrap(h.viewModel.currentPath.last { $0.role == "assistant" })
         let delivery = try XCTUnwrap(assistant.recallReceipt?.delivery)
         XCTAssertTrue(delivery.gate.triggerOff)
+        XCTAssertEqual(delivery.gate.everyRound, true)
         let legacy = delivery.items.filter { $0.kind == RecallDeliveryItem.Kind.legacyFragment }
         XCTAssertEqual(legacy.count, 1, "legacy 碎片一条")
         XCTAssertTrue(legacy.first?.shown.contains("合成碎片：云桥城地图带尺") ?? false)
@@ -1519,7 +1523,7 @@ final class RecallRealPathTests: XCTestCase {
         XCTAssertNil(MemoryInjectionMeter.load(profileId: pid), "首事件前取消也不写")
     }
 
-    /// 默认路径（触发关）不再漏记本轮碎片：Meter 的 hitCount 来自 delivery 的 legacy 碎片
+    /// 触发关 + 每轮全带不漏记本轮碎片：Meter 的 hitCount 来自 delivery 的 legacy 碎片
     func testMeterCountsLegacyFragmentsWhenTriggerOff() async throws {
         let server = try scripted { _, _ in .init(status: 200, contentType: "text/event-stream", body: Self.textChunk) }
         let h = try await make(baseURL: server.baseURL)
@@ -1527,6 +1531,7 @@ final class RecallRealPathTests: XCTestCase {
         var tuning = RecallTestTuning.make()
         tuning.archiveTriggerEnabled = false
         RecallTuningStore.save(tuning, profileId: pid)
+        MemoryOpenWindow.setEveryRound(true, profileId: pid)
         let fragment = Memory(content: "合成碎片：云桥城地图带尺", category: "fact", profileId: pid)
         fragment.occurredDay = "2026-11-01"
         fragment.reviewedAt = Date()

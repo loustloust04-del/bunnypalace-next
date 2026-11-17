@@ -283,6 +283,7 @@ public enum RecallTurnState {
             var selected: [RecallItem] = []
             var used = 0
             var pages = 0
+            var fragments = 0
             var seen = Set<RecallSourceRef>()
             for item in items where seen.insert(item.source).inserted {
                 guard let current = resolve(item), current.source == item.source else {
@@ -296,7 +297,7 @@ public enum RecallTurnState {
                 let freed = replaced.reduce(0) { $0 + $1.tokenCost }
                 let freedPages = replaced.filter { $0.source.kind != .fragment }.count
                 let isPage = item.source.kind != .fragment
-                if isPage && pages - freedPages >= tuning.maximumPages {
+                if isPage ? pages - freedPages >= tuning.maximumPages : fragments >= tuning.maximumFragments {
                     suppressions.append(.init(source: item.source, reason: .pageLimit)); continue
                 }
                 guard used - freed + current.tokenCost <= max(0, budget) else {
@@ -307,7 +308,7 @@ public enum RecallTurnState {
                 pages -= freedPages
                 selected.append(current)
                 used += current.tokenCost
-                if isPage { pages += 1 }
+                if isPage { pages += 1 } else { fragments += 1 }
             }
             return selected
         }
@@ -340,12 +341,22 @@ public enum RecallTurnState {
         let turn = state.effectiveTurn + 1
         let weights = state.active.isEmpty && state.pending.isEmpty ? nil : weights()
         let keeping = !state.active.isEmpty && weights?.continues(text, anchor: state.topicAnchor, active: state.active, tuning: tuning) == true
+        // 点名 / 指路对每个候选都要判：同一组名字只分词一次、这句话里的指路只解析一次
+        // （很多卡记的是同一个人；整段贴进来的长句逐个候选重新分词会卡）
+        var namedMemo: [[String]: Bool] = [:]
+        var references: Set<String>?
+        func addressed(_ identities: [String], _ source: RecallSourceRef) -> Bool {
+            if !identities.isEmpty {
+                let named = namedMemo[identities] ?? RecallLexical.names(identities, in: text, tuning: tuning)
+                namedMemo[identities] = named
+                if named { return true }
+            }
+            if references == nil { references = RecallLexical.references(in: text) }
+            return references?.contains(RecallLexical.normalized(source.path)) == true
+        }
         // Generic retrospective grammar cannot thaw an unrelated source.
-        var thawed = Set((state.pending + state.active).filter {
-            RecallLexical.names($0.identities, in: text, tuning: tuning) || RecallLexical.targets($0.source, in: text)
-        }.map(\.source)).union(state.cooldowns.filter {
-            RecallLexical.targets($0.source, in: text) || RecallLexical.names($0.identities ?? [], in: text, tuning: tuning)
-        }.map(\.source))
+        var thawed = Set((state.pending + state.active).filter { addressed($0.identities, $0.source) }.map(\.source))
+            .union(state.cooldowns.filter { addressed($0.identities ?? [], $0.source) }.map(\.source))
         let continued = Set(state.pending.filter {
             weights?.continues(text, anchor: $0.text, active: [$0], tuning: tuning) == true
         }.map(\.source))
@@ -357,9 +368,7 @@ public enum RecallTurnState {
                                    identities: state.pending.first { $0.source == source }?.identities))
         }
         let candidates = keeping ? state.active : search(cooldowns)
-        thawed.formUnion(candidates.filter {
-            RecallLexical.names($0.identities, in: text, tuning: tuning) || RecallLexical.targets($0.source, in: text)
-        }.map(\.source))
+        thawed.formUnion(candidates.filter { addressed($0.identities, $0.source) }.map(\.source))
         cooldowns.removeAll { thawed.contains($0.source) }
         ignored.removeAll { thawed.contains($0) }
         let selected = validated(candidates, cooldowns: cooldowns, turn: turn, thawed: thawed)

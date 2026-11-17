@@ -180,9 +180,15 @@ struct RightPanelToolContent: View {
             Page2ChatWebView(viewModel: viewModel)
         case RightPanelToolManager.gardenOSToolId:
             NavigationStack { GardenOSSettingsView() }
+        case "cinema":
+            CinemaPanelView(viewModel: viewModel, profileId: profileManager?.currentProfile.id ?? "")
         #endif
         case "xiaoya":
             AssistantPanelView()
+        #if os(iOS)
+        case let id where id.hasPrefix(WebAppStore.toolPrefix):
+            WebAppView(toolID: id)
+        #endif
         default:
             Text("未知工具")
                 .foregroundColor(Theme.textMuted)
@@ -194,7 +200,7 @@ struct RightPanelToolContent: View {
 // MARK: - Memory Panel（page2 主体）
 //
 // 首屏：出问题时一行提醒 + 常驻记忆一行 + 两组记忆（画像卡 v5 下线）；关系图进「⋯」，下一轮会想起什么在常驻记忆页，设置在每格左上角（弹 sheet）。
-// 多选删除 / 钉住：EditMode + List(selection:) + bottom toolbar；两组记忆一个行样式（MemoryRow），删掉的进「已删除」。
+// 多选删除 / 钉住：EditMode + List(selection:) + bottom toolbar；两组记忆一个行样式（MemoryRow），删掉的进 Deleted（就是整理台那一页的 Deleted 段）。
 // 四格「记忆 / 窗口·时间轴 / wiki / 审计台」在底部（同日历 iOS 版，规格 7¼；粟粟 10-24）：iOS 系统 TabView，mac 浮动胶囊 `PanelFloatingTabBar`。
 // 窗口·时间轴 = 原「窗口总结」「时间轴」两格合一，格内顶上分段切；wiki = 原审计台 wiki 台里翻页那段；审计台的 wiki 台只剩整理提案。
 
@@ -276,20 +282,28 @@ struct MemoryPanelView: View {
     /// 审计台的状态段 / 筛选 / 展开（10-16 astra #8）：父级持有，mac 切格重建页面也不丢
     @State private var auditState = MemoryAuditViewState()
     @State private var highlightedId: String? = nil
-    /// 常驻记忆（第八½节）：顶上那一行的 N / 灰的条数；跳过来的目标是常驻的就推常驻页并高亮它
+    /// 常驻记忆（第八½节）：顶上那一行的 N / 灰的条数（钉住的照样在下面那份列表里，11-15 起列表是一份全的）
     @State private var resident = MemoryResident.Summary()
     @State private var showResident = false
-    @State private var residentHighlight: MemoryResidentPage.Highlight? = nil
     /// 顶上计数的刷新代次 + 注入设置快照（10-16 astra #3 / #7）
     @State private var residentTicket = MemoryResident.LoadTicket()
     @State private var residentSettings = MemoryResident.settingsStamp()
     @State private var selection: Set<MemoryRowID> = []
-    @State private var showAddSheet = false
-    @State private var showTrash = false
-    @State private var editingMemory: Memory? = nil   // 刀2：单条编辑
+    /// 开着的那张条目详情页（点一条 / ＋ 新加，都是同一张 `MemoryAuditEditPage`）
+    @State private var entryTarget: MemoryEntryTarget?
+    /// 底部「Deleted · N」：开的就是整理台那一页的 Deleted 段（同一处）
+    @State private var showDeleted = false
+    @State private var deletedState = MemoryAuditViewState()
+    @State private var showLog = false
+    /// 「全部 / Draft / Archive」
+    @State private var listFilter: MemoryListFilter = .all
+    /// 做完一笔浮「Deleted 1 · Undo」
+    @State private var undo = MemoryUndoCenter()
     @State private var loaded = false
     @State private var healthWarning: String? = nil
     @State private var showSettings = false
+    /// 手动「重新整理」（`FragmentReorganize`）：这一处入口自己的记号，确认框只弹这里问的那一问
+    @State private var reorganizeHost = UUID()
     @State private var searchText = ""
     @State private var pendingScrollId: String? = nil
     /// 时间轴格「⋯」里的暂停 / 继续；和时间轴顶上的开关、设置格「跨窗口时间轴」同一个 key
@@ -314,19 +328,19 @@ struct MemoryPanelView: View {
         ScrollViewReader { proxy in
             tabContainer(proxy)
                 .tint(Theme.branchIndicator)
-                .sheet(isPresented: $showAddSheet) {
-                    AddMemorySheet(profileId: profileManager?.currentProfile.id ?? "") {
-                        refreshMemories()
+                .memoryEntryPage($entryTarget, onJump: { mem in mem.sourceConversationId != nil ? { jumpToSource(mem) } : nil },
+                                 onEvent: { undo.show($0) })
+                .sheet(isPresented: $showDeleted, onDismiss: refreshMemories) {
+                    NavigationStack {
+                        MemoryAuditPage(onClose: { showDeleted = false }, viewState: deletedState)
+                            .environment(viewModel)
                     }
+                    #if os(macOS)
+                    .frame(width: 520, height: 640)
+                    #endif
                 }
-                .sheet(item: $editingMemory) { mem in
-                    AddMemorySheet(profileId: profileManager?.currentProfile.id ?? "", editing: mem,
-                                   onJumpToSource: mem.sourceConversationId != nil ? { jumpToSource(mem) } : nil) {
-                        refreshMemories()
-                    }
-                }
-                .sheet(isPresented: $showTrash, onDismiss: refreshMemories) {
-                    MemoryTrashSheet(profileId: profileManager?.currentProfile.id ?? "")
+                .sheet(isPresented: $showLog, onDismiss: refreshMemories) {
+                    MemoryWriteLogSheet(profileId: profileManager?.currentProfile.id ?? "")
                 }
                 .sheet(item: $editingSelfMemory) { m in
                     SelfMemoryEditSheet(profileId: profileManager?.currentProfile.id ?? "", slug: m.slug)
@@ -334,6 +348,7 @@ struct MemoryPanelView: View {
                 .sheet(isPresented: $showSettings, onDismiss: refreshMemories) {
                     settingsSheet
                 }
+                .modifier(ReorganizeDraftsConfirm(host: reorganizeHost))
                 #if os(iOS)
                 .fullScreenCover(isPresented: $showGraph) {
                     MemoryGraphSheet(memories: memories.filter { $0.supersededAt == nil })
@@ -379,7 +394,11 @@ struct MemoryPanelView: View {
                     healthWarning = nil
                     selection = []
                     showSettings = false
-                    showTrash = false
+                    showDeleted = false
+                    showLog = false
+                    entryTarget = nil
+                    listFilter = .all
+                    deletedState.clear()
                     searchText = ""
                     timelineModel.clear()
                     sessionsModel.clear()
@@ -457,7 +476,7 @@ struct MemoryPanelView: View {
                 }
                 .navigationTitle("记忆")
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbarVisibility(keyboardUp || editMode?.wrappedValue.isEditing == true ? .hidden : .automatic, for: .tabBar)
+                .toolbarVisibility(keyboardUp || (auditState.hidesTabBar && auditState.station == .desk) || auditState.station == .recall || editMode?.wrappedValue.isEditing == true ? .hidden : .automatic, for: .tabBar)
         }
     }
     #else
@@ -520,7 +539,7 @@ struct MemoryPanelView: View {
         .tint(Theme.branchIndicator)
     }
 
-    /// wiki 格空页「去整理提案 ›」：切到审计台格、推 wiki 台（那里现在直接是整理提案）
+    /// wiki 格空页「去 wiki 台批 ›」：切到审计台格、推 wiki 台（那里现在直接是整理提案）
     private func openProposals() {
         tab = .audit
         auditState.station = .wiki
@@ -537,6 +556,9 @@ struct MemoryPanelView: View {
                 List(selection: $selection) {
                     if searchText.panelSearchKeyword == nil, healthWarning != nil {
                         warningSection
+                    }
+                    if searchText.panelSearchKeyword == nil {
+                        ReorganizeDraftsStatusSection(profileId: profileManager?.currentProfile.id ?? "")
                     }
                     if searchText.panelSearchKeyword == nil {
                         residentSection
@@ -566,9 +588,10 @@ struct MemoryPanelView: View {
         }
         .scrollDismissesKeyboard(.immediately)
         #endif
+        .memoryUndoToast(undo, profileId: profileManager?.currentProfile.id ?? "")
         .onAppear { consumePendingScroll(proxy) }
         .navigationDestination(isPresented: $showResident) {
-            MemoryResidentPage(highlight: residentHighlight)
+            MemoryResidentPage()
         }
     }
 
@@ -577,7 +600,6 @@ struct MemoryPanelView: View {
     private var residentSection: some View {
         Section {
             Button {
-                residentHighlight = nil
                 showResident = true
             } label: {
                 HStack {
@@ -585,10 +607,12 @@ struct MemoryPanelView: View {
                         Text("常驻记忆 · \(resident.count) 条")
                             .font(m.body)
                             .foregroundColor(Theme.textPrimary)
-                        Text(resident.grayCount > 0 ? "其中 \(resident.grayCount) 条现在不带" : "每一轮都带的，点进去看为什么")
-                            .font(m.caption)
-                            .foregroundColor(Theme.textMuted)
-                            .lineLimit(1)
+                        if resident.grayCount > 0 {
+                            Text("其中 \(resident.grayCount) 条现在不带")
+                                .font(m.caption)
+                                .foregroundColor(Theme.textMuted)
+                                .lineLimit(1)
+                        }
                     }
                     Spacer()
                     Image(systemName: "chevron.right")
@@ -614,10 +638,10 @@ struct MemoryPanelView: View {
                 VStack(spacing: 32) {
                     MemoryEmptyState(title: "还没有记忆",
                                      message: "和{{char}}聊天时会自动记下重要的事".expandingMacros(profile: profileManager?.currentProfile)) {
-                        Button("加一条") { showAddSheet = true }
+                        Button("加一条") { addEntry() }
                             .buttonStyle(MemoryPrimaryButtonStyle())
                         if deletedCount > 0 {
-                            Button("已删除 · \(deletedCount)") { showTrash = true }
+                            Button("Deleted · \(deletedCount)") { openDeleted() }
                                 .buttonStyle(MemoryPrimaryButtonStyle())
                         }
                     }
@@ -672,14 +696,8 @@ struct MemoryPanelView: View {
         guard loaded else { return }
         navigator?.pendingTarget = nil
         guard let mem = memories.first(where: { $0.id.uuidString == target.id && $0.supersededAt == nil }) else { return }
-        // 常驻的不在普通列表里：推常驻页，在那边亮一下；常驻页已经开着也换新请求（页面按请求再滚一次）
-        if let rule = MemoryResident.archiveRule(), rule(mem) {
-            searchText = ""
-            tab = .memory
-            residentHighlight = MemoryResidentPage.Highlight(id: mem.id)
-            showResident = true
-            return
-        }
+        // 列表筛着 Draft / Archive、这条不在里面：放回「全部」
+        if !listFilter.matches(mem) { listFilter = .all }
         flash(target.id)
         if searchText.isEmpty && tab == .memory && !showResident {
             DispatchQueue.main.async { withAnimation { proxy.scrollTo(target.id, anchor: .center) } }
@@ -734,7 +752,7 @@ struct MemoryPanelView: View {
         .panelRowBackground()
     }
 
-    // MARK: - 两组记忆（只列活着的；删掉的在最底「已删除 · N ›」）
+    // MARK: - 两组记忆（只列活着的；删掉的在最底「Deleted · N ›」）
 
     @ViewBuilder
     private var listSections: some View {
@@ -750,13 +768,14 @@ struct MemoryPanelView: View {
                             "\(assistantName)觉得重要、自己决定记下的；跟\(assistantName)说「记住…」也会记在这")
             }
         }
-        if !active.isEmpty {
+        if memories.contains(where: { $0.supersededAt == nil }) {
             Section {
+                filterBar
                 ForEach(active, id: \.id) { mem in
                     memoryRow(mem)
                 }
             } header: {
-                groupHeader("从聊天里记住的 · \(active.count)", "聊天时自动记下的关于你的事")
+                groupHeader("C2 原子事实 · \(active.count)", nil)
             }
         }
         if searchText.panelSearchKeyword != nil && active.isEmpty && selfRows.isEmpty {
@@ -769,13 +788,30 @@ struct MemoryPanelView: View {
         trashRow
     }
 
-    /// 组头 + 一行说明；计数 = 这组正在显示的条数（搜索时是命中数）
-    private func groupHeader(_ title: String, _ note: String) -> some View {
+    /// 「全部 N / Draft N / Archive N」：和整理台顶上三段同一个数（`MemoryListFilter.counts`，不看搜索词）
+    private var filterBar: some View {
+        let counts = MemoryListFilter.counts(memories)
+        return Picker("C2 原子事实", selection: $listFilter) {
+            Text("全部 \(counts[.all] ?? 0)").tag(MemoryListFilter.all)
+            Text("Draft \(counts[.draft] ?? 0)").tag(MemoryListFilter.draft)
+            Text("Archive \(counts[.archive] ?? 0)").tag(MemoryListFilter.archive)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .selectionDisabled()
+    }
+
+    /// 组头（+ 一行说明）；计数 = 这组正在显示的条数（搜索 / 筛选时是剩下的数）
+    private func groupHeader(_ title: String, _ note: String?) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
-            Text(note)
-                .font(m.caption)
-                .foregroundColor(Theme.textMuted)
+            if let note {
+                Text(note)
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+            }
         }
         .textCase(nil)
         #if os(macOS)
@@ -784,8 +820,18 @@ struct MemoryPanelView: View {
         #endif
     }
 
-    private var deletedCount: Int {
-        memories.filter { $0.supersededAt != nil }.count + selfMemories.filter { !$0.isActive }.count
+    /// 和整理台第三段 Deleted 同一个数（`MemoryAudit.deletedCount`）
+    private var deletedCount: Int { MemoryAudit.deletedCount(memories, selfMemories: selfMemories) }
+
+    /// 底部「Deleted · N」开的是整理台那一页、停在 Deleted 段：同一个实现、同一个数
+    private func openDeleted() {
+        deletedState.clear()
+        deletedState.state = .trashed
+        showDeleted = true
+    }
+
+    private func addEntry() {
+        entryTarget = .new(profileId: profileManager?.currentProfile.id ?? "")
     }
 
     @ViewBuilder
@@ -794,10 +840,10 @@ struct MemoryPanelView: View {
         if searchText.panelSearchKeyword == nil && n > 0 {
             Section {
                 Button {
-                    showTrash = true
+                    openDeleted()
                 } label: {
                     HStack {
-                        Text("已删除 · \(n)")
+                        Text("Deleted · \(n)")
                             .font(m.body)
                             .foregroundColor(Theme.textSecondary)
                         Spacer()
@@ -832,7 +878,7 @@ struct MemoryPanelView: View {
             .tag(item.id)
             .swipeActions(edge: .trailing) {
                 Button(role: .destructive) { moveToTrash([item.id]) } label: {
-                    Label("删除", systemImage: "trash")
+                    Label("Delete", systemImage: "trash")
                 }
             }
             .panelRowBackground(rowBackground(item.id))
@@ -856,37 +902,37 @@ struct MemoryPanelView: View {
             .tag(item.id)
             .swipeActions(edge: .leading) {
                 Button { pin([mem]) } label: {
-                    Label(mem.isUserExplicit ? "取消钉住" : "钉住", systemImage: mem.isUserExplicit ? "pin.slash" : "pin")
+                    Label(mem.isUserExplicit ? "Unpin" : "Pin", systemImage: mem.isUserExplicit ? "pin.slash" : "pin")
                 }
                 .tint(Theme.branchIndicator)
             }
             .swipeActions(edge: .trailing) {
                 Button(role: .destructive) { moveToTrash([item.id]) } label: {
-                    Label("删除", systemImage: "trash")
+                    Label("Delete", systemImage: "trash")
                 }
             }
             .panelRowBackground(highlightedId == idStr ? Theme.branchIndicator.opacity(0.35) : rowBackground(item.id))
     }
 
-    /// 长按 / 右键 / mac 行尾「⋯」同一份：编辑 / 钉住 / 去原对话（有出处才有）/ 删除
+    /// 长按 / 右键 / mac 行尾「⋯」同一份：Edit / Pin / Open in chat（有出处才有）/ Delete（和详情页、整理台同一组词）
     @ViewBuilder
     private func rowActions(_ ids: Set<MemoryRowID>) -> some View {
         let archive = liveArchive(ids)
         if ids.count == 1, let id = ids.first {
-            Button { edit(id) } label: { Label("编辑", systemImage: "pencil") }
+            Button { edit(id) } label: { Label("Edit", systemImage: "pencil") }
         }
         if !archive.isEmpty {
             let unpin = MemoryPinPlan.unpins(archive)
             Button { pin(archive) } label: {
-                Label(unpin ? "取消钉住" : "钉住", systemImage: unpin ? "pin.slash" : "pin")
+                Label(unpin ? "Unpin" : "Pin", systemImage: unpin ? "pin.slash" : "pin")
             }
         }
         if ids.count == 1, let m = archive.first, m.sourceConversationId != nil {
-            Button { jumpToSource(m) } label: { Label("去原对话", systemImage: "arrow.right.circle") }
+            Button { jumpToSource(m) } label: { Label("Open in chat", systemImage: "arrow.right.circle") }
         }
         if !ids.isEmpty {
             Button(role: .destructive) { moveToTrash(ids) } label: {
-                Label(ids.count > 1 ? "删除 \(ids.count) 条" : "删除", systemImage: "trash")
+                Label(ids.count > 1 ? "Delete \(ids.count)" : "Delete", systemImage: "trash")
             }
         }
     }
@@ -907,7 +953,7 @@ struct MemoryPanelView: View {
             if tab == .memory {
                 if foldAdd {
                     Button {
-                        showAddSheet = true
+                        addEntry()
                     } label: {
                         Label("加一条记忆", systemImage: "plus")
                     }
@@ -915,7 +961,13 @@ struct MemoryPanelView: View {
                 Button {
                     startSelecting()
                 } label: {
-                    Label("选择", systemImage: "checkmark.circle")
+                    Label("Select", systemImage: "checkmark.circle")
+                }
+                ReorganizeDraftsMenuButton(profileId: profileManager?.currentProfile.id ?? "", host: reorganizeHost)
+                Button {
+                    showLog = true
+                } label: {
+                    Label("记忆日志", systemImage: "clock")
                 }
             }
             if tab == .windows, windowsSegment == .timeline {
@@ -952,7 +1004,7 @@ struct MemoryPanelView: View {
 
     private var addMemoryButton: some View {
         Button {
-            showAddSheet = true
+            addEntry()
         } label: {
             toolbarIcon("plus")
         }
@@ -1007,15 +1059,15 @@ struct MemoryPanelView: View {
     private var macSelectionBar: some View {
         let unpin = MemoryPinPlan.unpins(selectedLiveArchive)
         return HStack(spacing: 14) {
-            Text(selection.isEmpty ? "⌘ 点选多条" : "\(selection.count) 已选")
+            Text(selection.isEmpty ? "⌘ 点选多条" : "\(selection.count) selected")
                 .foregroundColor(Theme.textMuted)
             Spacer()
             Button { pinSelected() } label: {
-                Label(unpin ? "取消钉住" : "钉住", systemImage: unpin ? "pin.slash" : "pin")
+                Label(unpin ? "Unpin" : "Pin", systemImage: unpin ? "pin.slash" : "pin")
             }
             .disabled(selectedLiveArchive.isEmpty)
             Button(role: .destructive) { deleteSelected() } label: {
-                Label("删除", systemImage: "trash")
+                Label("Delete", systemImage: "trash")
             }
             .disabled(selection.isEmpty)
             Button { resetSelection() } label: {
@@ -1048,16 +1100,16 @@ struct MemoryPanelView: View {
             ToolbarItemGroup(placement: .bottomBar) {
                 let unpin = MemoryPinPlan.unpins(selectedLiveArchive)
                 Button { pinSelected() } label: {
-                    Label(unpin ? "取消钉住" : "钉住", systemImage: unpin ? "pin.slash" : "pin")
+                    Label(unpin ? "Unpin" : "Pin", systemImage: unpin ? "pin.slash" : "pin")
                 }
                 .disabled(selectedLiveArchive.isEmpty)
                 Spacer()
-                Text("\(selection.count) 已选")
+                Text("\(selection.count) selected")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()
                 Button(role: .destructive) { deleteSelected() } label: {
-                    Label("删除", systemImage: "trash")
+                    Label("Delete", systemImage: "trash")
                 }
                 .disabled(selection.isEmpty)
             }
@@ -1085,16 +1137,16 @@ struct MemoryPanelView: View {
     private func edit(_ id: MemoryRowID) {
         switch id {
         case .archive(let uuid):
-            editingMemory = memories.first { $0.id == uuid }
+            entryTarget = memories.first { $0.id == uuid }.map(MemoryEntryTarget.existing)
         case .assistant(let slug):
             editingSelfMemory = selfMemories.first { $0.slug == slug }
         }
     }
 
+    /// 钉 / 取消钉：记进记忆日志、浮条能 Undo（同详情页 ⋯ 里的 Pin）
     private func pin(_ targets: [Memory]) {
         guard !targets.isEmpty else { return }
-        MemoryPinPlan.apply(targets)
-        try? modelContext.save()
+        undo.show(MemoryEntryActions.togglePin(targets, profileId: profileManager?.currentProfile.id ?? "", context: modelContext))
         refreshMemories()
     }
 
@@ -1116,12 +1168,15 @@ struct MemoryPanelView: View {
         if clipped != selection { selection = clipped }
     }
 
-    /// 删除 = 移到「已删除」，可恢复，不确认；只碰活着的（按楼层 ID 读最新列表再按 id 找）
+    /// 删除 = 移到 Deleted，可恢复，不确认；只碰活着的（按楼层 ID 读最新列表再按 id 找）。
+    /// 原子事实那部分记进记忆日志、浮条能 Undo（和整理台同一套）；{助手}自己记下的照旧只改文件。
+    /// 把眼前列着的原子事实全选了再删才算整批（同整理台）
     private func moveToTrash(_ ids: Set<MemoryRowID>) {
         let pid = profileManager?.currentProfile.id ?? ""
-        let targets = store.listAll(profileId: pid, context: modelContext).filter { ids.contains(.archive($0.id)) }
-        if !MemoryDeletePlan.moveToTrash(targets).isEmpty {
-            try? modelContext.save()
+        let targets = store.listAll(profileId: pid, context: modelContext).filter { ids.contains(.archive($0.id)) && $0.supersededAt == nil }
+        if !targets.isEmpty {
+            let bulk = MemoryEntryActions.isBulk(picked: targets.count, shown: activeMemories.count)
+            undo.show(MemoryEntryActions.trash(targets, profileId: pid, context: modelContext, bulk: bulk))
         }
         let now = Date()
         for (i, m) in selfMemories.enumerated() where m.isActive && ids.contains(.assistant(m.slug)) {
@@ -1151,10 +1206,9 @@ struct MemoryPanelView: View {
     }
 
     /// 第二刀 A1：档案不分冷热——活着的按创建时间新→旧（钉住在前）；已删除的不在主列表。
-    /// 第八½节：不搜的时候常驻的（默认 = 钉住的）挪到顶上「常驻记忆」里，这组不再列；搜索时照旧全列（不然搜不到钉住的）
+    /// 11-15 起是一份全的列表（钉住的也在，带图钉），按「全部 / Draft / Archive」筛
     private var activeMemories: [Memory] {
-        MemoryResident.panelListed(MemoryArchiveOrder.split(visibleMemories).active, searching: searchText.panelSearchKeyword != nil,
-                                   rule: MemoryResident.archiveRule())
+        MemoryArchiveOrder.split(visibleMemories).active.filter(listFilter.matches)
     }
 
     private var visibleRowIds: Set<MemoryRowID> {
@@ -1259,13 +1313,13 @@ private struct MemoryGraphSheet: View {
 }
 
 #if os(iOS)
-/// 中文「选择 / 完成」：同 `EditButton` 在 toolbar 里就地读写 environment.editMode（App 没中文本地化，系统 EditButton 显示英文）
+/// 「Select / Done」：同 `EditButton` 在 toolbar 里就地读写 environment.editMode（动作名用英文，和整理台同一组词）
 struct MemorySelectButton: View {
     @Environment(\.editMode) private var editMode
 
     var body: some View {
         let editing = editMode?.wrappedValue.isEditing == true
-        Button(editing ? "完成" : "选择") {
+        Button(editing ? "Done" : "Select") {
             withAnimation { editMode?.wrappedValue = editing ? .inactive : .active }
         }
         .foregroundColor(Theme.branchIndicator)
@@ -1301,6 +1355,8 @@ enum MemoryHealthWarning {
 struct InjectionPreviewSections: View {
     let stable: String
     let volatilePart: String
+    /// 批过的记忆条目是不是每轮全带
+    let everyRound: Bool
     /// 总开关关着
     let masterOff: Bool
     /// 每一轮会带的条数（档案 + {助手}自己记下的）
@@ -1309,9 +1365,9 @@ struct InjectionPreviewSections: View {
     let assistantName: String
     @Environment(\.settingsMetrics) private var m
 
-    /// ⧫7（10-16）：第二段标题按实际——没开关键词 / 按意思找时是全量注入，第二段预算内也每一轮都带
-    static func volatileTitle(_ retrievers: [MemoryRetriever] = MemoryInjector.activeRetrievers()) -> String {
-        retrievers.contains { $0 is KeywordRetriever || $0 is VectorRetriever } ? "聊到相关话题才会想起的" : "全量注入开着：预算内都带"
+    /// ⧫7（10-16）：第二段标题按实际——每轮全带勾着时第二段预算内也每一轮都带
+    static func volatileTitle(everyRound: Bool) -> String {
+        everyRound ? "每轮全带勾着：预算内都带" : "聊到相关话题才会想起的"
     }
 
     var body: some View {
@@ -1324,7 +1380,7 @@ struct InjectionPreviewSections: View {
             .panelRowBackground()
         } else {
             layerSection("每次都会想起的", stable)
-            layerSection(Self.volatileTitle(), volatilePart)
+            layerSection(Self.volatileTitle(everyRound: everyRound), volatilePart)
             if stable.isEmpty && volatilePart.isEmpty {
                 Section {
                     Text("下一轮不会想起任何记忆（还没有记忆，或相关开关都关着）")
@@ -1434,7 +1490,7 @@ struct MemoryCardView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 // Content
-                Text(memory.content)
+                Text(memory.lineText)
                     .font(.system(size: Theme.F.body))
                     .foregroundColor(Theme.textPrimary)
                     .lineLimit(metrics.memoryCardLines)

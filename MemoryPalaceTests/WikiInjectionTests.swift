@@ -8,7 +8,7 @@ import SwiftData
 final class WikiInjectionTests: XCTestCase {
 
     private let pid = "xctest-wiki-injection"
-    private let keys = ["mem_inject_keyword", "mem_inject_full", "mem_inject_vector", "mem_inject_graph", "mem_master",
+    private let keys = ["mem_inject_vector", "mem_inject_graph", "mem_master",
                         MemoryOpenWindow.cKey, MemoryOpenWindow.b4Key, "mem_inject_budget", "mem_inject_catalog",
                         RecallTuningStore.storageKey, MemoryOpenWindowStore.storageKey]
     private var saved: [String: Any?] = [:]
@@ -277,7 +277,7 @@ final class WikiInjectionTests: XCTestCase {
         XCTAssertFalse(empty.volatile.contains("C 档案"))
     }
 
-    // MARK: - 每轮的输入：钉住照带、按类别常驻停掉、只带留下的碎片、C 没勾三样都不带
+    // MARK: - 每轮的输入：钉住照带、按类别常驻停掉、只带留下的碎片、C（wiki 目录）没勾只少目录
 
     @MainActor
     func testRoundInputsCandidatesAndGate() async throws {
@@ -314,7 +314,9 @@ final class WikiInjectionTests: XCTestCase {
 
         UserDefaults.standard.set(false, forKey: MemoryOpenWindow.cKey)
         let off = MemoryInjector.roundInputs(profileId: pid, participation: .testValue(profileId: pid), store: store, context: context, wikiStore: wiki)
-        XCTAssertTrue(off.memories.isEmpty, "C 没勾：钉住的也不带（同改前）")
+        XCTAssertEqual(Set(off.memories.map(\.content)), ["钉住的旧档案", "留下的碎片"],
+                       "C 没勾：钉住的照带（只听「钉住的」那一勾），留下的碎片照旧是聊到才带的候选")
+        XCTAssertFalse(off.everyRound)
         XCTAssertEqual(off.wiki?.indexLines, [], "根索引取消后不带目录")
         XCTAssertEqual(off.wiki?.pages.map(\.title), ["小慧"], "档案触发独立于根索引")
     }
@@ -674,8 +676,8 @@ final class WikiInjectionTests: XCTestCase {
     func testResidentLine() {
         let hits = [WikiPageHit(page: page("人/小慧", "小慧"), word: "慧慧"),
                     WikiPageHit(page: page("工程/记忆宫殿", "记忆宫殿"), word: "审计台")]
-        XCTAssertEqual(WikiInjection.residentLine(indexCount: 12, hits: hits), "根索引 12 行 · 本轮命中：小慧（“慧慧”）、记忆宫殿（“审计台”）")
-        XCTAssertEqual(WikiInjection.residentLine(indexCount: 3, hits: []), "根索引 3 行 · 本轮没命中")
+        XCTAssertEqual(WikiInjection.residentLine(indexCount: 12, hits: hits), "wiki 目录 12 行 · 本轮命中：小慧（“慧慧”）、记忆宫殿（“审计台”）")
+        XCTAssertEqual(WikiInjection.residentLine(indexCount: 3, hits: []), "wiki 目录 3 行 · 本轮没命中")
     }
 
     func testSettingsStampCarriesWikiVersion() {

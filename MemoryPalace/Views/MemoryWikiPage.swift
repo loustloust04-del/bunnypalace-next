@@ -6,7 +6,7 @@ import SwiftUI
 // 原来是审计台 wiki 台顶上「页 | 整理提案」里的「页」那段；整理提案留在审计台 wiki 台。数据一条不动，只换入口。
 
 struct MemoryWikiPage: View {
-    /// 空页「去整理提案 ›」：父级切到审计台格并推 wiki 台
+    /// 空页「去 wiki 台批 ›」：父级切到审计台格并推 wiki 台
     let openProposals: () -> Void
 
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
@@ -14,6 +14,8 @@ struct MemoryWikiPage: View {
     @State private var branches: [WikiBranchCount] = []
     @State private var loaded = false
     @State private var deletedCount = 0
+    /// 没有页时数一下 wiki 台里等批的（和审计台 wiki 方块同一个数）
+    @State private var pendingCount = 0
     @State private var wiki: WikiStore?
     @State private var runner = CatalogRunner.shared
     @State private var refresher = AuditRefreshQueue()
@@ -25,10 +27,10 @@ struct MemoryWikiPage: View {
         List {
             Section {
                 if loaded && total == 0 {
-                    Text("还没有页——在审计台「整理提案」批了提案才会写进来")
+                    Text(pendingCount > 0 ? "还没有 wiki 页 · wiki 台里 \(pendingCount) 条等你批，批了才写进来" : "还没有 wiki 页 · wiki 台里批了才写进来")
                         .font(m.caption)
                         .foregroundColor(Theme.textMuted)
-                    Button("去整理提案 ›", action: openProposals)
+                    Button("去 wiki 台批 ›", action: openProposals)
                         .font(m.body)
                         .foregroundColor(Theme.branchIndicator)
                         .buttonStyle(.plain)
@@ -53,17 +55,12 @@ struct MemoryWikiPage: View {
                     NavigationLink {
                         WikiDeletedPage(profileId: profileId, store: wiki)
                     } label: {
-                        Text("已删除 · \(deletedCount)")
+                        Text("Deleted pages · \(deletedCount)")
                             .font(m.body)
                             .foregroundColor(Theme.textSecondary)
                     }
-                    .accessibilityLabel("已删除 C 档案，\(deletedCount) 页")
+                    .accessibilityLabel("Deleted pages，\(deletedCount) 页")
                 }
-            } header: {
-                Text("整理好的档案，一个点一页")
-                    .font(m.caption)
-                    .foregroundColor(Theme.textMuted)
-                    .textCase(nil)
             }
             .panelRowBackground()
         }
@@ -81,6 +78,7 @@ struct MemoryWikiPage: View {
             branches = []
             wiki = nil
             deletedCount = 0
+            pendingCount = 0
             loaded = false
         }
     }
@@ -90,12 +88,15 @@ struct MemoryWikiPage: View {
         guard !pid.isEmpty else { return }
         let result = await Task.detached(priority: .utility) {
             let store = WikiStore(profileId: pid)
-            return (store, store.branchPageCounts(), store.deletions().filter { $0.phase != .restored && $0.reason != "批准补偿" }.count)
+            let branches = store.branchPageCounts()
+            let pending = branches.contains { $0.count > 0 } ? 0 : AuditStation.proposalTally(WikiProposalStore(wiki: store).list()).pending
+            return (store, branches, store.deletions().filter { $0.phase != .restored && $0.reason != "批准补偿" }.count, pending)
         }.value
         guard refresher.isCurrent(ticket), pid == profileId else { return }
         wiki = result.0
         branches = result.1
         deletedCount = result.2
+        pendingCount = result.3
         loaded = true
     }
 }

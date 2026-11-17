@@ -4,7 +4,7 @@ import Foundation
 /// AI 资料卡店：memory/profile-card.md。
 /// frontmatter：card(版本) + status（AI 当下状态一句话）+ statusUpdatedAt；body = bio。
 /// status/bio 独立保存互不踩。body 空时写 "-" 哨兵（FrontmatterCodec.parse 空 body 返回 nil）。
-/// 在 memory/ 树下 = AI 可 fs_read 看到，但 fs_write 对 memory/ 路径拒绝——只能走 update_profile_card 改。
+/// 在 memory/ 树下 = AI 可 fs_read 看到；改走 update_profile_card，或文件工具写 memory/profile-card.md（`MemoryFolderWrite`，落到同一对 saveStatus / saveBio）。
 enum ProfileCardStore {
     struct Card {
         var status: String? = nil

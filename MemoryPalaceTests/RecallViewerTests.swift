@@ -34,29 +34,24 @@ final class RecallViewerTests: XCTestCase {
         return ModelContext(container)
     }
 
-    func testEditSavesTrimmedContentAndKeepsSource() throws {
-        let ctx = try context()
-        let m = try SwiftDataMemoryStore().add(content: "喜欢海边", category: "preference", keywords: ["海边"],
-                                               profileId: "p", isUserExplicit: false, extractedBy: "x",
-                                               sourceConversationId: "c", sourceQuote: "我喜欢海边", sourceNodeId: "n", context: ctx)
-        XCTAssertNil(m.userEditedAt)
-        XCTAssertTrue(RecallActions.saveEdit(m, text: "  喜欢山里  ", context: ctx))
-        XCTAssertEqual(m.content, "喜欢山里")
-        XCTAssertNotNil(m.userEditedAt, "store.update = 人手改的，记「你改过」")
-        XCTAssertEqual(m.sourceNodeId, "n", "出处不丢")
-        XCTAssertEqual(m.sourceQuote, "我喜欢海边")
-        XCTAssertFalse(RecallActions.saveEdit(m, text: "   ", context: ctx), "空的不存")
-        XCTAssertEqual(m.content, "喜欢山里")
+    private let pid = "xctest-recall-viewer"
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(at: FileLibraryStore.memoryRoot(profileId: pid).deletingLastPathComponent())
+        super.tearDown()
     }
 
-    func testDisableThenRevive() throws {
+    /// 停用 / 恢复 = 进 Deleted / Restore，两笔都记进记忆日志（和记忆页、整理台同一处）
+    func testDisableThenReviveIsLogged() throws {
         let ctx = try context()
-        let m = try SwiftDataMemoryStore().add(content: "a", category: "fact", keywords: [], profileId: "p",
+        let m = try SwiftDataMemoryStore().add(content: "a", category: "fact", keywords: [], profileId: pid,
                                                isUserExplicit: false, extractedBy: "x", sourceConversationId: nil,
                                                sourceQuote: nil, sourceNodeId: nil, context: ctx)
         RecallActions.toggleDisabled(m, context: ctx)
         XCTAssertNotNil(m.supersededAt, "停用 = 软失效，可恢复")
         RecallActions.toggleDisabled(m, context: ctx)
         XCTAssertNil(m.supersededAt)
+        let log = MemoryAuditLog.load(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
+        XCTAssertEqual(log.map(\.action), [.restore, .delete])
     }
 }

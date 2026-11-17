@@ -135,25 +135,16 @@ enum RecallHitDisplay {
     }
 }
 
-/// 卡上的操作：走记忆库同一套接口（同记忆面板），不另起一套
+/// 卡上的操作：走记忆页 / 整理台同一处（`MemoryEntryActions`：记进记忆日志、能 Undo），不另起一套。改字开唯一的那张详情页
 @MainActor
 enum RecallActions {
-    /// 改内容：去掉首尾空白，空的不存；关键词和出处原样留着
-    @discardableResult
-    static func saveEdit(_ memory: Memory, text: String, context: ModelContext) -> Bool {
-        let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty else { return false }
-        try? SwiftDataMemoryStore().update(id: memory.id, content: content, keywords: memory.keywords,
-                                           sourceQuote: memory.sourceQuote, sourceNodeId: memory.sourceNodeId, context: context)
-        try? context.save()
-        return true
-    }
-
-    /// 停用 ↔ 恢复（软失效：出排名不出库，同记忆面板的删除第一步）
+    /// 停用 ↔ 恢复（= 进 Deleted / Restore，同记忆页的删除）
     static func toggleDisabled(_ memory: Memory, context: ModelContext) {
-        memory.supersededAt = memory.supersededAt == nil ? Date() : nil
-        memory.updatedAt = Date()
-        try? context.save()
+        if memory.supersededAt == nil {
+            MemoryEntryActions.trash([memory], profileId: memory.profileId, context: context)
+        } else {
+            MemoryEntryActions.restore([memory], profileId: memory.profileId, context: context)
+        }
     }
 }
 
@@ -173,8 +164,7 @@ struct RecallHitList: View {
     @AppStorage("mem_recall_feedback") private var feedbackEnabled = true
     @Query private var live: [Memory]
     @State private var openIds: Set<UUID> = []
-    @State private var editing: Memory?
-    @State private var editText = ""
+    @State private var editing: MemoryEntryTarget?
 
     init(node: MessageNode, rowSpacing: CGFloat = 6, snippetSize: CGFloat = 11, metaSize: CGFloat = 9) {
         self.node = node
@@ -186,7 +176,7 @@ struct RecallHitList: View {
     }
 
     static let retrieverLabels: [String: String] = [
-        "vector": "语义", "keyword": "关键词", "graph": "关联", "fullFallback": "兜底",
+        "vector": "语义", "keyword": "关键词", "named": "点名", "graph": "关联", "fullFallback": "兜底",
     ]
 
     var body: some View {
@@ -197,26 +187,10 @@ struct RecallHitList: View {
                 hitRow(hit, index: i, memory: byId[hit.memoryId])
             }
         }
-        .sheet(item: $editing) { memory in
-            NavigationStack {
-                TextEditor(text: $editText)
-                    .padding()
-                    .navigationTitle("改这条记忆")
-                    #if os(iOS)
-                    .navigationBarTitleDisplayMode(.inline)
-                    #endif
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) { Button("取消") { editing = nil } }
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("保存") {
-                                if RecallActions.saveEdit(memory, text: editText, context: modelContext) { editing = nil }
-                            }
-                            .disabled(editText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        }
-                    }
-            }
-            .frame(minWidth: 320, minHeight: 220)
-        }
+        // 「改」开的是记忆页 / 整理台同一张详情页（改 / 删 / 钉都记进记忆日志、能在那里 Undo）
+        .memoryEntryPage($editing, onJump: { mem in
+            mem.sourceConversationId != nil && viewModel != nil ? { jumpToSource(mem) } : nil
+        })
     }
 
     @ViewBuilder
@@ -256,7 +230,7 @@ struct RecallHitList: View {
                         .foregroundColor(palette.textMuted)
                         .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: 14) {
-                        action("改", "pencil") { editText = memory.content; editing = memory }
+                        action("改", "pencil") { editing = .existing(memory) }
                         action(state == .disabled ? "恢复" : "停用", state == .disabled ? "arrow.uturn.backward" : "pause.circle") {
                             RecallActions.toggleDisabled(memory, context: modelContext)
                         }

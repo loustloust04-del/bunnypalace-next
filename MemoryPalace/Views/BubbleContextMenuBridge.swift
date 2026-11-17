@@ -19,6 +19,8 @@ struct MenuActionSpec {
     var quickLabel: String? = nil
     /// 有值 = 二级菜单：iOS 浮层里点它在卡内原地换成这一页（带「返回」），mac 渲成子 Menu
     var children: [MenuActionSpec]? = nil
+    /// 灰掉不能点（如记忆总开关关着时的「现在写记忆」）
+    var isDisabled: Bool = false
     let handler: () -> Void
 }
 
@@ -27,23 +29,35 @@ extension MenuActionSpec {
     @ViewBuilder
     static func menuItems(from specs: [MenuActionSpec]) -> some View {
         ForEach(specs.indices, id: \.self) { i in
-            if let children = specs[i].children {
-                Menu(specs[i].title) {
-                    ForEach(children.indices, id: \.self) { j in
-                        Button(role: children[j].isDestructive ? .destructive : nil, action: children[j].handler) {
-                            Label(children[j].title, systemImage: children[j].systemImage)
-                        }
-                    }
-                }
-            } else {
-                Button(role: specs[i].isDestructive ? .destructive : nil, action: specs[i].handler) {
-                    Label(specs[i].title, systemImage: specs[i].systemImage)
-                }
-            }
+            item(specs[i])
             if specs[i].dividerAfter {
                 Divider()
             }
         }
+    }
+
+    /// 系统菜单（Mac 右键 / 标题栏、iOS 宽屏悬浮条）的顺序：图标排那几项 → 其余 → 删除垫底。
+    /// 自绘浮层的图标排在系统菜单里只是普通行，删除别夹在中间（11-16 对话菜单合一）
+    static func systemMenuOrder(_ specs: [MenuActionSpec]) -> [MenuActionSpec] {
+        var quick = specs.filter { $0.quickLabel != nil && !$0.isDestructive }
+        var rows = specs.filter { $0.quickLabel == nil }
+        let destructive = specs.filter { $0.quickLabel != nil && $0.isDestructive }
+        if !quick.isEmpty, !rows.isEmpty { quick[quick.count - 1].dividerAfter = true }
+        if !rows.isEmpty, !destructive.isEmpty { rows[rows.count - 1].dividerAfter = true }
+        return quick + rows + destructive
+    }
+
+    /// 一项：带 children 的渲成子 Menu，可以一层套一层（对话菜单「更多 ▸ 身份 ▸」）
+    private static func item(_ spec: MenuActionSpec) -> AnyView {
+        if let children = spec.children {
+            return AnyView(Menu(spec.title) {
+                ForEach(children.indices, id: \.self) { j in item(children[j]) }
+            })
+        }
+        return AnyView(Button(role: spec.isDestructive ? .destructive : nil, action: spec.handler) {
+            Label(spec.title, systemImage: spec.systemImage)
+        }
+        .disabled(spec.isDisabled))
     }
 }
 

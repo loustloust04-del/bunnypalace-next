@@ -138,6 +138,35 @@ final class Page2AppFloorsTests: XCTestCase {
         XCTAssertTrue(Page2Apps.isInstalled("twitter", profileId: b))
     }
 
+    // MARK: pmBoard 入口先停（plan-folder-floor §5 Q1）：关一次，之后她自己开的不再动
+
+    func testPMBoardParkedOnceThenLeftAlone() throws {
+        try XCTSkipUnless(RightPanelToolManager.builtInTools.contains { $0.id == "pmBoard" }, "pmBoard 只在个人 Debug 包里")
+        sandbox.storeDefaults(["pmBoard": true])
+
+        let tm = RightPanelToolManager(defaults: sandbox.defaults)
+        XCTAssertFalse(tm.pinnedTools.contains { $0.id == "pmBoard" }, "老存档里开着的被关掉")
+        XCTAssertTrue(tm.allToolsSorted.contains { $0.id == "pmBoard" }, "还在开关列表里，能再打开")
+        let saved = RightPanelToolManager.decodedTools(sandbox.defaults.data(forKey: RightPanelToolManager.storageKey))
+        XCTAssertEqual(saved.first { $0.id == "pmBoard" }?.isEnabled, false, "关掉落了盘")
+
+        tm.setEnabled("pmBoard", true, target: .defaults)
+        XCTAssertTrue(RightPanelToolManager(defaults: sandbox.defaults).pinnedTools.contains { $0.id == "pmBoard" },
+                      "她重新打开以后，下次启动不再关")
+    }
+
+    func testPMBoardParkClearsFloorInstalls() throws {
+        try XCTSkipUnless(RightPanelToolManager.builtInTools.contains { $0.id == "pmBoard" }, "pmBoard 只在个人 Debug 包里")
+        sandbox.storeDefaults(["pmBoard": false])
+        Page2Apps.setFloor(true, for: "pmBoard", profileId: a)
+        XCTAssertEqual(Page2Apps.floors().stored("pmBoard", profileId: a), true)
+
+        let tm = RightPanelToolManager(defaults: sandbox.defaults)
+        tm.activeProfileId = a
+        XCTAssertNil(Page2Apps.floors().stored("pmBoard", profileId: a), "按人单独装的也清掉")
+        XCTAssertFalse(tm.pinnedTools.contains { $0.id == "pmBoard" })
+    }
+
     // MARK: RightPanelToolManager：默认 / 生效分开（plan §6-1）
 
     func testFloorWriteNeverTouchesRightPanelToolsBytes() throws {

@@ -272,6 +272,10 @@ struct FullMemoryDocument: Codable {
     // C2 归因（可选；旧备份缺键 = nil，不推断）
     var subject: String? = nil
     var speaker: String? = nil
+    // C2 整段写手的置信度（可选；旧备份缺键 = nil）
+    var confidence: Int? = nil
+    // 整段写手标的全部出处（可选；旧备份缺键 = nil）
+    var sourceNodeIds: [String]? = nil
 }
 
 // MARK: - WorldBook

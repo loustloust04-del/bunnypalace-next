@@ -134,10 +134,11 @@ public enum SessionSegmentWriter {
         return out
     }
 
-    /// 说话人用楼层称呼，不标「用户 / AI」——那两个词漏进旧摘要的根子
+    /// 对方用楼层称呼，不标「用户 / AI」——那两个词漏进旧摘要的根子。写手自己那一方标「我」，和提示词要它写的「我：「……」」一致：
+    /// 标成它的名字时它看到的是两个别人在说话，会当旁观者写成第三人称（11-14 真数据 7 段：标名字 1 段写反 + 3 次重写，标「我」0）
     public static func transcript(_ messages: [Message], speakers: Speakers) -> String {
         messages.map { m in
-            let who = m.role == "user" ? speakers.user : speakers.char
+            let who = m.role == "user" ? speakers.user : "我"
             let text = m.content.count > messageCharLimit ? String(m.content.prefix(messageCharLimit)) + "…（后面略）" : m.content
             return "\(who)：\(text)"
         }.joined(separator: "\n\n")
@@ -297,7 +298,7 @@ public enum SessionSegmentWriter {
         var o = parse(raw)
         for problem in softProblems(raw, output: o) {
             MemoryWriteLog.record(writer: .a2, profileId: req.profileId, ok: true,
-                                  note: "A2 软检查 · 窗口「\(SessionSummaryStore.oneLine(req.windowTitle))」· 段「\(SessionSummaryStore.oneLine(o.title))」· \(problem)", model: "", cost: 0, memoryRoot: req.memoryRoot ?? fallbackLogRoot())
+                                  note: "A2 软检查 · 窗口「\(SessionSummaryStore.oneLine(req.windowTitle))」· 段「\(SessionSummaryStore.oneLine(o.title))」· \(problem)", model: MemoryWriteLog.meter?.model ?? "", cost: 0, memoryRoot: req.memoryRoot ?? fallbackLogRoot())
         }
         if o.keywords.count > keywordLimit { o.keywords.removeLast(o.keywords.count - keywordLimit) }
         return SessionSegment(
@@ -320,11 +321,13 @@ public enum SessionSegmentWriter {
         { system, user in
             guard isOn() else {
                 MemoryLogging.shared.log("📝 记忆写手: 跳过（开关关了）")
+                MemoryWriteLog.noteSkip("开关关了")
                 return nil
             }
             let raw = try await caller(system, user)
             guard isOn() else {
                 MemoryLogging.shared.log("📝 记忆写手: 开关关了，这次写的不存")
+                MemoryWriteLog.noteSkip("开关关了")
                 return nil
             }
             return raw

@@ -67,27 +67,33 @@ struct MemoryWindowChoices: Codable, Equatable, Sendable {
     static let allOff = MemoryWindowChoices(timeline: false, pending: false, selfMemory: false,
                                             archive: false, previousWindow: false, pinned: false)
 
-    /// 新窗档案 = 根索引勾或档案触发开；其余三项读新键（没写过 = 开）。
+    /// 新窗档案 = wiki 目录勾、聊到才带开、每轮全带勾，三样有一样就开；其余三项读新键（没写过 = 开）。
     static func defaults(profileId: String, defaults: UserDefaults = MemoryReadEnvironment.defaults) -> MemoryWindowChoices {
-        func extra(_ item: MemoryNoteItem) -> Bool {
-            item.defaultsKey.flatMap { MemoryOpenWindowStore.load(key: $0, profileId: profileId, defaults: defaults) } ?? true
-        }
+        func extra(_ item: MemoryNoteItem) -> Bool { floorExtra(item, profileId: profileId, defaults: defaults) }
         return MemoryWindowChoices(timeline: MemoryOpenWindow.isChecked(.a4, profileId: profileId, defaults: defaults),
                                    pending: extra(.pending),
                                    selfMemory: MemoryOpenWindow.isChecked(.b4, profileId: profileId, defaults: defaults),
                                    archive: MemoryOpenWindow.isChecked(.c, profileId: profileId, defaults: defaults)
-                                       || RecallTuningStore.load(profileId: profileId, defaults: defaults).archiveTriggerEnabled,
+                                       || RecallTuningStore.load(profileId: profileId, defaults: defaults).archiveTriggerEnabled
+                                       || MemoryOpenWindow.everyRound(profileId: profileId, defaults: defaults),
                                    previousWindow: extra(.previousWindow),
                                    pinned: extra(.pinned))
     }
 
-    /// 老窗（没存选择）：逐字等于今天——待续跟时间轴一勾、钉住跟档案一勾、没有上个窗口
+    /// 老窗（没存选择）：待续跟时间轴一勾、档案 = wiki 目录那一勾、没有上个窗口；
+    /// 钉住只听「钉住的」那一勾（11-15 起不再跟 wiki 目录那一勾，没写过 = 开）
     static func legacy(profileId: String, defaults: UserDefaults = MemoryReadEnvironment.defaults) -> MemoryWindowChoices {
         let a4 = MemoryOpenWindow.isChecked(.a4, profileId: profileId, defaults: defaults)
-        let c = MemoryOpenWindow.isChecked(.c, profileId: profileId, defaults: defaults)
         return MemoryWindowChoices(timeline: a4, pending: a4,
                                    selfMemory: MemoryOpenWindow.isChecked(.b4, profileId: profileId, defaults: defaults),
-                                   archive: c, previousWindow: false, pinned: c)
+                                   archive: MemoryOpenWindow.isChecked(.c, profileId: profileId, defaults: defaults),
+                                   previousWindow: false,
+                                   pinned: floorExtra(.pinned, profileId: profileId, defaults: defaults))
+    }
+
+    /// 纸条新增的三勾在楼层档里的值（没写过 = 开）
+    private static func floorExtra(_ item: MemoryNoteItem, profileId: String, defaults: UserDefaults) -> Bool {
+        item.defaultsKey.flatMap { MemoryOpenWindowStore.load(key: $0, profileId: profileId, defaults: defaults) } ?? true
     }
 
     static func setDefault(_ item: MemoryNoteItem, _ on: Bool, profileId: String, defaults: UserDefaults = .standard) {
@@ -106,7 +112,8 @@ enum MemoryOpenWindowNote {
     static let key = "mem_open_note"
 
     static func enabled(profileId: String, defaults: UserDefaults = MemoryReadEnvironment.defaults) -> Bool {
-        MemoryOpenWindowStore.load(key: key, profileId: profileId, defaults: defaults) ?? true
+        // 没设过：普通楼层默认弹；连着电脑文件夹的楼层默认不弹（粟粟 11-17「默认关，反正有开关」）。她设过的照她的
+        MemoryOpenWindowStore.load(key: key, profileId: profileId, defaults: defaults) ?? !FolderFloor.isFolder(profileId)
     }
 
     static func set(_ on: Bool, profileId: String, defaults: UserDefaults = .standard) {
@@ -416,17 +423,22 @@ enum MemoryNotePreview {
         let root = wiki.map { WikiInjection.indexBlock($0, user: profile.userName) } ?? ""
         let rootLines = wiki?.indexLines.filter { $0.hasPrefix("- ") }.count ?? 0
         let triggerOn = RecallTuningStore.load(profileId: pid).archiveTriggerEnabled
+        let everyRound = MemoryOpenWindow.everyRound(profileId: pid)
         let fragments = injectable.filter { !$0.isUserExplicit }
-        let fragmentText = triggerOn ? "" : MemoryInjector.buildInjectionSplit(memories: fragments, recentMessages: [],
-                                                                               budget: MemoryInjector.tokenBudget, now: now).volatile
+        // 每轮全带勾着：批过的记忆条目预算内都带；没勾：聊到才带开着时只在聊到时带，每轮都在的只有卡的目录
+        let fragmentText = everyRound ? MemoryInjector.buildInjectionSplit(memories: fragments, recentMessages: [],
+                                                                           budget: MemoryInjector.tokenBudget, now: now).volatile : ""
+        let cardIndex = triggerOn && !everyRound ? MemoryInjector.cardIndex(fragments).text : ""
         let previous = snapshot.map { $0.render(user: names.userName, assistant: names.charName, budget: MemoryInjector.tokenBudget) }
 
         func tokens(_ text: String?) -> Int { text.map { $0.isEmpty ? 0 : Memory.estimateTokens($0) } ?? 0 }
         let archiveSummary: String = {
             var parts: [String] = []
             parts.append(wiki == nil ? "目录还没读好" : (rootLines > 0 ? "目录 \(rootLines) 页" : "还没有档案页"))
-            if !triggerOn, !fragments.isEmpty { parts.append("留下的碎片 \(fragments.count) 条") }
-            parts.append("聊到哪页带哪页另算")
+            if !fragments.isEmpty, everyRound || triggerOn {
+                parts.append("批过的记忆条目 \(fragments.count) 张" + (everyRound ? "每轮都带" : ""))
+            }
+            if triggerOn { parts.append(everyRound ? "聊到才推送的页另算" : "聊到才推送的页和卡另算") }
             return parts.joined(separator: "，")
         }()
         let previousSummary: String = {
@@ -443,7 +455,7 @@ enum MemoryNotePreview {
             .init(item: .selfMemory, summary: selfBuilt.fullCount + selfBuilt.indexCount == 0 ? "还没有"
                     : "\(selfBuilt.fullCount) 条全文" + (selfBuilt.indexCount > 0 ? "，\(selfBuilt.indexCount) 条只带标题" : ""),
                   tokens: selfBuilt.tokens),
-            .init(item: .archive, summary: archiveSummary, tokens: tokens(root) + tokens(fragmentText)),
+            .init(item: .archive, summary: archiveSummary, tokens: tokens(root) + tokens(cardIndex) + tokens(fragmentText)),
             .init(item: .previousWindow, summary: previousSummary, tokens: previous?.tokens ?? 0),
             .init(item: .pinned, summary: pinned.isEmpty ? "没有钉住的" : "\(pinned.count) 条", tokens: tokens(pinnedText)),
         ]

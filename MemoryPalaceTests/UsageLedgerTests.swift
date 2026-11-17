@@ -235,7 +235,7 @@ final class UsageLedgerTests: XCTestCase {
             record("cheap", at: date(2026, 9, 24, 4), input: 500_000, output: 0, kind: .catalog),
         ]
         let s = UsageSummarizer.summarize(.today, now: now, records: recs, calendar: calendar, price: price)
-        XCTAssertEqual(s.kinds.map(\.label), ["wiki 种子", "对话", "整理编目"], "按花费降序")
+        XCTAssertEqual(s.kinds.map(\.label), ["wiki 种子", "对话", "wiki 整理"], "按花费降序")
         XCTAssertEqual(s.kinds[0].totals.calls, 2)
         XCTAssertEqual(s.kinds[0].totals.costUSD, 3, accuracy: 1e-9)
         XCTAssertEqual(s.kinds.map(\.totals.costUSD).reduce(0, +), s.totals.costUSD, accuracy: 1e-9, "分项加起来等于总花费")

@@ -208,23 +208,16 @@ final class MemorydBenchAPITests: XCTestCase {
         let sets = try XCTUnwrap(response.jsonDictionary?["sets"] as? [[String: Any]])
         let ids = sets.compactMap { $0["id"] as? String }
         XCTAssertTrue(ids.contains("wiki-probe"))
-        XCTAssertTrue(ids.contains("recall-24"))
         XCTAssertTrue(ids.contains("c2-probe"))
         let probe = try XCTUnwrap(sets.first { $0["id"] as? String == "wiki-probe" })
         XCTAssertEqual(probe["runnable"] as? Bool, true)
-        let recall = try XCTUnwrap(sets.first { $0["id"] as? String == "recall-24" })
-        XCTAssertEqual(recall["runnable"] as? Bool, true)
-        XCTAssertEqual(recall["partial"] as? String, "13/24")
-        XCTAssertFalse(ids.contains { $0.contains("floor") }, "楼层 JSON 不是题集")
     }
 
-    /// S1：楼层 JSON 以 `memory-bench-` 开头，必须显式排除；靠 decode 失败跳过会每次请求记一条 error
-    func testBuiltInSetsExcludeRecallFloorWithoutDecodeFailure() async throws {
+    /// 资源目录里 `memory-bench-` 开头的都是题集、都解得开（解不开的每次请求会记一条 error）
+    func testBuiltInSetsAllDecodeWithoutSkips() async throws {
         let loaded = await service.loadBuiltInSets()
-        XCTAssertEqual(loaded.sets.map(\.id), ["a2-probe", "c2-probe", "recall-24", "wiki-probe"])
-        XCTAssertEqual(loaded.skipped, [], "楼层 JSON 不该进解码失败列表（那会记 error）")
-        let floorFile = try XCTUnwrap(MemorydResources.benchDirectory).appendingPathComponent("memory-bench-recall-floor-xingyan.json")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: floorFile.path), "文件在资源目录里，确实被过滤器排除")
+        XCTAssertEqual(loaded.sets.map(\.id), ["a2-probe", "c2-probe", "wiki-probe"])
+        XCTAssertEqual(loaded.skipped, [])
     }
 
     func testSetDetailCarriesCasesAndLabels() async throws {
@@ -284,23 +277,6 @@ final class MemorydBenchAPITests: XCTestCase {
         let privateCase = try XCTUnwrap(cells.first { ($0["caseId"] as? String) == "wiki-private-never" })
         let output = try XCTUnwrap(privateCase["output"] as? String)
         XCTAssertFalse(output.contains("private_雾岛"))
-    }
-
-    func testRecallSetRunsYHalfOrExplainsTimeZone() async throws {
-        let started = await service.post("/api/bench/run", json: #"{"setId":"recall-24"}"#)
-        XCTAssertEqual(started.status, 200)
-        let runId = try XCTUnwrap(started.jsonDictionary?["runId"] as? String)
-        let detail = await service.get("/api/bench/runs/\(runId)")
-        let run = try XCTUnwrap(detail.jsonDictionary)
-        let note = run["note"] as? String ?? ""
-        if Calendar.current.timeZone.identifier == "America/Los_Angeles" {
-            XCTAssertEqual((run["cells"] as? [[String: Any]])?.count, 13)
-            XCTAssertTrue(note.contains("主分不可测（X 侧 11 题等刀 3）"), note)
-        } else {
-            XCTAssertEqual((run["cells"] as? [[String: Any]])?.count, 0)
-            XCTAssertTrue(note.contains("宿主时区"), note)
-            XCTAssertTrue(note.contains("America/Los_Angeles"), note)
-        }
     }
 
     func testBadRunBodyIs400AndWrongMethodIs405() async throws {

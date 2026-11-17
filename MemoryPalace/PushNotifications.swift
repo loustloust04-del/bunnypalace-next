@@ -11,6 +11,7 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         // 粟粟拍板：撤销只留编辑器浮条 / 硬件快捷键，摇一摇是全 App 开关。
         application.applicationSupportsShakeToEdit = false
+        TurnKeepAlive.registerLaunchHandler()   // 系统要求启动完成前登记好后台任务标识
         LaunchSplash.install(fromPush: launchOptions?[.remoteNotification] != nil)
         LaunchMarks.note(launchOptions?[.remoteNotification] != nil ? "launch.push" : application.applicationState == .background ? "launch.bg" : "launch.fg")   // 秒连尺子：启动来源
         // #042：锁屏来电要读的钥匙串条目改成「首次解锁后可读」；锁着冷启动改不了，等解锁回调补跑

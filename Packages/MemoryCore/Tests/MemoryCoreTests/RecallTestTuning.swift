@@ -13,6 +13,7 @@ enum RecallTestTuning {
             cooldownTurns: 3,
             identityLookbackMessages: 4,
             maximumPages: 3,
+            maximumFragments: 3,
             maximumQueryTerms: 6,
             minimumHanTermLength: 2,
             minimumLatinTermLength: 3,

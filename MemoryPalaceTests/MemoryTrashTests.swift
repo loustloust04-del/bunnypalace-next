@@ -102,8 +102,9 @@ final class MemoryTrashTests: XCTestCase {
         XCTAssertNil(pinned.importance)
 
         let deleted = MemoryRowItem(mem("旧", deletedAt: thisYear, category: "context"))
-        XCTAssertEqual(deleted.infoLine, "近况 · 删于 3月2日")
+        XCTAssertEqual(deleted.infoLine, "删于 3月2日", "11-15：原子事实的行上不再写旧类别（类别是 #tags，在详情页里）")
         XCTAssertTrue(deleted.isDeleted)
+        XCTAssertFalse(deleted.isDraft, "删了的不算 Draft")
 
         let asked = MemoryRowItem(selfMem("配色", origin: "asked", type: "feedback"))
         XCTAssertEqual(asked.id, .assistant("配色"))

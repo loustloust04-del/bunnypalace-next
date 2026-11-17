@@ -26,7 +26,12 @@ struct ApprovalCardView: View {
                         Text("AI 想用「\(request.domain.displayName)」").font(.headline)
                     }
                     Text(approval.toolName).font(.caption.monospaced()).foregroundStyle(CodeBlockStyle.label)
-                    if let command = preview.command { commandBlock(command) }
+                    if let command = preview.command {
+                        commandBlock(command)
+                    } else if let detail = request.detail {
+                        // 询问卡多出的那一行（`PermissionGate.detail`）：要动的那张记忆条目现在写的是什么 / 这次要查什么
+                        Text(detail).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    }
                     if !preview.rows.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             ForEach(preview.rows, id: \.label) { row in

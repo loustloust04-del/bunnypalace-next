@@ -587,10 +587,13 @@ final class ProviderManager {
         return nil
     }
 
-    /// mac 上回环地址就是本机 hub；iOS 模拟器的回环也是这台 Mac（不用配对）；真机得扫码配过对（配了主 / 备 / 中继任一个）
+    /// mac 上回环地址就是本机 hub；真机得扫码配过对（配了主 / 备 / 中继任一个）；
+    /// iOS 模拟器的回环也是这台 Mac，但没显式配过地址就不连（`CCBridgeEndpoints.allowsLocalFallback`），XCTest 宿主里照旧算能用
     private static var bridgeReachable: Bool {
-        #if os(macOS) || targetEnvironment(simulator)
+        #if os(macOS)
         return true
+        #elseif targetEnvironment(simulator)
+        return CCBridgeEndpoints.allowsLocalFallback || !CCBridgeEndpoints.configuredURLs(fallbackToLocal: false).isEmpty
         #else
         return !CCBridgeEndpoints.configuredURLs(fallbackToLocal: false).isEmpty
         #endif

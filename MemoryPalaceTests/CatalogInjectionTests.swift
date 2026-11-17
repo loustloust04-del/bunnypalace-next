@@ -2,15 +2,14 @@ import XCTest
 import SwiftData
 @testable import 记忆花园
 
-/// SC-B3 目录式注入特征测试。buildInjectionSplit 读 UserDefaults 开关，
+/// SC-B3 目录式注入特征测试。buildInjectionSplit 读 UserDefaults 里的目录开关，
 /// setUp/tearDown 复原所有动过的 key，不污染其他用例。
 final class CatalogInjectionTests: XCTestCase {
 
     let pid = "xctest-catalog"
 
     private let touchedKeys = [
-        "mem_inject_catalog", "mem_inject_keyword", "mem_inject_vector",
-        "mem_inject_full", "mem_content_convhistory",
+        "mem_inject_catalog", "mem_inject_vector", "mem_content_convhistory",
     ]
 
     override func setUp() {
@@ -71,18 +70,16 @@ final class CatalogInjectionTests: XCTestCase {
         XCTAssertGreaterThan(catalogLines.count, fullLines.count, "目录按行计费，同预算装更多条")
     }
 
-    // MARK: - 修复第一刀·刀4：关键词模式下常驻层仍全文，命中层目录化（C3 ② 起常驻层只收钉住的）
+    // MARK: - 修复第一刀·刀4：常驻层仍全文，其余的目录化（C3 ② 起常驻层只收钉住的）
 
-    func testKeywordModePersistentCategoriesStayFullText() {
+    func testPinnedStaysFullTextWhileTheRestBecomesCatalog() {
         UserDefaults.standard.set(true, forKey: "mem_inject_catalog")
-        UserDefaults.standard.set(true, forKey: "mem_inject_keyword")
-        UserDefaults.standard.set(false, forKey: "mem_inject_full")
         let rel = makeMemory("我们是彼此最亲近的人，已经一起走过很长一段日子了，这是关系层的常驻记忆", category: "relationship", pinned: true)
         let fact = makeMemory(String(repeating: "用户正在做记忆宫殿这个项目，", count: 6))
         let r = MemoryInjector.buildInjectionSplit(memories: [rel, fact], recentMessages: ["今天聊聊记忆宫殿项目"])
         XCTAssertTrue(r.stable.contains(rel.content), "钉住的走常驻层，全文")
-        XCTAssertTrue(r.volatile.hasPrefix("- ["), "命中的事实类是目录行")
-        XCTAssertFalse(r.volatile.contains(fact.content), "全文不进命中层")
+        XCTAssertTrue(r.volatile.hasPrefix("- ["), "没钉住的事实类是目录行")
+        XCTAssertFalse(r.volatile.contains(fact.content), "全文不进这一层")
     }
 
     // MARK: - 条数上限

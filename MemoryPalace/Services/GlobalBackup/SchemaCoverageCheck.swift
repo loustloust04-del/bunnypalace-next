@@ -274,7 +274,7 @@ enum SchemaCoverageCheck {
             occurredDay: "", importance: 0, emotion: 0, resolved: false,
             reviewedAt: Date(), userEditedAt: Date(),
             organizedAt: Date(), organizedPage: "", organizeRejectedAt: Date(),
-            subject: "虚构归因对象", speaker: "用户自述"
+            subject: "虚构归因对象", speaker: "用户自述", confidence: 0, sourceNodeIds: []
         )
         try compareFields(modelName: "Memory",
                           modelFields: modelFieldNames(model),

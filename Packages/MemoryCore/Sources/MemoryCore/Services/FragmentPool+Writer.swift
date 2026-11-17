@@ -53,6 +53,13 @@ extension FragmentPool {
         public var speaker: String? = nil
         /// 带明确日子的事到哪天（YYYY-MM-DD，规格 4⅞-3）；类型 / 日期不对只丢这个字段
         public var validUntil: Loose? = nil
+        /// 这件事从哪天起成立（整段写手给的；老写手不给，落库时按出处那条的日子算）
+        public var occurredDay: String? = nil
+        /// 这条信息本身有多可信（0–100；整段写手的提示词要了才有，老写手没有 = nil；落库存进 `Memory.confidence`）
+        public var confidence: Int? = nil
+        /// 这件事出自这一批的哪几条（整段写手交的 `msgs`，去重、从小到大；`msg` 仍是它交的第一个）；老写手只给 `msg` = nil。
+        /// 落库换成那几条的消息 id 存进 `Memory.sourceNodeIds`
+        public var msgs: [Int]? = nil
 
         public init(msg: Int, content: String, tags: [String], importance: Int, emotion: Int, resolved: Bool?,
                     category: String, subject: String? = nil, speaker: String? = nil, validUntil: Loose? = nil) {
@@ -89,9 +96,19 @@ extension FragmentPool {
 
     /// 解出来的一包：合格的卡 + 拒收几张
     public struct Batch: Equatable {
+        /// 整段写手「写完再核对一次」的结果
+        public enum Verified: Equatable {
+            /// 用了核对后的那份；draft = 第一次交了几张
+            case adopted(draft: Int)
+            /// 核对那次没回 / 不合格，留第一次的
+            case keptDraft
+        }
+
         public let fragments: [Fragment]
         public let rejected: Int
         public var rejectionReasons: [String] = []
+        /// 没走核对（老写手 / 没开 / 第一次是空的）= nil
+        public var verified: Verified? = nil
 
         public init(fragments: [Fragment], rejected: Int, rejectionReasons: [String] = []) {
             self.fragments = fragments

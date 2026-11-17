@@ -146,4 +146,9 @@ public enum RecallLexical {
     public static func targets(_ source: RecallSourceRef, in text: String) -> Bool {
         sourceReferences(in: text).contains(normalized(source.path))
     }
+
+    /// 这句话里点名的来源（`[[页]]` / `memory/wiki/….md` / `来源:`）；要对很多候选逐个判时先取一次
+    public static func references(in text: String) -> Set<String> {
+        Set(sourceReferences(in: text))
+    }
 }

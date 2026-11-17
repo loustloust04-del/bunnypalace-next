@@ -107,6 +107,7 @@ final class OpenWindowInjectionTests: XCTestCase {
         }
         MemoryOpenWindowStore.save(.b4, false, profileId: pid)
         MemoryOpenWindowStore.save(.c, true, profileId: pid)
+        RecallTuningStore.save(RecallTestTuning.make(archiveTriggerEnabled: false), profileId: pid)
         let rootOnly = inputs()
         XCTAssertEqual(rootOnly.wiki?.indexLines, wiki.indexLines)
         XCTAssertEqual(rootOnly.wiki?.pages, [])
@@ -116,8 +117,10 @@ final class OpenWindowInjectionTests: XCTestCase {
         let triggerOnly = inputs()
         XCTAssertEqual(triggerOnly.wiki?.indexLines, [])
         XCTAssertEqual(triggerOnly.wiki?.pages, wiki.pages)
-        RecallTuningStore.reset(profileId: pid)
+        RecallTuningStore.save(RecallTestTuning.make(archiveTriggerEnabled: false), profileId: pid)
         XCTAssertNil(inputs().wiki)
+        RecallTuningStore.reset(profileId: pid)
+        XCTAssertEqual(inputs().wiki?.pages, wiki.pages, "没设过的楼层：档案触发默认开")
     }
 
     func testWriteOffDoesNotStopInjection() {
@@ -127,25 +130,27 @@ final class OpenWindowInjectionTests: XCTestCase {
         XCTAssertTrue(EffectiveMemoryParticipation.resolve(profileId: pid, conversation: nil, preset: nil).a2Summary, "已经写下的照样带")
     }
 
+    /// 11-15：钉住的只听「钉住的」那一勾（老窗也是），不再跟 wiki 目录（C）那一勾
     @MainActor
-    func testArchiveCheckGatesRoundInputs() throws {
+    func testPinnedCheckGatesRoundInputsNotTheWikiDirectoryCheck() throws {
         let container = try ModelContainer(for: Memory.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
         let context = ModelContext(container)
         let store = SwiftDataMemoryStore()
         try store.add(content: "喜欢暖奶白", category: "preference", keywords: [], profileId: pid, isUserExplicit: true,
                       extractedBy: "t", sourceConversationId: nil, context: context)
-        UserDefaults.standard.removeObject(forKey: MemoryOpenWindow.cKey)
-        XCTAssertTrue(MemoryInjector.roundInputs(profileId: pid, participation: .testValue(profileId: pid),
-                                                 store: store, context: context).memories.isEmpty,
-                      "没写过 = C 不勾 = 档案不带（钉住的也不带，⧫3）")
-        UserDefaults.standard.set(true, forKey: MemoryOpenWindow.cKey)
-        XCTAssertEqual(MemoryInjector.roundInputs(profileId: pid, participation: .testValue(profileId: pid),
-                                                  store: store, context: context).memories.count, 1,
-                       "勾上才带")
-        UserDefaults.standard.set(false, forKey: MemoryOpenWindow.cKey)
-        XCTAssertTrue(MemoryInjector.roundInputs(profileId: pid, participation: .testValue(profileId: pid),
-                                                 store: store, context: context).memories.isEmpty,
-                      "C 不勾 = 档案不带")
+        func count() -> Int {
+            MemoryInjector.roundInputs(profileId: pid, participation: .testValue(profileId: pid), store: store, context: context).memories.count
+        }
+        for root in [nil, true, false] as [Bool?] {
+            if let root { UserDefaults.standard.set(root, forKey: MemoryOpenWindow.cKey) }
+            else { UserDefaults.standard.removeObject(forKey: MemoryOpenWindow.cKey) }
+            XCTAssertEqual(count(), 1, "「钉住的」没写过 = 勾着：照带（wiki 目录 \(String(describing: root))）")
+        }
+        MemoryWindowChoices.setDefault(.pinned, false, profileId: pid)
+        for root in [true, false] {
+            UserDefaults.standard.set(root, forKey: MemoryOpenWindow.cKey)
+            XCTAssertEqual(count(), 0, "「钉住的」不勾 = 不带（wiki 目录 \(root)）")
+        }
     }
 
     func testTimelineCheckGatesSlot() throws {

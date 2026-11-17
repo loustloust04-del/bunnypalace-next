@@ -463,6 +463,14 @@ struct PermissionsSettingsTab: View {
                     .searchAnchor("leaf-perm-shell")
                 PermissionDomainRow(domain: .twitter, target: rowTarget)   // local_twitter：本楼层推特，纯本地
                     .searchAnchor("leaf-perm-twitter")
+                PermissionDomainRow(domain: .memoryCards, target: rowTarget)   // memory_card：每次询问 = 一笔一问
+                    .searchAnchor("leaf-perm-memoryCards")
+                PermissionDomainRow(domain: .memorySelf, target: rowTarget)    // remember 三件 + 待续（pending_notes / 文件工具写 memory/pending/）+ 文件工具写 memory/self/
+                    .searchAnchor("leaf-perm-memorySelf")
+                PermissionDomainRow(domain: .memoryFiles, target: rowTarget)   // 文件工具改 wiki 页、suggest_wiki_direction
+                    .searchAnchor("leaf-perm-memoryFiles")
+                PermissionDomainRow(domain: .promptEdit, target: rowTarget)    // 文件工具改 文件库 › Prompt 里的一段
+                    .searchAnchor("leaf-perm-promptEdit")
             } header: {
                 Text("AI 能做什么")
             } footer: {
@@ -607,7 +615,7 @@ struct PermissionsSettingsTab: View {
     }
 }
 
-/// 权限页「系统权限」节：只读状态 + 前往系统设置。atrium「我 → 系统授权」单独开一页复用它（plan-atrium P2）
+/// 权限页「系统权限」节：只读状态 + 前往系统设置
 private struct SystemPermissionsSection: View {
     let status: SystemPermissionStatus
     @Environment(\.settingsMetrics) private var m
@@ -649,21 +657,6 @@ private struct SystemPermissionsSection: View {
             NSWorkspace.shared.open(url)
         }
         #endif
-    }
-}
-
-/// atrium「我 → 系统授权」：系统给 App 的授权，按人分不了（research-atrium §1.4）
-struct SystemAuthorizationPage: View {
-    @State private var sysStatus = SystemPermissionStatus()
-
-    var body: some View {
-        SettingsSectionList(.list) {
-            SystemPermissionsSection(status: sysStatus)
-        }
-        .scrollContentBackground(.hidden)
-        .background(Theme.mainBg)
-        .navigationTitle("系统授权")
-        .task { await sysStatus.refresh() }
     }
 }
 

@@ -77,18 +77,19 @@ final class LiveActivityDebugUITests: XCTestCase {
         me.tap()
         sleep(3)
 
-        // 设置表会恢复上次停留的页签，所以先直接找按钮；
-        // 找不到才走底部搜索「Claude Code」回车跳页这条冷启动路径（「我」根列表没有 CC 入口，P3 附 a 删了折叠组）。
+        // 设置表会恢复上次停留的页签和折叠组状态，所以先直接找按钮；
+        // 找不到才走「编程工具」→「Claude Code」这条冷启动路径（折叠组已展开时点它反而收起来）。
         // CC 设置页是定高 430 的内嵌 List，DEBUG 小节在它自己的底部。
         let target = app.buttons[label]
         if !reveal(app, target, scrollAt: 0.62, tries: 8) {
-            let searchCapsule = app.staticTexts["搜索"]
-            XCTAssertTrue(searchCapsule.waitForExistence(timeout: 5), "找不到底部搜索胶囊")
-            searchCapsule.tap()
-            let field = app.textFields["搜索设置"].firstMatch
-            XCTAssertTrue(field.waitForExistence(timeout: 5), "搜索面板没弹出来")
-            field.tap()
-            field.typeText("Claude Code\n")
+            let devTools = app.buttons["编程工具"]
+            if reveal(app, devTools, scrollAt: 0.75, tries: 10) {
+                devTools.tap()
+                sleep(1)
+            }
+            let claudeCode = app.buttons["Claude Code"]
+            XCTAssertTrue(reveal(app, claudeCode, scrollAt: 0.75, tries: 10), "滚不到「Claude Code」")
+            claudeCode.tap()
             sleep(3)
             XCTAssertTrue(reveal(app, target, scrollAt: 0.62, tries: 16), "滚不到 DEBUG 按钮「\(label)」")
         }

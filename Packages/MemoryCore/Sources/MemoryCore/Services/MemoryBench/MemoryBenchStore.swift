@@ -17,7 +17,7 @@ public struct MemoryBenchStore: Sendable {
     /// 完整日志留几天（分数、判断、每格输出永远留；钉住的跑不清）
     public static let keepLogDays = 30
     /// 随 app 走的考卷（`Resources/MemoryBench/<名字>.json`）
-    public static let builtInSetNames = ["memory-bench-c2-probe", "memory-bench-recall-24"]
+    public static let builtInSetNames = ["memory-bench-c2-probe"]
 
     public init(root: URL) {
         self.root = root

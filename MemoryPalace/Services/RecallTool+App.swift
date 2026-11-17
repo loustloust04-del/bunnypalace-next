@@ -61,7 +61,7 @@ extension RecallTool {
         let store = SwiftDataMemoryStore()
         let pool = includeInvalid ? store.listAll(profileId: profileId, context: context) : store.listActive(profileId: profileId, context: context)
         let snapshots = pool.map { memory in
-            (document: MemoryRetrievalDocument(memory), hit: MemoryHit(id: memory.id, content: memory.content, category: memory.category,
+            (document: MemoryRetrievalDocument(memory), hit: MemoryHit(id: memory.id, content: memory.lineText, category: memory.category,
                 createdAt: memory.createdAt, invalid: memory.supersededAt != nil, priority: memory.recallPriority,
                 sourceConversationId: memory.sourceConversationId, sourceNodeId: memory.sourceNodeId, isFragment: memory.isFragment))
         }
@@ -88,7 +88,7 @@ extension RecallTool {
             .filter { CatalogSources.label($0.id) == label }
         guard matches.count == 1, let memory = matches.first,
               let cid = memory.sourceConversationId, let nodeId = memory.sourceNodeId else { return nil }
-        return (memory.id.uuidString, memory.content, cid, nodeId)
+        return (memory.id.uuidString, memory.lineText, cid, nodeId)
     }
 
     /// wiki 当前源解析（原 `RecallWikiReader.original` 里 `WikiProposalSources.current` 那一段）。

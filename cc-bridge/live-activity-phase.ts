@@ -25,6 +25,8 @@ export type LaPhaseEvent =
   | { kind: "reply"; pendingRemains?: boolean }
   /// 终端 attach（T21）：done 已被看过 → idle；别的 phase 不动。
   | { kind: "seen" }
+  /// 这一轮没开始就没了（会话没起来 / 文件夹模式下被信任弹窗拦下）：任何 phase → idle。
+  | { kind: "abort" }
 
 /// `live-activity-scheduler.ts` 的同名类型是这个的只读子集（phase/since_unix/run_id），
 /// 结构上兼容 —— 这份快照可以直接喂给 scheduler 的 `phaseFor`。
@@ -86,6 +88,10 @@ export function reducePhase(
       break
     case "seen":
       next = prev?.phase === "done" ? { phase: "idle", ...round, updated_unix: now } : prev ?? { phase: "idle", updated_unix: now }
+      break
+    case "abort":
+      // 这一轮根本没开始（会话没起来 / 被拦下）：直接回 idle，不经过 done——没有东西答完
+      next = { phase: "idle", ...round, updated_unix: now }
       break
   }
   // detail 变化不算跳变：状态跳变推送是稀疏的高优先级流量，不为一行文案再花一次预算。

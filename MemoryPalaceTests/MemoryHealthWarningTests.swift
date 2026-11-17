@@ -74,13 +74,6 @@ final class MemoryHealthWarningTests: XCTestCase {
         XCTAssertEqual(MemoryHealthWarning.text(profileId: pid), "最近写不成时间轴")
     }
 
-    func testFailureDetailListsReasonStreakModel() {
-        fail(.context, times: 3)
-        let s = MemoryHealthStore.status(.context, profileId: pid)
-        let text = MemoryHealthStatusView.failureDetail(s)
-        XCTAssertTrue(text.hasPrefix("原因：boom · 连续 3 次 · 用的 m"), text)
-    }
-
     func testRecoveryClearsWarning() {
         fail(.summary, times: 3)
         XCTAssertEqual(MemoryHealthWarning.text(profileId: pid), "最近写不成窗口总结")

@@ -69,10 +69,14 @@ enum MemoryAudit {
         }
     }
 
-    /// 某个状态下筛出来的，新→旧（按创建时间）
-    static func apply(_ memories: [Memory], filter: Filter, state: State, now: Date = Date(), calendar: Calendar = .current) -> [Memory] {
+    /// 某个状态下筛出来的，新→旧（按创建时间）。first = 排最前面的那几张（Draft 里「C2 整理」拿不准的），它们之间也是新→旧
+    static func apply(_ memories: [Memory], filter: Filter, state: State, now: Date = Date(), calendar: Calendar = .current,
+                      first: Set<UUID> = []) -> [Memory] {
         memories.filter { Self.state(of: $0) == state && matches($0, filter, now: now, calendar: calendar) }
-            .sorted { $0.createdAt > $1.createdAt }
+            .sorted {
+                let (a, b) = (first.contains($0.id), first.contains($1.id))
+                return a != b ? a : $0.createdAt > $1.createdAt
+            }
     }
 
     /// 牌堆（审计台卡片 plan 2.3）：压住的那张（`top`）只要还在这一段（「删了」= 已失效，另两段 = 活着）就放第一——
@@ -121,7 +125,7 @@ enum MemoryAudit {
             case kept       // 留：放回没留之前
             case trashed    // 删：恢复
             case restored   // 「删了」里恢复：再删回去
-            case passed     // 「留下」里过到下一张：不碰库，界面从「过掉的」里拿出来
+            case passed     // Skip（Draft / Archive 里过到下一张）：不碰库，界面从「过掉的」里拿出来
         }
         let id: UUID
         let kind: Kind
@@ -238,8 +242,13 @@ enum MemoryAudit {
         memories.filter { snapshot.ids.contains($0.id) && $0.profileId == snapshot.profileId && $0.supersededAt == nil }
     }
 
-    /// 改类别：立刻生效，算「留」（⧫2）
+    /// 她亲手改过这张 = 置信度 100（粟粟 11-13「如果人改过就confidence=100」）。下面几个改动作真改了东西才调；
+    /// 她同一次里亲手填了别的置信度的以她填的为准（见 `setTraits` / `apply`）。不回填老卡
+    static let handEditedConfidence = 100
+
+    /// 改类别：立刻生效，算「留」（⧫2）；类别真变了置信度记 100
     static func setCategory(_ m: Memory, _ category: String, now: Date = Date()) {
+        if m.category != category { m.confidence = handEditedConfidence }
         m.category = category
         m.updatedAt = now
         m.reviewedAt = now
@@ -251,6 +260,7 @@ enum MemoryAudit {
         let v = min(max(value, 1), 5)
         guard m.supersededAt == nil, m.importance != v else { return false }
         m.importance = v
+        m.confidence = handEditedConfidence
         m.updatedAt = now
         m.reviewedAt = now
         return true
@@ -261,6 +271,7 @@ enum MemoryAudit {
     static func editText(_ m: Memory, _ text: String, now: Date = Date()) -> Bool {
         let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return false }
+        if m.content != content { m.confidence = handEditedConfidence }
         m.content = content
         m.tokenCount = Memory.estimateTokens(content)
         m.embeddingData = nil   // 内容变了向量失效，MemoryEmbeddingBackfill 下轮自动重算
@@ -268,6 +279,79 @@ enum MemoryAudit {
         m.userEditedAt = now
         m.reviewedAt = now
         return true
+    }
+
+    /// Edit 页一次交回的草稿：正文 / 类别 / 重要度 + 写手给的四项。`Edit(memory)` = 卡上现在的值，改哪项动哪项
+    struct Edit: Equatable {
+        var text: String
+        var category: String
+        /// nil = 不动（定过的撤不回「没定」）
+        var importance: Int?
+        var subject: String?
+        var speaker: String?
+        var keywords: [String]
+        /// nil = 清成空
+        var confidence: Int?
+
+        init(_ m: Memory) {
+            text = m.content
+            category = m.category
+            importance = m.importance
+            subject = m.subject
+            speaker = m.speaker
+            keywords = m.keywords
+            confidence = m.confidence
+        }
+    }
+
+    /// 去首尾空白，空的当没有
+    static func cleaned(_ text: String?) -> String? {
+        let t = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return t.isEmpty ? nil : t
+    }
+
+    /// 标签：去首尾空白、去空、去重保序
+    static func cleanedTags(_ tags: [String]) -> [String] {
+        var seen = Set<String>()
+        return tags.compactMap(cleaned).filter { seen.insert($0).inserted }
+    }
+
+    /// 改写手给的四项（说的是谁 / 谁说的 / 标签 / 置信度）：原样传回卡上现有值的那几项不动；改了的先规整——
+    /// subject、标签去首尾空白、空的当没有，标签去重保序；置信度夹到 0–100，nil = 清空；speaker 不认清单，空的当没有，其余原样存。
+    /// 算「留」（同改类别）、不算改字；已失效的不动。改了别的三项、置信度原样传回的，置信度记 100；她填了置信度的以她填的为准。返回改了没有
+    @discardableResult
+    static func setTraits(_ m: Memory, subject: String?, speaker: String?, keywords: [String], confidence: Int?, now: Date = Date()) -> Bool {
+        guard m.supersededAt == nil else { return false }
+        let leftConfidenceAlone = confidence == m.confidence
+        let newSubject = cleaned(subject), newSpeaker = cleaned(speaker) == nil ? nil : speaker
+        let newKeywords = cleanedTags(keywords), newConfidence = confidence.map { min(max($0, 0), 100) }
+        var changed = false
+        if subject != m.subject, newSubject != m.subject { m.subject = newSubject; changed = true }
+        if speaker != m.speaker, newSpeaker != m.speaker { m.speaker = newSpeaker; changed = true }
+        if keywords != m.keywords, newKeywords != m.keywords { m.keywords = newKeywords; changed = true }
+        if confidence != m.confidence, newConfidence != m.confidence { m.confidence = newConfidence; changed = true }
+        guard changed else { return false }
+        if leftConfidenceAlone { m.confidence = handEditedConfidence }
+        m.updatedAt = now
+        m.reviewedAt = now
+        return true
+    }
+
+    /// Edit 页的 Save 落到卡上：类别、重要度、正文、四项各走上面那几条规则，没变的不动；空正文 / 已失效的整个不动。
+    /// 改了任何一项置信度就是 100，除非她这次亲手填了别的置信度（清空也算她填的）。返回动了没有
+    @discardableResult
+    static func apply(_ edit: Edit, to m: Memory, now: Date = Date()) -> Bool {
+        let text = edit.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, m.supersededAt == nil else { return false }
+        let confidenceWas = m.confidence
+        var changed = false
+        if edit.category != m.category { setCategory(m, edit.category, now: now); changed = true }
+        if let importance = edit.importance, setImportance(m, importance, now: now) { changed = true }
+        if text != m.content, editText(m, text, now: now) { changed = true }
+        // 上面几步可能已经把置信度记成 100：她没碰置信度就把卡上现在的值传下去，别让四项那步当成她要改回旧数
+        let confidence = edit.confidence == confidenceWas ? m.confidence : edit.confidence
+        if setTraits(m, subject: edit.subject, speaker: edit.speaker, keywords: edit.keywords, confidence: confidence, now: now) { changed = true }
+        return changed
     }
 
     // MARK: - 一次性横条「v5 碎片池有 N 条还没看过 · 全部删掉」（⧫6：只算这一版装上之前 C2 写的）

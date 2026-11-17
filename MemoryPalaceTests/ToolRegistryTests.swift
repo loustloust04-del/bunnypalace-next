@@ -244,11 +244,11 @@ final class ToolRegistryTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: URL(fileURLWithPath: "/tmp/tools-schema.json"))
         #if PERSONAL_APPS
-        XCTAssertEqual(ToolRegistry.all.count, 45)   // + chrome_read / site_query（plan-opencli-in-app，不导出）；+ set_turn_status（气泡状态行，本轮内存，不导出）；+ suggest_wiki_direction（C2/C3 v2 第 4 段）；+ pending_notes（记忆 v5 待续）；+ remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；+ death_scale（死亡天平，按楼层门控）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
+        XCTAssertEqual(ToolRegistry.all.count, 46)   // + memory_card（助手动记忆条目，11-14）；+ chrome_read / site_query（plan-opencli-in-app，不导出）；+ set_turn_status（气泡状态行，本轮内存，不导出）；+ suggest_wiki_direction（C2/C3 v2 第 4 段）；+ pending_notes（记忆 v5 待续）；+ remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；+ death_scale（死亡天平，按楼层门控）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
         #else
-        XCTAssertEqual(ToolRegistry.all.count, 44)   // + chrome_read / site_query（plan-opencli-in-app，不导出）；+ set_turn_status（气泡状态行，本轮内存，不导出）；+ suggest_wiki_direction（C2/C3 v2 第 4 段）；+ pending_notes（记忆 v5 待续）；+ remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
+        XCTAssertEqual(ToolRegistry.all.count, 45)   // + memory_card（助手动记忆条目，11-14）；+ chrome_read / site_query（plan-opencli-in-app，不导出）；+ set_turn_status（气泡状态行，本轮内存，不导出）；+ suggest_wiki_direction（C2/C3 v2 第 4 段）；+ pending_notes（记忆 v5 待续）；+ remember / edit_memory / forget_memory（记忆修复第二刀）；+ card_guide（卡片写法按需查）；19 内建（含 roll_dice 掷骰）；18 内建（含 local_twitter，page2 推特） + 11 设备工具（plan-设备工具 P1）+ run_command（plan-离线沙箱-phase1，macOS）+ code_* 4 件（W-N N5，macOS）
         #endif
-        XCTAssertEqual(tools.count, 41)   // 导出不含私有工具
+        XCTAssertEqual(tools.count, 42)   // 导出不含私有工具
         XCTAssertFalse(tools.contains { $0["name"] as? String == TurnStatusTool.toolName }, "本轮内存工具不能暴露给CC")
     }
 }

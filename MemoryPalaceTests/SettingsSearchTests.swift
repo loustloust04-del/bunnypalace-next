@@ -147,6 +147,7 @@ final class SettingsSearchTests: XCTestCase {
             XCTAssertEqual(SettingsSearchEntry.filtered(for: query).first?.tab, .macWorkspace, query)
         }
         XCTAssertNotNil(SettingsSearchEntry.iconByTab[.macWorkspace])
+        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .macWorkspace))
     }
     #endif
 
@@ -225,6 +226,7 @@ final class SettingsSearchTests: XCTestCase {
         for query in ["配对", "我的电脑", "工作目录", "局域网直连", "依赖检查"] {
             XCTAssertEqual(SettingsSearchEntry.filtered(for: query).first?.tab, .myComputer, query)
         }
+        XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .myComputer), "settingsFold.devTools")
         XCTAssertNotNil(SettingsSearchEntry.iconByTab[.myComputer])
     }
 
@@ -313,6 +315,43 @@ final class SettingsSearchTests: XCTestCase {
         #endif
     }
 
+    // MARK: 折叠组
+
+    func testFoldGroupMapping() {
+        XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .terminal), "settingsFold.devTools")
+        XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .mcp), "settingsFold.aiExt")
+        // C3：「模块」折叠组并进「子应用」页，这些页不再挂折叠组
+        #if PERSONAL_APPS
+        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .trading))
+        #endif
+        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .sticker))
+        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .groupChat))
+        XCTAssertEqual(SettingsSearchEntry.foldStorageKey(for: .sandbox), "settingsFold.storage")
+        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .general))
+        XCTAssertNil(SettingsSearchEntry.foldStorageKey(for: .worldBook))
+    }
+
+    /// 折叠组 key 必须跟根列表 SettingsFoldRow 的三个 storageKey 一致
+    func testFoldGroupKeysAreKnown() {
+        let known: Set<String> = ["settingsFold.aiExt", "settingsFold.devTools", "settingsFold.storage"]
+        for tab in SettingsView.SettingsTab.allCases {
+            if let key = SettingsSearchEntry.foldStorageKey(for: tab) {
+                XCTAssertTrue(known.contains(key), "\(tab.rawValue) 映射到未知折叠组 \(key)")
+            }
+        }
+    }
+
+    func testExpandFoldGroupWritesDefaults() {
+        let key = "settingsFold.devTools"
+        let old = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let old { UserDefaults.standard.set(old, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        UserDefaults.standard.set(false, forKey: key)
+        SettingsSearchEntry.expandFoldGroup(for: .claudeCode)
+        XCTAssertTrue(UserDefaults.standard.bool(forKey: key))
+    }
+
     func testRegistryIDsUnique() {
         let ids = SettingsSearchEntry.all.map(\.id)
         XCTAssertEqual(Set(ids).count, ids.count, "重复 id: \(Dictionary(grouping: ids, by: { $0 }).filter { $0.value.count > 1 }.keys.sorted())")
@@ -377,24 +416,31 @@ final class SettingsSearchTests: XCTestCase {
     func testRecallQueriesReachTheirPageAndRetiredFeedbackIsNotASetting() {
         for (query, route) in [("太短的不找", SettingsRoute.memoryArchiveTrigger),
                                ("最多翻几次", .memoryRecallBrowse),
-                               ("命中的只带一行目录", .memoryOpenWindow),
-                               ("翻记忆", .memoryRecallBrowse)] {
+                               ("命中的只带一行目录", .memoryOpenWindow)] {
             let hit = SettingsSearchEntry.filtered(for: query).first
             XCTAssertEqual(hit?.tab, .memory, query)
             XCTAssertEqual(hit?.anchor.flatMap(SettingsSearchEntry.memorySubpage), route, query)
         }
+        // 「翻记忆」一级页那行（11-15 由「对话历史搜索」改名）和它的二级页同名，两条都搜得到
+        let browse = SettingsSearchEntry.filtered(for: "翻记忆").prefix(2)
+        XCTAssertEqual(Set(browse.map(\.id)), ["leaf-mem-convhistory", "page-mem-recallbrowse"])
+        XCTAssertEqual(SettingsSearchEntry.memorySubpage(for: "page-mem-recallbrowse"), .memoryRecallBrowse)
         XCTAssertFalse(SettingsSearchEntry.filtered(for: "召回反馈").contains { $0.id == "leaf-mem-feedback" })
         XCTAssertEqual(SettingsSearchEntry.memorySubpage(for: "leaf-mem-tuning-previousWindowMessages"), .memoryOpenWindow)
-        XCTAssertNil(SettingsSearchEntry.memorySubpage(for: "leaf-mem-tuning-maximumPages"))
-        XCTAssertNil(SettingsSearchEntry.memorySubpage(for: "leaf-mem-maximumpages"))
+        // 一轮最多几页 / 冷却 11-15 从一级页挪进聊到才带的二级页
+        XCTAssertEqual(SettingsSearchEntry.memorySubpage(for: "leaf-mem-tuning-maximumPages"), .memoryArchiveTrigger)
+        XCTAssertEqual(SettingsSearchEntry.memorySubpage(for: "leaf-mem-maximumpages"), .memoryArchiveTrigger)
     }
 
-    func testCCMemorySyncQueriesReachMemoryWritingSettings() throws {
-        for query in ["同步 CC 的记忆", "CC 记忆 同步", "Claude Code 同步"] {
+    /// 11-15：两张卡收进 记忆 › 接口 › 和 CC 同步 那一页；搜卡里的东西推进那一页，搜那一行落在一级页
+    func testCCMemorySyncQueriesReachMemoryInterfaceSettings() throws {
+        let exact = try XCTUnwrap(SettingsSearchEntry.filtered(for: "同步 CC 的记忆").first)
+        XCTAssertEqual(exact.anchor, "leaf-mem-ccmemory")
+        XCTAssertEqual(SettingsSearchEntry.memorySubpage(for: "leaf-mem-ccmemory"), .memoryCCSync)
+        for query in ["CC 记忆 同步", "Claude Code 同步", "和 CC 同步"] {
             let hit = try XCTUnwrap(SettingsSearchEntry.filtered(for: query).first, query)
             XCTAssertEqual(hit.tab, .memory, query)
-            XCTAssertEqual(hit.anchor, "leaf-mem-ccmemory", query)
-            XCTAssertNil(SettingsSearchEntry.memorySubpage(for: try XCTUnwrap(hit.anchor)), query)
+            XCTAssertTrue(["leaf-mem-ccmemory", "leaf-mem-garden-to-cc", "leaf-mem-ccsync"].contains(hit.id), "\(query) → \(hit.id)")
         }
     }
 

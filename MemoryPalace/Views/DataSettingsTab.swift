@@ -909,7 +909,8 @@ struct DataSettingsTab: View {
         descriptor.predicate = #Predicate<Conversation> { conv in conv.profileId == pid && conv.isTrashed == false }
         guard let conversations = try? modelContext.fetch(descriptor) else { return }
 
-        let convData = conversations.map { (id: $0.id, title: $0.title, currentNodeId: $0.currentNodeId) }
+        // 电脑上同步来的 session 不跟着批量导出（原件在电脑上；和全量导出、备份一个规矩）
+        let convData = conversations.filter { !$0.isFolderSession }.map { (id: $0.id, title: $0.title, currentNodeId: $0.currentNodeId) }
         let mode: ExportPathMode = exportMode == "full" ? .fullTree : .longest
         let uName = userName
         let aName = assistantName
@@ -1016,7 +1017,8 @@ struct DataSettingsTab: View {
                 let uName = profile.userName.isEmpty ? "你" : profile.userName
                 let aName = profile.assistantName.isEmpty ? "助手" : profile.assistantName
 
-                for conv in conversations {
+                // 电脑上同步来的 session 不跟着批量导出（同单楼层那条路）
+                for conv in conversations where !conv.isFolderSession {
                     let markdown = MarkdownExporter.loadAndExport(
                         conversation: conv,
                         context: bgContext,

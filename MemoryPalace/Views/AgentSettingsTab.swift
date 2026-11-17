@@ -36,26 +36,21 @@ struct AgentSettingsTab: View {
 
     var body: some View {
         SettingsSectionList(.list) {
+            #if os(iOS)
+            // 自己醒来（plan-wake-heartbeat §5–6）：iPhone 上自主任务换成 app 自己跑的这套（总开关 / 每个人 / 护栏 / 今天用量）；
+            // 共读批注照旧在下面。电脑 hub 那套定时触发只在 Mac 这页还留着
+            WakeSettingsSections()
+            #else
             Section {
-                #if os(macOS)
                 // atrium P3②：开关按楼层存；iOS 在人页 › 时区，Mac 没人页留在这里
                 Toggle("作息感知（这一层）", isOn: bindingTimeAwareness)
                     .tint(Theme.branchIndicator)
-                #endif
                 Toggle("启用自主任务", isOn: bindingEnabled)
                     .tint(Theme.branchIndicator)
             } footer: {
-                #if os(iOS)
-                Text(wsLoaded
-                     ? "开启后，Mac 端会按触发器在后台执行任务；产出会作为普通消息进入对应楼层的对话。"
-                     : "数据来自 Mac（cc-bridge 连接后同步；当前未收到数据，改动可能不生效）。")
-                    .font(m.caption)
-                    .foregroundColor(Theme.textMuted)
-                #else
                 Text("开启后，Mac 端会按触发器在后台执行任务；产出会作为普通消息进入对应楼层的对话。")
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
-                #endif
             }
 
             Section {
@@ -75,24 +70,7 @@ struct AgentSettingsTab: View {
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
             }
-
-            Section {
-                if let profiles = profileManager?.profiles, !profiles.isEmpty {
-                    ForEach(profiles, id: \.id) { profile in
-                        Toggle("\(profile.emoji) \(profile.name)", isOn: bindingFloor(profile.id))
-                            .tint(Theme.branchIndicator)
-                    }
-                } else {
-                    Text("暂无楼层")
-                        .foregroundColor(Theme.textMuted)
-                }
-            } header: {
-                Text("楼层")
-            } footer: {
-                Text("每层楼独立开启，关闭的楼层不会执行任何自主任务。")
-                    .font(m.caption)
-                    .foregroundColor(Theme.textMuted)
-            }
+            #endif
 
             Section {
                 Toggle("Agent 自主共读", isOn: bindingCoReadDaemon)
@@ -109,6 +87,7 @@ struct AgentSettingsTab: View {
                     .foregroundColor(Theme.textMuted)
             }
 
+            #if os(macOS)
             Section {
                 HStack {
                     Text("每日预算上限")
@@ -175,6 +154,7 @@ struct AgentSettingsTab: View {
             } header: {
                 Text("最近活动")
             }
+            #endif
         }
         #if os(iOS)
         .listStyle(.insetGrouped)

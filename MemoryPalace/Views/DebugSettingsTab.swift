@@ -14,6 +14,9 @@ struct DebugPage: View {
     #if os(iOS) && DEBUG
     @AppStorage("debugOrbEnabled") private var debugOrbEnabled = false
     @AppStorage(UIKitChatSpike.defaultsKey) private var spikeUIKitChatMode = ""
+    #if DEBUG && os(iOS)
+    @AppStorage(ChatPageEngine.defaultsKey) private var chatPageEngine = ChatPageEngine.swiftui.rawValue
+    #endif
     #endif
     #if os(iOS) && DEBUG
     @AppStorage("perfProbeOn") private var perfProbeOn = false
@@ -32,6 +35,20 @@ struct DebugPage: View {
 
     var body: some View {
         SettingsSectionList(.list) {
+            // 粟粟 11-15：记忆里还没做的 / 没弄完的都收进这一页
+            Section {
+                SettingsNavRow(.memoryUnfinished) {
+                    MemoryUnfinishedPage()
+                } label: {
+                    Text("记忆 · 没做完的")
+                        .font(m.body)
+                        .foregroundColor(Theme.textPrimary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .listRowBackground(Theme.mainBg)
+            .listRowSeparator(.hidden)
+
             #if os(macOS)
             Section {
                 Button {
@@ -130,6 +147,22 @@ struct DebugPage: View {
             }
             .listRowBackground(Theme.mainBg)
             .listRowSeparator(.hidden)
+
+            #if DEBUG && os(iOS)
+            // 重构 R2（docs/plan-重构.md）：新对话页引擎开关。验收前只在 Debug 构建显示，不进设置搜索
+            Section {
+                Picker("聊天页引擎", selection: $chatPageEngine) {
+                    Text("现版（SwiftUI）").tag(ChatPageEngine.swiftui.rawValue)
+                    Text("新版（UIKit，施工中）").tag(ChatPageEngine.uikit.rawValue)
+                }
+            } footer: {
+                Text("重启 App 后生效。新版目前只画文章模式的署名和文字块，别的内容会显示成占位条。")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+            }
+            .listRowBackground(Theme.mainBg)
+            .listRowSeparator(.hidden)
+            #endif
 
             // P1a-0 spike 隐藏入口（docs/spike-uikit-chat-page.md）：不进设置搜索，spike 删除时一并删
             Section {

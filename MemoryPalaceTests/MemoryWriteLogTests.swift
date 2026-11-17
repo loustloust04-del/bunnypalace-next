@@ -1,4 +1,5 @@
 import MemoryCore
+import SwiftData
 import XCTest
 @testable import 记忆花园
 
@@ -85,6 +86,50 @@ final class MemoryWriteLogTests: XCTestCase {
         XCTAssertEqual(days.first?.0, "今天")
         XCTAssertEqual(days.count, 3)
         XCTAssertEqual(days[1].0, "昨天")
+    }
+
+    /// 11-12：带写手进来直接选到那一项（不滚动）；那排没有的写手退回「全部」
+    func testFocusPicksFilter() {
+        XCTAssertEqual(MemoryWriteLogSheet.filter(focus: .c2), .writer(.c2))
+        XCTAssertEqual(MemoryWriteLogSheet.filter(focus: nil), .all)
+        XCTAssertEqual(MemoryWriteLogSheet.filter(focus: .b4), .all)
+        XCTAssertEqual(MemoryWriteLogSheet.filters.map(\.label), ["全部", "You", "A2", "A3", "A4", "C2", "C3"])
+    }
+
+    /// 全部 = AI + 她的；You 只有她的（撤回那一笔本身不列）；某一项写手不带她的
+    func testRowsPerFilter() throws {
+        let now = Date()
+        let ai = [entry("A2", now), entry("C2", now.addingTimeInterval(-60))]
+        let schema = ProfileManager.makeFullSchema()
+        let context = ModelContext(try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]))
+        let card = Memory(content: "岚舟喜欢星砚", category: "fact", profileId: pid)
+        context.insert(card)
+        let state = MemoryAuditLog.CardState(card)
+        var after = state
+        after.reviewedAt = now
+        let approve = try XCTUnwrap(MemoryAuditLog.entry([(UUID(), state, after, nil)], now: now))
+        let undo = try XCTUnwrap(MemoryAuditLog.entry([(UUID(), after, state, nil)], undoOf: approve.id, now: now))
+        let audit = [approve, undo]
+        XCTAssertEqual(MemoryWriteLogSheet.rows(ai, audit: audit, filter: .all).map(\.id), ai.map(\.id) + [approve.id])
+        XCTAssertEqual(MemoryWriteLogSheet.rows(ai, audit: audit, filter: .you).map(\.id), [approve.id])
+        XCTAssertEqual(MemoryWriteLogSheet.rows(ai, audit: audit, filter: .writer(.c2)).map(\.id), [ai[1].id])
+    }
+
+    /// 只改了写手四项的那笔 Edit：变了的各一行改前 → 改后，没有的写 —；老记录（没记四项）/ 彻底删不出
+    func testTraitChangeLines() {
+        typealias T = MemoryAuditLog.Traits
+        let before = T(subject: "麦芽", speaker: "AI 观察", keywords: ["云桥城", "岚舟"], confidence: 60)
+        let after = T(subject: "麦芽", speaker: "用户自述", keywords: ["云桥城", "星砚"], confidence: 85)
+        XCTAssertEqual(MemoryWriteLogSheet.traitChanges(before, after, assistant: "星砚"),
+                       ["Said by: From 星砚 → Said by you", "Confidence: 60 → 85", "Tags: #云桥城 #岚舟 → #云桥城 #星砚"])
+        let cleared = T(subject: nil, speaker: nil, keywords: [], confidence: nil)
+        XCTAssertEqual(MemoryWriteLogSheet.traitChanges(before, cleared, assistant: "星砚"),
+                       ["About: 麦芽 → —", "Said by: From 星砚 → —", "Confidence: 60 → —", "Tags: #云桥城 #岚舟 → —"])
+        XCTAssertEqual(MemoryWriteLogSheet.traitChanges(before, before, assistant: "星砚"), [])
+        let spaced = T(subject: " 麦芽 ", speaker: "AI 观察", keywords: ["云桥城", " 岚舟"], confidence: 60)
+        XCTAssertEqual(MemoryWriteLogSheet.traitChanges(before, spaced, assistant: "星砚"), [], "只差空白看不出来的不列")
+        XCTAssertEqual(MemoryWriteLogSheet.traitChanges(nil, after, assistant: "星砚"), [], "老记录没有四项")
+        XCTAssertEqual(MemoryWriteLogSheet.traitChanges(before, nil, assistant: "星砚"), [], "彻底删")
     }
 
     func testRunReaderOpensExistingContentBeforeRequestedAnchorAppears() async throws {

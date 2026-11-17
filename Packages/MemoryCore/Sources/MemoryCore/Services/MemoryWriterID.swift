@@ -32,16 +32,25 @@ public enum MemoryWriterID: String, CaseIterable, Identifiable {
         }
     }
 
+    /// 界面上的名字（粟粟 11-15：C2 叫原子事实、C3 叫 wiki 整理）。`title` 还写进给助手 / CC 读的写入日志（`MemoryCardFolder`），那边不动
+    public func displayTitle(assistant: String) -> String {
+        switch self {
+        case .c2: return "原子事实"
+        case .c3: return "wiki 整理"
+        default: return title(assistant: assistant)
+        }
+    }
+
     /// 列表行的一句话（小样原文）；还没做的写「还没做」
     public func subtitle(assistant: String) -> String {
         switch self {
         case .a2: return "挤出视野的一段段记下"
-        case .a3: return "整个窗口压成一段，长度按段数分档"
+        case .a3: return "整个窗口压成一段"
         case .a4: return "一天一条，跨所有窗口"
         case .b1: return "\(assistant)聊到触动处写独白"
         case .b4: return "\(assistant)自己记、改、划掉的"
         case .c: return "关键词 + 原文"
-        case .c2: return "小模型填表，格式不对不收"
+        case .c2: return "整段读完对话，记下值得长期记住的事"
         case .c3: return "碎片和聊天整理成 wiki 页，先过目再写"
         case .b2, .b3: return "还没做"
         }

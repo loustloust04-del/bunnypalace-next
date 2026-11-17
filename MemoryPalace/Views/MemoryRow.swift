@@ -27,25 +27,29 @@ enum MemoryRowID: Hashable {
 struct MemoryRowItem: Identifiable, Equatable {
     let id: MemoryRowID
     let text: String
-    let kind: String
+    /// 信息行打头的那个词：{{char}}自己记下的写类型；原子事实没有（旧的五个类别已经是标签，在详情页 #tags 里）
+    let kind: String?
     let created: Date
     let deletedAt: Date?
     /// 只有{{char}}自己记下的有重要度；档案没有这个字段，不画圆点
     let importance: Int?
     let pinned: Bool
     let hasSource: Bool
+    /// 原子事实还在 Draft（不进聊天）：行上带一个「Draft」小牌子
+    let isDraft: Bool
 
     var isDeleted: Bool { deletedAt != nil }
 
     init(_ m: Memory) {
         id = .archive(m.id)
-        text = m.content
-        kind = MemoryCardView.categoryLabels[m.category] ?? m.category
+        text = m.lineText
+        kind = nil
         created = m.createdAt
         deletedAt = m.supersededAt
         importance = nil
         pinned = m.isUserExplicit
         hasSource = m.sourceConversationId != nil
+        isDraft = MemoryAudit.state(of: m) == .unreviewed
     }
 
     init(_ m: SelfMemory) {
@@ -58,12 +62,13 @@ struct MemoryRowItem: Identifiable, Equatable {
         importance = m.importance
         pinned = false
         hasSource = false
+        isDraft = false
     }
 
-    /// 「类型 · 日期」；已删除的写「删于 哪天」
+    /// 「类型 · 日期」（原子事实只有日期）；已删除的写「删于 哪天」
     var infoLine: String {
-        if let d = deletedAt { return "\(kind) · 删于 \(MemoryDateText.short(d))" }
-        return "\(kind) · \(MemoryDateText.short(created))"
+        let date = deletedAt.map { "删于 \(MemoryDateText.short($0))" } ?? MemoryDateText.short(created)
+        return kind.map { "\($0) · \(date)" } ?? date
     }
 }
 
@@ -85,9 +90,12 @@ struct MemoryRow<MenuItems: View>: View {
                     .font(m.body)
                     .foregroundColor(item.isDeleted ? Theme.textSecondary : Theme.textPrimary)
                     .lineLimit(2)
-                Text(item.infoLine)
-                    .font(m.caption)
-                    .foregroundColor(Theme.textMuted)
+                HStack(spacing: 6) {
+                    if item.isDraft && !item.isDeleted { MemoryDraftBadge() }
+                    Text(item.infoLine)
+                        .font(m.caption)
+                        .foregroundColor(Theme.textMuted)
+                }
             }
             Spacer(minLength: 8)
             HStack(spacing: 6) {

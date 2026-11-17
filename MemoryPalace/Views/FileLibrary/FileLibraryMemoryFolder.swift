@@ -71,6 +71,9 @@ enum FileLibraryMemoryFolder {
         if path == selfFolder { return "\(assistantName)的记忆" }
         if path == runsFolder { return "整理记录" }
         if path == draftsFolder { return "模型原始输出" }
+        if path == MemoryLogFolder.dreamFolder { return FragmentDream.actor + "记录" }
+        if let name = MemoryRecordsFolder.displayName(path) { return name }
+        if MemoryRecordsFolder.contains(path), path.hasSuffix("/" + WikiStore.userBranch) { return WikiStore.userLabel(userName) }
         guard path.hasPrefix(root + "/") else { return nil }
         let sub = String(path.dropFirst(root.count + 1))
         guard !sub.contains("/") else { return nil }

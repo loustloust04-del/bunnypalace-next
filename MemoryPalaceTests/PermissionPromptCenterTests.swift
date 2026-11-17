@@ -50,6 +50,18 @@ final class PermissionPromptCenterTests: XCTestCase {
         XCTAssertEqual(d2, .denied, "两张卡的结果不许串")
     }
 
+    /// CC 在电脑上改了记忆文件夹里的文件那种卡：带着是第几处；划走（宿主回 timedOut）= 以后再说，不算拒绝
+    func testFolderChangeCardCarriesItsNoteAndDismissMeansLater() async {
+        let note = PermissionPromptCenter.FolderChange(what: "修改 memory/cards/岚舟/3f9a1c2e.md", index: 2, total: 5)
+        let asking = Task { await center.decide(.memoryCards, detail: "这张卡现在写的是：「岚舟怕打雷。」", folderChange: note) }
+        await waitForPending({ self.center.pendingRequest != nil }, "卡挂起")
+        XCTAssertEqual(center.pendingRequest?.folderChange, note)
+        XCTAssertEqual(center.pendingRequest?.inline, false, "没有对话：走弹窗")
+        center.respond(to: center.pendingRequest!.id, decision: .timedOut)
+        let decision = await asking.value
+        XCTAssertEqual(decision, .timedOut)
+    }
+
     /// 迟到的点击（卡已被超时清掉 / 已答过）必须落空——**不能**误伤当时挂着的另一张卡。
     /// 这条是 BUG-9 的安全网：用户点了一张已经结清的卡时，别把下一张一起答了。
     func testStaleRespondDoesNotAffectCurrentCard() async {

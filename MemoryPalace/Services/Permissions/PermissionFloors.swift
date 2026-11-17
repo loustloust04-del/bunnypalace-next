@@ -82,7 +82,7 @@ extension PermissionDomain {
         #endif
         case .healthApple, .healthWeight, .healthMeds, .healthCycle, .healthIntimacy,
              .images, .fileLibrary, .webSearch, .voiceProactive,
-             .calendar, .reminders, .clipboard, .notifications, .twitter, .browserOperate:
+             .calendar, .reminders, .clipboard, .notifications, .twitter, .browserOperate, .selfWake, .memoryCards, .memorySelf, .memoryFiles, .promptEdit, .webApps:
             return .free
         #if PERSONAL_APPS
         case .trading:
@@ -118,6 +118,8 @@ extension PermissionDomain {
             return nil
         case .browserOperate:
             return nil   // AI 要用时从聊天上弹浏览器，不靠主屏装没装浏览器 App
+        case .selfWake, .memoryCards, .memorySelf, .memoryFiles, .promptEdit, .webApps:
+            return nil
         #if os(macOS)
         case .codingSessions:
             return nil

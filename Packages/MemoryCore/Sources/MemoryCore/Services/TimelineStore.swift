@@ -495,16 +495,20 @@ public extension TimelineStore {
         }
         // 被挡掉的窗的待续本来也该带一行，同算一条
         hiddenCount += hiddenWindows.filter { !resolvedPending($0).isEmpty }.count
-        let pendingUnits = pending.map { id, items in
+        var pendingUnits = pending.map { id, items in
             PendingUnit(conversationId: id,
                         line: "- 《\(windows[id].flatMap { $0.isEmpty ? nil : $0 } ?? "没有标题的窗口")》\(convTag(id))：\(items.joined(separator: "；"))")
+        }
+        // 不挂在窗口上的那一组（CC 那边加的）：没有窗口可跟，没做完的照带
+        if let outside = openPending?[PendingStore.ccWindow], !outside.isEmpty {
+            pendingUnits.append(PendingUnit(conversationId: PendingStore.ccWindow, line: "- 在 CC 里记的：\(outside.joined(separator: "；"))"))
         }
         // 段④：本窗只要待续不要时间轴 → 只出待续那一段（窗口还是按这几天时间轴里出现过的认）
         if !timelineLines {
             lines = []
             units = []
         }
-        guard !lines.isEmpty || !pending.isEmpty else {
+        guard !lines.isEmpty || !pendingUnits.isEmpty else {
             return Injection(text: nil, units: [], hiddenCount: hiddenCount)
         }
         var text = timelineLines ? "[时间轴]（一天一条，05:00 换日；最近 \(fullDays) 天带各时段聊了什么，更早的只带一句主调）" : ""
@@ -526,9 +530,13 @@ public extension TimelineStore {
             Calendar.current.date(byAdding: .day, value: -k, to: todayDate).map { MemoryDay.key(MemoryDay.boundary(of: $0)) }
         }
         let loaded = days(dates, in: dir(memoryRoot: memoryRoot))
-        guard !loaded.days.isEmpty || !loaded.entries.isEmpty else { return Injection(text: nil, units: []) }
+        let open = openPending()
+        // 这几天时间轴是空的也要带不挂窗口的那组待续（CC 那边加的）
+        guard !loaded.days.isEmpty || !loaded.entries.isEmpty || open?[PendingStore.ccWindow]?.isEmpty == false else {
+            return Injection(text: nil, units: [])
+        }
         return injection(records: loaded.days, entries: loaded.entries, today: today, currentConversationId: currentConversationId,
-                         windowIds: windowIds, openPending: openPending(), timelineLines: timelineLines,
+                         windowIds: windowIds, openPending: open, timelineLines: timelineLines,
                          hiddenConversations: hiddenConversations)
     }
 

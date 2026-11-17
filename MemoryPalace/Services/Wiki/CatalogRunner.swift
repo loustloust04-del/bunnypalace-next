@@ -1289,10 +1289,11 @@ final class CatalogRunner {
     func attach(profileManager: ProfileManager, providerManager: ProviderManager) {
         self.profileManager = profileManager
         self.providerManager = providerManager
-        let ids = profileManager.profiles.map(\.id)
+        let floors = profileManager.profiles.map { (id: $0.id, user: $0.userName) }
         let before = launchedAt
         Task {
-            for id in ids {
+            for (id, user) in floors {
+                await WikiStore.relocateLegacyLayout(profileId: id, user: user)
                 let store = await Task.detached(priority: .utility) { WikiProposalStore(wiki: WikiStore(profileId: id)) }.value
                 do {
                     _ = try await WikiProposalReview.finishInterrupted(store: store, before: before,
@@ -1325,6 +1326,11 @@ final class CatalogRunner {
                                      names: EffectiveCharacterContext(profile: profile, defaults: defaults))
     }
 
+    /// 这一层 Prompt 页那份预设实例（`FragmentResident` 看世界书槽开没开）；没接 PresetManager / 没有实例 = nil
+    func floorPreset(profile: Profile) -> Preset? {
+        presetManager.flatMap { PromptFolder.instance(profile: profile, presets: $0.presets) }
+    }
+
     /// 写手 / agent 看的楼层提示：完整底图（不截断、带自建槽）；没接 PresetManager（只有测试）才退回旧五段
     func writerFloorPrompt(profile: Profile) -> String {
         floorBase(profile: profile)?.text ?? CatalogFloorPrompt.text(profile: profile, defaults: defaults)
@@ -1337,6 +1343,7 @@ final class CatalogRunner {
         if PerfHarness.strictMeasure { PerfGuardrails.suppress("catalogDaily"); return }
         #endif
         let profile = pm.currentProfile
+        guard !profile.isFolderFloor else { return }   // 连着电脑文件夹的楼层：每天自动整理档案那次不跑（plan-folder-floor）
         let defaults = defaults
         Task {
             let exceeded = await Task.detached(priority: .utility) { WriteBudgetStore.exceeded() }.value

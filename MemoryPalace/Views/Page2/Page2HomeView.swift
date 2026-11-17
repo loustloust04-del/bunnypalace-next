@@ -133,7 +133,8 @@ struct Page2HomeView: View {
 
     /// 长按「给 TA 卸载」（atrium P4-b §4.3）：只对 App 图标，系统 / secret App 不出，只读楼层不出
     private func uninstallTool(_ item: Page2Item) -> RightPanelTool? {
-        guard item.kind == "app", let id = item.toolID, Page2Apps.canUninstallFromHome(id),
+        // 网页应用本来就只在这一层（文件在这层文件库），有「删除应用」，不再给「卸载」
+        guard item.kind == "app", let id = item.toolID, Page2Apps.canUninstallFromHome(id), !id.hasPrefix(WebAppStore.toolPrefix),
               let profiles, !profiles.isReadOnly else { return nil }
         return tools?.tool(byId: id)
     }
@@ -660,6 +661,13 @@ struct Page2HomeView: View {
         }
         if let tool = tools?.tool(byId: item.toolID ?? "") {
             actions.append(UIAction(title: "更换图标", image: UIImage(systemName: "paintbrush")) { _ in iconTool = tool })
+        }
+        // 网页应用（plan-webapp-as-file §2.3 §2.4）
+        if let app = WebAppActions.app(for: item.toolID ?? "") {
+            actions.append(UIAction(title: "历史版本", image: UIImage(systemName: "clock.arrow.circlepath")) { _ in WebAppActions.showHistory(app) })
+            actions.append(UIAction(title: "从文件换一版", image: UIImage(systemName: "doc.badge.arrow.up")) { _ in WebAppActions.replaceFromFile(app) })
+            actions.append(UIAction(title: "分享", image: UIImage(systemName: "square.and.arrow.up")) { _ in WebAppActions.share(app) })
+            actions.append(UIAction(title: "删除应用", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in WebAppActions.confirmDelete(app) })
         }
         if item.kind == "folder" {
             actions.append(UIAction(title: "重新命名", image: UIImage(systemName: "pencil")) { _ in editing = true; openFolder(item) })

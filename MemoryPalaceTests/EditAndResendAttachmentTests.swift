@@ -69,6 +69,7 @@ final class EditAndResendAttachmentTests: XCTestCase {
         while vm.assistantTurnInFlight, Date() < deadline {
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
+        XCTAssertNil(vm.debugPathDrift, "一轮结束后：手改出来的显示路径应该和按树重算的一样")
     }
 
     /// 先发一条垫底，再发带图的原消息，返回它
@@ -144,6 +145,7 @@ final class EditAndResendAttachmentTests: XCTestCase {
         f.viewModel.quotingPreview = "草稿引用"
         XCTAssertTrue(f.viewModel.editAndResend(original.id, newText: "重发", model: f.model, profile: f.profile, preset: f.preset,
                                                 providerManager: f.providerManager, context: f.context))
+        XCTAssertNil(f.viewModel.debugPathDrift, "编辑重发刚发出：手改出来的显示路径应该和按树重算的一样")
         let newUser = try XCTUnwrap(f.viewModel.currentPath.last { $0.role == "user" })
         XCTAssertNil(newUser.replyToId)
         XCTAssertEqual(newUser.contentType, "text")
@@ -204,6 +206,7 @@ final class EditAndResendAttachmentTests: XCTestCase {
         f.viewModel.switchBranch(at: info.branchNodeId, to: 0)
         let back = try XCTUnwrap(f.viewModel.currentPath.last { $0.role == "user" })
         XCTAssertEqual(back.id, original.id, "切回第一个版本")
+        XCTAssertNil(f.viewModel.debugPathDrift, "切分支后：手改出来的显示路径应该和按树重算的一样")
         XCTAssertEqual(f.viewModel.branchInfoMap[original.id]?.currentIndex, 0)
     }
 
@@ -213,6 +216,7 @@ final class EditAndResendAttachmentTests: XCTestCase {
         let reply = try XCTUnwrap(f.viewModel.currentPath.last { $0.role == "assistant" })
         f.viewModel.regenerate(assistantNodeId: reply.id, model: f.model, profile: f.profile, preset: f.preset,
                                providerManager: f.providerManager, context: f.context)
+        XCTAssertNil(f.viewModel.debugPathDrift, "重新生成刚发出：手改出来的显示路径应该和按树重算的一样")
         let newReply = try XCTUnwrap(f.viewModel.currentPath.last)
         XCTAssertNotEqual(newReply.id, reply.id)
         let info = try XCTUnwrap(f.viewModel.branchInfoMap[newReply.id])

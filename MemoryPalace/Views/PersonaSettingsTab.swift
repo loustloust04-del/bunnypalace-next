@@ -1082,9 +1082,7 @@ struct PersonaSettingsTab: View {
                 // 上下文压缩：状态 + 手动按钮（粟粟：从来没见它触发过 → 状态摆出来 + 给个手动钮）
                 if let conv = viewModel?.selectedConversation {
                     let convId = conv.id
-                    let msgCount = (viewModel?.currentPath ?? []).filter {
-                        ($0.role == "user" || $0.role == "assistant") && $0.hasDisplayableContent
-                    }.count
+                    let msgCount = viewModel?.displayedMessageCount ?? 0
                     let depth = preset.sampling.contextDepth
                     let ctxSummary = ContextSummarizer.load(conversationId: convId, profileId: conv.profileId)
                     HStack(spacing: 8) {

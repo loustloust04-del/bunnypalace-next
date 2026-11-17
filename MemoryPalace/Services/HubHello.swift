@@ -30,6 +30,19 @@ struct HubHello: Equatable {
     var dirs: Dirs
     var tools: Tools
     var capabilities: Set<String>
+    /// 文件夹模式（docs/plan-folder-floor.md）：这台 hub 连的是电脑上的一个文件夹，不是「家」。主 hub / 老 hub 不报 = nil
+    var folder: Folder?
+
+    struct Folder: Equatable {
+        var path: String
+        /// 这台电脑上能用的账号，第一个是默认的
+        var accounts: [Account]
+    }
+
+    struct Account: Equatable, Identifiable {
+        var id: String
+        var label: String
+    }
 
     init(hubVersion: String? = nil, hostName: String? = nil, hostModelId: String? = nil, hostModelName: String? = nil,
          hubId: String? = nil, dirs: Dirs = Dirs(), tools: Tools = Tools(), capabilities: Set<String> = []) {
@@ -58,6 +71,13 @@ struct HubHello: Equatable {
         let t = frame["tools"] as? [String: Any] ?? [:]
         tools = Tools(tmux: Self.flag(t["tmux"]), claude: Self.flag(t["claude"]), codex: Self.flag(t["codex"]))
         capabilities = Set((frame["capabilities"] as? [Any] ?? []).compactMap { $0 as? String })
+        if frame["mode"] as? String == "folder", let path = Self.text(frame["folder"]) {
+            let accounts = (frame["accounts"] as? [Any] ?? []).compactMap { item -> Account? in
+                guard let d = item as? [String: Any], let id = Self.text(d["id"]) else { return nil }
+                return Account(id: id, label: Self.text(d["label"]) ?? id)
+            }
+            folder = Folder(path: path, accounts: accounts)
+        }
     }
 
     /// 首页 / 状态行上的名字：「粟粟的 MacBook Pro · MacBook Air (15-inch, M5)」，缺哪段省哪段

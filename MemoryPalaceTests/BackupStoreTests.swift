@@ -77,7 +77,8 @@ final class BackupStoreTests: XCTestCase {
 
     /// 往备份目录里写「楼层 <owner> 拥有 convId」的一天备份。
     /// extraEmptyProfiles 里的楼层也进 day-manifest（对话列表为空），用来构造整库还原的范围。
-    private func seedBackup(owner: String, extraEmptyProfiles: [String] = [], a1Events: Data? = nil) throws {
+    private func seedBackup(owner: String, extraEmptyProfiles: [String] = [], a1Events: Data? = nil, date overrideDate: String? = nil) throws {
+        let date = overrideDate ?? self.date
         let doc = SyncStore.ConversationDocument(
             schemaVersion: SyncStore.schemaVersion,
             conversationId: convId,
@@ -201,6 +202,63 @@ final class BackupStoreTests: XCTestCase {
         XCTAssertEqual(convs.count, 1)
         XCTAssertEqual(convs.first?.profileId, floorB, "整库还原按备份归属")
         XCTAssertEqual(convs.first?.title, "备份里的标题")
+    }
+
+    /// 电脑文件夹楼层（plan-folder-floor，kimi P1 审 #2）：整库还原一份平时的备份，不碰现在连着文件夹的楼层——
+    /// 备份里有它（连上之前留下的），它现在的对话不删、也不被旧的盖掉；她单独点这一层来还原的照常
+    @MainActor
+    func testRestoreEverythingLeavesFolderFloorAlone() throws {
+        seedLiveConversation(profileId: floorA, title: "连上之后的对话")
+        try seedBackup(owner: floorA)
+        var linked = Profile(id: floorA, name: "A", emoji: "", description: "", userName: "你", assistantName: "助手")
+        linked.folderHubId = "h1"
+        FolderFloor.refresh([linked])
+        defer { FolderFloor.refresh([]) }
+
+        let result = try BackupStore.restore(date: date, scope: .everything, context: context)
+        XCTAssertEqual(result.conversationsRestored, 0, "整库还原跳过这一层")
+        XCTAssertEqual(conversations().count, 1)
+        XCTAssertEqual(conversations().first?.title, "连上之后的对话")
+
+        let explicit = try BackupStore.restore(date: date, scope: .profile(profileId: floorA), context: context)
+        XCTAssertEqual(explicit.conversationsRestored, 1, "单独点这一层还原：她明确要的，照常")
+        XCTAssertEqual(conversations().first?.title, "备份里的标题")
+    }
+
+    /// 恢复前快照本来就包含连着文件夹的楼层：整库还原一份快照时这一层照常还原，不跳过（kimi P1 修复审 #5）
+    @MainActor
+    func testRestoreEverythingFromPreRestoreSnapshotIncludesFolderFloor() throws {
+        let snapshot = "pre-restore-2026-09-02T12-00-00Z"
+        seedLiveConversation(profileId: floorA, title: "还原之后改乱的")
+        try seedBackup(owner: floorA, date: snapshot)
+        var linked = Profile(id: floorA, name: "A", emoji: "", description: "", userName: "你", assistantName: "助手")
+        linked.folderHubId = "h1"
+        FolderFloor.refresh([linked])
+        defer { FolderFloor.refresh([]) }
+
+        let result = try BackupStore.restore(date: snapshot, scope: .everything, context: context)
+        XCTAssertEqual(result.conversationsRestored, 1)
+        XCTAssertEqual(conversations().first?.title, "备份里的标题")
+    }
+
+    /// 电脑上同步来的 session（文件夹楼层看历史，粟粟 11-17）本来就不进任何备份：还原时不当成「多出来的」删掉
+    @MainActor
+    func testRestoreDoesNotDeleteSyncedFolderSessions() throws {
+        let synced = Conversation(id: "fh-synced-1", title: "电脑上的 session", createTime: Date(), updateTime: Date(),
+                                  currentNodeId: "", provider: FolderHistory.provider, profileId: floorA)
+        synced.archiveKind = FolderHistory.archiveKind
+        context.insert(synced)
+        let extra = Conversation(id: "extra-1", title: "备份之后新开的普通对话", createTime: Date(), updateTime: Date(),
+                                 currentNodeId: "", provider: "api", profileId: floorA)
+        context.insert(extra)
+        try context.save()
+        try seedBackup(owner: floorA)
+
+        _ = try BackupStore.restore(date: date, scope: .everything, context: context)
+        let ids = Set(conversations().map(\.id))
+        XCTAssertTrue(ids.contains("fh-synced-1"), "同步来的留着")
+        XCTAssertFalse(ids.contains("extra-1"), "对照：普通的、备份里没有的对话照旧被清掉")
+        XCTAssertTrue(ids.contains(convId))
     }
 
     /// 整库还原但冲突方**不在**备份里（备份之后新建的楼层）→ 仍然整份跳过，不偷。

@@ -850,7 +850,8 @@ extension ParagraphUIView: UITextViewDelegate {
   }
 }
 
-fileprivate extension NSMutableAttributedString {
+// MP fork（重构 R3）：去掉 fileprivate——原生块行（MarkdownBlockRows）后台预排版要套同一份行距
+extension NSMutableAttributedString {
   func setLineSpacing(_ lineSpacing: CGFloat) {
     let paragraphStyle = NSMutableParagraphStyle()
     // MP fork: 注音段落的最小行高（给 ruby 留位置）不能被行距覆盖掉

@@ -22,9 +22,12 @@ public extension MemoryWriteLog {
         public var run: CatalogRunLink? = nil
         /// 审计台试写台跑的（不算失败、不进健康；状态行「最近那条」跳过它）。老行没有这个字段 = nil
         public var trial: Bool? = nil
+        /// 「C2 整理」那一次的记录编号（点开看喂了什么、回了什么）；别的行没有 = nil
+        public var dream: String? = nil
 
         public init(id: UUID = UUID(), time: Date, writer: String, ok: Bool, note: String, model: String,
-                    costUSD: Double? = nil, rejected: Int? = nil, run: CatalogRunLink? = nil, trial: Bool? = nil) {
+                    costUSD: Double? = nil, rejected: Int? = nil, run: CatalogRunLink? = nil, trial: Bool? = nil,
+                    dream: String? = nil) {
             self.id = id
             self.time = time
             self.writer = writer
@@ -35,6 +38,7 @@ public extension MemoryWriteLog {
             self.rejected = rejected
             self.run = run
             self.trial = trial
+            self.dream = dream
         }
     }
 
@@ -71,8 +75,22 @@ public extension MemoryWriteLog {
         private let lock = NSLock()
         private var total: Double = 0
         private var touched = false
+        private var calledModel: String?
+        private var skipReason: String?
 
         public init() {}
+
+        /// 这个任务里真去调的那个模型（包里的写手不知道模型：调模型的那一层报上来，写手记软检查时取）
+        public var model: String? {
+            get { lock.lock(); defer { lock.unlock() }; return calledModel }
+            set { lock.lock(); calledModel = newValue; lock.unlock() }
+        }
+
+        /// 最近一次没调成是被什么拦下的（预算闸 / 开关关了 / 模型没回内容）；调成一次就清掉
+        public var skip: String? {
+            get { lock.lock(); defer { lock.unlock() }; return skipReason }
+            set { lock.lock(); skipReason = newValue; lock.unlock() }
+        }
 
         public func add(_ usd: Double) {
             lock.lock(); total += usd; touched = true; lock.unlock()
@@ -94,16 +112,26 @@ public extension MemoryWriteLog {
         meter?.add(usd)
     }
 
+    /// 调模型的那一层报：这次用的是哪个模型
+    static func noteModel(_ name: String) {
+        meter?.model = name
+    }
+
+    /// 调模型的那一层报：这次没调成，被什么拦下了（nil = 调成了）
+    static func noteSkip(_ why: String?) {
+        meter?.skip = why
+    }
+
     // MARK: - 写
 
 
     /// 没有健康种类的（C3 批提案）直接按编号记。trial = 试写台跑的（cost 给了就用它，不看 meter）
     static func record(writer: MemoryWriterID, profileId: String, ok: Bool, note: String, model: String,
                        rejected: Int? = nil, now: Date = Date(), run: CatalogRunLink? = nil,
-                       trial: Bool = false, cost: Double? = nil, memoryRoot: @autoclosure () -> URL) {
+                       trial: Bool = false, cost: Double? = nil, dream: String? = nil, memoryRoot: @autoclosure () -> URL) {
         guard !profileId.isEmpty else { return }
         let entry = Entry(time: now, writer: writer.code, ok: ok, note: note, model: model, costUSD: cost ?? meter?.usd,
-                          rejected: rejected.flatMap { $0 > 0 ? $0 : nil }, run: run, trial: trial ? true : nil)
+                          rejected: rejected.flatMap { $0 > 0 ? $0 : nil }, run: run, trial: trial ? true : nil, dream: dream)
         let url = fileURL(memoryRoot: memoryRoot())
         queue.async { append(entry, to: url, now: now) }
     }
@@ -151,8 +179,8 @@ public extension MemoryWriteLog {
     }
 
 
-    /// 这一项最近那条（状态卡每一行点了跳这里）；试写台的不算
+    /// 这一项最近那条（状态卡每一行点了跳这里）；试写台的、「C2 整理」的不算（做梦不是写卡，成败不算写手的）
     static func latest(_ writer: MemoryWriterID, in list: [Entry]) -> Entry? {
-        list.filter { $0.writer == writer.code && $0.trial != true }.max { $0.time < $1.time }
+        list.filter { $0.writer == writer.code && $0.trial != true && $0.dream == nil }.max { $0.time < $1.time }
     }
 }

@@ -1,5 +1,6 @@
 #if os(iOS)
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct Page2LibraryView: View {
     var addingToHome = false
@@ -11,6 +12,10 @@ struct Page2LibraryView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.page2Date) private var date
     @State private var appearance = Page2AppearanceStore.shared
+    /// 网页应用（plan-garden-webapps §6.3）：「＋ 从文件添加」、长按真删
+    @State private var importingHTML = false
+    @State private var deletingApp: RightPanelTool?
+    @State private var importError: String?
     @State private var search = ""
     @State private var listsApps = false
     @State private var expanded: Category?
@@ -22,7 +27,7 @@ struct Page2LibraryView: View {
         var id: String { title }
     }
     private let categories = [
-        Category(title: "生活", ids: ["calendar", "health"] + Self.debugAppIds(["topicBox"]) + ["sticker"]),
+        Category(title: "生活", ids: ["calendar", "health"] + Self.debugAppIds(["topicBox"]) + ["sticker", "cinema"]),
         Category(title: "阅读与学习", ids: ["vocab", "reading"] + Self.debugAppIds(["audiobook"]) + ["study", "memory"]),
         Category(title: "创作与资料", ids: ["worldBook", "cardLibrary", "prompt", "fileLibrary"]),
         Category(title: "工具", ids: [RightPanelToolManager.gardenOSToolId] + Self.toolIds)
@@ -52,11 +57,17 @@ struct Page2LibraryView: View {
         #endif
     }
     private var tools: [RightPanelTool] { manager?.pinnedTools ?? [] }
+    private static let myAppsTitle = "我的应用"
+    /// 没有网页应用时也在，展开后只有「＋」一格
+    private var myApps: Category {
+        Category(title: Self.myAppsTitle, ids: tools.map(\.id).filter { $0.hasPrefix(WebAppStore.toolPrefix) })
+    }
     private var shownCategories: [Category] {
-        let known = Set(categories.flatMap(\.ids))
+        let mine = myApps
+        let known = Set(categories.flatMap(\.ids) + mine.ids)
         let others = tools.filter { !known.contains($0.id) }.map(\.id)
         return (categories + (others.isEmpty ? [] : [Category(title: "其他", ids: others)]))
-            .filter { !members($0).isEmpty }
+            .filter { !members($0).isEmpty } + [mine]
     }
     private func ordered(_ tools: [RightPanelTool]) -> [RightPanelTool] {
         let keyed: [(tool: RightPanelTool, key: Page2LibraryNameKey)] = tools.map { ($0, Page2LibraryNameKey($0.name)) }
@@ -118,8 +129,35 @@ struct Page2LibraryView: View {
                 if !active { searching = false; search = ""; listsApps = false; expanded = nil }
             }
             .onChange(of: tools.map(\.id)) { _, _ in
-                if let expanded, members(expanded).isEmpty { self.expanded = nil }
+                if let expanded, expanded.title == Self.myAppsTitle { self.expanded = myApps }
+                else if let expanded, members(expanded).isEmpty { self.expanded = nil }
             }
+        }
+        .fileImporter(isPresented: $importingHTML, allowedContentTypes: [.html]) { result in
+            guard case .success(let url) = result else { return }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url), let html = String(data: data, encoding: .utf8) else {
+                importError = "这个文件读不出来（只收 UTF-8 的 html）"
+                return
+            }
+            WebAppInstaller.present(html: html, suggestedTitle: url.deletingPathExtension().lastPathComponent)
+        }
+        .alert("删除「\(deletingApp?.name ?? "")」？", isPresented: Binding(get: { deletingApp != nil }, set: { if !$0 { deletingApp = nil } })) {
+            Button("删除", role: .destructive) {
+                if let id = deletingApp.flatMap({ WebAppStore.appID(fromToolID: $0.id) }), let app = WebAppStore.shared.app(id) {
+                    Task { try? await WebAppInstaller.delete(app) }
+                }
+                deletingApp = nil
+            }
+            Button("取消", role: .cancel) { deletingApp = nil }
+        } message: {
+            Text(WebAppActions.deleteMessage(deletingApp.flatMap { WebAppActions.app(for: $0.id) }))
+        }
+        .alert("没添加上", isPresented: Binding(get: { importError != nil }, set: { if !$0 { importError = nil } })) {
+            Button("好") { importError = nil }
+        } message: {
+            Text(importError ?? "")
         }
     }
 
@@ -181,7 +219,8 @@ struct Page2LibraryView: View {
     }
     private func expandedCategory(_ category: Category, metrics: Page2SystemMetrics, height: CGFloat) -> some View {
         let entries = ordered(members(category))
-        let rows = max(1, (entries.count + 3) / 4)
+        let isMine = category.title == Self.myAppsTitle
+        let rows = max(1, (entries.count + (isMine ? 1 : 0) + 3) / 4)
         let rowHeight: CGFloat = 92
         let contentHeight = rowHeight + CGFloat(rows - 1) * metrics.rowPitch
         return ZStack {
@@ -203,8 +242,29 @@ struct Page2LibraryView: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(tool.name).accessibilityIdentifier("page2.app.\(tool.id)")
-                            .contextMenu { Button("添加到主屏", systemImage: "plus.app") { onAdd(tool) } }
+                            .contextMenu {
+                                Button("添加到主屏", systemImage: "plus.app") { onAdd(tool) }
+                                if isMine, let app = WebAppActions.app(for: tool.id) {
+                                    Button("历史版本", systemImage: "clock.arrow.circlepath") { WebAppActions.showHistory(app) }
+                                    Button("从文件换一版", systemImage: "doc.badge.arrow.up") { WebAppActions.replaceFromFile(app) }
+                                    Button("分享", systemImage: "square.and.arrow.up") { WebAppActions.share(app) }
+                                    Button("删除应用", systemImage: "trash", role: .destructive) { deletingApp = tool }
+                                }
+                            }
                             .onDrag { onBeginDrag(); return NSItemProvider(object: "library:\(tool.id)" as NSString) }
+                        }
+                        if isMine {
+                            Button { importingHTML = true } label: {
+                                VStack(spacing: 3) {
+                                    Image(systemName: "plus").font(.system(size: 24, weight: .medium))
+                                        .frame(width: metrics.iconSide, height: metrics.iconSide)
+                                        .glassEffect(.clear, in: .rect(cornerRadius: metrics.iconSide * 0.26))
+                                    Text("从文件添加").font(.system(size: 12)).lineLimit(1).modifier(Page2DesktopLabel())
+                                        .frame(width: metrics.columnPitch + 8, height: 20)
+                                }.frame(width: metrics.columnWidth, height: rowHeight, alignment: .top).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("page2.webapp-add")
                         }
                     }
                     .background { Color.clear.contentShape(Rectangle()).onTapGesture { expanded = nil } }

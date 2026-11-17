@@ -50,6 +50,8 @@ actor FileVersionStore {
         let source: Source
         let bytes: Int
         let sha256: String
+        /// 不是她在编辑器里存的那几版：谁写的（助手名 /「CC 里的助手名」，用文件工具改 Prompt 时记）。老记录没有 = nil
+        var actor: String? = nil
     }
 
     enum StoreError: Error {
@@ -79,7 +81,7 @@ actor FileVersionStore {
 
     /// 和最新一版内容相同返回 nil 不记；超过 maxVersions 删最老
     @discardableResult
-    func record(key: Key, content: String, source: Source) throws -> Version? {
+    func record(key: Key, content: String, source: Source, actor: String? = nil, date: Date = Date()) throws -> Version? {
         let dir = directory(for: key)
         var index = try loadIndex(key: key, dir: dir) ?? Index(scope: key.scope, name: key.name, versions: [])
         let data = Data(content.utf8)
@@ -87,8 +89,8 @@ actor FileVersionStore {
         if index.versions.last?.sha256 == hash { return nil }
 
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let version = Version(id: UUID().uuidString.lowercased(), date: Date(), source: source,
-                              bytes: data.count, sha256: hash)
+        let version = Version(id: UUID().uuidString.lowercased(), date: date, source: source,
+                              bytes: data.count, sha256: hash, actor: actor)
         try Self.writeAtomically(data, to: contentURL(dir: dir, id: version.id))
         index.versions.append(version)
         let overflow = max(0, index.versions.count - Self.maxVersions)
@@ -119,6 +121,31 @@ actor FileVersionStore {
         let dir = directory(for: key)
         guard FileManager.default.fileExists(atPath: dir.path) else { return }
         try FileManager.default.removeItem(at: dir)
+    }
+
+    /// 文件改名：历史跟着走。新名字下已经有历史（改回旧名 / 撞名）就按时间合在一起，超过上限删最老
+    func move(from old: Key, to new: Key) throws {
+        guard old != new else { return }
+        let src = directory(for: old)
+        guard let moving = try loadIndex(key: old, dir: src) else { return }
+        let dst = directory(for: new)
+        let existing = try loadIndex(key: new, dir: dst)?.versions ?? []
+        try FileManager.default.createDirectory(at: dst, withIntermediateDirectories: true)
+        var copied: [Version] = []
+        for version in moving.versions where !existing.contains(where: { $0.id == version.id }) {
+            let from = contentURL(dir: src, id: version.id)
+            guard FileManager.default.fileExists(atPath: from.path) else { continue }
+            try Self.writeAtomically(Data(contentsOf: from), to: contentURL(dir: dst, id: version.id))
+            copied.append(version)
+        }
+        var merged = (existing + copied).sorted { $0.date < $1.date }
+        let overflow = max(0, merged.count - Self.maxVersions)
+        let dropped = merged.prefix(overflow)
+        merged.removeFirst(overflow)
+        try Self.writeAtomically(try encoder.encode(Index(scope: new.scope, name: new.name, versions: merged)),
+                                 to: AppPaths.checked(dst.appendingPathComponent(Self.indexFileName)))
+        for old in dropped { try? FileManager.default.removeItem(at: contentURL(dir: dst, id: old.id)) }
+        try FileManager.default.removeItem(at: src)
     }
 
     // MARK: - 路径

@@ -789,7 +789,7 @@ struct WikiProposalDetailPage: View {
                     .foregroundColor(Theme.textMuted)
                 ForEach(covered, id: \.self) { fid in
                     if let mem = fragments[fid] {
-                        let text = "碎片：" + (mem.content.count > 40 ? String(mem.content.prefix(40)) + "…" : mem.content)
+                        let text = "碎片：" + (mem.lineText.count > 40 ? String(mem.lineText.prefix(40)) + "…" : mem.lineText)
                         if viewModel != nil, mem.sourceConversationId != nil {
                             Button { jump(mem) } label: { citeLabel(text + " ›") }
                                 .buttonStyle(.borderless)
@@ -810,7 +810,7 @@ struct WikiProposalDetailPage: View {
             VStack(alignment: .leading, spacing: 3) {
                 ForEach(item.fragmentIds, id: \.self) { fid in
                     if let mem = fragments[fid] {
-                        let text = "碎片：" + (mem.content.count > 40 ? String(mem.content.prefix(40)) + "…" : mem.content)
+                        let text = "碎片：" + (mem.lineText.count > 40 ? String(mem.lineText.prefix(40)) + "…" : mem.lineText)
                         if viewModel != nil, mem.sourceConversationId != nil {
                             Button { jump(mem) } label: { citeLabel(text + " ›") }
                                 .buttonStyle(.borderless)

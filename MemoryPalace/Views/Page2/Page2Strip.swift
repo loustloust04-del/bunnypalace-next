@@ -1,6 +1,7 @@
 #if os(iOS)
 import SwiftUI
 import UIKit
+import WebKit
 
 /// 第二页切 app 的方式（#085）：右边竖条（默认）/ 左上弧线（#082，备选）
 enum Page2Switcher {
@@ -247,6 +248,23 @@ final class Page2StripPan: NSObject, UIGestureRecognizerDelegate {
         if PagingViewController.setPage2DragLocked(true, owner: owner, scrollView: scroll) { lockedScroll = scroll }
     }
 
+    private static let edgeWidth: CGFloat = 24
+    private var startsAtEdge = false
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if let window = touch.window { startsAtEdge = touch.location(in: window).x > window.bounds.width - Self.edgeWidth }
+        return true
+    }
+
+    private static func isInWebView(_ view: UIView) -> Bool {
+        var v: UIView? = view
+        while let current = v {
+            if current is WKWebView { return true }
+            v = current.superview
+        }
+        return false
+    }
+
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         let shell = Page2AppShell.shared
         guard shell.motion == nil, !shell.showsSwitcher, !shell.stack.openApps.isEmpty else { return false }
@@ -259,10 +277,13 @@ final class Page2StripPan: NSObject, UIGestureRecognizerDelegate {
     /// - 滚动视图：还能往左滚的才让（终端 tab 条、桌面翻页）；竖着滚的、滚到头的不让，不然竖滚的应用里永远拉不出竖条
     /// - 其它拖动类手势（列表左划删除、终端窗口面板左划、SwiftUI 拖动）：一律先让
     /// - 点按 / 长按不等（手指一动它们自己就失败了）
+    /// - 例外：手指从屏幕右边 24pt 起手、落在网页上 → 不等网页的手势。WKWebView 里有跟着手指走、整段都不失败的手势，
+    ///   等它就永远拉不出竖条；网页应用全屏没有按钮可退（粟粟 11-15，plan-garden-webapps）。网页别处的横划照旧网页先来
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer) -> Bool {
         guard Page2AppShell.shared.stripProgress < 0.01, other !== pan,
               let paging = PagingViewController.sharedScrollView, other !== paging.panGestureRecognizer,
               let view = other.view, view.window != nil else { return false }
+        if startsAtEdge, Self.isInWebView(view) { return false }
         if let scroll = view as? UIScrollView, other === scroll.panGestureRecognizer {
             guard scroll.contentSize.width > scroll.bounds.width + 1 else { return false }
             let maxX = scroll.contentSize.width - scroll.bounds.width + scroll.adjustedContentInset.right

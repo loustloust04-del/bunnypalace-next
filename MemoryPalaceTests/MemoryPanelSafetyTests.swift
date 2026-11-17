@@ -212,7 +212,7 @@ extension MemoryPanelSafetyTests {
     func testEmptyMemoryRetainsTrashAction() async throws {
         try await assertRenderedMemoryPanel(
             deletedMemory: true,
-            expected: ["还没有记忆", "加一条", "已删除1"],
+            expected: ["还没有记忆", "加一条", "Deleted1"],
             absent: ["还没有页"]
         )
     }

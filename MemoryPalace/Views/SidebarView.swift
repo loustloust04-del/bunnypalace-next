@@ -54,22 +54,6 @@ private struct SidebarJumpWord: Identifiable {
 }
 
 // 缓存保暖策略的展示映射（策略本身存在 CCBridgeWebSocketClient，按 tmux session）
-private func keepalivePolicyLabel(_ policy: String) -> String {
-    switch policy {
-    case "always": return "🔥 常驻保暖"
-    case "never":  return "❄️ 不保暖"
-    default:       return "⚙️ 自动"
-    }
-}
-
-private func keepalivePolicyIcon(_ policy: String) -> String {
-    switch policy {
-    case "always": return "flame"
-    case "never":  return "snowflake"
-    default:       return "gearshape"
-    }
-}
-
 struct SidebarView: View {
     @Binding var searchText: String
     @Binding var showFavoritesOnly: Bool
@@ -98,7 +82,6 @@ struct SidebarView: View {
     @Environment(\.modelContext) private var modelContext
     #if os(iOS)
     @Environment(\.launchPageSignal) private var launchSignal
-    @Environment(AtriumPresenter.self) private var atriumPresenter: AtriumPresenter?
     #endif
     /// input-jank C4：原本是 `@Query private var tags`，随**每次** `modelContext.save()`
     /// 失效（打字落盘、流式每 token）→ 驱动 `ForEach<Conversation>` 4.1 万条边重 diff
@@ -282,6 +265,8 @@ struct SidebarView: View {
     @State private var highlightJumpWord: String? = nil
     @State private var deletedNodes: [(node: MessageNode, convTitle: String)] = []
     @State private var renamingConversationId: String? = nil
+    /// 对话菜单「记忆 ▸ 窗口总结 / 上下文摘要」的弹层（11-16 合一后列表长按也有）
+    @State private var memorySheet: ConversationMemorySheetTarget? = nil
     #if os(macOS)
     /// 行内改名框的焦点（S1-9）。iOS 走系统 alert，不需要
     @FocusState private var renameFieldFocused: Bool
@@ -959,29 +944,29 @@ struct SidebarView: View {
                 }
     }
 
+    #if os(iOS)
+    /// 字标（11-15 起藏在灵动岛后面，换人走顶栏右边的小头像 / ⋯）
     @ViewBuilder
-    private var sidebarWordmark: some View {
-        #if os(iOS)
-        // 点字标进 atrium（plan-atrium P1）
-        Button { atriumPresenter?.present() } label: {
-            #if PERSONAL_APPS
-            if onTutu {
-                TutuPage0Wordmark().frame(width: 183 * tutuUnit, height: 35 * tutuUnit)
-                    .accessibilityLabel("mneme atrium")
-            } else {
-                ordinaryWordmark
-            }
-            #else
-            ordinaryWordmark
-            #endif
+    private var islandWordmark: some View {
+        #if PERSONAL_APPS
+        if onTutu {
+            TutuPage0Wordmark().aspectRatio(183 / 35, contentMode: .fit)
+        } else {
+            islandOrdinaryWordmark
         }
-            .buttonStyle(.plain)
-            .accessibilityAddTraits(.isButton)
-            .accessibilityIdentifier("page0-wordmark")
         #else
-        ordinaryWordmark
+        islandOrdinaryWordmark
         #endif
     }
+
+    private var islandOrdinaryWordmark: some View {
+        Image("MnemeWordmark")
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .foregroundColor(onTutu || onMetal ? .white : Theme.textPrimary)
+    }
+    #endif
 
     #if os(iOS)
     /// 新建对话（始终显示）：点一下弹菜单选文章 / 气泡（群聊、Codex 也在菜单里）。
@@ -993,17 +978,6 @@ struct SidebarView: View {
             }
             Button(action: { createNewConversation(displayMode: .bubble) }) {
                 Label("新建气泡对话", systemImage: "bubble.left.and.bubble.right")
-            }
-            #if os(iOS)
-            if agoraEnabled {
-                Button(action: onCreateAgoraRoom) {
-                    Label("新建群聊", systemImage: "person.2")
-                }
-            }
-            #endif
-            Button(action: { createNewCodexConversation() }) {
-                // Menu 行只吃 Text/Image/Label，用不了 AppIconView（自定义视图会被丢）
-                Label { Text("新建 Codex 对话") } icon: { Image("ri-openai") }
             }
         } label: {
             Group {
@@ -1036,41 +1010,7 @@ struct SidebarView: View {
 
     static let page0ProfileZoomID = "page0-profile-capsule"
 
-    /// 右上玻璃胶囊：当前层头像 + 名字，点开人页（plan-atrium P2）
-    private var profileCapsule: some View {
-        Button(action: onOpenProfile) {
-            HStack(spacing: 7) {
-                ProfileAvatarView(profile: profileManager?.currentProfile, size: 30)
-                Text(profileManager?.currentProfile.name ?? "")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(onTutu || onMetal ? .white : Theme.textPrimary)
-                    .lineLimit(1)
-            }
-            .padding(.leading, 7)
-            .padding(.trailing, 14)
-            .frame(height: onTutu ? 44 * tutuUnit : 44)
-            .contentShape(Capsule())
-            #if PERSONAL_APPS
-            .if(!onTutu) { $0.glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .capsule) }
-            #else
-            .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .capsule)
-            #endif
-            .modifier(Page0ProfileZoomSource(namespace: profileZoom))
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("page0-profile")
-    }
     #endif
-
-    private var ordinaryWordmark: some View {
-        Image("MnemeWordmark")
-            .renderingMode(.template)
-            .resizable()
-            .scaledToFit()
-            .frame(height: 24)
-            .foregroundColor(onMetal ? .white : Theme.textPrimary)
-            .accessibilityLabel("mneme atrium")
-    }
 
     @ViewBuilder
     private func sidebarScrollContainer<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -1142,17 +1082,14 @@ struct SidebarView: View {
             // 切到 Code 时整块内容换成编程会话列表（自带搜索框 / 筛选），对话的搜索行和筛选行都不出
             if !isCodeTab { macSearchToolbar }
             #else
-            // 字标 + 新建（搜索挪到底栏，plan-page0-brand-layout）
+            // 当前这个人 + 最近聊过的人 + 全部（11-15；字标挪到灵动岛后面）
             HStack(spacing: 8) {
-                // 字标：粟粟 PSD「图层 63」的透明通道，模板图跟正文色走
-                sidebarWordmark
+                Page0PeopleBar(dark: onTutu || onMetal, glass: !onTutu, zoom: profileZoom, onOpenProfile: onOpenProfile)
 
-                Spacer()
+                Spacer(minLength: 8)
 
-                // 窄屏 ＋ 挪到底栏原 ⚙ 的位置；宽屏底栏那格让给缩放弧，＋ 留在顶栏（plan-atrium P2）
-                if widePanelMode { newConversationMenu }
-
-                profileCapsule
+                // ＋ 在右上（11-16 回老位置）
+                newConversationMenu
             }
             .padding(.leading, onTutu ? 15 * tutuUnit : (isIOSStyle ? 20 : 12))
             .padding(.trailing, onTutu ? 20 * tutuUnit : (isIOSStyle ? 20 : 12))
@@ -1346,6 +1283,11 @@ struct SidebarView: View {
             #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        #if os(iOS)
+        .overlay(alignment: .top) {
+            if !widePanelMode { IslandWordmark { islandWordmark } }
+        }
+        #endif
         .background {
             if isIOSStyle {
                 ZStack {
@@ -1475,6 +1417,7 @@ struct SidebarView: View {
         // 内容改动重排 / 同步导入：列表本身没换，保住已加载的页数，否则只剩第一页、滚动位置被截掉跳走
         .onChange(of: viewModel.sidebarRefreshTrigger) { _, _ in refreshList(keepLoaded: true) }
         .onReceive(NotificationCenter.default.publisher(for: .syncDidImport)) { _ in refreshList(keepLoaded: true) }
+        .modifier(MainSessionListSupport { refreshList(keepLoaded: true) })
         .sheet(isPresented: $showNewTagSheet) {
             FolderEditSheet(profileId: profileId, tag: nil) { created in
                 reloadTags()
@@ -1504,6 +1447,7 @@ struct SidebarView: View {
         )) { j in
             VocabWordDetailSheet(word: j.word)
         }
+        .modifier(ConversationMemorySheets(target: $memorySheet))
         .modifier(FavoriteTagHost(target: $favoriteTagTarget, renaming: $renamingFavoriteTag,
                                   renameText: $favoriteTagRenameText,
                                   onChanged: { refreshList(keepLoaded: true) },
@@ -1720,7 +1664,33 @@ struct SidebarView: View {
         .padding(.horizontal, 20)
     }
 
-    /// 底栏：搜索长条 + 设置圆钮（在搜时换成 ✕ 退出搜索）。打字时框里只有 ➡️；结果页（键盘已收）换成 ✕ 退出搜索。
+    /// 右下 ⚙（11-16 粟粟：⚙ 回右下、＋ 回右上，老位置）
+    private var settingsButton: some View {
+        Button { showSettings = true } label: {
+            Group {
+                #if PERSONAL_APPS
+                if onTutu {
+                    TutuPage0ControlIcon(kind: .gear).frame(width: 22 * tutuUnit, height: 22 * tutuUnit)
+                } else {
+                    Image(systemName: "gearshape").font(.system(size: 17, weight: .medium))
+                }
+                #else
+                Image(systemName: "gearshape").font(.system(size: 17, weight: .medium))
+                #endif
+            }
+            .foregroundColor(onTutu ? tutuTabInk(selected: false) : (onMetal ? .white : Theme.textSecondary))
+            .frame(width: onTutu ? 44 * tutuUnit : 44, height: onTutu ? 44 * tutuUnit : 44)
+            #if PERSONAL_APPS
+            .if(!onTutu) { $0.glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle) }
+            #else
+            .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle)
+            #endif
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("page0-settings")
+    }
+
+    /// 底栏：搜索长条 + ⚙（在搜时 ⚙ 换成 ✕ 退出搜索）。打字时框里只有 ➡️；结果页（键盘已收）换成 ✕ 退出搜索。
     private var iosBottomBar: some View {
         HStack(spacing: onTutu ? 10 * tutuUnit : 10) {
             HStack(spacing: onTutu ? 12 * tutuUnit : 8) {
@@ -1801,9 +1771,8 @@ struct SidebarView: View {
             .glassEffect(.regular.tint(Color.white.opacity(0.15)), in: .capsule)
             #endif
 
-            // 宽屏下这格压在对话窗右下角的缩放弧底下，两个手势抢一个点 → 收掉（宽屏 ＋ 在顶栏）
-            // 在搜的时候 ＋ 换成 ✕ 退出搜索：「最近搜过」卡不是 ScrollView，下滑 / 点空白都收不了键盘。
-            // 原来这格是 ⚙，P2 起设置只从 atrium「我」进（plan-atrium P2）
+            // 宽屏下这格压在对话窗右下角的缩放弧底下，两个手势抢一个点 → 收掉（宽屏 ⚙ 在顶部悬浮条）
+            // 在搜的时候 ⚙ 换成 ✕ 退出搜索：「最近搜过」卡不是 ScrollView，下滑 / 点空白都收不了键盘。
             if !widePanelMode {
                 if isInSearchMode {
                     Button(action: exitSearch) {
@@ -1818,7 +1787,7 @@ struct SidebarView: View {
                     }
                     .buttonStyle(.plain)
                 } else {
-                    newConversationMenu
+                    settingsButton
                 }
             }
         }
@@ -2602,6 +2571,8 @@ struct SidebarView: View {
     }
 
     private func toggleConversationPin(_ conversation: Conversation) {
+        // mainsession 永远在最上面，取消不了（plan-floor-main-thread）
+        guard !MainSession.isMain(conversation) else { return }
         conversation.pinnedAt = conversation.isPinned ? nil : Date()
         #if os(macOS)
         try? modelContext.save()
@@ -2624,92 +2595,65 @@ struct SidebarView: View {
                 },
             ]
         }
-        var specs: [MenuActionSpec] = [
-            MenuActionSpec(title: "重命名", systemImage: "pencil", quickLabel: "Rename") {
+        // 11-16 合一（plan-chat-menus）：清单在 ConversationMenu，跟聊天页 ⋯ 同一份；这里只给「做什么」
+        let state = ConversationMenu.State(
+            isPinned: conversation.isPinned, isFavorite: conversation.isFavorite, isBubble: conversation.isBubbleMode,
+            memoryEnabled: conversation.memoryEnabled, folderId: conversation.folderId, personaId: conversation.personaId,
+            folders: tags.map { ConversationMenu.Choice(id: $0.id, name: $0.name) },
+            // 「现在写」「重新记」只在聊天页 ⋯ 里（ConversationMenu 按 place 收掉）
+            personas: UserPersonaStore.shared.personas.map { ConversationMenu.Choice(id: $0.id, name: $0.name) },
+            isMainSession: MainSession.isMain(conversation), isFolderSession: conversation.isFolderSession)
+        let handlers = ConversationMenu.Handlers(
+            rename: {
                 renameText = conversation.title
                 renamingConversationId = conversation.id
             },
-            MenuActionSpec(title: "重新生成标题", systemImage: "sparkles") {
-                ConversationTitler.regenerate(conversation, context: modelContext, providerManager: providerManager)
-            },
-            MenuActionSpec(title: "复制对话", systemImage: "doc.on.doc", quickLabel: "Copy") {
+            duplicate: {
                 viewModel.duplicateConversation(conversation, context: modelContext)
                 refreshList()
             },
-            MenuActionSpec(title: conversation.isPinned ? "取消置顶" : "置顶对话",
-                           systemImage: conversation.isPinned ? "pin.slash" : "pin", quickLabel: "Pin") {
-                toggleConversationPin(conversation)
+            togglePin: { toggleConversationPin(conversation) },
+            toggleFavorite: { FavoriteTags.setFavorite(conversation, !conversation.isFavorite) },
+            delete: {
+                viewModel.softDeleteConversation(conversation)
+                refreshList()
             },
-            MenuActionSpec(title: conversation.isFavorite ? "取消收藏" : "收藏整个对话",
-                           systemImage: conversation.isFavorite ? "star.slash" : "star", quickLabel: "Star") {
-                FavoriteTags.setFavorite(conversation, !conversation.isFavorite)
+            toggleDisplayMode: {
+                viewModel.setDisplayMode(conversation.isBubbleMode ? .article : .bubble, for: conversation, context: modelContext)
             },
-            MenuActionSpec(title: "收藏到标签…", systemImage: "tag") {
-                favoriteTagTarget = FavoriteTags.Target(conversation: conversation)
+            moveToFolder: { folderId in
+                conversation.folderId = folderId
+                try? modelContext.save()
+                refreshList()
             },
-            MenuActionSpec(title: conversation.memoryEnabled ? "关闭记忆参与" : "开启记忆参与",
-                           systemImage: conversation.memoryEnabled ? "brain" : "brain.head.profile") {
+            toggleMemory: {
                 conversation.memoryEnabled.toggle()
                 try? conversation.modelContext?.save()
             },
-            MenuActionSpec(title: "这个窗口带什么", systemImage: "checklist") {
-                viewModel.editOpenWindowNote(for: conversation)
+            openWindowNote: { viewModel.editOpenWindowNote(for: conversation) },
+            windowSummary: {
+                memorySheet = ConversationMemorySheetTarget(kind: .windowSummary, conversationId: conversation.id,
+                                                            profileId: conversation.profileId, title: conversation.title)
             },
-            MenuActionSpec(title: conversation.isBubbleMode ? "换成文章" : "换成气泡",
-                           systemImage: conversation.isBubbleMode ? "doc.text" : "bubble.left.and.bubble.right") {
-                viewModel.setDisplayMode(conversation.isBubbleMode ? .article : .bubble, for: conversation, context: modelContext)
+            contextSummary: {
+                memorySheet = ConversationMemorySheetTarget(kind: .contextSummary, conversationId: conversation.id,
+                                                            profileId: conversation.profileId, title: conversation.title)
             },
-        ]
-
-        // 缓存保暖：按 tmux session 设（不是按对话）——共享同一 session 的
-        // 对话共用一份 prompt cache，标题里带上 session 名让这件事看得见。
-        // 按这条对话连的那台存 / 推（plan-multi-hub B2.4）；那台用不了就不给这项
-        if let ccSession = conversation.ccBridgeSessionName, !ccSession.isEmpty,
-           let hub = try? CCHubRegistry.shared.route(CCHubRegistry.hubId(of: conversation)).get() {
-            let current = CCBridgeWebSocketClient.keepalivePolicy(for: ccSession, hub: hub)
-            specs.append(MenuActionSpec(
-                title: "缓存保暖 · \(ccSession)", systemImage: "flame",
-                children: ["always", "auto", "never"].map { policy in
-                    MenuActionSpec(title: keepalivePolicyLabel(policy),
-                                   systemImage: current == policy ? "checkmark" : keepalivePolicyIcon(policy)) {
-                        CCBridgeWebSocketClient.setKeepalivePolicy(policy, for: ccSession, hub: hub)
-                    }
-                }
-            ) {})
-        }
-
-        if !tags.isEmpty {
-            specs.append(MenuActionSpec(
-                title: "移到文件夹", systemImage: "folder",
-                children: tags.map { tag in
-                    MenuActionSpec(title: tag.name, systemImage: conversation.folderId == tag.id ? "checkmark" : "folder") {
-                        conversation.folderId = tag.id
-                        try? modelContext.save()
-                        refreshList()
-                    }
-                }
-            ) {})
-            if conversation.folderId != nil {
-                specs.append(MenuActionSpec(title: "移出文件夹", systemImage: "folder.badge.minus") {
-                    conversation.folderId = nil
-                    try? modelContext.save()
-                    refreshList()
-                })
-            }
-        }
-        specs[specs.count - 1].dividerAfter = true
-
-        specs.append(MenuActionSpec(title: "新建文件夹…", systemImage: "folder.badge.plus", dividerAfter: true) {
-            showNewTagSheet = true
-        })
-        specs.append(MenuActionSpec(title: "导出为 Markdown", systemImage: "doc.text", dividerAfter: true) {
-            exportConversation(conversation)
-        })
-        specs.append(MenuActionSpec(title: "删除", systemImage: "trash", isDestructive: true, quickLabel: "Delete") {
-            viewModel.softDeleteConversation(conversation)
-            refreshList()
-        })
-        return specs
+            regenerateTitle: {
+                ConversationTitler.regenerate(conversation, context: modelContext, providerManager: providerManager)
+            },
+            favoriteTag: { favoriteTagTarget = FavoriteTags.Target(conversation: conversation) },
+            setPersona: { personaId in
+                conversation.personaId = personaId
+                try? modelContext.save()
+            },
+            export: { exportConversation(conversation) })
+        let cc = ConversationMenu.ccSpecs(
+            conversation, viewModel: viewModel,
+            isHubConversation: CCHubTitle.isHubConversation(conversation, providerManager: providerManager,
+                                                            profileModelId: profileManager?.currentProfile.preferredModel),
+            save: { try? modelContext.save() })
+        return ConversationMenu.specs(place: .list, state: state, cc: cc, handlers: handlers)
     }
 
     @ViewBuilder
@@ -2723,6 +2667,7 @@ struct SidebarView: View {
             isSelected: isSelected,
             isFirst: conversation.id == conversations.first?.id,
             isRunning: viewModel.ccWaitingSince[conversation.id] != nil,
+            folderState: conversation.isFolderSession ? FolderHistorySync.shared.states[conversation.id] : nil,
             detailed: listStyle == "detailed",
             pure: listStyle == "pure",
             isStudy: isStudy,
@@ -2732,7 +2677,7 @@ struct SidebarView: View {
         .rowHover(selected: isSelected)
         row.onTapGesture { openFromList(conversation) }
         #else
-        MacConversationRow(conversation: conversation, selected: isSelected, canPin: !showTrash,
+        MacConversationRow(conversation: conversation, selected: isSelected, canPin: !showTrash && !MainSession.isMain(conversation),
             favoriteTags: favoriteTags,
             onSelect: { openMacConversation(conversation) },
             onRename: {
@@ -2742,7 +2687,7 @@ struct SidebarView: View {
             onPin: {
                 toggleConversationPin(conversation)
             },
-            menuItems: { MenuActionSpec.menuItems(from: conversationMenuSpecs(conversation)) })
+            menuItems: { MenuActionSpec.menuItems(from: MenuActionSpec.systemMenuOrder(conversationMenuSpecs(conversation))) })
         #if DEBUG || PERF_BENCH
         .background { if PerfHarnessMac.enabled { MacPerfAnchor(key: "chat:\(profileId):\(conversation.id)") } }
         .onAppear {
@@ -4175,6 +4120,7 @@ struct SidebarView: View {
     #if os(iOS)
     /// page0 行点击（perf-flash 驱动器经 PerfHarness.openFromList 走同一函数）
     private func openFromList(_ conversation: Conversation) {
+        if conversation.isFolderSession { FolderHistorySync.shared.prioritize(conversationId: conversation.id) }   // 正文还没补到的，先补这条
         onSelectConversation()
         viewModel.loadConversation(conversation, context: modelContext)
         // 同 id 重进：selectedConversation?.id 不变，ContentView 翻页 onChange 不 fire，
@@ -4811,6 +4757,8 @@ struct ConversationRow: View {
     var isFirst: Bool = false
     /// CC 已发出、还在等回复（`ConversationViewModel.ccWaitingSince`）
     var isRunning: Bool = false
+    /// 电脑上同步来的 session 的状态（`FolderHistorySync.states`）：busy 在忙 = 同一个转圈；wait 等批 = 橙点；done 答完了 = 未读点那个颜色
+    var folderState: String? = nil
     /// 详细模式：两行，第二行 = 模型最后一句
     var detailed: Bool = false
     /// 纯净模式：只显示标题，不带图标/条数/时间/未读
@@ -4850,6 +4798,8 @@ struct ConversationRow: View {
         if let name = sessionName {
             return ("chevron.left.forwardslash.chevron.right", name.hasPrefix("mp-codex") ? Self.codexTint : Self.ccTint)
         }
+        if conversation.isFolderSession { return ("chevron.left.forwardslash.chevron.right", Self.ccTint) }
+        if MainSession.isMain(conversation) { return ("sparkle", Theme.textPrimary) }
         if isStudy { return ("graduationcap", Theme.textMuted) }
         if Conversation.importedProviders.contains(conversation.provider) { return ("archivebox", Theme.textMuted) }
         return ("bubble.left", Theme.textMuted)
@@ -4882,7 +4832,7 @@ struct ConversationRow: View {
             TutuPage0Row(title: conversation.title,
                          session: sessionName.map(Self.sessionShortName) ?? "",
                          metadata: (conversation.nodeCount > 0 ? "\(conversation.nodeCount) · " : "") + Self.smartDate(conversation.updateTime),
-                         icon: sessionName != nil ? .code : (isStudy ? .cap : .chat))
+                         icon: MainSession.isMain(conversation) ? .main : (sessionName != nil ? .code : (isStudy ? .cap : .chat)))
                 .background(isSelected ? tutuAppearance.ink.opacity(0.045) : Color.clear)
                 .overlay(alignment: .trailing) {
                     statusSlot(showUnreadDot: true).padding(.trailing, 8 * tutuAppearance.scale)
@@ -4938,7 +4888,7 @@ struct ConversationRow: View {
     }
 
     private var pureContent: some View {
-        Text(conversation.title)
+        Text(MainSession.listTitle(conversation))
             .font(.system(size: Theme.F.label, weight: .medium))
             .foregroundColor(Theme.textPrimary)
             .lineLimit(1)
@@ -5063,15 +5013,17 @@ struct ConversationRow: View {
 
     /// 右侧固定 10pt 状态位：永远占位，只改透明度 / 缩放，未读来去不改行高（官端做法）
     private func statusSlot(showUnreadDot: Bool) -> some View {
-        let dotOn = showUnreadDot && hasUnread && !isRunning
+        let spinning = isRunning || folderState == "busy"
+        let folderDot = folderState == "wait" || folderState == "done"
+        let dotOn = !spinning && (folderDot || (showUnreadDot && hasUnread))
         return ZStack {
             Circle()
-                .fill(Self.unreadTint)
+                .fill(folderState == "wait" ? Self.ccTint : Self.unreadTint)
                 .frame(width: 6, height: 6)
                 .opacity(dotOn ? 1 : 0)
                 .scaleEffect(dotOn ? 1 : 0.3)
             // 条件插入没事：外面是定尺寸 ZStack，不影响行布局；只在跑的行才挂转圈，不让一百行都在后台转
-            if isRunning {
+            if spinning {
                 ProgressView()
                     .controlSize(.mini)
                     .scaleEffect(0.75)
@@ -5080,7 +5032,7 @@ struct ConversationRow: View {
         }
         .frame(width: 10, height: 10)
         .animation(.spring(response: 0.3, dampingFraction: 0.6), value: dotOn)
-        .animation(.easeInOut(duration: 0.2), value: isRunning)
+        .animation(.easeInOut(duration: 0.2), value: spinning)
     }
 }
 
@@ -6054,16 +6006,3 @@ struct TagReorderDropDelegate: DropDelegate {
     }
 }
 
-#if os(iOS)
-private struct Page0ProfileZoomSource: ViewModifier {
-    let namespace: Namespace.ID?
-
-    func body(content: Content) -> some View {
-        if let namespace {
-            content.matchedTransitionSource(id: SidebarView.page0ProfileZoomID, in: namespace) { $0.clipShape(RoundedRectangle(cornerRadius: 22)) }   // 胶囊高 44：半径 22 = 两头圆
-        } else {
-            content
-        }
-    }
-}
-#endif

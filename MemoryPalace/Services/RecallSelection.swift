@@ -6,7 +6,8 @@ enum RecallSelection {
     static func prepare(profile: Profile, conversationId: String, turnId: String, branchAnchor: String,
                         text: String, state: RecallConversationState, existingDecision: RecallTurnDecision?,
                         inputs: MemoryInjector.RoundInputs, recentMessages: [String], now: Date,
-                        tuning: RecallTuning, enabled: Bool = true) -> (decision: RecallTurnDecision, layers: RecallMemoryLayers) {
+                        tuning: RecallTuning, enabled: Bool = true,
+                        windowIds: Set<String> = [], windowSince: Date? = nil) -> (decision: RecallTurnDecision, layers: RecallMemoryLayers) {
         let tuning = existingDecision.flatMap { $0.turnId == turnId ? $0.tuning : nil } ?? tuning
         let context = EffectiveCharacterContext(profile: profile)
         let excluded = [profile.userName, profile.assistantName, context.userName, context.charName]
@@ -20,7 +21,17 @@ enum RecallSelection {
             $0.profileId == profile.id && MemoryInjector.isInjectable($0)
                 && !($0.organizedPage.map(WikiProposalSources.isPrivate) ?? false)
         } : []
+        // 批过的记忆条目每轮全带：都已经在了，「聊到才带」不再单独推它们（wiki 页照旧聊到才带）
+        let everyRound = enabled && inputs.everyRound
         let memoryById = Dictionary(memories.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { first, _ in first })
+        /// 出处就在眼前的记忆条目不推回同一个窗口（同时间轴 / 段摘要「还在历史窗口里的不注」）：来自这场对话，且出处那条消息还在
+        /// 这一轮发出去的历史里；没有出处消息的（助手在这里亲手记的）看它是不是在历史窗口最早那条之后写下的。
+        /// `windowIds` / `windowSince` = 这一轮历史窗口里的消息 id、最早那条的时间；没给 = 不滤
+        func inView(_ memory: Memory) -> Bool {
+            guard !conversationId.isEmpty, memory.sourceConversationId == conversationId else { return false }
+            if let node = memory.sourceNodeId { return windowIds.contains(node) }
+            return windowSince.map { memory.createdAt >= $0 } ?? false
+        }
         let archiveTitle = PromptAssembler.archiveLabel(profile)
         var stableParts = [inputs.selfMemory?.text ?? ""].filter { !$0.isEmpty }
         // 保留单位与拼接同处旁录：顺序 = 层里出现的顺序（plan-memory-receipt §2.2 顺序陷阱）
@@ -46,29 +57,41 @@ enum RecallSelection {
                     shown: "根索引 \(root.components(separatedBy: "\n").count) 行", segment: .memoryStable))
             }
         }
-        let stableRetrievers = MemoryInjector.activeRetrievers().filter { $0.layer == .stable }
+        // 卡的目录（Z）：只在卡靠「聊到了才带」带时出——那时没聊到的卡不在提示里，助手得知道有哪些可翻
+        if enabled, tuning.archiveTriggerEnabled, !everyRound {
+            let index = MemoryInjector.cardIndex(memories.filter { !$0.isUserExplicit })
+            let cost = Memory.estimateTokens(index.text)
+            if !index.text.isEmpty, cost <= remaining {
+                stableParts.append(index.text)
+                remaining -= cost
+                units.append(RecallDeliveryUnit(
+                    kind: RecallDeliveryItem.Kind.cardIndex, ref: "cardIndex",
+                    version: WikiStore.version(of: Data(index.text.utf8)), text: index.text, tokens: cost,
+                    shown: "卡的目录 \(index.groups) 组", segment: .memoryStable))
+            }
+        }
+        // 钉住的：进了这一轮原料的就带（带不带进原料只听「钉住的」那一勾）
+        let pinnedRetriever = PersistentRetriever()
         var pinnedIds = Set<UUID>()
         var stableHits: [InjectionHit] = []
         var pinnedLines: [String] = []
         var expiredPinned: [Memory] = []
-        for retriever in stableRetrievers {
-            for hit in retriever.retrieve(memories, recent: []) where !pinnedIds.contains(hit.memory.id) {
-                let memory = hit.memory
-                let line = MemoryInjector.injectionPayload(memory, stable: true, catalog: false, now: now).text
-                let cost = Memory.estimateTokens(line) + (pinnedLines.isEmpty ? Memory.estimateTokens("[\(archiveTitle)]\n") : 0)
-                guard cost <= remaining else { continue }
-                remaining -= cost
-                pinnedIds.insert(memory.id)
-                pinnedLines.append(line)
-                let pinnedRef = memoryRef(memory)
-                units.append(RecallDeliveryUnit(
-                    kind: RecallDeliveryItem.Kind.pinned, ref: MemoryDelivery.key(pinnedRef),
-                    version: pinnedRef.version, text: line, tokens: Memory.estimateTokens(line),
-                    shown: String(memory.content.prefix(60)), segment: .memoryStable))
-                if memory.isUserExplicit, WikiInjection.isExpired(memory, now: now) { expiredPinned.append(memory) }
-                stableHits.append(InjectionHit(memoryId: memory.id, snippet: String(memory.content.prefix(60)),
-                                               category: memory.category, score: hit.score, retrieverId: retriever.id, catalog: false))
-            }
+        for hit in pinnedRetriever.retrieve(memories, recent: []) where !pinnedIds.contains(hit.memory.id) {
+            let memory = hit.memory
+            let line = MemoryInjector.injectionPayload(memory, stable: true, catalog: false, now: now).text
+            let cost = Memory.estimateTokens(line) + (pinnedLines.isEmpty ? Memory.estimateTokens("[\(archiveTitle)]\n") : 0)
+            guard cost <= remaining else { continue }
+            remaining -= cost
+            pinnedIds.insert(memory.id)
+            pinnedLines.append(line)
+            let pinnedRef = memoryRef(memory)
+            units.append(RecallDeliveryUnit(
+                kind: RecallDeliveryItem.Kind.pinned, ref: MemoryDelivery.key(pinnedRef),
+                version: pinnedRef.version, text: line, tokens: Memory.estimateTokens(line),
+                shown: String(memory.lineText.prefix(60)), segment: .memoryStable))
+            if WikiInjection.isExpired(memory, now: now) { expiredPinned.append(memory) }
+            stableHits.append(InjectionHit(memoryId: memory.id, snippet: String(memory.lineText.prefix(60)),
+                                           category: memory.category, score: hit.score, retrieverId: pinnedRetriever.id, catalog: false))
         }
         if !pinnedLines.isEmpty { stableParts.append("[\(archiveTitle)]\n" + pinnedLines.joined(separator: "\n")) }
         let expiredReminder = MemoryInjector.expiredPinnedReminder(expiredPinned, budget: remaining)
@@ -113,16 +136,15 @@ enum RecallSelection {
             return RecallSourceRef(profileId: profile.id, conversationId: conversationId, kind: .fragment,
                                    path: memory.id.uuidString, version: version)
         }
+        let fragmentHeader = "[\(archiveTitle)·本轮相关]"
+        // keywords are retrieval hints, not public entity identities. Only a recorded subject is an identity.
+        func identities(_ memory: Memory) -> [String] {
+            [memory.subject].compactMap { $0 }.filter { !$0.isEmpty && !blocked.contains(RecallLexical.normalized($0)) }
+        }
+        /// 一张卡 = 一行；「本轮相关」的头和目录模式的指路在下面拼 volatile 时整组只出一次
         func memoryItem(_ memory: Memory) -> RecallItem {
-            let catalog = MemoryFlags.catalogInjection
-            let line = MemoryInjector.injectionPayload(memory, stable: false, catalog: catalog, now: now).text
-            let hint = catalog && RecallTool.enabled ? MemoryInjector.recallCatalogHint : ""
-            let payload = "[\(archiveTitle)·本轮相关]\n" + line + hint
-            // keywords are retrieval hints, not public entity identities. Only a recorded subject is an identity.
-            let identities = [memory.subject].compactMap { $0 }.filter {
-                !$0.isEmpty && !blocked.contains(RecallLexical.normalized($0))
-            }
-            return RecallItem(source: memoryRef(memory), text: payload, identities: identities, tokenCost: Memory.estimateTokens(payload))
+            let line = MemoryInjector.injectionPayload(memory, stable: false, catalog: MemoryFlags.catalogInjection, now: now).text
+            return RecallItem(source: memoryRef(memory), text: line, identities: identities(memory), tokenCost: Memory.estimateTokens(line))
         }
         let batch = inputs.fullText.flatMap { $0.profileId == profile.id && $0.text == text ? $0 : nil }
         let cardHits = (((batch?.status.state == .ready ? batch?.hits : nil) ?? []) + (batch?.kept ?? [])).filter {
@@ -151,26 +173,43 @@ enum RecallSelection {
                 guard let page = pageByPath[item.source.path], pageRef(page) == item.source else { return nil }
                 return pageItem(page, word: page.title)
             case .fragment:
-                guard let memory = memoryById[item.source.path], !memory.isUserExplicit,
+                guard !everyRound, let memory = memoryById[item.source.path], !memory.isUserExplicit, !inView(memory),
                       memory.organizedPage == nil, memoryRef(memory) == item.source else { return nil }
                 return memoryItem(memory)
             case .card:
                 return cardHits.first { $0.path == item.source.path && $0.version == item.source.version }.flatMap(cardItem)
             }
         }
-        let fragmentDocuments = memories.filter { !$0.isUserExplicit && $0.organizedPage == nil }
-        func weights() -> RecallTokenWeights {
-            let versions = pages.map { pageRef($0).path + "|" + pageRef($0).version }
-                + fragmentDocuments.map { memoryRef($0).path + "|" + memoryRef($0).version }
-            return RecallCorpusCache.shared.weights(profileId: profile.id, versions: versions, tuning: tuning) {
+        let fragmentDocuments = everyRound ? [] : memories.filter { !$0.isUserExplicit && $0.organizedPage == nil }
+        func corpus() -> RecallCorpus {
+            // 这一步每个要找的轮次都走：只拿决定词面的东西（页的版本、卡的正文和标签）算签名，
+            // 不给每张卡算内容摘要（真数据 300 张卡时那一项占了一轮挑选的大半时间）
+            var signature = Hasher()
+            for page in pages {
+                signature.combine(page.path)
+                signature.combine(pageRef(page).version)
+            }
+            for memory in fragmentDocuments {
+                signature.combine(memory.id)
+                signature.combine(memory.content)
+                signature.combine(memory.keywords)
+            }
+            let key = "\(pages.count)|\(fragmentDocuments.count)|\(signature.finalize())"
+            return RecallCorpusCache.shared.corpus(profileId: profile.id, signature: key, tuning: tuning) {
                 let pageDocuments = pages.map { RecallLexical.tokens($0.lexicalDocument, tuning: tuning) }
-                return RecallTokenWeights(tokenDocuments: pageDocuments + fragmentDocuments.map { RecallLexical.tokens($0.content, tuning: tuning) })
+                let cards = fragmentDocuments.map {
+                    ($0.id.uuidString, RecallFullText.fragmentTokens(([$0.content] + $0.keywords).joined(separator: "\n"), tuning: tuning))
+                }
+                return RecallCorpus(weights: RecallTokenWeights(tokenDocuments: pageDocuments + cards.map(\.1)),
+                                    fragmentTokens: Dictionary(cards, uniquingKeysWith: { first, _ in first }))
             }
         }
         var searchedHits: [UUID: InjectionHit] = [:]
+        // 卡那一组的头只出一次，先从预算里留出来
+        let itemBudget = max(0, remaining - (fragmentDocuments.isEmpty ? 0 : Memory.estimateTokens(fragmentHeader + "\n")))
         let decision = RecallTurnState.prepare(turnId: turnId, branchAnchor: branchAnchor, text: text, state: state,
                                               existingDecision: existingDecision, enabled: enabled,
-                                              tuning: tuning, weights: weights(), budget: remaining, resolve: resolve, covers: covers) { cooldowns in
+                                              tuning: tuning, weights: corpus().weights, budget: itemBudget, resolve: resolve, covers: covers) { cooldowns in
             // A new topic's lower bound is this true user message, never prior topic/history text.
             // recentMessages remains in the public bridge signature for callers' real-history context.
             let snapshot = WikiInjectionSnapshot(pages: pages, stopWords: inputs.wiki?.stopWords ?? [])
@@ -194,11 +233,21 @@ enum RecallSelection {
                     }
             } ?? [] : []
             let selectedPages = hasX1 ? x1 : x1 + x2
-            let fragments = fragmentDocuments.filter { !pinnedIds.contains($0.id) }
-            let result = MemoryInjector.buildInjectionSplit(memories: fragments, recentMessages: [text], budget: remaining, now: now)
-            searchedHits = Dictionary(result.hits.map { ($0.memoryId, $0) }, uniquingKeysWith: { first, _ in first })
-            return selectedPages + result.hits.compactMap { hit in
-                memoryById[hit.memoryId.uuidString].map(memoryItem)
+            // X3：只带这一句聊到的卡（`RecallFullText.fragmentHits`）；每轮全带勾着时没有候选（上面 `fragmentDocuments` 是空的）
+            let built = corpus()
+            let documents = fragmentDocuments.filter { !pinnedIds.contains($0.id) && !inView($0) }.map {
+                RecallFragmentDocument(id: $0.id.uuidString, tokens: built.fragmentTokens[$0.id.uuidString] ?? [],
+                                       identities: identities($0), priority: $0.recallPriority, createdAt: $0.createdAt)
+            }
+            let matched = RecallFullText.fragmentHits(text: text, documents: documents, weights: built.weights,
+                                                      excluding: excluded, tuning: tuning)
+            return selectedPages + matched.compactMap { hit -> RecallItem? in
+                guard let memory = memoryById[hit.id] else { return nil }
+                searchedHits[memory.id] = InjectionHit(memoryId: memory.id, snippet: String(memory.lineText.prefix(60)),
+                                                       category: memory.category, score: nil,
+                                                       retrieverId: hit.match == .lexical ? "keyword" : "named",
+                                                       catalog: MemoryFlags.catalogInjection)
+                return memoryItem(memory)
             }
         }
         let selectedPages = decision.selected.compactMap { item -> WikiPageHit? in
@@ -208,14 +257,14 @@ enum RecallSelection {
         }
         var fragmentHits = decision.selected.compactMap { item -> InjectionHit? in
             guard item.source.kind == .fragment, let memory = memoryById[item.source.path] else { return nil }
-            return searchedHits[memory.id] ?? InjectionHit(memoryId: memory.id, snippet: String(memory.content.prefix(60)),
+            return searchedHits[memory.id] ?? InjectionHit(memoryId: memory.id, snippet: String(memory.lineText.prefix(60)),
                                                          category: memory.category, score: nil, retrieverId: "active", catalog: MemoryFlags.catalogInjection)
         }
         func unitShown(_ item: RecallItem) -> String {
             switch item.source.kind {
             case .page: return pageByPath[item.source.path]?.title ?? item.identities.first ?? item.source.path
             case .card: return item.identities.first ?? item.source.path
-            case .fragment: return memoryById[item.source.path].map { String($0.content.prefix(60)) } ?? item.source.path
+            case .fragment: return memoryById[item.source.path].map { String($0.lineText.prefix(60)) } ?? item.source.path
             }
         }
         func sourceKind(_ source: RecallSourceRef) -> String {
@@ -226,21 +275,34 @@ enum RecallSelection {
             }
         }
         var volatile = expiredReminder.text
-        for item in decision.selected {
-            if !volatile.isEmpty { volatile += "\n\n" }
-            volatile += item.text
+        func record(_ item: RecallItem) {
             units.append(RecallDeliveryUnit(
                 kind: sourceKind(item.source), ref: MemoryDelivery.key(item.source), version: item.source.version,
                 text: item.text, tokens: item.tokenCost, shown: unitShown(item), segment: .memoryVolatile))
         }
-        if enabled && !tuning.archiveTriggerEnabled {
+        for item in decision.selected where item.source.kind != .fragment {
+            if !volatile.isEmpty { volatile += "\n\n" }
+            volatile += item.text
+            record(item)
+        }
+        let selectedFragments = decision.selected.filter { $0.source.kind == .fragment }
+        if !selectedFragments.isEmpty {
+            if !volatile.isEmpty { volatile += "\n\n" }
+            volatile += fragmentHeader + "\n" + selectedFragments.map(\.text).joined(separator: "\n")
+            if MemoryFlags.catalogInjection && RecallTool.enabled { volatile += MemoryInjector.recallCatalogHint }
+            selectedFragments.forEach(record)
+        }
+        // 不靠「聊到才带」带的那几路：每轮全带，或聊到才带关着时试验的按意思找。预算 = 这一轮页和卡用剩下的
+        let cardRetrievers = enabled
+            ? MemoryInjector.cardRetrievers(everyRound: everyRound, triggerOn: tuning.archiveTriggerEnabled) : []
+        if !cardRetrievers.isEmpty {
             let fragments = MemoryInjector.buildInjectionSplit(
-                memories: memories.filter { !pinnedIds.contains($0.id) },
-                recentMessages: recentMessages, budget: remaining, now: now)
+                memories: memories.filter { !pinnedIds.contains($0.id) }, cards: cardRetrievers, recentMessages: recentMessages,
+                budget: max(0, remaining - decision.selected.reduce(0) { $0 + $1.tokenCost }), now: now)
             fragmentHits = fragments.hits
             if !fragments.volatile.isEmpty {
                 if !volatile.isEmpty { volatile += "\n\n" }
-                volatile += "[\(archiveTitle)·本轮相关]\n" + fragments.volatile
+                volatile += fragmentHeader + "\n" + fragments.volatile
                 // 只旁录实际拼进 volatile 的项：内层 stable 命中不在这段 wire 上，内层过期提醒单列
                 for line in fragments.volatileLines {
                     guard let memoryId = line.memoryId else {
@@ -255,7 +317,7 @@ enum RecallSelection {
                     units.append(RecallDeliveryUnit(
                         kind: RecallDeliveryItem.Kind.legacyFragment, ref: MemoryDelivery.key(ref),
                         version: ref.version, text: line.text, tokens: Memory.estimateTokens(line.text),
-                        shown: String(memory.content.prefix(60)), segment: .memoryVolatile))
+                        shown: String(memory.lineText.prefix(60)), segment: .memoryVolatile))
                 }
             }
         }
@@ -266,14 +328,20 @@ enum RecallSelection {
     }
 }
 
+/// 一层楼这一版语料的词面：词的分量（页 + 没整理进页的卡）和每张卡自己的词
+private struct RecallCorpus {
+    let weights: RecallTokenWeights
+    let fragmentTokens: [String: Set<String>]
+}
+
 /// Bounded cache keyed by the public corpus versions, not query text or other floors' contents.
 private final class RecallCorpusCache: @unchecked Sendable {
     static let shared = RecallCorpusCache()
     private let lock = NSLock()
-    private var entries: [String: RecallTokenWeights] = [:]
+    private var entries: [String: RecallCorpus] = [:]
 
-    func weights(profileId: String, versions: [String], tuning: RecallTuning, build: () -> RecallTokenWeights) -> RecallTokenWeights {
-        let key = profileId + "\u{0}" + "\(tuning.minimumHanTermLength)|\(tuning.minimumLatinTermLength)" + "\u{0}" + versions.sorted().joined(separator: "\u{0}")
+    func corpus(profileId: String, signature: String, tuning: RecallTuning, build: () -> RecallCorpus) -> RecallCorpus {
+        let key = profileId + "\u{0}" + "\(tuning.minimumHanTermLength)|\(tuning.minimumLatinTermLength)" + "\u{0}" + signature
         if let found = lock.withLock({ entries[key] }) { return found }
         let result = build()
         lock.withLock {

@@ -5,13 +5,17 @@ enum UsageKind: String, Codable, CaseIterable, Sendable {
     case chat, assistant, memory, catalog, catalogSeed, dream, timeline, summary, windowSummary, image, innerVoice, vocab, vocabArcheology, topic, coach, code, title, thinking, toolSummary, other
     /// 审计台试写台跑测试集（plan-memory-audit-home-trial）：进写入预算合计，但不被写入预算拦
     case memoryTrial
+    /// 自己醒来做任务（plan-wake-heartbeat）
+    case wake
+    /// 一起看的陪看节拍（plan-watch-together-v2 V7）
+    case watchAlong
 
     var label: String {
         switch self {
         case .chat: "对话"
         case .assistant: "小芽助手"
-        case .memory: "碎片池"
-        case .catalog: "整理编目"
+        case .memory: "原子事实"
+        case .catalog: "wiki 整理"
         case .catalogSeed: "wiki 种子"
         case .dream: "做梦画像"
         case .timeline: "时间轴"
@@ -29,6 +33,8 @@ enum UsageKind: String, Codable, CaseIterable, Sendable {
         case .toolSummary: "工具总结"
         case .other: "其他"
         case .memoryTrial: "试写"
+        case .wake: "自己醒来"
+        case .watchAlong: "陪看"
         }
     }
 }

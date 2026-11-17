@@ -143,7 +143,7 @@ struct WikiPageEditorSheet: View {
         .onAppear { if openedProfileId == nil { openedProfileId = profileManager?.currentProfile.id } }
         .alert("目标页已删除 / 不存在", isPresented: Binding(get: { missingLink != nil }, set: { if !$0 { missingLink = nil } })) {
             if canRestoreLink {
-                Button("去已删除恢复") { showDeleted = true }
+                Button("去 Deleted pages 恢复") { showDeleted = true }
             }
             Button("好", role: .cancel) { missingLink = nil }
         } message: {
@@ -567,7 +567,7 @@ struct WikiDeleteConfirmation: ViewModifier {
                 Button("删除页", role: .destructive) { remove() }
                 Button("取消", role: .cancel) { target = nil }
             } message: { prepared in
-                Text("仅删这页，条目卡保留，可从 C 档案「已删除」恢复。"
+                Text("仅删这页，条目卡保留，可从 wiki 的 Deleted pages 恢复。"
                      + prepared.incomingMessage
                      + (hasUnsavedEdits ? "\n未保存的修改会丢。" : ""))
             }
@@ -628,7 +628,7 @@ struct WikiDeletedPage: View {
         .scrollContentBackground(.hidden)
         .toolPageBackground()
         .tint(Theme.branchIndicator)
-        .memorySubpage("已删除 C 档案")
+        .memorySubpage("Deleted pages")
         .task(id: profileId) { await reload() }
         .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in Task { await reload() } }
     }

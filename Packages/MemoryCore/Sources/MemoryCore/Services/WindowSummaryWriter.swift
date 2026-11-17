@@ -167,7 +167,7 @@ public enum WindowSummaryWriter {
         var o = SessionSegmentWriter.parse(raw)
         for problem in softProblems(o, segmentCount: segments.count, speakers: speakers) {
             MemoryWriteLog.record(writer: .a3, profileId: profileId, ok: true,
-                                  note: "A3 软检查 · 窗口「\(SessionSummaryStore.oneLine(title))」· 段「\(SessionSummaryStore.oneLine(o.title))」· \(problem)", model: "", cost: 0, memoryRoot: memoryRoot ?? fallbackLogRoot())
+                                  note: "A3 软检查 · 窗口「\(SessionSummaryStore.oneLine(title))」· 段「\(SessionSummaryStore.oneLine(o.title))」· \(problem)", model: MemoryWriteLog.meter?.model ?? "", cost: 0, memoryRoot: memoryRoot ?? fallbackLogRoot())
         }
         if o.keywords.count > keywordLimit { o.keywords.removeLast(o.keywords.count - keywordLimit) }
         return SessionSegment(kind: .window, title: o.title, start: start, end: end, from: 0, to: to, lastNodeId: lastNodeId,

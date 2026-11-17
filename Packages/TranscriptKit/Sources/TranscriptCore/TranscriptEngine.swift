@@ -77,6 +77,8 @@ public struct TranscriptEngine: Sendable {
         case none
         /// 系统默认的滚动动画
         case standard
+        /// 跟随时的滑入：逐帧按时间指数逼近（`glideResponse`），目的地每帧现读引擎的位置；手指一碰就停
+        case glide
         /// 跟键盘同曲线。做完后界面要回报 `.animationFinished(id)`
         case keyboard(KeyboardMotion, id: Int)
     }
@@ -92,7 +94,10 @@ public struct TranscriptEngine: Sendable {
 
     public enum Transaction: Sendable {
         case setRows([TranscriptLayout.Row])
-        case setHeights([HeightReport])
+        /// `streaming`：这批高度来自正在流式输出的那条消息
+        case setHeights([HeightReport], streaming: Bool = false)
+        /// 有没有消息正在流式输出
+        case setStreaming(Bool)
         case setLeadingPad(CGFloat, reason: PadReason)
         /// `.scroll(…, animation: .keyboard(_, id))` 做完了（被新动画顶掉的不用报）
         case animationFinished(id: Int)
@@ -128,6 +133,14 @@ public struct TranscriptEngine: Sendable {
     /// 发送时离起点不超过这么多屏：回到最新消息；更远：原地不动
     public static let sendReturnScreens: CGFloat = 1.5
 
+    // 跟随滑入的三个数，照旧页（StreamScrollAnchor.cellGrew / glideTick / pollScrollSettled）
+    /// 跟随时最新内容长高不超过这么多（一行、一段）：画面先不动，再滑上来。流式的那条不限
+    public static let glideMaxGrowth: CGFloat = 120
+    /// 滑入的时间常数（秒）
+    public static let glideResponse: Double = 0.08
+    /// 流式中松手，停在离起点不到这么多屏：滑回去接着跟
+    public static let resumeFollowScreens: CGFloat = 0.5
+
     public private(set) var layout: TranscriptLayout
     public private(set) var viewport: Viewport
     public private(set) var offset: CGFloat
@@ -135,6 +148,9 @@ public struct TranscriptEngine: Sendable {
     public private(set) var phase: ScrollPhase = .idle
     /// 收键盘的滑动在路上：垫块先留着（留着才有合法的位置可滑），滑完再塌成 `pad`
     public private(set) var pendingPadRelease: (id: Int, pad: CGFloat)?
+    public private(set) var isStreaming = false
+    /// 键盘的滑动在路上：这期间不叠跟随滑入
+    private var keyboardAnimationID: Int?
     private var lastAnimationID = 0
 
     public init(width: CGFloat, viewport: Viewport) {
@@ -175,21 +191,18 @@ public struct TranscriptEngine: Sendable {
             let adjustment = keepingAnchor { $0.setRows(rows) }
             return [.rowsChanged(reconfigure: reconfigure, offsetAdjustment: adjustment)]
 
-        case .setHeights(let reports):
-            var changed = false
-            let adjustment = keepingAnchor { layout in
-                for report in reports {
-                    if layout.setHeight(report.height, tier: report.tier, id: report.id, version: report.version) {
-                        changed = true
-                    }
-                }
-            }
-            return changed || adjustment != 0 ? [.layoutChanged(offsetAdjustment: adjustment)] : []
+        case .setHeights(let reports, let streaming):
+            return setHeights(reports, streaming: streaming)
+
+        case .setStreaming(let streaming):
+            isStreaming = streaming
+            return []
 
         case .setLeadingPad(let pad, let reason):
             return setLeadingPad(max(0, pad), reason: reason)
 
         case .animationFinished(let id):
+            if keyboardAnimationID == id { keyboardAnimationID = nil }
             guard let pending = pendingPadRelease, pending.id == id else { return [] }
             pendingPadRelease = nil
             let before = offset
@@ -206,6 +219,7 @@ public struct TranscriptEngine: Sendable {
             return [.layoutChanged(offsetAdjustment: restore(anchor))]
 
         case .scrolled(let position, let next):
+            let wasMoving = phase == .tracking || phase == .decelerating
             offset = position
             phase = next
             switch next {
@@ -217,6 +231,13 @@ public struct TranscriptEngine: Sendable {
                 }
             case .idle:
                 if distanceFromStart <= Self.regainFollowDistance { isFollowing = true }
+                // 流式中松手停在最新消息附近：滑回去接着跟
+                if wasMoving, isStreaming, !isFollowing, keyboardAnimationID == nil,
+                   distanceFromStart < viewport.height * Self.resumeFollowScreens {
+                    isFollowing = true
+                    offset = pinnedOffset
+                    return [.scroll(to: offset, animation: .glide)]
+                }
             case .animating:
                 break
             }
@@ -245,6 +266,41 @@ public struct TranscriptEngine: Sendable {
         }
     }
 
+    // MARK: 高度
+
+    private mutating func setHeights(_ reports: [HeightReport], streaming: Bool) -> [Effect] {
+        var changed = false
+        let apply: (inout TranscriptLayout) -> Void = { layout in
+            for report in reports {
+                if layout.setHeight(report.height, tier: report.tier, id: report.id, version: report.version) {
+                    changed = true
+                }
+            }
+        }
+        let moving = phase == .tracking || phase == .decelerating
+        guard isFollowing, !moving, keyboardAnimationID == nil else {
+            let adjustment = keepingAnchor(apply)
+            return changed || adjustment != 0 ? [.layoutChanged(offsetAdjustment: adjustment)] : []
+        }
+        // 跟随中：先按「画面不动」算出最新内容长了多少
+        let pinned = pinnedOffset
+        let before = offset
+        let pictureAnchor = captureAnchor(following: false)
+        apply(&layout)
+        guard changed else { return [] }
+        var growth: CGFloat = 0
+        if case .row(let id, let distance) = pictureAnchor, let frame = layout.frame(of: id) {
+            growth = (frame.maxY - distance) - before
+        }
+        offset = pinned
+        guard growth > 0, streaming || growth <= Self.glideMaxGrowth else {
+            // 变矮、或一下子长了一大截（展开全文、整表重排）：直接钉回最新消息
+            return [.layoutChanged(offsetAdjustment: pinned - before)]
+        }
+        // 一行一段地长：同一帧位置加上同样多（新内容先藏在底下），再滑上来
+        return [.layoutChanged(offsetAdjustment: growth + (pinned - before)), .scroll(to: pinned, animation: .glide)]
+    }
+
     // MARK: 键盘垫块
 
     private mutating func setLeadingPad(_ pad: CGFloat, reason: PadReason) -> [Effect] {
@@ -259,7 +315,7 @@ public struct TranscriptEngine: Sendable {
             guard interrupted, case .keyboard(let motion) = reason else { return [] }
             isFollowing = true
             offset = minOffset
-            return [.scroll(to: minOffset, animation: .keyboard(motion, id: nextAnimationID()))]
+            return [.scroll(to: minOffset, animation: .keyboard(motion, id: nextKeyboardAnimationID()))]
         }
 
         switch reason {
@@ -286,13 +342,13 @@ public struct TranscriptEngine: Sendable {
                 isFollowing = true
                 offset = minOffset
                 return [.layoutChanged(offsetAdjustment: delta),
-                        .scroll(to: minOffset, animation: .keyboard(motion, id: nextAnimationID()))]
+                        .scroll(to: minOffset, animation: .keyboard(motion, id: nextKeyboardAnimationID()))]
             }
             guard nearStart else {
                 return [.layoutChanged(offsetAdjustment: keepingAnchor { $0.setLeadingPad(pad) })]
             }
             // 收键盘：垫块先留着，内容跟着键盘滑下去；滑完（animationFinished）再塌垫块、归位，同一帧
-            let id = nextAnimationID()
+            let id = nextKeyboardAnimationID()
             pendingPadRelease = (id, pad)
             isFollowing = true
             offset = pinnedOffset
@@ -300,8 +356,9 @@ public struct TranscriptEngine: Sendable {
         }
     }
 
-    private mutating func nextAnimationID() -> Int {
+    private mutating func nextKeyboardAnimationID() -> Int {
         lastAnimationID += 1
+        keyboardAnimationID = lastAnimationID
         return lastAnimationID
     }
 
@@ -325,8 +382,10 @@ public struct TranscriptEngine: Sendable {
         case none
     }
 
-    private func captureAnchor() -> Anchor {
-        if isFollowing { return .start }
+    private func captureAnchor() -> Anchor { captureAnchor(following: isFollowing) }
+
+    private func captureAnchor(following: Bool) -> Anchor {
+        if following { return .start }
         let visible = visibleRange
         guard let last = layout.indices(intersecting: visible.minY, visible.maxY).last else { return .none }
         return .row(id: layout.rows[last].id, distance: layout.frame(at: last).maxY - offset)

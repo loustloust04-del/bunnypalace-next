@@ -132,7 +132,9 @@ final class PromptRealPathHarness {
         store.setBudgetUSD(100)
         store.resetSpent()
 
-        let bypass: Set<PermissionDomain> = [.toolsMaster, .fileLibrary, .images, .memory]
+        // memorySelf：remember 三件原来不归权限域（一直给），基线照旧带着它们；
+        // memoryFiles：suggest_wiki_direction 现在归这一档（不允许 = 不下发），基线照旧带着它
+        let bypass: Set<PermissionDomain> = [.toolsMaster, .fileLibrary, .images, .memory, .memorySelf, .memoryFiles]
         for domain in PermissionDomain.allCases {
             let level: PermissionLevel = bypass.contains(domain) ? .bypass : .notAllowed
             setDefault(domain.storageKey, level.rawValue)
@@ -161,9 +163,7 @@ final class PromptRealPathHarness {
         setDefault("mem_write_b4", nil)
         // 时间轴（A4）开着：注入时间轴 + 下发 pending_notes（金样录的就是开着的样子，钉死不吃本机偏好）
         setDefault("mem_content_timeline", true)
-        setDefault("mem_inject_keyword", false)
         setDefault("mem_inject_vector", false)
-        setDefault("mem_inject_full", true)
         setDefault("mem_inject_graph", false)
         setDefault("mem_inject_catalog", false)
         setDefault("mem_inject_budget", nil)

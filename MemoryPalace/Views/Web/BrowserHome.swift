@@ -11,6 +11,9 @@ import UIKit
 /// 身份胶囊 + 设置 / 搜索或网址 / 收藏网格（网站图标 + 已登录小圆点）/ 最近（同网址一条）
 struct BrowserHome: View {
     @Binding var identity: BrowserIdentity
+    /// page2 浏览器主页上的「打开的标签页」（plan-browser-tabs §2）；新标签页里不给
+    var openTabs: [BrowserTabRecord] = []
+    var onSelectTab: ((UUID) -> Void)? = nil
     var onPick: (URL) -> Void
 
     @State private var identities: [BrowserIdentity] = []
@@ -30,6 +33,7 @@ struct BrowserHome: View {
             VStack(alignment: .leading, spacing: 22) {
                 topBar
                 searchField
+                if !openTabs.isEmpty, onSelectTab != nil { openTabsSection }
                 favoritesSection
                 if !history.isEmpty { recentSection }
             }
@@ -155,6 +159,42 @@ struct BrowserHome: View {
         .frame(height: 52)
         .background(Capsule().fill(Theme.mainBg).shadow(color: Theme.textPrimary.opacity(0.07), radius: 10, y: 4))
         .overlay(Capsule().strokeBorder(Theme.textPrimary.opacity(0.06)))
+    }
+
+    // MARK: 打开的标签页
+
+    private var openTabsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("打开的标签页").font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(openTabs) { tab in
+                        let url = tab.url ?? ""
+                        let title = tab.title.isEmpty ? (URL(string: url)?.host() ?? "新标签页") : tab.title
+                        HStack(spacing: 8) {
+                            FaviconTile(url: url, name: title, size: 22)
+                            Text(title)
+                                .font(.system(size: 14))
+                                .foregroundStyle(Theme.textPrimary)
+                                .lineLimit(1)
+                                .frame(maxWidth: 140, alignment: .leading)
+                            if identities.count > 1, let owner = identities.first(where: { $0.id == tab.identityID }) {
+                                Circle().fill(owner.color).frame(width: 7, height: 7)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 40)
+                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.mainBg)
+                            .shadow(color: Theme.textPrimary.opacity(0.06), radius: 4, y: 2))
+                        .contentShape(Rectangle())
+                        // 横向滚动里 Button 会被滚动手势吞（.claude/rules/swiftui-ui.md）
+                        .onTapGesture { onSelectTab?(tab.id) }
+                        .accessibilityAddTraits(.isButton)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
     }
 
     // MARK: 收藏

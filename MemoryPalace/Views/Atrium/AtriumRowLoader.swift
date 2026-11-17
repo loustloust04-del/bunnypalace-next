@@ -35,4 +35,32 @@ enum AtriumRowLoader {
             return rows
         }.value
     }
+
+    /// 只要每层最近一条对话的时间（page0 顶栏挑最近聊过的人用，不算预览和未读）
+    static func latestTimes(profileIds: [String], container: ModelContainer) async -> [String: AtriumRow] {
+        await Task.detached(priority: .userInitiated) {
+            let context = ModelContext(container)
+            var rows: [String: AtriumRow] = [:]
+            for pid in profileIds {
+                var latest = FetchDescriptor<Conversation>(
+                    predicate: #Predicate { $0.profileId == pid && !$0.isTrashed },
+                    sortBy: [SortDescriptor(\.updateTime, order: .reverse)])
+                latest.fetchLimit = 1
+                rows[pid] = AtriumRow(updatedAt: (try? context.fetch(latest).first)?.updateTime)
+            }
+            return rows
+        }.value
+    }
+
+    /// 最近聊过的在上（按该层最近一条对话的时间）；没聊过的垫底，保持建层顺序
+    static func recentFirst(_ profiles: [Profile], rows: [String: AtriumRow]) -> [Profile] {
+        profiles.enumerated().sorted { a, b in
+            switch (rows[a.element.id]?.updatedAt, rows[b.element.id]?.updatedAt) {
+            case let (x?, y?) where x != y: return x > y
+            case (.some, nil): return true
+            case (nil, .some): return false
+            default: return a.offset < b.offset
+            }
+        }.map(\.element)
+    }
 }

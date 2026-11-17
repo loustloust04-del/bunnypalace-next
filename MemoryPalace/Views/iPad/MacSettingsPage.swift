@@ -35,13 +35,18 @@ extension SettingsRoute {
         case .floorPermissions: "权限"
         case .permissionOverrides: "单独设了的"
         case .memoryExtractPrompt: "提取提示词"
+        case .memoryExtractCustomPrompt: "Edit"
         case .memoryWriterA2, .memoryWriterA3, .memoryWriterA4, .memoryWriterB1, .memoryWriterB4, .memoryWriterC, .memoryWriterC2, .memoryWriterC3:
-            memoryWriterID.map { "\($0.code) \($0.title(assistant: Self.assistantName))" } ?? ""
+            memoryWriterID.map { "\($0.code) \($0.displayTitle(assistant: Self.assistantName))" } ?? ""
         case .memoryCatalogStopWords: "不触发的词"
         case .memoryWriteBudget: "写入预算"
         case .memoryOpenWindow: "开窗口带什么"
-        case .memoryArchiveTrigger: "档案触发"
+        case .memoryArchiveTrigger: "系统推送给\(Self.assistantName)"
         case .memoryRecallBrowse: "翻记忆"
+        case .memoryCCSync: "和 CC 同步"
+        case .memoryAuditSettings: "审计台设置"
+        case .memoryExplainer: "记忆系统说明"
+        case .memoryUnfinished: "记忆 · 没做完的"
         case .memoryPending: "待续"
         case .memoryArchiveList: "从聊天里记住的"
         case .memorySelfList: "\(Self.assistantName)的记忆"
@@ -70,7 +75,9 @@ extension SettingsRoute {
         case .floorPermissions: PermissionsSettingsTab(startsOnFloor: true)
         case .permissionOverrides: MacPermissionOverridesRoute()
         case .memoryExtractPrompt:
-            PromptEditorPage.memoryExtract
+            ExtractPromptPage()
+        case .memoryExtractCustomPrompt:
+            ExtractPromptEditorPage()
         case .memoryWriterA2, .memoryWriterA3, .memoryWriterA4, .memoryWriterB1, .memoryWriterB4, .memoryWriterC, .memoryWriterC2, .memoryWriterC3:
             if let id = memoryWriterID { MemoryWriterPage(id: id) }
         case .memoryCatalogStopWords: CatalogStopWordsPage()
@@ -78,6 +85,10 @@ extension SettingsRoute {
         case .memoryOpenWindow: MemoryOpenWindowPage()
         case .memoryArchiveTrigger: ArchiveTriggerPage()
         case .memoryRecallBrowse: RecallBrowsePage()
+        case .memoryCCSync: MemoryCCSyncPage()
+        case .memoryAuditSettings: MemoryAuditSettingsPage()
+        case .memoryExplainer: MemoryExplainerPage()
+        case .memoryUnfinished: MemoryUnfinishedPage()
         case .memoryPending: PendingListPage()
         case .memoryArchiveList: MemoryArchiveListPage()
         case .memorySelfList: SelfMemoryListPage()

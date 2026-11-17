@@ -23,8 +23,11 @@ struct AppModelCaller: ModelCaller, @unchecked Sendable {
         }
         if let why = blocked {
             CacheDiagLog.shared.log("📝 记忆写手: 跳过（\(why)）")
+            MemoryWriteLog.noteSkip(why)
             return ModelReply()
         }
+        MemoryWriteLog.noteModel(model.name)
+        MemoryWriteLog.noteSkip(nil)
         let router = ProviderRouter(usageContext: UsageContext(kind: kind, conversationId: conversationId, profileId: profileId))
         let (response, usage) = try await router.sendNonStreaming(
             model: model, messages: [(role: "user", content: request.user)], systemPrompt: request.system, providerManager: providerManager)
@@ -43,6 +46,7 @@ struct AppModelCaller: ModelCaller, @unchecked Sendable {
         }
         guard !trimmed.isEmpty else {
             CacheDiagLog.shared.log("📝 记忆写手: ⚠️ 模型返回空内容")
+            MemoryWriteLog.noteSkip("模型没回内容")
             return ModelReply(usage: reported)
         }
         return ModelReply(text: trimmed, usage: reported)

@@ -18,7 +18,10 @@ enum RecallCardPresentation: Equatable {
             RecallReceiptCardModel.Group(kind: ledger.kind,
                                          rows: ledger.rows.map { .init(title: $0.title, detail: $0.detail, text: $0.text) })
         }
-        return .receipt(.init(groups: groups, reads: receipt.reads, injectionRecord: receipt.injectionRecord))
+        // 钉住的卡每轮都带、不在 selected 里：从实发清单取（旧回执没有清单 = 不列）
+        let pinned = (receipt.delivery?.items ?? []).filter { $0.kind == RecallDeliveryItem.Kind.pinned }
+            .map { RecallReceiptCardModel.Row(title: $0.shown, detail: nil, text: $0.shown) }
+        return .receipt(.init(groups: groups, reads: receipt.reads, injectionRecord: receipt.injectionRecord, pinned: pinned))
     }
 }
 
@@ -37,7 +40,7 @@ struct RecallReceiptCardModel: Equatable {
             switch kind {
             case .page: "档案页"
             case .card: "要点卡"
-            case .fragment: "碎片"
+            case .fragment: "C2 原子事实"
             }
         }
     }
@@ -45,6 +48,8 @@ struct RecallReceiptCardModel: Equatable {
     let groups: [Group]
     let reads: [RecallReadReceipt]
     let injectionRecord: MemoryInjectionRecord?
+    /// 这一轮带进去的钉住的卡（每张开头 60 字）
+    var pinned: [Row] = []
 }
 
 struct MessageRecallCardView: View {
@@ -147,6 +152,19 @@ struct RecallReceiptCardContent: View {
                                 .foregroundColor(palette.textMuted)
                             ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in
                                 RecallReceiptItemRow(row: row, snippetSize: snippetSize)
+                            }
+                        }
+                    }
+                    if !model.pinned.isEmpty {
+                        VStack(alignment: .leading, spacing: rowSpacing) {
+                            Text("钉住的 \(model.pinned.count)")
+                                .font(.system(size: 11))
+                                .foregroundColor(palette.textMuted)
+                            ForEach(Array(model.pinned.enumerated()), id: \.offset) { _, row in
+                                Text(verbatim: row.title)
+                                    .font(.system(size: snippetSize))
+                                    .foregroundColor(palette.textPrimary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }

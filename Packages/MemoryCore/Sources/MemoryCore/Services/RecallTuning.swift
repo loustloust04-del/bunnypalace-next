@@ -3,7 +3,9 @@ import Foundation
 /// 每轮读取的楼层读侧参数快照；后续分页/检索参数只保存配置，不在此启用功能。
 public struct RecallTuning: Codable, Equatable, Sendable {
     public var schemaVersion: Int
-    public var archiveTriggerEnabled: Bool = false
+    /// 聊到了才带（档案页 + 记忆条目）。11-14 起没设过的楼层默认开：批过的卡默认得带得进对话，
+    /// 但只带聊到的（粟粟：「我要的是精准塞」）。存档里写过值的楼层照存档，不跟着默认变。
+    public var archiveTriggerEnabled: Bool = true
     public var cooldownEnabled: Bool = true
     /// NFKC 后字母、汉字、数字达到此长度才按普通新话题处理。
     public var minimumEffectiveLength: Int
@@ -13,10 +15,12 @@ public struct RecallTuning: Codable, Equatable, Sendable {
     public var activeOverlapThreshold: Double
     /// 未接茬的实际推送连续抑制多少个有效用户轮。
     public var cooldownTurns: Int
-    /// 身份命中最多回看多少条真实消息，仍受话题边界限制。
+    /// 聊天侧不读（只在当前这一句里找）；留着是为了旧存档、旧回执能解。
     public var identityLookbackMessages: Int
     /// 自动召回允许带入的真实页与独立卡的页位总数。
     public var maximumPages: Int
+    /// 一轮自动带进去的记忆条目最多几张（不占页位）。
+    public var maximumFragments: Int
     /// 当前真实用户句最多提供多少个不同检索词。
     public var maximumQueryTerms: Int
     /// 汉字检索词至少包含多少个字符。
@@ -50,9 +54,10 @@ public struct RecallTuning: Codable, Equatable, Sendable {
     /// 原文页每次最多返回多少条真实消息。
     public var originalPageMessages: Int
 
-    public init(schemaVersion: Int, archiveTriggerEnabled: Bool = false, cooldownEnabled: Bool = true,
+    public init(schemaVersion: Int, archiveTriggerEnabled: Bool = true, cooldownEnabled: Bool = true,
                 minimumEffectiveLength: Int, minimumSharedTerms: Int, activeOverlapThreshold: Double,
-                cooldownTurns: Int, identityLookbackMessages: Int, maximumPages: Int, maximumQueryTerms: Int,
+                cooldownTurns: Int, identityLookbackMessages: Int, maximumPages: Int,
+                maximumFragments: Int = RecallTuning.defaultMaximumFragments, maximumQueryTerms: Int,
                 minimumHanTermLength: Int, minimumLatinTermLength: Int, minimumFullTextTerms: Int,
                 fullTextCoverageThreshold: Double, previousWindowMessages: Int, maximumRecallCalls: Int,
                 maximumBodyCharacters: Int, maximumResponseCharacters: Int, datePageDays: Int, datePageEvents: Int,
@@ -67,6 +72,7 @@ public struct RecallTuning: Codable, Equatable, Sendable {
         self.cooldownTurns = cooldownTurns
         self.identityLookbackMessages = identityLookbackMessages
         self.maximumPages = maximumPages
+        self.maximumFragments = maximumFragments
         self.maximumQueryTerms = maximumQueryTerms
         self.minimumHanTermLength = minimumHanTermLength
         self.minimumLatinTermLength = minimumLatinTermLength
@@ -85,6 +91,10 @@ public struct RecallTuning: Codable, Equatable, Sendable {
         self.originalPageMessages = originalPageMessages
     }
 
+    /// 来由：她批过的读侧规格只定了「每轮最多 3 页」，没给卡单独定数；卡沿用同一个数。
+    /// 一张卡一句话，3 张约百来个 token；多出来的按命中强弱、重要度、新旧排，排不进的不带。
+    public static let defaultMaximumFragments = 3
+
     public static let defaults = RecallTuning(
         schemaVersion: 1,
         minimumEffectiveLength: 4, minimumSharedTerms: 2, activeOverlapThreshold: 0.5,
@@ -101,7 +111,7 @@ public struct RecallTuning: Codable, Equatable, Sendable {
     /// 参数元数据集中提供合法范围、界面步长与中文说明；不参与语义分类。
     public enum Field: String, CaseIterable, CodingKey, Sendable {
         case minimumEffectiveLength, minimumSharedTerms, activeOverlapThreshold
-        case cooldownTurns, identityLookbackMessages, maximumPages
+        case cooldownTurns, identityLookbackMessages, maximumPages, maximumFragments
         case maximumQueryTerms, minimumHanTermLength, minimumLatinTermLength
         case minimumFullTextTerms, fullTextCoverageThreshold, previousWindowMessages
         case maximumRecallCalls, maximumBodyCharacters, maximumResponseCharacters
@@ -116,6 +126,7 @@ public struct RecallTuning: Codable, Equatable, Sendable {
             case .cooldownTurns: "停几句"
             case .identityLookbackMessages: "往回看几条消息"
             case .maximumPages: "一轮最多几页"
+            case .maximumFragments: "一轮最多几条记忆条目"
             case .maximumQueryTerms: "一句话最多取几个词"
             case .minimumHanTermLength: "汉字词至少几个字"
             case .minimumLatinTermLength: "英文词至少几个字母"
@@ -138,11 +149,13 @@ public struct RecallTuning: Codable, Equatable, Sendable {
         public var explanation: String {
             switch self {
             case .minimumEffectiveLength: "去掉标点、表情后不够这么多字就不找（「嗯」「哈哈」不触发）。问「上次」「还记得」这种回看的句子不受这条限制。"
-            case .minimumSharedTerms, .activeOverlapThreshold: "这句话和上个话题有这么多词是同一个、而且这些词分量够重，就当还在聊同一件事：上轮带的页接着带，不重新找。切了话题就清掉重找。"
-            case .cooldownTurns: "带了一页你没接这个话，之后这么多句不再带它；你点名提到它就解冻。"
-            case .identityLookbackMessages: "在最近这几条里找页名和触发词；只看本话题之内，不越过切题的那一句。"
+            case .minimumSharedTerms, .activeOverlapThreshold: "这句话和上个话题有这么多词是同一个、而且这些词分量够重，就当还在聊同一件事：上轮推送的页接着推送，不重新找。切了话题就清掉重找。"
+            case .cooldownTurns: "推送了一页你没接这个话，之后这么多句不再推送它；你点名提到它就解冻。"
+            // 设置页不再列这一项：换了话题只在当前这一句里找（`RecallSelection` 的 search），往回看会把上个话题的页带回来
+            case .identityLookbackMessages: "现在不起作用：只在当前这一句里找页名和触发词，不往回看。"
             case .maximumPages: "聊到哪页带哪页"
-            case .maximumQueryTerms, .minimumFullTextTerms, .fullTextCoverageThreshold: "页名没对上时搜全文"
+            case .maximumFragments: "这句话点了条目上记的那个人的名字，或和条目里的话有足够多的词一样，才推送这一条；一轮最多推送这么多条，多了按对得上多少、重要度、新旧排。钉住的另算，每轮都带。"
+            case .maximumQueryTerms, .minimumFullTextTerms, .fullTextCoverageThreshold: "页名和触发词都没对上时，拿这句话里分量最重的几个词搜档案全文：对上的词够多、分量够重才推送。记忆条目算不算聊到了，用的也是这组门槛。"
             case .minimumHanTermLength, .minimumLatinTermLength: "比这短的词不参与匹配。单字名字的楼层把汉字那条调到 1。"
             case .previousWindowMessages: "开新窗口时记下最后聊的那个窗口最后这么多条，这个窗口每轮都带。"
             case .maximumRecallCalls: "同一句话里助手最多调几次翻记忆；翻错、翻下一页都算。"
@@ -153,7 +166,7 @@ public struct RecallTuning: Codable, Equatable, Sendable {
         }
 
         public enum Page: String, Sendable {
-            case archiveTrigger = "档案触发"
+            case archiveTrigger = "系统推送给助手"
             case recallBrowse = "翻记忆"
             case openWindow = "开窗口带什么"
         }
@@ -175,6 +188,7 @@ public struct RecallTuning: Codable, Equatable, Sendable {
             case .cooldownTurns: "冷却"
             case .identityLookbackMessages, .minimumHanTermLength, .minimumLatinTermLength: "怎么找页"
             case .maximumPages: "自动想起 · 聊到了才带"
+            case .maximumFragments: "C2 原子事实"
             case .maximumQueryTerms, .minimumFullTextTerms, .fullTextCoverageThreshold: "全文兜底"
             case .previousWindowMessages: "每轮都带的"
             case .maximumRecallCalls: "一轮翻几次"
@@ -208,7 +222,7 @@ public struct RecallTuning: Codable, Equatable, Sendable {
             case .cooldownTurns: 0...30
             case .identityLookbackMessages, .maximumQueryTerms, .minimumFullTextTerms,
                  .previousWindowMessages, .maximumRecallCalls: 1...50
-            case .maximumPages, .minimumHanTermLength: 1...20
+            case .maximumPages, .maximumFragments, .minimumHanTermLength: 1...20
             case .minimumLatinTermLength: 1...30
             case .maximumBodyCharacters: 100...30000
             case .maximumResponseCharacters: 100...40000
@@ -238,6 +252,7 @@ public struct RecallTuning: Codable, Equatable, Sendable {
             case .cooldownTurns: \.cooldownTurns
             case .identityLookbackMessages: \.identityLookbackMessages
             case .maximumPages: \.maximumPages
+            case .maximumFragments: \.maximumFragments
             case .maximumQueryTerms: \.maximumQueryTerms
             case .minimumHanTermLength: \.minimumHanTermLength
             case .minimumLatinTermLength: \.minimumLatinTermLength

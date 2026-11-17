@@ -70,6 +70,15 @@ struct Profile: Identifiable, Hashable, Codable {
     // 角色时区（可选 = 老数据 decode 自动 nil，零迁移）。开关按楼层：`timeAwarenessEnabled`（人页 › 时区）
     var characterTimeZone: String? = nil
 
+    // 电脑文件夹（docs/plan-folder-floor.md P1）：这一层连着哪台「文件夹模式」的电脑。全空 = 普通楼层。
+    // 可选 = 老数据 decode 自动 nil，零迁移。连 / 不连走 `FolderFloor.linked` / `unlinked`（人页 › 编辑 › 电脑文件夹）
+    /// `CCHubRegistry` 里那台的 id
+    var folderHubId: String? = nil
+    /// 那台的 hub_id：本机的 id 对不上时（恢复备份 / 换设备）靠它认回来
+    var folderHubIdentity: String? = nil
+    /// 这一层用电脑上的哪个账号；nil = 那台的默认账号
+    var folderAccount: String? = nil
+
     /// 「作息感知」按楼层（atrium P3②）。存成可选 = 老数据 decode 自动 nil（关），读写走 `timeAwarenessEnabled`
     private var storedTimeAwareness: Bool? = nil
     var timeAwarenessEnabled: Bool {
@@ -82,6 +91,9 @@ struct Profile: Identifiable, Hashable, Codable {
 
     /// 「聊天时的样子」按楼层（atrium P3④）。老数据无键 decode = nil（聊天主题跟随界面主题），零迁移
     var chatAppearance: ChatAppearance? = nil
+
+    /// 这一层的 mainsession（plan-floor-main-thread）：常驻，对话列表一出现就建；AI 自己醒来做的事默认发到这里。nil = 还没建过
+    var mainSessionId: String? = nil
 
     /// 新建楼层从当前这个人带过来的设置（atrium P3①②③④）：模型、作息感知、声音三参、聊天外观。
     /// 只给楼层编辑页「新建」用；远端领养 / 卡建 / 酒馆 / 整包导入不复制
@@ -172,7 +184,9 @@ struct Profile: Identifiable, Hashable, Codable {
 final class ProfileManager {
     private static let profilesKey = "savedProfiles"
 
-    var profiles: [Profile]
+    var profiles: [Profile] {
+        didSet { if tracksFolderFloors { FolderFloor.refresh(profiles) } }   // 连着电脑文件夹的那几层：后台（醒来 / 同步 / 摘要）也要问
+    }
     var currentProfile: Profile
     weak var characterCardManager: CharacterCardManager?
     private let defaults: UserDefaults
@@ -185,6 +199,8 @@ final class ProfileManager {
     /// ⑧c-4：楼层列表存 BlobStore（root 可注入，测试 / 临时库不碰真实目录）
     private let root: URL?
     private let sideEffectsEnabled: Bool
+    /// 只有 app 根上那一个是 true：它的楼层列表是 `FolderFloor` 登记的唯一来源（别的实例不碰）
+    private let tracksFolderFloors: Bool
     private var storageLoadError: Error?
     /// #037：启动读楼层列表失败，内存里是 seed 不是她的真列表。拿 profiles 判「楼层在不在」再写 / 删的地方都要先看它
     var isReadOnly: Bool { storageLoadError != nil }
@@ -214,13 +230,14 @@ final class ProfileManager {
     let container: ModelContainer
 
     /// loadError 必传：来自 `loadProfilesChecked`，同一次读的成败（#037：不再自己复读，两次读结果不一致会拿 seed 覆盖真列表）
-    init(container: ModelContainer, profiles: [Profile], currentProfile: Profile, loadError: Error?, root: URL? = nil, defaults: UserDefaults = .standard, sideEffectsEnabled: Bool = true, themeManager: ThemeManager = .shared, toolDrawer: ToolDrawerStore? = nil, toolManager: RightPanelToolManager? = nil) {
+    init(container: ModelContainer, profiles: [Profile], currentProfile: Profile, loadError: Error?, root: URL? = nil, defaults: UserDefaults = .standard, sideEffectsEnabled: Bool = true, tracksFolderFloors: Bool = false, themeManager: ThemeManager = .shared, toolDrawer: ToolDrawerStore? = nil, toolManager: RightPanelToolManager? = nil) {
         self.defaults = defaults
         self.themeManager = themeManager
         self.toolDrawer = toolDrawer
         self.toolManager = toolManager
         self.root = BlobStore.resolvedRoot(root, defaults: defaults)
         self.sideEffectsEnabled = sideEffectsEnabled
+        self.tracksFolderFloors = tracksFolderFloors
         self.container = container
         self.profiles = profiles
         self.currentProfile = currentProfile
@@ -228,6 +245,7 @@ final class ProfileManager {
         if loadError == nil {
             mirrorCurrent(currentProfile)
         }
+        if tracksFolderFloors { FolderFloor.refresh(profiles) }
         #if os(iOS)
         // App Group 索引：启动期把所有楼层全量同步给 NSE
         // （老用户首次升级到带 NSE 版本时也走这条路 → App Group 立即就绪）
@@ -470,7 +488,12 @@ final class ProfileManager {
         ChatAppearance.mirror(profile.chatAppearance, into: defaults, theme: themeManager)
         toolManager?.activeProfileId = profile.id
         // 主屏摆法按层（atrium P3⑥b）：整树按新 id 重建那一帧 `@State home = .shared` 拿到的就是这一层；测试 / 临时库不碰真目录
-        if sideEffectsEnabled { MainActor.assumeIsolated { Page2HomeStore.activate(profileId: profile.id) } }
+        if sideEffectsEnabled {
+            MainActor.assumeIsolated {
+                Page2HomeStore.activate(profileId: profile.id)
+                WebAppStore.shared.activate(profileId: profile.id)
+            }
+        }
     }
 
     private func publishUpdated(_ profile: Profile) {
@@ -1159,10 +1182,10 @@ struct MemoryPalaceApp: App {
         LaunchTrace.end("legacyMigration", legacySpan)
         // atrium P3⑥0：toolManager 是属性默认值，这时已经建好（也早于上面的待导入恢复），init 里的 mirrorCurrent 就把当前层设上
         let tools = _toolManager.wrappedValue
-        let pm = LaunchTrace.measure("profileManager") { ProfileManager(container: container, profiles: profiles, currentProfile: current, loadError: loaded.error, toolManager: tools) }
+        let pm = LaunchTrace.measure("profileManager") { ProfileManager(container: container, profiles: profiles, currentProfile: current, loadError: loaded.error, tracksFolderFloors: true, toolManager: tools) }
         #else
         let tools = _toolManager.wrappedValue
-        let pm = ProfileManager(container: container, profiles: profiles, currentProfile: current, loadError: loaded.error, toolManager: tools)
+        let pm = ProfileManager(container: container, profiles: profiles, currentProfile: current, loadError: loaded.error, tracksFolderFloors: true, toolManager: tools)
         #endif
         #if (DEBUG || PERF_BENCH) && os(macOS)
         Self.prepareBenchProfile(pm)
@@ -1173,6 +1196,9 @@ struct MemoryPalaceApp: App {
         #endif
         // 小芽不再有自己的楼层（plan-onboarding-xiaoya-impl §10-2）：列表可信才移除 P2 版本种过的那层
         if profilesTrusted { pm.removeLegacyXiaoyaFloor() }
+        #if DEBUG
+        FolderHistorySync.shared.start(profileManager: pm)   // 文件夹楼层看历史（plan-folder-floor P2）；没有连着文件夹的楼层时什么都不做
+        #endif
         let cards = CharacterCardManager()
         cards.insertSampleCardIfNeeded()
         LaunchMarks.mark("cards")
@@ -1214,6 +1240,9 @@ struct MemoryPalaceApp: App {
             #endif
         }
         self._presetManager = State(initialValue: psm)
+        // 助手用文件工具读写 Prompt 文件夹要用这两个 manager（聊天里的工具循环、CC 那头都从这里取）
+        PromptFolderTools.profiles = pm
+        PromptFolderTools.presets = psm
         // 小芽新引导（plan-onboarding-xiaoya-impl §5.1）：新装判定只判一次，判成新装就从开场白放起、一打开在小芽 app 里（要读 providerManager，得等 State 全部初始化完）
         #if (DEBUG || PERF_BENCH) && os(iOS)
         LaunchTrace.measure("onboarding.probe") {
@@ -1248,11 +1277,13 @@ struct MemoryPalaceApp: App {
         LaunchTrace.measure("fixup.memoryFlags") {
             MemoryFlags.migrateFullPresenceIfNeeded()
             MemoryFlags.migrateV5SplitIfNeeded()
+            if profilesTrusted { MemoryFlags.migrateEveryRoundIfNeeded(profileIds: pm.profiles.map(\.id)) }
             MemoryAudit.recordCutoffIfNeeded()   // 审计台横条只算这一版装上之前 C2 写的（⧫6）
         }
         #else
         MemoryFlags.migrateFullPresenceIfNeeded()
         MemoryFlags.migrateV5SplitIfNeeded()
+        if profilesTrusted { MemoryFlags.migrateEveryRoundIfNeeded(profileIds: pm.profiles.map(\.id)) }
         MemoryAudit.recordCutoffIfNeeded()   // 审计台横条只算这一版装上之前 C2 写的（⧫6）
         #endif
         // 权限 P1（plan-权限管理 §4）：旧 Bool 闸 → 三档；老装机无显式值按旧默认保行为，新装吃收紧后的默认
@@ -1658,6 +1689,13 @@ struct MemoryPalaceApp: App {
                 .sandboxStatusOverlay()
                 // 聊天正文 / 外链卡等 openURL 链接：http(s) 进花园浏览器（plan-inapp-browser-modern）
                 .gardenBrowserLinkRouting()
+                // 网页应用（plan-webapp-versions-share §5）：别处的 html「用记忆花园打开」→ 放到桌面小卡
+                .onOpenURL { WebAppInstaller.openFile($0) }
+                // 网页应用 = 文件库里的 html（plan-webapp-as-file）：文件没了跟着清桌面；老的全局应用搬进各层文件库
+                .task {
+                    WebAppInstaller.startObserving()
+                    await WebAppMigration.runIfNeeded()
+                }
                 #endif
                 #if os(macOS)
                 // plan-mac-shape ⧫a：对话面板最小 240 + 工具道 412 + 正文 320 = 972 取整（以前 800/500 + 全屏观察者硬提 900 两处打架）
@@ -1689,6 +1727,8 @@ struct MemoryPalaceApp: App {
                     CatalogRunner.shared.attach(profileManager: profileManager, providerManager: providerManager)
                     CatalogRunner.shared.attach(presetManager: presetManager)
                     CatalogRunner.shared.dailyTick()
+                    // 自己醒来（plan-wake-heartbeat）：拿 manager 不经界面；回到前台补跑错过的
+                    WakeEngine.shared.attach(profileManager: profileManager, providerManager: providerManager, presetManager: presetManager)
                     // 审计台试写台：跑到一半被杀的标成中断（做完的格子留着）、清 30 天前的完整日志和原始输出
                     let benchFloors = profileManager.profiles.map(\.id)
                     Task.detached(priority: .utility) { MemoryBenchRunner.maintain(profileIds: benchFloors) }

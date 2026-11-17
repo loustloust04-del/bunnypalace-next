@@ -173,6 +173,7 @@ struct MemorySessionsView: View {
     @AppStorage("mem_write_a3") private var writeA3 = true
     @State private var detail: WindowSummaryRow? = nil
     @State private var pendingStop: MemoryStopTarget? = nil
+    @State private var rewriteAsk: SummaryRewriteAsk? = nil
 
     private var profileId: String { profileManager?.currentProfile.id ?? "" }
 
@@ -202,6 +203,7 @@ struct MemorySessionsView: View {
         .modifier(MemoryStopRecordingAlert(target: $pendingStop) {
             model.reloadQueue(profileId: profileId, container: modelContext.container)
         })
+        .modifier(SummaryRewriteConfirm(ask: $rewriteAsk, profileId: profileId))
         .sheet(item: $detail) { r in
             WindowSummarySheet(conversationId: r.conversationId, profileId: profileId, fallbackTitle: r.title,
                                isGone: r.isGone) {
@@ -312,6 +314,11 @@ struct MemorySessionsView: View {
             Button { open(r.conversationId) } label: { Label("去这个窗口", systemImage: "arrow.right.circle") }
                 .disabled(r.isGone)
             if !r.isGone {
+                Button {
+                    rewriteAsk = SummaryRewriteAsk(target: .window, conversationId: r.conversationId, windowTitle: r.title,
+                                                   segmentCount: r.segmentCount)
+                } label: { Label("Rewrite", systemImage: "arrow.triangle.2.circlepath") }
+                    .disabled(SummaryRewriteStatus.shared.running[r.conversationId] != nil)
                 Button(role: .destructive) {
                     pendingStop = MemoryStopTarget(conversationId: r.conversationId, title: r.title)
                 } label: { Label("这个对话以后不记", systemImage: "nosign") }

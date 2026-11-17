@@ -86,8 +86,8 @@ struct LiteMemoryEntriesPage: View {
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
 
     @State private var memories: [Memory] = []
-    @State private var showAddSheet = false
-    @State private var editingMemory: Memory? = nil
+    /// 加 / 改都开唯一的那张条目详情页（同记忆页）
+    @State private var entryTarget: MemoryEntryTarget?
     /// 已失效的再删 = 永久删除，先挂这里等确认
     @State private var pendingPurge: MemoryDeletePlan.Plan? = nil
 
@@ -135,22 +135,15 @@ struct LiteMemoryEntriesPage: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button { showAddSheet = true } label: {
+                Button { entryTarget = .new(profileId: profileManager?.currentProfile.id ?? "") } label: {
                     Image(systemName: "plus.circle.fill")
                         .foregroundColor(Theme.branchIndicator)
                 }
             }
         }
-        .sheet(isPresented: $showAddSheet) {
-            AddMemorySheet(profileId: profileManager?.currentProfile.id ?? "") {
-                refreshMemories()
-            }
-        }
-        .sheet(item: $editingMemory) { mem in
-            AddMemorySheet(profileId: profileManager?.currentProfile.id ?? "", editing: mem) {
-                refreshMemories()
-            }
-        }
+        .memoryEntryPage($entryTarget, onJump: { mem in
+            viewModel != nil && mem.sourceConversationId != nil ? { jumpToSource(mem) } : nil
+        })
         .onAppear { refreshMemories() }
         .onReceive(NotificationCenter.default.publisher(for: .profileWillSwitch)) { _ in
             memories = []
@@ -176,7 +169,7 @@ struct LiteMemoryEntriesPage: View {
             memory: mem,
             onPin: { togglePin(mem) },
             onDelete: { deleteMemory(mem) },
-            onEdit: { editingMemory = mem },
+            onEdit: { entryTarget = .existing(mem) },
             onRevive: mem.supersededAt != nil ? { reviveMemory(mem) } : nil,
             onJumpToSource: viewModel != nil && mem.sourceConversationId != nil ? { jumpToSource(mem) } : nil
         )

@@ -57,8 +57,12 @@ enum SelfMemoryTool {
         if available.contains(RecallTool.toolName) {
             lines.append("- 想起我们说过的话、后台从聊天里整理的关于对方的档案：recall。")
         }
+        if available.contains(MemoryCardTool.toolName) { lines.append(MemoryCardTool.hintLine) }
         if available.contains(FileLibraryTools.Name.read.rawValue) {
             lines.append("- 翻你自己记的记忆文件：fs_read / fs_search（memory/self/）；memory/cc/ 是 CC 那边的你记的笔记，只读。")
+        }
+        if available.contains(FileLibraryTools.Name.write.rawValue) || available.contains(FileLibraryTools.Name.edit.rawValue) {
+            lines.append("- memory/ 下的记忆也能直接当文件写（fs_write / fs_edit / fs_delete）：记忆条目 memory/cards/、你自己的记忆 memory/self/、待续 memory/pending/待续.md、wiki 页 memory/wiki/，和上面的专门工具是同一回事；写法见 fs_write 的说明。")
         }
         return lines.joined(separator: "\n")
     }

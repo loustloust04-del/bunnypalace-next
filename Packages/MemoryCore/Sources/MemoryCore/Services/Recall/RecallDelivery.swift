@@ -41,6 +41,7 @@ public struct RecallDeliveryItem: Codable, Equatable, Sendable {
     public enum Kind {
         public static let selfMemory = "self"
         public static let rootIndex = "rootIndex"
+        public static let cardIndex = "cardIndex"
         public static let pinned = "pinned"
         public static let expiredReminder = "expiredReminder"
         public static let previousWindow = "previousWindow"
@@ -87,6 +88,8 @@ public struct RecallGateSnapshot: Codable, Equatable, Sendable {
     /// 解析后六项：timeline / pending / selfMemory / archive / previousWindow / pinned
     public let choices: [String: Bool]
     public let a2Checked: Bool
+    /// 这一轮批过的记忆条目是不是每轮全带（`EffectiveMemoryParticipation.everyRound`）；11-15 之前的回执没有这一项 = nil
+    public let everyRound: Bool?
     /// 候选数：`roundInputs` 被来源窗挡掉的条数（不保证本来会上 wire）；`off != nil` 时恒 0
     public let hiddenFragments: Int
     /// 候选数：`TimelineStore.injection` 按 `hiddenConversations` 挡掉的项 + 老条目（勾着时间轴才数）
@@ -94,13 +97,14 @@ public struct RecallGateSnapshot: Codable, Equatable, Sendable {
     public let hiddenTimeline: Int
 
     public init(off: String?, participates: Bool, triggerOff: Bool, legacy: Bool, choices: [String: Bool],
-                a2Checked: Bool, hiddenFragments: Int, hiddenTimeline: Int) {
+                a2Checked: Bool, everyRound: Bool? = nil, hiddenFragments: Int, hiddenTimeline: Int) {
         self.off = off
         self.participates = participates
         self.triggerOff = triggerOff
         self.legacy = legacy
         self.choices = choices
         self.a2Checked = a2Checked
+        self.everyRound = everyRound
         self.hiddenFragments = hiddenFragments
         self.hiddenTimeline = hiddenTimeline
     }

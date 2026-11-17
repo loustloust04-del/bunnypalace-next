@@ -1,0 +1,84 @@
+{
+  "_说明": "全虚构（岚舟 / 星砚 / 林栖 / 云桥城 / 雾岛）。写完一批之后对着档案下结论那一步的夹具：改口、说第二遍、删过的又写出来、对方的话被记成她说的、提示词里已有、提示词之后的新进展、带锁的卡。expected 是人写的答案，Job 解码时不读它。",
+  "windowTitle": "模型船",
+  "userName": "岚舟",
+  "assistantName": "星砚",
+  "resident": [
+    {
+      "title": "人设",
+      "text": "你是星砚，岚舟的搭档。说话简短，不用敬语。\n每次回复都要先叫一声「船长」，并且只用一句话回答。"
+    },
+    {
+      "title": "用户资料",
+      "text": "岚舟住在云桥城。\n岚舟的爱好是做模型船。\n岚舟的朋友林栖在雾岛开船具店。"
+    }
+  ],
+  "lines": [
+    {"role": "user", "at": "2026-10-12 20:01", "text": "我回来了。今天哪也没去，就在云桥城家里待着。"},
+    {"role": "assistant", "at": "2026-10-12 20:01", "text": "欢迎回来。船做得怎么样了？"},
+    {"role": "user", "at": "2026-10-12 20:03", "text": "改主意了，双帆太挤，我改成三帆了，桅杆昨天已经立好。"},
+    {"role": "assistant", "at": "2026-10-12 20:03", "text": "三帆更稳。木料够吗？"},
+    {"role": "user", "at": "2026-10-12 20:05", "text": "够。桅杆用的是云桥城老木器行的榉木，以后木料我都固定在那家买。"},
+    {"role": "assistant", "at": "2026-10-12 20:05", "text": "好。颜料还是用水性的吗？"},
+    {"role": "user", "at": "2026-10-12 20:06", "text": "对，只用水性的，油性那个味道我受不了。"},
+    {"role": "assistant", "at": "2026-10-12 20:07", "text": "记得。你这么有耐心，其实很适合去教小孩做手工。"},
+    {"role": "user", "at": "2026-10-12 20:07", "text": "哈哈。"},
+    {"role": "user", "at": "2026-10-12 20:09", "text": "对了，这艘做完我想送给林栖，放在她店里。"},
+    {"role": "assistant", "at": "2026-10-12 20:09", "text": "她会喜欢的。你还是周四晚上去她店里帮忙吗？"},
+    {"role": "user", "at": "2026-10-12 20:10", "text": "周四去不了了，以后改成每周日下午去。"},
+    {"role": "assistant", "at": "2026-10-12 20:10", "text": "好，周日下午。"},
+    {"role": "user", "at": "2026-10-12 20:14", "text": "说起来，我小时候晕船这事，到现在都没告诉林栖。"},
+    {"role": "assistant", "at": "2026-10-12 20:14", "text": "做船的人晕船，她知道了大概会笑。"},
+    {"role": "user", "at": "2026-10-13 21:30", "text": "有件大事：我明年春天要搬去雾岛住了，房子已经看好，就在船具店隔壁那条街。"},
+    {"role": "assistant", "at": "2026-10-13 21:30", "text": "那离林栖近多了。"},
+    {"role": "user", "at": "2026-10-13 21:41", "text": "我不做船了！再也不做了！"},
+    {"role": "assistant", "at": "2026-10-13 21:41", "text": "怎么了？"},
+    {"role": "user", "at": "2026-10-13 21:44", "text": "刚才胶水把手指粘住了。气话，别当真，船当然接着做。"},
+    {"role": "assistant", "at": "2026-10-13 21:44", "text": "好，那我当没听见。"},
+    {"role": "user", "at": "2026-10-13 21:50", "text": "晚安，明天见。"},
+    {"role": "assistant", "at": "2026-10-13 21:50", "text": "晚安。"}
+  ],
+  "newCards": [
+    {"id": "n1", "subject": "岚舟", "content": "住在云桥城。", "speaker": "用户自述", "message": 1},
+    {"id": "n2", "subject": "岚舟", "content": "模型船从双帆改成了三帆，桅杆已经立好。", "speaker": "用户自述", "message": 3},
+    {"id": "n3", "subject": "岚舟", "content": "模型船的木料固定在云桥城老木器行买，桅杆用榉木。", "speaker": "用户自述", "message": 5},
+    {"id": "n4", "subject": "岚舟", "content": "颜料只用水性的，受不了油性颜料的味道。", "speaker": "用户自述", "message": 7},
+    {"id": "n5", "subject": "岚舟", "content": "很有耐心，适合去教小孩做手工。", "speaker": "用户自述", "message": 8},
+    {"id": "n6", "subject": "岚舟", "content": "打算把正在做的模型船送给林栖，放在她店里。", "speaker": "用户自述", "message": 10},
+    {"id": "n7", "subject": "岚舟", "content": "每周日下午去林栖的店里帮忙。", "speaker": "用户自述", "message": 12},
+    {"id": "n8", "subject": "岚舟", "content": "小时候有晕船的毛病，这件事还没让林栖知道。", "speaker": "用户自述", "message": 14},
+    {"id": "n9", "subject": "岚舟", "content": "计划 2027 年春天搬到雾岛住，房子已经看好，在船具店隔壁那条街。", "speaker": "用户自述", "message": 16},
+    {"id": "n10", "subject": "岚舟", "content": "决定不再做模型船。", "speaker": "用户自述", "message": 18},
+    {"id": "n11", "subject": "岚舟", "content": "今天手指被胶水粘住了。", "speaker": "用户自述", "message": 20}
+  ],
+  "archive": [
+    {"id": "a1", "subject": "岚舟", "content": "每周四晚上去林栖的店里帮忙。"},
+    {"id": "a2", "subject": "岚舟", "content": "只用水性颜料，油性的味道受不了。"},
+    {"id": "a3", "subject": "岚舟", "content": "模型船做成双帆。", "isProtected": true},
+    {"id": "a4", "subject": "林栖", "content": "对岚舟说过，想要一艘带灯的模型船当店里的摆设。", "otherWindow": true},
+    {"id": "a5", "subject": "岚舟", "content": "工作台放在阳台，朝北，下午光线最好。"},
+    {"id": "a6", "subject": "岚舟", "content": "和林栖是在云桥城的旧码头认识的。", "otherWindow": true},
+    {"id": "a7", "subject": "星砚", "content": "答应每个月初提醒岚舟订砂纸，岚舟说好。"},
+    {"id": "a8", "subject": "岚舟", "content": "不吃姜，点菜时会特意交代。", "otherWindow": true},
+    {"id": "a9", "subject": "岚舟", "content": "在旧码头边的图书室当管理员，周一休息。", "otherWindow": true},
+    {"id": "a10", "subject": "琥珀风铃", "content": "岚舟挂在窗边的风铃，是外婆留下的，搬家也要带着。"},
+    {"id": "a11", "subject": "岚舟", "content": "睡前习惯听一段潮汐的录音。", "otherWindow": true},
+    {"id": "a12", "subject": "岚舟", "content": "第一艘模型船是单桅的小渔船，现在摆在书架上。"},
+    {"id": "x1", "subject": "岚舟", "content": "小时候晕船，一直没告诉林栖。", "isDeleted": true},
+    {"id": "x2", "subject": "岚舟", "content": "上个月把旧工具箱卖给了旧码头的摊主。", "isDeleted": true},
+    {"id": "x3", "subject": "岚舟", "content": "觉得图书室的新馆长说话太绕。", "isDeleted": true, "otherWindow": true}
+  ],
+  "expected": [
+    {"card": "n1", "accept": ["drop"], "reasons": ["in_prompt"], "why": "用户资料里已写住在云桥城"},
+    {"card": "n2", "accept": ["unsure"], "why": "要改的是带锁的 a3（双帆），只能交给她"},
+    {"card": "n3", "accept": ["keep"], "why": "新事实，哪里都没有"},
+    {"card": "n4", "accept": ["merge:a2"], "why": "说第二遍，a2 已经说全"},
+    {"card": "n5", "accept": ["drop", "rewrite"], "reasons": ["unsupported"], "why": "是星砚的看法，岚舟只回了哈哈"},
+    {"card": "n6", "accept": ["keep"], "why": "和 a4 相关但不是同一件事"},
+    {"card": "n7", "accept": ["merge:a1:changed"], "why": "周四改口成周日，改 a1"},
+    {"card": "n8", "accept": ["drop"], "reasons": ["deleted"], "ref": "x1", "why": "她删过同一件事"},
+    {"card": "n9", "accept": ["keep"], "why": "用户资料写住云桥城，这是之后的新进展"},
+    {"card": "n10", "accept": ["drop"], "reasons": ["unsupported"], "why": "气话，几分钟后改口"},
+    {"card": "n11", "accept": ["drop"], "reasons": ["not_fact"], "why": "一次性的小事"}
+  ]
+}

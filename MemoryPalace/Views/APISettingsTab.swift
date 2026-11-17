@@ -415,6 +415,9 @@ struct APISettingsTab: View {
     private var streamingSection: some View {
         Section {
             StreamingModeRow(fontSize: m.bodySize, valueSize: m.secondarySize)
+            #if os(iOS)
+            TurnKeepAliveRow(titleFont: m.label.weight(.medium), captionFont: m.caption)
+            #endif
         } header: {
             Text("回复方式")
         } footer: {

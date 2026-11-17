@@ -301,8 +301,9 @@ struct LyricsSheet: View {
         // 独立会话——她指一句，他在一个她从来不看的会话里回，情话全打了水漂。
         // 主对话 id 从最近一次 CC 发送记下的 lastCCChatId 取；一次都没聊过才回落老路。
         let mainChat = UserDefaults.standard.string(forKey: "lastCCChatId")
-        CCBridgeWebSocketClient.shared.sendChat(
-            chatId: mainChat ?? "music-\(s.id)", messageId: UUID().uuidString, content: payload) { _ in }
+        CCBridgeWebSocketClient.shared.sendUserMessage(   // [Bunny] 上游没有 sendChat，改用同语义的 sendUserMessage
+            chatId: mainChat ?? "music-\(s.id)", messageId: UUID().uuidString, content: payload,
+            user: "你", session: nil, replyTo: nil, attachments: [])
     }
 }
 

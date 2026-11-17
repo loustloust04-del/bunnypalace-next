@@ -10,7 +10,7 @@ enum AuditStationID: String, CaseIterable, Hashable, Identifiable {
     case desk     // 整理台：卡片审碎片（人整理）
     case wiki     // wiki：整理提案（翻页 10-24 挪去底栏 wiki 格）
     case trial    // 试写台：测提示词和管线（第 ③ 段点亮）
-    case recall   // 召回测试台：离线回放与出题
+    case recall   // 召回测试台：点进去是记忆实验台（`MemoryLabPage`，plan-memory-lab）；方块名字还没定新的
 
     var id: String { rawValue }
 }
@@ -39,8 +39,6 @@ struct AuditStation: Identifiable {
     let name: String
     let icon: String
     let surface: Surface
-    /// 方块底下一行小字：这个台干什么
-    let note: String
     /// false = 灰着、不能点
     let isOpen: Bool
     /// 现场数字没算出来 / 没有现场数字时，数字位置写的那句
@@ -51,13 +49,13 @@ struct AuditStation: Identifiable {
     static var all: [AuditStation] {
         [
             AuditStation(id: .desk, name: "整理台", icon: "rectangle.stack", surface: .userBubble,
-                         note: "一条一张卡：留、删、改", isOpen: true, placeholder: "",
+                         isOpen: true, placeholder: "",
                          pulse: { ctx in
                              let all = SwiftDataMemoryStore().listAll(profileId: ctx.profileId, context: ctx.modelContext)
                              return deskPulse(unreviewed: MemoryAudit.counts(all, filter: MemoryAudit.Filter())[.unreviewed] ?? 0)
                          }),
             AuditStation(id: .wiki, name: "wiki", icon: "book.closed", surface: .assistantBubble,
-                         note: "整理提案：批了才写进 wiki", isOpen: true, placeholder: "",
+                         isOpen: true, placeholder: "",
                          pulse: { ctx in
                              let pid = ctx.profileId
                              let (tally, pages) = await Task.detached(priority: .utility) {
@@ -68,21 +66,22 @@ struct AuditStation: Identifiable {
                              return wikiPulse(pending: tally.pending, unread: tally.unread, pages: pages)
                          }),
             AuditStation(id: .trial, name: "试写台", icon: "flask", surface: .outlined,
-                         note: "测提示词和管线准不准", isOpen: false, placeholder: "还在搭",
+                         isOpen: false, placeholder: "还在搭",
                          pulse: nil),
             AuditStation(id: .recall, name: "召回测试台", icon: "scope", surface: .outlined,
-                         note: "测召回准不准、注入位置", isOpen: true, placeholder: "",
+                         isOpen: true, placeholder: "",
                          pulse: { ctx in
                              let pid = ctx.profileId
-                             return await Task.detached(priority: .utility) {
-                                 recallPulse(store: .forMemoryRoot(FileLibraryStore.memoryRoot(profileId: pid)))
-                             }.value
+                             return labPulse(await Task.detached(priority: .utility) {
+                                 MemoryLabStore(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)).summary()
+                             }.value)
                          }),
         ]
     }
 
+    /// 只留数字（粟粟 11-15 小样：「31 Draft」），和整理台第一段同一个数
     static func deskPulse(unreviewed: Int) -> AuditStationPulse {
-        unreviewed > 0 ? AuditStationPulse(figure: "\(unreviewed)", label: "没看过") : AuditStationPulse(figure: nil, label: "都看过了")
+        AuditStationPulse(figure: "\(unreviewed)", label: "Draft")
     }
 
     /// 待批（条目等她批）和待阅（没收进页、她还没看过）分开数（astra P3：`pendingItemCount` 是两样的和）
@@ -94,11 +93,10 @@ struct AuditStation: Identifiable {
         return AuditStationPulse(figure: nil, label: pages > 0 ? "\(pages) 页 · 没有待批" : "还没有页")
     }
 
-    static func recallPulse(store: MemoryBenchStore) -> AuditStationPulse {
-        guard let run = store.runs(writer: "recall").first(where: { $0.status == .done }) else {
-            return AuditStationPulse(figure: nil, label: "还没跑")
-        }
-        return AuditStationPulse(figure: run.scores.first?.main.map { String(format: "%.2f", $0) } ?? "—", label: "最近一次")
+    /// 实验台说过几句、几个 👍（「12 句 · 👍 5」）；一句没有「还没说过」
+    static func labPulse(_ summary: MemoryLabStore.Summary) -> AuditStationPulse {
+        guard summary.count > 0 else { return AuditStationPulse(figure: nil, label: "还没说过") }
+        return AuditStationPulse(figure: "\(summary.count)", label: "句 · 👍 \(summary.up)")
     }
 
     static func proposalTally(_ proposals: [WikiProposal]) -> (pending: Int, unread: Int) {
@@ -166,7 +164,7 @@ struct AuditStationPage: View {
                 .toolPageBackground()
                 .tint(Theme.branchIndicator)
         case .recall:
-            MemoryRecallBenchPage()
+            MemoryLabPage()
         case .trial:
             // 灰着点不进来；防万一推进来了也不空白
             MemoryEmptyState(title: "还没开放", message: "以后在这里")

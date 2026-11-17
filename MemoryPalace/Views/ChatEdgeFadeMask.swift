@@ -8,6 +8,8 @@ struct ChatEdgeFadeMask: View {
     let keyboardVisible: Bool
     let hasInputGeometry: Bool
     var bubbleMode: Bool = false
+    /// 顶上多让出的高（一起看小窗，plan-chat-watch-together W1）
+    var extraTop: CGFloat = 0
     /// 只要 minY：GeometryReader 闭包里直读 .global 会在任何全局位置变化（含翻页的水平平移、layerSync）时整段重跑；onGeometryChange 去重，minY 不变不触发（plan-paging-decouple A-7，同 Page2HomeView 顶栏）
     @State private var globalMinY: CGFloat = 0
 
@@ -30,9 +32,12 @@ struct ChatEdgeFadeMask: View {
                 let barBottomY = inputBarBottom - globalMinY
                 let clearEnd = keyboardVisible && hasInputGeometry
                     ? min(height, max(0, barBottomY)) : height
-                let topEnd = min(bubbleMode ? max(0, 180 - globalMinY) : 130, clearEnd * 0.5)
-                let topStart = bubbleMode
-                    ? min(topEnd, max(0, PagingViewController.topSafeAreaInset - globalMinY)) : 0
+                let baseEnd = bubbleMode ? max(0, 180 - globalMinY) : 130
+                // 一起看小窗（plan-chat-watch-together W1）：小窗那一段消息全藏，过了小窗下沿再渐显
+                let topEnd = min(baseEnd + extraTop + (extraTop > 0 ? 30 : 0), clearEnd * 0.5)
+                let topStart = extraTop > 0
+                    ? min(topEnd, baseEnd + extraTop - 20)
+                    : (bubbleMode ? min(topEnd, max(0, PagingViewController.topSafeAreaInset - globalMinY)) : 0)
                 let bottomStart = min(clearEnd, max(topEnd, hasInputGeometry ? fieldY - 40 : clearEnd - 140))
                 LinearGradient(stops:
                     Self.transitionStops(from: topStart / height, to: topEnd / height, fadingOut: false)

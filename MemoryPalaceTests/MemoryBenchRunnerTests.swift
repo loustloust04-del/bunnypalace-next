@@ -147,10 +147,18 @@ final class MemoryBenchRunnerTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { MemoryBenchLocalExecutor.removePreferences(defaults, suite: suite) }
         let recipe = try XCTUnwrap(reader.builtInRecipes(defaults: defaults).first)
-        let set = try XCTUnwrap(MemoryBenchStore.builtInSets().first { $0.id == "recall-24" })
+        let input = MemoryBenchRecallInput(snapshot: "floor", profile: .init(userName: "岚舟", assistantName: "星砚", timeZone: "UTC"),
+                                           turns: [.init(text: "今天好困")])
+        let set = MemoryBenchSet(id: "recall-floor", name: "我出的题", writer: "recall", source: .floor,
+                                 cases: [.init(id: "floor-chat", title: "纯闲聊跳过", input: try .from(input), labels: [])])
+        let canned = String(decoding: try MemoryBench.lineEncoder.encode(MemoryBenchRecallOutput(
+            turns: [.init(x: .init(searched: false, kept: false, reason: "门槛", sources: []), y: [])], calls: 0, guardrail: .init())), as: UTF8.self)
         let calls = Counter()
-        let run = try await MemoryBenchRunner.run(writer: reader, set: set, caseIds: ["gate-06"], recipes: [recipe],
-            models: [haiku], store: store, profileId: pid, caller: { _, _ in
+        let pid = pid
+        let run = try await MemoryBenchRunner.run(writer: reader, set: set, recipes: [recipe],
+            models: [haiku], store: store, profileId: pid,
+            memoryRoot: { FileLibraryStore.memoryRoot(profileId: pid) }, local: { _, _ in canned },
+            caller: { _, _ in
                 await calls.bump()
                 throw URLError(.unsupportedURL)
             })
@@ -166,13 +174,8 @@ final class MemoryBenchRunnerTests: XCTestCase {
         XCTAssertEqual(request.user, "")
         XCTAssertEqual(request.response, cell.output)
 
-        var invalidSet = set
-        var invalid = try XCTUnwrap(set.cases.first { $0.id == "gate-06" })
-        var input = try invalid.input.decode(MemoryBenchRecallInput.self)
-        input.snapshot = "fictional-missing-snapshot"
-        invalid.input = try .from(input)
-        invalidSet.cases = [invalid]
-        let failed = try await MemoryBenchRunner.run(writer: reader, set: invalidSet, recipes: [recipe],
+        // app 的本机执行器现在如实拒绝（本楼层的重放还没接）：出错格同样不出站、不记用量
+        let failed = try await MemoryBenchRunner.run(writer: reader, set: set, recipes: [recipe],
             models: [haiku], store: store, profileId: pid, caller: { _, _ in
                 await calls.bump()
                 throw URLError(.unsupportedURL)

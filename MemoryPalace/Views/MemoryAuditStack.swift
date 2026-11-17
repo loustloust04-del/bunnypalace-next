@@ -2,26 +2,116 @@ import MemoryCore
 import SwiftUI
 import SwiftData
 
-// MARK: - 审计台卡片（plan-memory-audit-cards）
-// 一条档案的卡片内容（列表行 / 牌堆共用）+ 重要度滑条。动作都交回 `MemoryAuditPage`：存盘 + 发通知在那边。
+// MARK: - 整理台的卡（v2 原型 docs/prototypes/audit-desk-20261112）
+// 卡 =「说的是谁 · 正文」+ 卡底一排 chip（和详情页同一套，含 Source / Why），别的不放；动作都交回 `MemoryAuditPage`：存盘 + 发通知在那边。
+// 两种圆角：卡 / 弹层 16，钮胶囊。三档字：卡正文 sectionHeader（iOS 16）、列表 / 钮 body（14）、出处 / 小字 secondary（13）。
 
-/// 正文（点开全文 + 原话 + 跳到这条 / 改字）、信息行（类别 ▾ · 日期 · 《窗口》 · 你改过 · 图钉）、重要度滑条
-struct MemoryAuditCardContent: View {
+enum MemoryAuditStyle {
+    static let corner: CGFloat = 16
+
+    private static func luminance(_ color: Color) -> Double {
+        let c = color.resolve(in: EnvironmentValues())
+        return 0.2126 * Double(c.red) + 0.7152 * Double(c.green) + 0.0722 * Double(c.blue)
+    }
+
+    /// 页面底（sidebarBg）是不是深色
+    static var pageIsDark: Bool { luminance(Theme.sidebarBg) < 0.4 }
+
+    /// 压在页面底 / 玻璃上的字（原型 --onPage）：textPrimary 和 mainBg 里跟页面底差得远的那个——
+    /// 她的深蓝主题（页面底深、字深）取 mainBg，默认深色（页面底深、字浅）取 textPrimary
+    static var onPage: Color { onPageIsText ? Theme.textPrimary : Theme.mainBg }
+
+    private static var onPageIsText: Bool {
+        let page = luminance(Theme.sidebarBg)
+        return abs(luminance(Theme.textPrimary) - page) >= abs(luminance(Theme.mainBg) - page)
+    }
+
+    /// 实心主钮（强调色底）上的字：textPrimary 和 mainBg 里深的那个（原型主钮是深字）
+    static var onAccent: Color {
+        luminance(Theme.textPrimary) <= luminance(Theme.mainBg) ? Theme.textPrimary : Theme.mainBg
+    }
+
+    static var pageScheme: ColorScheme { pageIsDark ? .dark : .light }
+    /// 压在卡上的玻璃（Edit 页托盘）跟卡底走：深蓝主题页面底深、卡是浅的
+    static var cardScheme: ColorScheme { luminance(Theme.mainBg) < 0.4 ? .dark : .light }
+    /// 页面底上的墨色实心钮（Edit 页 Save，原型 .solid）：底 = `onPage`，字 = textPrimary / mainBg 里剩下那个
+    static var offPage: Color { onPageIsText ? Theme.mainBg : Theme.textPrimary }
+    /// 行尾「正」钮（Approve / Restore）的底：强调色淡淡一层（原型 --selTint）
+    static var positiveTint: Color { Theme.branchIndicator.opacity(0.32) }
+}
+
+extension View {
+    /// 玻璃层的钮：iOS 26 / macOS 26 系统玻璃（不许 glassEffect + plain，吞点击）；macOS 15 退回 bordered
+    @ViewBuilder
+    func auditGlassButton(prominent: Bool = false) -> some View {
+        #if os(iOS)
+        if prominent { buttonStyle(.glassProminent) } else { buttonStyle(.glass) }
+        #else
+        if #available(macOS 26.0, *) {
+            if prominent { buttonStyle(.glassProminent) } else { buttonStyle(.glass) }
+        } else {
+            if prominent { buttonStyle(.borderedProminent) } else { buttonStyle(.bordered) }
+        }
+        #endif
+    }
+}
+
+/// 写手给的那几项怎么显示（说的是谁 / 谁说的 / 标签，类别当标签）：详情页、牌堆卡、记忆日志共用
+enum MemoryAuditTraits {
+    /// 库里 speaker 认得的三个词（Edit 页 From 的选项；显示名走 `from`，写入记录页还用 `origin`）
+    static let speakers = ["用户自述", "AI 观察", "AI 承诺"]
+
+    /// 库里的 speaker（`FragmentPool.wholeOrigins` / 老写手的三个词）→ 界面上的英文状态词
+    static func origin(_ speaker: String?, assistant: String) -> String? {
+        guard let s = speaker?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else { return nil }
+        switch s {
+        case "用户自述": return "Said by you"
+        case "AI 观察": return "From \(assistant)"
+        case "AI 承诺": return "\(assistant) promised"
+        default: return s
+        }
+    }
+
+    /// Edit 页 From 托盘的选项名（11-13 原型）：You / {助手} noticed / {助手} promised；不认得的原样；空 = nil（界面写 Not set）
+    static func from(_ speaker: String?, assistant: String) -> String? {
+        guard let s = MemoryAudit.cleaned(speaker) else { return nil }
+        switch s {
+        case "用户自述": return "You"
+        case "AI 观察": return "\(assistant) noticed"
+        case "AI 承诺": return "\(assistant) promised"
+        default: return s
+        }
+    }
+
+    /// From 在 chip / 卡上灰小字里的写法：她说的写 From you，其余同 `from`
+    static func fromChip(_ speaker: String?, assistant: String) -> String? {
+        MemoryAudit.cleaned(speaker) == "用户自述" ? "From you" : from(speaker, assistant: assistant)
+    }
+
+    /// 不当标签显示的类别（「事实」= 没特别分类）
+    static let plainCategory = "fact"
+
+    /// 旧的五个类别当标签显示（粟粟 11-13「旧的五个类别也是标签一种」，只是显示层，`category` 不动）：「事实」不出，其余出中文名
+    static func categoryTag(_ category: String) -> String? {
+        guard let c = MemoryAudit.cleaned(category), c != plainCategory else { return nil }
+        return MemoryCardView.categoryLabels[c] ?? c
+    }
+
+    /// 卡上显示的标签：类别放第一个，后面写手 / 她的标签（去空白去重，和类别同名的不再出一遍）
+    static func shownTags(category: String, keywords: [String]) -> [String] {
+        let cat = categoryTag(category)
+        return (cat.map { [$0] } ?? []) + MemoryAudit.cleanedTags(keywords).filter { $0 != cat }
+    }
+
+    /// 标签名是不是另四个类别之一（「事实」不算：它不当标签显示）→ 类别 key
+    static func categoryKey(forTag tag: String) -> String? {
+        MemoryAuditFilterSheet.categories.first { $0.key != plainCategory && $0.label == tag }?.key
+    }
+}
+
+/// 归进的 wiki 页没了时那一行 +「重新整理」（只在出事时出现）
+struct MemoryAuditPageNotice: View {
     let memory: Memory
-    let windowTitle: String?
-    let expanded: Bool
-    /// 列表在「选择」里：滑条不让动（点行是选中）
-    var locked = false
-    /// 牌堆卡：正文不折叠（卡里有地方，长的在卡里滚）
-    var fullText = false
-    /// 牌堆卡把滑条放到卡底按钮上面，这里不画
-    var showsImportance = true
-    let onToggle: () -> Void
-    /// nil = 不出「跳到这条」（拿不到聊天 / 没有来源窗口）
-    let onJump: (() -> Void)?
-    let onEdit: () -> Void
-    let onCategory: (String) -> Void
-    let onImportance: (Int) -> Void
 
     @Environment(\.settingsMetrics) private var m
     @Environment(\.modelContext) private var context
@@ -31,61 +121,28 @@ struct MemoryAuditCardContent: View {
     @State private var error: String?
 
     var body: some View {
-        let alive = memory.supersededAt == nil
-        VStack(alignment: .leading, spacing: 6) {
-            Text(memory.content)
-                .font(m.body)
-                .foregroundColor(alive ? Theme.textPrimary : Theme.textSecondary)
-                .lineLimit(expanded || fullText ? nil : 3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onToggle)
-            infoLine
-            if let note = MemoryAudit.organizeNote(memory) {
-                Text(note)
-                    .font(m.caption)
-                    .foregroundColor(Theme.textMuted)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
+        Group {
             if let pageNotice {
                 HStack {
-                    Text(pageNotice).font(m.caption).foregroundColor(Theme.textMuted)
-                    if alive && !locked {
+                    Text(pageNotice).font(m.secondary).foregroundColor(Theme.textMuted)
+                    if memory.supersededAt == nil {
                         Button("重新整理") { resetPage = memory.organizedPage }
-                            .font(m.caption)
+                            .font(m.secondary)
                             .buttonStyle(.borderless)
                     }
                 }
-            }
-            if expanded {
-                MemoryAuditSourceView(memory: memory)
-                HStack(spacing: 16) {
-                    if let onJump {
-                        Button("跳到这条 ›", action: onJump)
-                    }
-                    if alive {
-                        Button("改字", action: onEdit)
-                    }
-                }
-                .font(m.caption)
-                .foregroundColor(Theme.branchIndicator)
-                .buttonStyle(.borderless)
-            }
-            if showsImportance {
-                MemoryAuditImportance(value: memory.importance, disabled: locked || !alive, onCommit: onImportance)
             }
         }
         .task(id: memory.organizedPage) { await checkPage() }
         .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in Task { await checkPage() } }
         .confirmationDialog("重新整理这条碎片？", isPresented: Binding(get: { resetPage != nil }, set: { if !$0 { resetPage = nil } }), titleVisibility: .visible) {
             Button("解除归页标记") { releaseOrganization() }
-            Button("取消", role: .cancel) { resetPage = nil }
+            Button("Cancel", role: .cancel) { resetPage = nil }
         } message: {
             Text("只解除这条碎片的整理页与整理时间，重新按现有资格筛选；不会自动播种，也不会撤回批准。")
         }
         .alert("重新整理失败", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
-            Button("好", role: .cancel) { error = nil }
+            Button("OK", role: .cancel) { error = nil }
         } message: { Text(error ?? "") }
     }
 
@@ -121,44 +178,6 @@ struct MemoryAuditCardContent: View {
             }
         }
     }
-
-    /// 信息行：类别 ▾ · 日期 · 《窗口》 · 你改过 · 图钉（钉住的不管什么类别都常驻）；重要度挪到下面的滑条
-    private var infoLine: some View {
-        var rest: [String] = [MemoryDateText.short(memory.createdAt)]
-        if let windowTitle { rest.append("《\(windowTitle)》") }
-        if memory.userEditedAt != nil { rest.append("你改过") }
-        return HStack(spacing: 4) {
-            Menu {
-                ForEach(MemoryAuditFilterSheet.categories, id: \.key) { c in
-                    Button {
-                        onCategory(c.key)
-                    } label: {
-                        if c.key == memory.category { Label(c.label, systemImage: "checkmark") } else { Text(c.label) }
-                    }
-                }
-            } label: {
-                Text("\(MemoryCardView.categoryLabels[memory.category] ?? memory.category) ▾")
-                    .font(m.caption)
-                    .foregroundColor(Theme.branchIndicator)
-            }
-            .menuStyle(.button)
-            .buttonStyle(.borderless)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .disabled(memory.supersededAt != nil)
-            Text("· " + rest.joined(separator: " · "))
-                .font(m.caption)
-                .foregroundColor(Theme.textMuted)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            if memory.isUserExplicit {
-                Image(systemName: "pin.fill")
-                    .font(.system(size: 9))
-                    .foregroundColor(Theme.branchIndicator)
-                    .accessibilityLabel("钉住的，不管什么类别都常驻")
-            }
-        }
-    }
 }
 
 // MARK: - 牌堆（plan 2.3）
@@ -169,7 +188,7 @@ struct MemoryAuditFlight: Equatable {
     let toRight: Bool
 }
 
-/// 一叠卡：只画最上面三张，后面两张各往下 6pt、缩一点露个边；只有最上面那张能点，飞着的时候都不能点。
+/// 一叠卡：只画最上面三张，后面两张各往下 7pt、缩一点露个边；只有最上面那张能点，飞着的时候都不能点。
 /// 不挂任何拖动手势（规格 7¾：左右划跟翻页打架），飞走由页面的 `flight` 驱动
 struct MemoryAuditStack<Card: View>: View {
     let deck: [Memory]
@@ -187,7 +206,8 @@ struct MemoryAuditStack<Card: View>: View {
                     // 减弱动态效果：下一张放大到位 / 往上挪不动画，直接到位，只剩淡入淡出（10-17 astra #6）
                     .transaction { t in if reduceMotion { t.animation = nil } } body: {
                         $0.scaleEffect(1 - 0.04 * CGFloat(i), anchor: .bottom)
-                            .offset(y: 6 * CGFloat(i))
+                            .offset(y: 7 * CGFloat(i))
+                            .opacity(i == 0 ? 1 : (i == 1 ? 0.8 : 0.55))
                     }
                     .rotationEffect(.degrees(flying && !reduceMotion ? (flight?.toRight == true ? 12 : -12) : 0))
                     .offset(x: flying && !reduceMotion ? (flight?.toRight == true ? 700 : -700) : 0)
@@ -199,147 +219,107 @@ struct MemoryAuditStack<Card: View>: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 4)
-        .padding(.bottom, 24)
+        .padding(.bottom, 26)
     }
 }
 
-/// 牌堆里的一张：奶白卡、正文区自己滚；卡底是重要度滑条 + 两颗按钮（左红描边、右薄荷实心白字——实心薄荷只压在奶白卡上）
-struct MemoryAuditDeckCard<Content: View>: View {
-    let leftTitle: String
-    let rightTitle: String
-    let importance: Int?
-    let importanceDisabled: Bool
-    let onImportance: (Int) -> Void
-    let onLeft: () -> Void
-    let onRight: () -> Void
-    @ViewBuilder let content: () -> Content
+/// 牌堆里的一张（粟粟 11-15 小样「卡上只剩正文 + chip」）：「说的是谁 · 正文」（长的在卡里滚）+ 卡底一排 chip，和详情页同一套；
+/// About / From / 置信度 / 标签只显示，Source / Why 点开升托盘看完收回。改东西走底栏 Edit（开详情页），别的钮都在底部玻璃动作条上
+struct MemoryAuditDeckCard: View {
+    let memory: Memory
+    let windowTitle: String?
+    let onJump: (() -> Void)?
+    /// 「C2 整理」给这张卡的理由（有才出 Why）
+    var dreamNote: FragmentDreamNotes.Note? = nil
+
+    private enum Tray: Hashable { case source, why }
 
     @Environment(\.settingsMetrics) private var m
+    @Environment(\.modelContext) private var modelContext
+    @AppStorage("assistantName") private var assistantName = "助手"
+    @State private var open: Tray?
+    @State private var live: String?
+    @State private var liveMessages: [MemorySourceMessage] = []
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
             ScrollView {
-                content()
-                    .padding(.bottom, 4)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(memory.lineText)
+                        .font(m.sectionHeader.weight(.regular))
+                        .lineSpacing(5)
+                        .foregroundColor(memory.supersededAt == nil ? Theme.textPrimary : Theme.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                    MemoryAuditPageNotice(memory: memory)
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 14)
+                .padding(.bottom, 8)
             }
             .scrollBounceBehavior(.basedOnSize)
-            Divider()
-            MemoryAuditImportance(value: importance, disabled: importanceDisabled, onCommit: onImportance)
-            HStack(spacing: 12) {
-                Button(action: onLeft) {
-                    Text(leftTitle)
-                        .font(m.body.weight(.medium))
-                        .foregroundColor(Theme.danger)
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .overlay(Capsule().stroke(Theme.danger, lineWidth: 1))
-                        .contentShape(Capsule())
+            .scrollIndicators(.hidden)
+            if !chips.isEmpty || hasSource || hasWhy {
+                Rectangle()
+                    .fill(MemoryEntryChip.line)
+                    .frame(height: 1)
+                FlowLayout(spacing: 4, lineSpacing: 0) {
+                    ForEach(chips, id: \.self) { MemoryEntryChip(text: $0, name: $0) }
+                    if hasSource {
+                        MemoryEntryChip(text: MemoryChipText.source(memory), name: "Source") { toggle(.source) }
+                    }
+                    if hasWhy {
+                        MemoryEntryChip(text: "Why", name: "Why") { toggle(.why) }
+                    }
                 }
-                .buttonStyle(.plain)
-                Button(rightTitle, action: onRight)
-                    .buttonStyle(MemoryPrimaryButtonStyle(fullWidth: true))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .opacity(open == nil ? 1 : 0)
+                .allowsHitTesting(open == nil)
+                .accessibilityHidden(open != nil)
             }
         }
-        .padding(16)
-        .frame(maxWidth: 560, maxHeight: .infinity)
-        .background(Theme.mainBg, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .shadow(color: .black.opacity(0.06), radius: 8, y: 2)
-    }
-}
-
-// MARK: - 重要度滑条（plan 2.4，⧫3 / ⧫5）
-
-/// 连续拖、松手吸到最近的整数 1–5 才交出去（拖动中只改自己的本地值，不碰库）；松手值没变不交。
-/// 没定（nil）的停在 3、写「没定」，拖过才算定
-struct MemoryAuditImportance: View {
-    let value: Int?
-    let disabled: Bool
-    let onCommit: (Int) -> Void
-
-    @Environment(\.settingsMetrics) private var m
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var draft: Double = 3
-    @State private var dragging = false
-    @State private var moved = false
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Text("重要度")
-                .font(m.caption)
-                .foregroundColor(Theme.textMuted)
-            Slider(value: $draft, in: 1...5) { editing in
-                if editing {
-                    dragging = true
-                    moved = false
-                } else {
-                    dragging = false
-                    commit()
+        .frame(maxWidth: 560, maxHeight: .infinity, alignment: .top)
+        // 影子只给卡底：挂在整张上字也会带一圈虚影
+        .background {
+            RoundedRectangle(cornerRadius: MemoryAuditStyle.corner, style: .continuous)
+                .fill(Theme.mainBg)
+                .shadow(color: .black.opacity(0.10), radius: 8, y: 2)
+        }
+        .overlay(alignment: .bottom) {
+            if let open {
+                Group {
+                    switch open {
+                    case .source:
+                        MemorySourceTray(memory: memory, windowTitle: windowTitle, live: live, messages: liveMessages, onJump: onJump) { self.open = nil }
+                    case .why:
+                        if let dreamNote { MemoryWhyTray(note: dreamNote) { self.open = nil } }
+                    }
                 }
-            }
-            .tint(Theme.branchIndicator)
-            .disabled(disabled)
-            .accessibilityLabel("重要度")
-            .accessibilityValue(label)
-            Text(label)
-                .font(m.caption.monospacedDigit())
-                .foregroundColor(showsUnset ? Theme.textMuted : Theme.textPrimary)
-                .frame(width: 30, alignment: .trailing)
-        }
-        .onAppear { draft = Double(Memory.effectiveImportance(value)) }
-        .onChange(of: value) { _, v in
-            if !dragging { draft = Double(Memory.effectiveImportance(v)) }
-        }
-        .onChange(of: draft) { _, _ in
-            if dragging { moved = true }
-        }
-    }
-
-    private var showsUnset: Bool { value == nil && !moved }
-
-    private var label: String { showsUnset ? "没定" : "\(Int(draft.rounded()))" }
-
-    private func commit() {
-        let v = Int(draft.rounded())
-        // 减弱动态效果：吸附不弹，直接到位（10-17 astra #6）
-        let snap: Animation? = reduceMotion ? nil : .snappy
-        guard moved, v != value else {
-            withAnimation(snap) { draft = Double(Memory.effectiveImportance(value)) }
-            return
-        }
-        withAnimation(snap) { draft = Double(v) }
-        onCommit(v)
-    }
-}
-
-// MARK: - 展开后的「原话」
-
-/// 按 `sourceNodeId` 只取那一条消息（fetchLimit 1，前 300 字）；老 AUDN 没节点就用 `sourceQuote`；都没有写「没有出处」
-private struct MemoryAuditSourceView: View {
-    let memory: Memory
-    @Environment(\.modelContext) private var modelContext
-    @Environment(\.settingsMetrics) private var m
-    @State private var text: String?
-
-    var body: some View {
-        Text(text ?? "没有出处")
-            .font(m.caption)
-            .foregroundColor(Theme.textSecondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(8)
-            .background(Theme.sidebarBg, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .textSelection(.enabled)
-            .task(id: memory.id) { load() }
-    }
-
-    private func load() {
-        if let nid = memory.sourceNodeId {
-            var desc = FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> { $0.id == nid })
-            desc.fetchLimit = 1
-            if let node = try? modelContext.fetch(desc).first {
-                let clean = ContentCleaner.clean(node.content, cacheKey: node.id)
-                text = "原话：" + (clean.count > 300 ? String(clean.prefix(300)) + "…" : clean)
-                return
+                .memoryTray()
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        if let quote = memory.sourceQuote, !quote.isEmpty { text = "原话：「\(quote)」" }
+        .animation(.easeOut(duration: 0.18), value: open)
+        .task(id: memory.id) {
+            open = nil
+            live = MemoryConversationLink.sourceText(of: memory, profileId: memory.profileId, context: modelContext)
+            liveMessages = MemoryConversationLink.sourceMessages(of: memory, profileId: memory.profileId, context: modelContext)
+        }
     }
+
+    /// 只显示的那几颗：卡上有才出（About / From / 置信度 / 重要度 / 标签）
+    private var chips: [String] {
+        [MemoryChipText.about(memory.subject),
+         MemoryAuditTraits.fromChip(memory.speaker, assistant: assistantName),
+         MemoryChipText.sure(memory.confidence),
+         MemoryChipText.importance(memory.importance),
+         MemoryChipText.tags(MemoryAuditTraits.shownTags(category: memory.category, keywords: memory.keywords))].compactMap { $0 }
+    }
+
+    private var hasSource: Bool { MemorySourceTray.has(memory, live: live, canJump: onJump != nil) }
+    private var hasWhy: Bool { MemoryWhyTray.shows(dreamNote, for: memory) }
+
+    private func toggle(_ t: Tray) { open = open == t ? nil : t }
 }

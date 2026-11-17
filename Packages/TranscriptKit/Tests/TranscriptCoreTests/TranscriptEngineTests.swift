@@ -184,6 +184,69 @@ final class TranscriptEngineTests: XCTestCase {
         XCTAssertEqual(engine.apply(.scrollToRow(id: "missing", alignment: .center, animated: true)), [])
     }
 
+    // MARK: 跟随时的滑入（旧页 StreamScrollAnchor.cellGrew / glide）
+
+    func testStreamingLineWhileFollowingHidesBelowThenGlidesIn() {
+        var engine = makeEngine()
+        _ = engine.apply(.setHeights((0..<20).map { .init(id: "r\($0)", version: 0, height: 100, tier: .measured) }))
+        let effects = engine.apply(.setHeights([.init(id: "r0", version: 0, height: 130, tier: .measured)], streaming: true))
+        XCTAssertEqual(effects, [.layoutChanged(offsetAdjustment: 30),           // 新的一行先藏在屏幕底下，画面没动
+                                 .scroll(to: 0, animation: .glide)])              // 再滑上来
+        XCTAssertEqual(engine.offset, 0)
+        XCTAssertTrue(engine.isFollowing)
+    }
+
+    func testStreamingParagraphOfAnySizeGlides() {
+        var engine = makeEngine()
+        let effects = engine.apply(.setHeights([.init(id: "r0", version: 0, height: 700, tier: .measured)], streaming: true))
+        XCTAssertEqual(effects, [.layoutChanged(offsetAdjustment: 600), .scroll(to: 0, animation: .glide)],
+                       "气泡模式一段整块弹出：流式的那条不限幅，否则跟随就断了")
+    }
+
+    func testNonStreamingGrowthGlidesOnlyWhenSmall() {
+        var engine = makeEngine()
+        XCTAssertEqual(engine.apply(grow("r0", to: 200)), [.layoutChanged(offsetAdjustment: 100), .scroll(to: 0, animation: .glide)])
+        XCTAssertEqual(engine.apply(grow("r0", to: 400)), [.layoutChanged(offsetAdjustment: 0)], "一下长了 200：直接钉住，不滑")
+        XCTAssertEqual(engine.apply(grow("r0", to: 380)), [.layoutChanged(offsetAdjustment: 0)], "变矮：直接钉住")
+        XCTAssertEqual(engine.offset, 0)
+    }
+
+    func testNoGlideWhileFingerIsDown() {
+        var engine = makeEngine()
+        _ = engine.apply(.scrolled(to: 2, phase: .tracking))
+        let effects = engine.apply(.setHeights([.init(id: "r0", version: 0, height: 130, tier: .measured)], streaming: true))
+        XCTAssertEqual(effects, [.layoutChanged(offsetAdjustment: -2)], "手指按着：只钉，不起动画")
+    }
+
+    func testNoGlideDuringKeyboardSlide() {
+        var engine = makeEngine()
+        let motion = TranscriptEngine.KeyboardMotion(duration: 0.25, curve: 7)
+        _ = engine.apply(.setLeadingPad(300, reason: .keyboard(motion)))
+        let effects = engine.apply(.setHeights([.init(id: "r0", version: 0, height: 130, tier: .measured)], streaming: true))
+        XCTAssertEqual(effects, [.layoutChanged(offsetAdjustment: 0)], "键盘还在滑：不叠第二个动画")
+        _ = engine.apply(.animationFinished(id: 1))
+        XCTAssertEqual(engine.apply(.setHeights([.init(id: "r0", version: 0, height: 160, tier: .measured)], streaming: true)),
+                       [.layoutChanged(offsetAdjustment: 30), .scroll(to: 0, animation: .glide)])
+    }
+
+    func testReleasingNearStartWhileStreamingResumesFollow() {
+        var engine = makeEngine()
+        _ = engine.apply(.setStreaming(true))
+        _ = engine.apply(.scrolled(to: 250, phase: .tracking))
+        XCTAssertFalse(engine.isFollowing)
+        XCTAssertEqual(engine.apply(.scrolled(to: 250, phase: .idle)), [.scroll(to: 0, animation: .glide)],
+                       "流式中松手停在半屏以内：滑回去接着跟")
+        XCTAssertTrue(engine.isFollowing)
+
+        _ = engine.apply(.scrolled(to: 350, phase: .tracking))
+        XCTAssertEqual(engine.apply(.scrolled(to: 350, phase: .idle)), [], "超过半屏：留在那儿")
+        XCTAssertFalse(engine.isFollowing)
+
+        _ = engine.apply(.setStreaming(false))
+        _ = engine.apply(.scrolled(to: 250, phase: .tracking))
+        XCTAssertEqual(engine.apply(.scrolled(to: 250, phase: .idle)), [], "没在流式：不抢位置")
+    }
+
     // MARK: 其它
 
     func testVersionBumpReportsReconfigure() {

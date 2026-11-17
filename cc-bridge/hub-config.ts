@@ -19,6 +19,8 @@ export interface HubConfig {
   port?: number
   /// plan-opencli-in-app：让 AI 用这台 Mac 的 Chrome 登录态（chrome_read / site_query），默认关，只认本机 Mac app 改
   opencli_enabled?: boolean
+  /// 账号列表（folder-mode.ts parseAccounts 解；这里原样留着，别的设置落盘时不把它冲掉）。手改文件，没有帧能改
+  accounts?: unknown[]
 }
 
 /// LAN / Tailscale 绑定开关（secrets/bind-config.json）。缺文件 / 坏文件 = 都开
@@ -73,6 +75,7 @@ export function loadHubConfig(path: string): HubConfig {
     if (typeof raw.agent_workdir === "string" && raw.agent_workdir) out.agent_workdir = raw.agent_workdir
     if (Number.isInteger(raw.port) && raw.port > 0 && raw.port < 65536) out.port = raw.port
     if (raw.opencli_enabled === true) out.opencli_enabled = true
+    if (Array.isArray(raw.accounts)) out.accounts = raw.accounts
     return out
   } catch {
     return {}
@@ -244,6 +247,8 @@ export interface HelloInput {
   agentWorkdir: string | null
   tools: ToolAvailability
   capabilities: string[]
+  /// 文件夹模式才有（plan-folder-floor P0）：这台 hub 连的是哪个文件夹、能用哪些账号
+  folder?: { path: string; accounts: { id: string; label: string }[] }
 }
 
 export function buildHelloPayload(input: HelloInput): string {
@@ -256,16 +261,17 @@ export function buildHelloPayload(input: HelloInput): string {
     tools: input.tools,
     capabilities: input.capabilities,
   }
+  if (input.folder) { frame.mode = "folder"; frame.folder = input.folder.path; frame.accounts = input.folder.accounts }
   if (input.machine.host_model_id) frame.host_model_id = input.machine.host_model_id
   if (input.machine.host_model_name) frame.host_model_name = input.machine.host_model_name
   return JSON.stringify(frame)
 }
 
 /// 内嵌 hub（Mac App）没有 cc-bridge/.mcp.json：用 App 带的 mcp-server 二进制现写一份，连本 hub 的真实端口。
-export function buildMcpConfig(serverBin: string, port: number, token: string | undefined): Record<string, unknown> {
+export function buildMcpConfig(serverBin: string, port: number, token: string | undefined, args: string[] = []): Record<string, unknown> {
   const env: Record<string, string> = { MP_CC_HUB_URL: `ws://127.0.0.1:${port}/mcp` }
   if (token) env.MP_CC_HUB_TOKEN = token
-  return { mcpServers: { "cc-bridge": { command: serverBin, args: [], env } } }
+  return { mcpServers: { "cc-bridge": { command: serverBin, args, env } } }
 }
 
 /// 对话 Agent 的 --mcp-config：cwd 有 .mcp.json（粟粟的 launchd hub，start_cc.sh 渲染的）就用它；

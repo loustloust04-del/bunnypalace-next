@@ -76,6 +76,7 @@ enum ToolDrawerCatalog {
             Item(name: SelfMemoryTool.forgetName, group: .memory, summary: "{char} 把一条记忆标成失效", gate: .memoryWriter(.b4)),
             Item(name: PendingNotesTool.toolName, group: .memory, summary: "{char} 看待续、标做完了 / 淡了", gate: .memoryWriter(.a4)),
             Item(name: WikiSuggestTool.toolName, group: .memory, summary: "{char} 给记忆 wiki 提整理方向（{user}批了才去查、写）", gate: .memoryWriter(.c3)),
+            Item(name: MemoryCardTool.toolName, group: .memory, summary: "{char} 新加、改、删、钉从聊天里记下的记忆条目（每一笔都进记忆日志，{user}能撤回）", gate: .permission(.memoryCards)),
             Item(name: RecallTool.toolName, group: .memory, summary: "{char} 搜和{user}的对话历史、记忆库", gate: .convHistory),
             Item(name: InnerVoice.toolName, group: .memory, summary: "{char} 写下心声", gate: .heartVoice),
 
@@ -87,6 +88,7 @@ enum ToolDrawerCatalog {
             Item(name: RemindersTools.completeName, group: .device, summary: "{char} 把一条提醒标成完成", gate: .permission(.reminders)),
             Item(name: ClipboardTool.toolName, group: .device, summary: "{char} 读{user}设备的剪贴板", gate: .permission(.clipboard)),
             Item(name: NotifyTool.toolName, group: .device, summary: "{char} 到点给{user}发通知", gate: .permission(.notifications)),
+            Item(name: HeartbeatTaskTool.name, group: .other, summary: "{char} 给自己建任务，到点自己醒来去做（早报、到点来找{user}）", gate: .permission(.selfWake)),
             Item(name: OCRImageTool.toolName, group: .device, summary: "{char} 识别图片里的文字", gate: .always),
             Item(name: OpenURLTool.toolName, group: .device, summary: "{char} 在{user}的设备上打开链接", gate: .always),
             Item(name: DeviceInfoTool.toolName, group: .device, summary: "{char} 看设备型号、电量、存储空间", gate: .always),
@@ -114,6 +116,11 @@ enum ToolDrawerCatalog {
             Item(name: BrowserOperateTools.typeName, group: .search, summary: "{char} 在花园浏览器里填字（密码不填）", gate: .permission(.browserOperate)),
             Item(name: BrowserOperateTools.scrollName, group: .search, summary: "{char} 在花园浏览器里翻页", gate: .permission(.browserOperate)),
             Item(name: BrowserOperateTools.backName, group: .search, summary: "{char} 花园浏览器后退", gate: .permission(.browserOperate)),
+            Item(name: BrowserOperateTools.videoName, group: .search, summary: "{char} 控制一起看小窗里的视频（播放 / 暂停 / 倒回 / 倍速）", gate: .permission(.browserOperate)),
+            // 网页应用（plan-garden-webapps §6.4）
+            Item(name: WebAppTools.addName, group: .other, summary: "{char} 把写好的网页（或文件库里的 html）做成{user}花园桌面上的全屏应用", gate: .permission(.webApps)),
+            Item(name: WebAppTools.readName, group: .other, summary: "{char} 读桌面上一个网页应用的源码", gate: .permission(.webApps)),
+            Item(name: WebAppTools.editName, group: .other, summary: "{char} 原地改桌面上的网页应用（留历史版本，存的东西不丢）", gate: .permission(.webApps)),
         ]
         #endif
         #if os(macOS)
@@ -153,7 +160,7 @@ enum ToolDrawerCatalog {
         switch gate {
         case .permission(let domain): return "权限 · \(domain.displayName)"
         case .memoryWriter(let id): return "设置 · 记忆 · \(id.code)"
-        case .convHistory: return "设置 · 记忆 · 对话历史搜索"
+        case .convHistory: return "设置 · 记忆 · 翻记忆"
         case .heartVoice: return "设置 · 记忆 · 心声"
         case .always: return "工具调用总开关"
         case .auto: return "自动"

@@ -478,7 +478,7 @@
       "name" : "forget_memory"
     },
     "fs_append" : {
-      "description" : "在文件末尾追加内容；文件不存在时创建",
+      "description" : "在文件末尾追加内容；文件不存在时创建。memory\/、.prompt\/ 下同 fs_write 的规矩",
       "input_schema" : {
         "properties" : {
           "content" : {
@@ -497,7 +497,7 @@
       "name" : "fs_append"
     },
     "fs_delete" : {
-      "description" : "删除某个文件",
+      "description" : "删除某个文件。memory\/ 下：删记忆条目 = 进 Deleted（能放回），删 memory\/self\/ 的一份 = 标成失效，删 wiki 页 = 进已删除（能恢复）；.prompt\/ 下不能删",
       "input_schema" : {
         "properties" : {
           "path" : {
@@ -512,7 +512,7 @@
       "name" : "fs_delete"
     },
     "fs_edit" : {
-      "description" : "把文件里唯一命中的 old_string 替换成 new_string",
+      "description" : "把文件里唯一命中的 old_string 替换成 new_string。memory\/、.prompt\/ 下同 fs_write 的规矩（改记忆条目的一项、待续的一行、Prompt 的一段用它最省事）",
       "input_schema" : {
         "properties" : {
           "new_string" : {
@@ -535,7 +535,7 @@
       "name" : "fs_edit"
     },
     "fs_list" : {
-      "description" : "列出文件库与楼层记忆树（memory\/ 前缀，只读）里所有文本文件（路径+大小），不读内容",
+      "description" : "列出文件库、楼层记忆（memory\/）和这一层 Prompt（.prompt\/）里所有文本文件（路径+大小），不读内容。.prompt\/fields\/ 下是楼层字段：systemPrompt = 系统指令 \/ userPersona = 用户描述 \/ characterDescription = 助手设定 \/ characterPersonality = 助手性格 \/ scenario = 背景设定 \/ chatExamples = 对话示例 \/ postInstructions = 后置提醒；.prompt\/ 下其余的是当前预设的插槽，每行后面标着是哪一段",
       "input_schema" : {
         "properties" : {
 
@@ -560,7 +560,7 @@
             "type" : "integer"
           },
           "path" : {
-            "description" : "相对路径，如 notes\/todo.md；memory\/ 与 tool-results\/ 前缀是只读区",
+            "description" : "相对路径，如 notes\/todo.md。memory\/ 下是记忆，.prompt\/ 下是这一层的 Prompt；tool-results\/ 前缀是只读区",
             "type" : "string"
           }
         },
@@ -572,7 +572,7 @@
       "name" : "fs_read"
     },
     "fs_rename" : {
-      "description" : "重命名或移动某个文件；目标已存在时会失败",
+      "description" : "重命名或移动某个文件；目标已存在时会失败。memory\/ 下只有记忆条目能挪：挪到另一个「说的是谁」文件夹 = 改 about，挪进 memory\/cards\/Deleted\/ = 删（能放回）",
       "input_schema" : {
         "properties" : {
           "new_path" : {
@@ -606,7 +606,7 @@
       "name" : "fs_search"
     },
     "fs_write" : {
-      "description" : "新建或整文件覆盖写入",
+      "description" : "新建或整文件覆盖写入。memory\/ 下写文件 = 写那种记忆：memory\/cards\/<说的是谁>\/<名字>.md 是记忆条目（开头两行 --- 之间一行一项：about \/ from \/ tags \/ importance \/ confidence \/ pinned \/ state，下面是一句正文；没写的项不动；新建一份 = 加一条，文件名会换成它的编号）；memory\/self\/<短标题>.md 是你自己的记忆；memory\/pending\/待续.md 是待续，一条一行「- 内容」；memory\/wiki\/<组>\/<页>.md 是 wiki 页。.prompt\/ 下是这一层的 Prompt，只能改已有的那几份，对方的下一条消息起生效。格式不对会被拒并说明哪一行；对方可能要先点允许，被拒绝了就照实说。memory\/ 里别的文件只读",
       "input_schema" : {
         "properties" : {
           "content" : {
@@ -704,6 +704,74 @@
         "type" : "object"
       },
       "name" : "local_twitter"
+    },
+    "memory_card" : {
+      "description" : "记忆条目：从聊天里一条条记下来的事实（关于对方、关于你、你们之间的事），每条一句话。用这个工具自己动这些条目：add 新加一条；edit 改一条（只传要改的那几项）；delete 删一条（进已删除，还能恢复）；restore 把删掉的放回来；pin 钉住（之后每轮都带着）；unpin 取消钉住。除 add 外都要给 id：recall 搜到的 memory_id，或 fs_search \/ fs_read 在 memory\/cards\/ 里看到的那份文件的路径。正文写成不看上下文也读得懂的一句完整的话，用名字，不用「我 \/ 你 \/ 他」，例：「岚舟每周三去槐序巷皮影作坊学雕皮影」。发现哪条记错了、过时了就改或删，不要另加一条意思相反的。每一笔对方都看得到、能撤回；对方可能要先点允许才生效，被拒绝了就照实说，不要再试。也可以不用这个工具，直接用 fs_write \/ fs_edit \/ fs_delete 改 memory\/cards\/ 下那一条的文件，是同一回事。",
+      "input_schema" : {
+        "properties" : {
+          "action" : {
+            "description" : "add = 新加；edit = 改；delete = 删（能恢复）；restore = 把删掉的放回来；pin = 钉住；unpin = 取消钉住",
+            "enum" : [
+              "add",
+              "edit",
+              "delete",
+              "restore",
+              "pin",
+              "unpin"
+            ],
+            "type" : "string"
+          },
+          "confidence" : {
+            "description" : "0–100，这件事有多确定",
+            "type" : "integer"
+          },
+          "content" : {
+            "description" : "正文，一句完整的话。add 必填；edit 时给了就整句换掉",
+            "type" : "string"
+          },
+          "id" : {
+            "description" : "要动哪一条：recall 给的 memory_id，或 memory\/cards\/ 里那份文件的路径。除 add 外必填",
+            "type" : "string"
+          },
+          "importance" : {
+            "description" : "1–5，越大越容易被想起来",
+            "type" : "integer"
+          },
+          "pin" : {
+            "description" : "只在 add 时用：加的同时钉住",
+            "type" : "boolean"
+          },
+          "reason" : {
+            "description" : "一句话：为什么动这一条（记进日志给对方看）",
+            "type" : "string"
+          },
+          "speaker" : {
+            "description" : "这件事是谁说的：用户自述 = 对方自己说的；AI 观察 = 你看出来的；AI 承诺 = 你答应过的",
+            "enum" : [
+              "用户自述",
+              "AI 观察",
+              "AI 承诺"
+            ],
+            "type" : "string"
+          },
+          "subject" : {
+            "description" : "这一条说的是谁 \/ 什么，写名字，如「岚舟」",
+            "type" : "string"
+          },
+          "tags" : {
+            "description" : "几个短标签，如 [\"皮影\", \"周三\"]；edit 时给了就整组换掉",
+            "items" : {
+              "type" : "string"
+            },
+            "type" : "array"
+          }
+        },
+        "required" : [
+          "action"
+        ],
+        "type" : "object"
+      },
+      "name" : "memory_card"
     },
     "notify_schedule" : {
       "description" : "给用户设备发一条本地通知（一次性）。after_seconds 与 at 二选一（at 为 ISO 8601 或相对写法）。同一 id 再次调用会覆盖旧通知。只在用户要求提醒\/叫醒时用，不要用来复读聊天内容。",
@@ -1899,7 +1967,7 @@
     },
     "fs_append" : {
       "function" : {
-        "description" : "在文件末尾追加内容；文件不存在时创建",
+        "description" : "在文件末尾追加内容；文件不存在时创建。memory\/、.prompt\/ 下同 fs_write 的规矩",
         "name" : "fs_append",
         "parameters" : {
           "properties" : {
@@ -1921,7 +1989,7 @@
     },
     "fs_delete" : {
       "function" : {
-        "description" : "删除某个文件",
+        "description" : "删除某个文件。memory\/ 下：删记忆条目 = 进 Deleted（能放回），删 memory\/self\/ 的一份 = 标成失效，删 wiki 页 = 进已删除（能恢复）；.prompt\/ 下不能删",
         "name" : "fs_delete",
         "parameters" : {
           "properties" : {
@@ -1939,7 +2007,7 @@
     },
     "fs_edit" : {
       "function" : {
-        "description" : "把文件里唯一命中的 old_string 替换成 new_string",
+        "description" : "把文件里唯一命中的 old_string 替换成 new_string。memory\/、.prompt\/ 下同 fs_write 的规矩（改记忆条目的一项、待续的一行、Prompt 的一段用它最省事）",
         "name" : "fs_edit",
         "parameters" : {
           "properties" : {
@@ -1965,7 +2033,7 @@
     },
     "fs_list" : {
       "function" : {
-        "description" : "列出文件库与楼层记忆树（memory\/ 前缀，只读）里所有文本文件（路径+大小），不读内容",
+        "description" : "列出文件库、楼层记忆（memory\/）和这一层 Prompt（.prompt\/）里所有文本文件（路径+大小），不读内容。.prompt\/fields\/ 下是楼层字段：systemPrompt = 系统指令 \/ userPersona = 用户描述 \/ characterDescription = 助手设定 \/ characterPersonality = 助手性格 \/ scenario = 背景设定 \/ chatExamples = 对话示例 \/ postInstructions = 后置提醒；.prompt\/ 下其余的是当前预设的插槽，每行后面标着是哪一段",
         "name" : "fs_list",
         "parameters" : {
           "properties" : {
@@ -1994,7 +2062,7 @@
               "type" : "integer"
             },
             "path" : {
-              "description" : "相对路径，如 notes\/todo.md；memory\/ 与 tool-results\/ 前缀是只读区",
+              "description" : "相对路径，如 notes\/todo.md。memory\/ 下是记忆，.prompt\/ 下是这一层的 Prompt；tool-results\/ 前缀是只读区",
               "type" : "string"
             }
           },
@@ -2008,7 +2076,7 @@
     },
     "fs_rename" : {
       "function" : {
-        "description" : "重命名或移动某个文件；目标已存在时会失败",
+        "description" : "重命名或移动某个文件；目标已存在时会失败。memory\/ 下只有记忆条目能挪：挪到另一个「说的是谁」文件夹 = 改 about，挪进 memory\/cards\/Deleted\/ = 删（能放回）",
         "name" : "fs_rename",
         "parameters" : {
           "properties" : {
@@ -2048,7 +2116,7 @@
     },
     "fs_write" : {
       "function" : {
-        "description" : "新建或整文件覆盖写入",
+        "description" : "新建或整文件覆盖写入。memory\/ 下写文件 = 写那种记忆：memory\/cards\/<说的是谁>\/<名字>.md 是记忆条目（开头两行 --- 之间一行一项：about \/ from \/ tags \/ importance \/ confidence \/ pinned \/ state，下面是一句正文；没写的项不动；新建一份 = 加一条，文件名会换成它的编号）；memory\/self\/<短标题>.md 是你自己的记忆；memory\/pending\/待续.md 是待续，一条一行「- 内容」；memory\/wiki\/<组>\/<页>.md 是 wiki 页。.prompt\/ 下是这一层的 Prompt，只能改已有的那几份，对方的下一条消息起生效。格式不对会被拒并说明哪一行；对方可能要先点允许，被拒绝了就照实说。memory\/ 里别的文件只读",
         "name" : "fs_write",
         "parameters" : {
           "properties" : {
@@ -2145,6 +2213,77 @@
             "tweet_id" : {
               "description" : "目标推文 id",
               "type" : "string"
+            }
+          },
+          "required" : [
+            "action"
+          ],
+          "type" : "object"
+        }
+      },
+      "type" : "function"
+    },
+    "memory_card" : {
+      "function" : {
+        "description" : "记忆条目：从聊天里一条条记下来的事实（关于对方、关于你、你们之间的事），每条一句话。用这个工具自己动这些条目：add 新加一条；edit 改一条（只传要改的那几项）；delete 删一条（进已删除，还能恢复）；restore 把删掉的放回来；pin 钉住（之后每轮都带着）；unpin 取消钉住。除 add 外都要给 id：recall 搜到的 memory_id，或 fs_search \/ fs_read 在 memory\/cards\/ 里看到的那份文件的路径。正文写成不看上下文也读得懂的一句完整的话，用名字，不用「我 \/ 你 \/ 他」，例：「岚舟每周三去槐序巷皮影作坊学雕皮影」。发现哪条记错了、过时了就改或删，不要另加一条意思相反的。每一笔对方都看得到、能撤回；对方可能要先点允许才生效，被拒绝了就照实说，不要再试。也可以不用这个工具，直接用 fs_write \/ fs_edit \/ fs_delete 改 memory\/cards\/ 下那一条的文件，是同一回事。",
+        "name" : "memory_card",
+        "parameters" : {
+          "properties" : {
+            "action" : {
+              "description" : "add = 新加；edit = 改；delete = 删（能恢复）；restore = 把删掉的放回来；pin = 钉住；unpin = 取消钉住",
+              "enum" : [
+                "add",
+                "edit",
+                "delete",
+                "restore",
+                "pin",
+                "unpin"
+              ],
+              "type" : "string"
+            },
+            "confidence" : {
+              "description" : "0–100，这件事有多确定",
+              "type" : "integer"
+            },
+            "content" : {
+              "description" : "正文，一句完整的话。add 必填；edit 时给了就整句换掉",
+              "type" : "string"
+            },
+            "id" : {
+              "description" : "要动哪一条：recall 给的 memory_id，或 memory\/cards\/ 里那份文件的路径。除 add 外必填",
+              "type" : "string"
+            },
+            "importance" : {
+              "description" : "1–5，越大越容易被想起来",
+              "type" : "integer"
+            },
+            "pin" : {
+              "description" : "只在 add 时用：加的同时钉住",
+              "type" : "boolean"
+            },
+            "reason" : {
+              "description" : "一句话：为什么动这一条（记进日志给对方看）",
+              "type" : "string"
+            },
+            "speaker" : {
+              "description" : "这件事是谁说的：用户自述 = 对方自己说的；AI 观察 = 你看出来的；AI 承诺 = 你答应过的",
+              "enum" : [
+                "用户自述",
+                "AI 观察",
+                "AI 承诺"
+              ],
+              "type" : "string"
+            },
+            "subject" : {
+              "description" : "这一条说的是谁 \/ 什么，写名字，如「岚舟」",
+              "type" : "string"
+            },
+            "tags" : {
+              "description" : "几个短标签，如 [\"皮影\", \"周三\"]；edit 时给了就整组换掉",
+              "items" : {
+                "type" : "string"
+              },
+              "type" : "array"
             }
           },
           "required" : [

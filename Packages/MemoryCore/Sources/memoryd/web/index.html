@@ -3,62 +3,184 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>memoryd · 记忆副本</title>
+<title>memoryd · 记忆实验</title>
 <style>
-  :root { --fg:#1c1c1e; --muted:#6b6b70; --line:#e3e3e8; --bg:#fafafc; --card:#fff; --accent:#2f6fed; --bad:#c0392b; --good:#1e8e3e; }
+  :root {
+    --fg:#2b2a27; --muted:#77736b; --faint:#a39e94; --line:#e9e3d8; --bg:#f8f5ef; --card:#fffdf9; --soft:#f3efe7;
+    --mint:#e1ece7; --mint-line:#c6d9d0; --accent:#557f72; --ink:#3a4541;
+    --rose:#f4e4e1; --rose-fg:#8e463f; --lilac:#ece8f1; --stone:#ecebe6; --bad:#b0443a;
+    --mono:12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
   * { box-sizing: border-box; }
-  body { margin:0; font:14px/1.55 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; color:var(--fg); background:var(--bg); }
-  header { position:sticky; top:0; background:var(--card); border-bottom:1px solid var(--line); padding:10px 18px; display:flex; align-items:center; gap:16px; z-index:2; }
-  header h1 { font-size:15px; margin:0; font-weight:600; }
-  nav button { border:1px solid var(--line); background:var(--card); color:var(--fg); border-radius:8px; padding:5px 14px; cursor:pointer; font-size:13px; }
-  nav button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
-  main { max-width:1020px; margin:0 auto; padding:20px 18px 60px; }
+  [hidden] { display:none !important; }
+  body { margin:0; font:14px/1.6 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; color:var(--fg); background:var(--bg); }
+  a { color:var(--accent); }
+
+  header { position:sticky; top:0; background:var(--card); border-bottom:1px solid var(--line); z-index:5; }
+  .bar { display:flex; align-items:center; gap:14px; padding:9px 20px; }
+  .bar h1 { font-size:15px; margin:0 8px 0 0; font-weight:600; }
+  nav { display:flex; gap:4px; }
+  nav button { border:1px solid transparent; background:transparent; color:var(--fg); border-radius:8px; padding:5px 13px; cursor:pointer; font-size:13.5px; }
+  nav button:hover { background:var(--soft); }
+  nav button.on { background:var(--mint); border-color:var(--mint-line); }
+  nav.minor button { font-size:12.5px; color:var(--muted); padding:4px 10px; }
+  nav.minor button.on { color:var(--fg); }
+  .spacer { flex:1; }
+  .conn { display:flex; gap:18px; flex-wrap:wrap; padding:5px 20px 6px; background:var(--soft); border-top:1px solid var(--line); font-size:12.5px; color:var(--muted); }
+  .conn .k { color:var(--faint); margin-right:6px; }
+  .conn b { color:var(--fg); font-weight:500; }
+
+  main { max-width:1060px; margin:0 auto; padding:22px 20px 90px; }
+  body.wide main { max-width:1500px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:14px; }
   .row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
   .muted { color:var(--muted); font-size:12.5px; }
-  .score { font-size:52px; font-weight:700; letter-spacing:-1px; }
-  .delta.up { color:var(--good); } .delta.down { color:var(--bad); }
-  button.primary { background:var(--accent); color:#fff; border:none; border-radius:8px; padding:7px 16px; cursor:pointer; font-size:13px; }
-  button.primary:disabled { opacity:.5; cursor:default; }
-  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--line); border-radius:8px; padding:5px 12px; cursor:pointer; font-size:12.5px; }
-  .set { border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:10px; display:flex; align-items:center; justify-content:space-between; gap:12px; }
-  .tag { display:inline-block; font-size:11.5px; border-radius:999px; padding:1px 8px; background:#eef2fb; color:var(--accent); margin-left:6px; }
-  .tag.off { background:#f2f2f5; color:var(--muted); }
-  ol.bad { margin:8px 0 0; padding-left:22px; }
-  ol.bad li { margin-bottom:6px; }
-  pre { background:#f6f6f9; border:1px solid var(--line); border-radius:8px; padding:12px; overflow:auto; white-space:pre-wrap; word-break:break-word; font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .cell { border-top:1px solid var(--line); padding:9px 0; cursor:pointer; }
-  .cell:hover { background:#fbfbfd; }
-  .crumb { margin-bottom:12px; font-size:12.5px; color:var(--muted); }
-  .crumb a { color:var(--accent); text-decoration:none; cursor:pointer; }
-  .entry { padding:9px 4px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:10px; }
-  .entry.click { cursor:pointer; } .entry.click:hover { background:#fbfbfd; }
-  .entry .count { color:var(--muted); font-size:12px; }
-  h2 { font-size:17px; margin:0 0 6px; }
-  h3 { font-size:14px; margin:14px 0 6px; }
-  .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; vertical-align:-2px; margin-right:6px; }
-  @keyframes spin { to { transform:rotate(360deg); } }
+  .faint { color:var(--faint); font-size:12px; }
   .error { color:var(--bad); }
+  h2 { font-size:18px; margin:0 0 4px; font-weight:600; }
+  h3 { font-size:14.5px; margin:0 0 8px; font-weight:600; }
+  pre { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px; overflow:auto; white-space:pre-wrap; word-break:break-word; font:var(--mono); margin:6px 0 0; }
   ul.plain { margin:6px 0 0; padding-left:20px; }
+  input.text, textarea.text, select.text { width:100%; font:inherit; padding:6px 9px; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--fg); }
+  textarea.mono { font:var(--mono); }
+  details > summary { cursor:pointer; }
+
+  button.primary { background:var(--ink); color:#fff; border:none; border-radius:8px; padding:7px 16px; cursor:pointer; font-size:13px; }
+  button.primary:disabled { opacity:.4; cursor:default; }
+  button.ghost { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:4px 11px; cursor:pointer; font-size:12.5px; }
+  button.ghost:hover { border-color:var(--mint-line); }
+  button.ghost.on { background:var(--mint); border-color:var(--mint-line); }
+  .link { color:var(--accent); cursor:pointer; text-decoration:none; }
+  .link:hover { text-decoration:underline; }
+  .calllink { color:var(--accent); cursor:pointer; font-size:12.5px; white-space:nowrap; }
+  .calllink:hover { text-decoration:underline; }
+
+  .chip { display:inline-block; font-size:11.5px; border-radius:999px; padding:1px 9px; background:var(--stone); color:var(--fg); white-space:nowrap; }
+  .chip.k-write { background:var(--mint); }
+  .chip.k-organize { background:var(--lilac); }
+  .chip.k-summary { background:var(--stone); }
+  .chip.off { color:var(--muted); }
+  .chip.warn { background:var(--rose); color:var(--rose-fg); }
+  .v { display:inline-block; font-size:12px; border-radius:6px; padding:1px 8px; white-space:nowrap; border:1px solid transparent; }
+  .v-keep { background:var(--mint); }
+  .v-drop { background:var(--rose); color:#6e3a34; }
+  .v-merge { background:var(--stone); }
+  .v-rewrite { background:var(--lilac); }
+  .v-unsure { background:#fff; border:1px dashed var(--faint); color:var(--muted); }
+  .judge-no { font-size:11px; color:var(--rose-fg); display:block; }
+
+  .spinner { display:inline-block; width:13px; height:13px; border:2px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; vertical-align:-2px; margin-right:6px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .crumb { margin-bottom:12px; font-size:13px; color:var(--muted); }
+  .crumb a { color:var(--accent); cursor:pointer; text-decoration:none; }
+
+  /* 实验记录 */
+  .filters { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .filters select { width:auto; max-width:320px; padding:3px 8px; font-size:12.5px; }
+  .day { font-size:12.5px; font-weight:600; color:var(--muted); margin:16px 4px 4px; }
+  .day:first-child { margin-top:0; }
+  .runrow { display:grid; grid-template-columns:24px 52px minmax(0,1fr) 150px; gap:10px; align-items:start; padding:10px 8px; border-top:1px solid var(--line); cursor:pointer; border-radius:6px; }
+  .runrow:hover { background:var(--soft); }
+  .runrow.picked { background:var(--mint); }
+  .runrow .time { font-variant-numeric:tabular-nums; font-weight:600; padding-top:1px; }
+  .runrow .title { font-weight:600; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .runrow .num { text-align:right; font-size:13px; }
+  .runrow .num b { font-size:17px; font-weight:600; }
+  .approx { font-size:11px; color:var(--faint); font-weight:400; margin-left:2px; }
+  .pickbar { position:fixed; left:0; right:0; bottom:0; background:var(--card); border-top:1px solid var(--line); padding:10px 18px; display:flex; gap:12px; align-items:center; justify-content:center; z-index:4; box-shadow:0 -4px 14px rgba(60,50,30,.05); }
+
+  /* 一次实验 */
+  .facts { display:grid; grid-template-columns:84px minmax(0,1fr); gap:5px 14px; margin-top:12px; }
+  .facts dt { color:var(--muted); font-size:13px; }
+  .facts dd { margin:0; }
+  .notsaved { color:var(--muted); background:var(--soft); border-radius:6px; padding:2px 8px; display:inline-block; font-size:12.5px; }
+  .siblings { margin-top:12px; padding-top:10px; border-top:1px dashed var(--line); }
+  .siblings .sib { display:flex; gap:10px; align-items:center; padding:3px 0; font-size:13px; }
+  .group { margin-top:4px; }
+  .ghead { display:flex; justify-content:space-between; align-items:baseline; gap:12px; font-size:12.5px; color:var(--muted); font-weight:600; margin:16px 0 4px; padding-top:10px; border-top:1px dashed var(--line); }
+  .ghead:first-child { margin-top:4px; border-top:none; padding-top:0; }
+  .kcard { padding:8px 0; border-top:1px solid var(--line); }
+  .kcard:first-child { border-top:none; }
+  .kcard .meta { color:var(--muted); font-size:12px; }
+  .source { white-space:pre-wrap; border-left:2px solid var(--mint-line); padding-left:8px; margin:4px 0; color:var(--muted); font-size:12.5px; }
+  .seg { padding:10px 0; border-top:1px solid var(--line); }
+  .seg:first-child { border-top:none; }
+  .callrow { display:grid; grid-template-columns:56px minmax(0,1fr) auto; gap:10px; padding:7px 8px; border-top:1px solid var(--line); cursor:pointer; border-radius:6px; font-size:13px; }
+  .callrow:hover { background:var(--soft); }
+  .callrow.on { background:var(--mint); }
+
+  /* C2 整理：结论表 */
+  table.vt { border-collapse:collapse; width:100%; font-size:13px; }
+  table.vt th { text-align:left; font-weight:500; color:var(--muted); font-size:12px; padding:6px 6px; border-bottom:1px solid var(--line); vertical-align:bottom; }
+  table.vt td { padding:7px 6px; border-top:1px solid var(--line); vertical-align:top; }
+  table.vt td.num { text-align:center; font-variant-numeric:tabular-nums; }
+  tr.vrow { cursor:pointer; }
+  tr.vrow:hover td { background:var(--soft); }
+  tr.vrow.open td { background:var(--mint); }
+  tr.vdetail td { background:var(--soft); padding:4px 12px 12px; }
+  .vtext { max-width:430px; }
+  .vgrid th.runh { writing-mode:horizontal-tb; white-space:nowrap; }
+
+  /* 并排看 */
+  .cmp { display:grid; grid-template-columns:repeat(var(--n), minmax(0,1fr)); gap:12px; }
+  .cmp > .col { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px; min-width:0; }
+  .bucket { font-size:12.5px; color:var(--muted); font-weight:600; margin:14px 2px 6px; padding-top:8px; border-top:1px dashed var(--line); }
+  .stat { display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; }
+  .stat div b { font-size:17px; font-weight:600; }
+
+  /* 跑一次新的 / 题集 / wiki */
+  .entry { padding:8px 6px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:10px; }
+  .entry.click { cursor:pointer; border-radius:6px; } .entry.click:hover { background:var(--soft); }
+  .entry .count { color:var(--muted); font-size:12px; white-space:nowrap; }
+  .form h3 { margin-top:18px; padding-top:12px; border-top:1px dashed var(--line); }
+  .form h3:first-of-type { border-top:none; padding-top:0; }
+  .field { margin-top:9px; }
+  .field > b { display:block; font-weight:500; margin-bottom:3px; }
+  .two { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; }
+  .set { border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:10px; display:flex; align-items:center; justify-content:space-between; gap:12px; background:var(--card); }
+  .score { font-size:48px; font-weight:600; letter-spacing:-1px; }
+  .delta.up { color:var(--accent); } .delta.down { color:var(--bad); }
+  ol.bad { margin:8px 0 0; padding-left:22px; } ol.bad li { margin-bottom:6px; }
+  .cell { border-top:1px solid var(--line); padding:9px 0; }
+  .cell.click { cursor:pointer; } .cell.click:hover { background:var(--soft); }
+
+  /* 一次调用：右侧抽屉 */
+  #scrim { position:fixed; inset:0; background:rgba(50,42,30,.18); z-index:9; }
+  #drawer { position:fixed; top:0; right:0; bottom:0; width:min(1000px, 66vw); background:var(--card); border-left:1px solid var(--line); box-shadow:-10px 0 30px rgba(60,50,30,.08); z-index:10; display:flex; flex-direction:column; }
+  #drawer .dhead { padding:14px 18px 10px; border-bottom:1px solid var(--line); }
+  #drawer .dtabs { display:flex; gap:4px; padding:8px 18px; border-bottom:1px solid var(--line); align-items:center; }
+  #drawer .dtabs button { border:1px solid transparent; background:transparent; border-radius:8px; padding:4px 12px; cursor:pointer; font-size:13px; color:var(--fg); }
+  #drawer .dtabs button.on { background:var(--mint); border-color:var(--mint-line); }
+  #drawer .dtabs .n { color:var(--muted); font-size:11.5px; margin-left:4px; }
+  #drawer .dbody { flex:1; overflow:auto; padding:12px 18px 24px; }
+  #drawer .dbody pre { margin:0; min-height:100%; }
 </style>
 </head>
 <body>
 <header>
-  <h1>memoryd</h1>
-  <nav>
-    <button id="tab-bench" class="on" data-tab="bench">测试台</button>
-    <button id="tab-wiki" data-tab="wiki">wiki</button>
-    <button id="tab-lab" data-tab="lab">实验台</button>
-    <button id="tab-review" data-tab="review">结果对照</button>
-  </nav>
-  <span class="muted" id="status"></span>
+  <div class="bar">
+    <h1>记忆实验</h1>
+    <nav>
+      <button id="tab-runs" data-tab="runs">实验记录</button>
+      <button id="tab-new" data-tab="new">跑一次新的</button>
+    </nav>
+    <span class="muted" id="status"></span>
+    <span class="spacer"></span>
+    <nav class="minor">
+      <button id="tab-bench" data-tab="bench">虚构题集</button>
+      <button id="tab-wiki" data-tab="wiki">wiki</button>
+    </nav>
+  </div>
+  <div class="conn" id="conn"><span class="faint">读连接…</span></div>
 </header>
 <main>
-  <section id="page-bench"></section>
+  <section id="page-runs"></section>
+  <section id="page-new" hidden></section>
   <section id="page-wiki" hidden></section>
-  <section id="page-lab" hidden></section>
-  <section id="page-review" hidden></section>
+  <section id="page-bench" hidden></section>
 </main>
+<div id="scrim" hidden></div>
+<aside id="drawer" hidden></aside>
 <script src="/app.js"></script>
 </body>
 </html>

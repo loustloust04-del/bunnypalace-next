@@ -294,6 +294,25 @@ test("loadLaPhase / saveLaPhase 往返；缺文件、坏 JSON、坏条目都当�
   expect(Object.keys(loadLaPhase(path))).toEqual(["good"])
 })
 
+test("abort（这一轮没开始就没了）：working / waiting → idle，不经过 done；之后 send 照常开新一轮", () => {
+  const d = makeDriver()
+  const working = d.fire("mp-cc", { kind: "send" }, 100)
+  const aborted = d.fire("mp-cc", { kind: "abort" }, 110)
+  expect(aborted.phase).toBe("idle")
+  expect(aborted.run_id).toBe(working.run_id)
+  expect(aborted.updated_unix).toBe(110)
+
+  d.fire("mp-cc", { kind: "send" }, 200)
+  d.fire("mp-cc", { kind: "ask_pre", detail: "选哪个" }, 210)
+  const fromWaiting = d.fire("mp-cc", { kind: "abort" }, 220)
+  expect(fromWaiting.phase).toBe("idle")
+  expect(fromWaiting.detail).toBeUndefined()
+
+  const next = d.fire("mp-cc", { kind: "send" }, 300)
+  expect(next.phase).toBe("working")
+  expect(next.run_id).not.toBe(working.run_id)
+})
+
 test("seen（终端 attach）：done → idle，保留本轮 run_id；别的 phase 不动", () => {
   const d = makeDriver()
   d.fire("mp-cc", { kind: "send" }, 100)

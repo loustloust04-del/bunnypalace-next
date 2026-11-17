@@ -24,7 +24,7 @@ struct ChatMetrics {
     var sendFrame: CGFloat
 
     // MARK: 右栏
-    /// 记忆卡正文行数：iOS 4，mac 3
+    /// 记忆条目正文行数：iOS 4，mac 3
     var memoryCardLines: Int
     /// 文件库头部按钮字号：iOS 12，mac 11；头部内距：iOS 16·10，mac 12·8
     var fileLibHeaderFontSize: CGFloat

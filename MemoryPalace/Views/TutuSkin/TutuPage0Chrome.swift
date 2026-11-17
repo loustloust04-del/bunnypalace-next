@@ -175,7 +175,7 @@ private struct TutuPage0InlineOverflow: Layout {
     }
 }
 
-enum TutuPage0RowIcon { case code, chat, cap }
+enum TutuPage0RowIcon { case code, chat, cap, main }
 /// The original Chrome DOM resolves to PingFang SC / Menlo, not SF Pro.
 /// Fixed sizes preserve CSS fractional points without Dynamic Type rounding.
 
@@ -292,6 +292,17 @@ struct TutuPage0Icon: View {
                 p.addCurve(to: CGPoint(x: 17.5, y: 14.8), control1: CGPoint(x: 13.5, y: 17.5), control2: CGPoint(x: 15.8, y: 16.6))
                 line(17.5, 10.2); move(20, 8.6); line(20, 14)
                 tint = glass ? TutuPage0Appearance.glassInk.opacity(0.55) : Color(red: 169 / 255, green: 160 / 255, blue: 151 / 255)
+                width = 1.4
+                roundedCaps = false
+            case .main:
+                // 四角星 ✦：main session
+                move(11, 1.5)
+                p.addQuadCurve(to: CGPoint(x: 20.5, y: 11), control: CGPoint(x: 12.4, y: 9.6))
+                p.addQuadCurve(to: CGPoint(x: 11, y: 20.5), control: CGPoint(x: 12.4, y: 12.4))
+                p.addQuadCurve(to: CGPoint(x: 1.5, y: 11), control: CGPoint(x: 9.6, y: 12.4))
+                p.addQuadCurve(to: CGPoint(x: 11, y: 1.5), control: CGPoint(x: 9.6, y: 9.6))
+                p.closeSubpath()
+                tint = glass ? TutuPage0Appearance.glassInk.opacity(0.8) : Color(red: 150 / 255, green: 140 / 255, blue: 130 / 255)
                 width = 1.4
                 roundedCaps = false
             }

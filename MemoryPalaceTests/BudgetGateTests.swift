@@ -239,12 +239,14 @@ final class BudgetGateTests: XCTestCase {
     }
 
     @MainActor
-    private func waitForTurnToFinish(_ viewModel: ConversationViewModel, timeout: TimeInterval = 8) async {
+    /// 等到这一轮结束。上限给得宽：这批测试在合并闸里跑，机器负载 70–170 时冷启动的第一条实测要 5–9 秒（平时 0.3 秒）
+    private func waitForTurnToFinish(_ viewModel: ConversationViewModel, timeout: TimeInterval = 30) async {
         let deadline = Date().addingTimeInterval(timeout)
         while viewModel.assistantTurnInFlight, Date() < deadline {
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
         XCTAssertFalse(viewModel.assistantTurnInFlight, "tool loop did not finish before timeout")
+        XCTAssertNil(viewModel.debugPathDrift, "一轮结束后，手改出来的显示路径应该和按树重算的一样")
     }
 
     private func assistantNode(in fixture: ToolLoopFixture) throws -> MessageNode {
@@ -1130,7 +1132,9 @@ extension BudgetGateTests {
         let (server, _) = try await runOneToolRound(name: SelfMemoryTool.rememberName,
                                                     arguments: #"{"name":"x","description":"x","body":"x"}"#)
         guard server.requestCount > 1 else { return XCTFail("没有第二轮") }
-        XCTAssertEqual(try toolMessage(server).result, ConversationViewModel.toolUnavailableMessage(name: SelfMemoryTool.rememberName))
+        // 记忆读侧 ⑤-1（968a9c53e）起：记忆关着时五个写工具被拒，说的是「关了记忆参与」而不是通用的「抽屉里关着」
+        XCTAssertEqual(try toolMessage(server).result,
+                       ConversationViewModel.toolUnavailableMessage(name: SelfMemoryTool.rememberName, memoryParticipationOff: true))
         let firstTools = (try requestJSON(server, at: 0)["tools"] as? [[String: Any]] ?? [])
             .compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
         XCTAssertFalse(firstTools.contains(SelfMemoryTool.rememberName))
@@ -1357,7 +1361,7 @@ extension BudgetGateTests {
     @MainActor
     func testThinkingOnlyEOFStoresThinkingWithError() async throws {
         try await runThinkingOnly([Self.thinkingOnlyLine]) { node in
-            XCTAssertTrue(node.content.hasPrefix("⚠️ "), node.content)
+            XCTAssertTrue(node.content.hasPrefix(ChatSystemMessage.errorMarker), node.content)
             XCTAssertEqual(node.segments, [.text(node.content), .thinking(text: "想到一半", signature: nil)])
         }
     }
@@ -1366,7 +1370,7 @@ extension BudgetGateTests {
     func testThinkingThenStreamErrorStoresThinkingWithError() async throws {
         let error = "data: " + Self.jsonLine(["error": ["message": "上游炸了"]])
         try await runThinkingOnly([Self.thinkingOnlyLine, error, "data: [DONE]"]) { node in
-            XCTAssertTrue(node.content.hasPrefix("⚠️ "), node.content)
+            XCTAssertTrue(node.content.hasPrefix(ChatSystemMessage.errorMarker), node.content)
             XCTAssertEqual(node.segments, [.text(node.content), .thinking(text: "想到一半", signature: nil)])
         }
     }
@@ -1377,6 +1381,110 @@ extension BudgetGateTests {
             XCTAssertEqual(node.content, "（已停止）")
             XCTAssertEqual(node.segments, [.text("（已停止）"), .thinking(text: "想到一半", signature: nil)])
         }
+    }
+
+    // MARK: - 流式缓冲和节点正文的先后（docs/plan-重构.md §3.7 第 2 步：搬「一轮回复」之前给现在的行为拍照）
+
+    private static func contentLine(_ text: String) -> String {
+        "data: " + jsonLine(["choices": [["delta": ["content": text]]]])
+    }
+
+    /// 流式中：字只进流式缓冲，节点正文不动；停止：已生成的部分写进节点，不加「（已停止）」，缓冲清空
+    @MainActor
+    func testStopKeepsStreamedTextOnNode() async throws {
+        let budget = isolateBudget()
+        defer { restoreBudget(budget) }
+        let server = try ToolLoopHTTPServer { _, _ in
+            Data(([Self.contentLine("写到"), Self.contentLine("一半")].joined(separator: "\n\n") + "\n\n").utf8)
+        }
+        server.holdOpen = true
+        try server.start()
+        defer { server.stop() }
+        let fixture = try makeToolLoopFixture(baseURL: server.baseURL)
+        defer { cleanUp(fixture) }
+        let viewModel = fixture.viewModel
+
+        XCTAssertTrue(viewModel.sendMessage("你好", model: fixture.model, profile: fixture.profile, preset: fixture.preset,
+                                            providerManager: fixture.providerManager, context: fixture.context))
+        let deadline = Date().addingTimeInterval(5)
+        while viewModel.streamingText != "写到一半", Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(viewModel.streamingText, "写到一半", "字到了流式缓冲")
+        let placeholder = try XCTUnwrap(viewModel.currentPath.last)
+        XCTAssertEqual(placeholder.role, "assistant", "助手占位已经在路径末尾")
+        XCTAssertEqual(placeholder.content, "", "流式中不逐字写节点")
+        XCTAssertTrue(viewModel.isNodeStreaming(nodeId: placeholder.id, conversationId: fixture.conversationId))
+        XCTAssertNil(viewModel.debugPathDrift, "流式中：手改出来的显示路径应该和按树重算的一样")
+        viewModel.rebuildPath()   // 流式中切分支 / 恢复删除都会触发重算
+        XCTAssertEqual(viewModel.currentPath.last?.id, placeholder.id, "重算不把正在生成的那条弄没")
+
+        viewModel.cancelAssistantTurn(context: fixture.context)
+        await waitForTurnToFinish(viewModel)
+        XCTAssertEqual(placeholder.content, "写到一半", "停止保留已生成的部分，不加「（已停止）」")
+        XCTAssertEqual(viewModel.streamingText, "", "缓冲清空")
+        XCTAssertFalse(viewModel.isNodeStreaming(nodeId: placeholder.id, conversationId: fixture.conversationId))
+        XCTAssertEqual(viewModel.currentPath.last?.id, placeholder.id, "停止不撤这条消息")
+    }
+
+    /// 正常完成：整段正文写进节点，缓冲清空，路径是「用户 → 助手」
+    @MainActor
+    func testCompletedStreamMovesBufferToNode() async throws {
+        let budget = isolateBudget()
+        defer { restoreBudget(budget) }
+        let server = try ToolLoopHTTPServer { _, _ in
+            Data(([Self.contentLine("前半"), Self.contentLine("后半"), "data: [DONE]"].joined(separator: "\n\n") + "\n\n").utf8)
+        }
+        try server.start()
+        defer { server.stop() }
+        let fixture = try makeToolLoopFixture(baseURL: server.baseURL)
+        defer { cleanUp(fixture) }
+        let viewModel = fixture.viewModel
+
+        XCTAssertTrue(viewModel.sendMessage("你好", model: fixture.model, profile: fixture.profile, preset: fixture.preset,
+                                            providerManager: fixture.providerManager, context: fixture.context))
+        await waitForTurnToFinish(viewModel)
+        XCTAssertEqual(viewModel.currentPath.suffix(2).map(\.role), ["user", "assistant"])
+        XCTAssertEqual(viewModel.currentPath.last?.content, "前半后半")
+        XCTAssertEqual(viewModel.streamingText, "", "缓冲清空")
+        XCTAssertEqual(try assistantNode(in: fixture).content, "前半后半", "存库的也是整段")
+    }
+
+    /// 软删：界面上马上拿掉，下一拍库里标成已删、对话条数跟着减；单条和批量是同一条路
+    @MainActor
+    func testSoftDeleteRemovesFromPathThenMarksTrashed() async throws {
+        let budget = isolateBudget()
+        defer { restoreBudget(budget) }
+        let server = try ToolLoopHTTPServer { _, _ in
+            Data(([Self.contentLine("回复"), "data: [DONE]"].joined(separator: "\n\n") + "\n\n").utf8)
+        }
+        try server.start()
+        defer { server.stop() }
+        let fixture = try makeToolLoopFixture(baseURL: server.baseURL)
+        defer { cleanUp(fixture) }
+        let viewModel = fixture.viewModel
+
+        XCTAssertTrue(viewModel.sendMessage("你好", model: fixture.model, profile: fixture.profile, preset: fixture.preset,
+                                            providerManager: fixture.providerManager, context: fixture.context))
+        await waitForTurnToFinish(viewModel)
+        let before = viewModel.currentPath
+        let reply = try XCTUnwrap(before.last)
+        let question = try XCTUnwrap(before.dropLast().last)
+
+        viewModel.softDelete(reply)
+        XCTAssertEqual(viewModel.currentPath.map(\.id), before.dropLast().map(\.id), "界面上马上拿掉")
+        XCTAssertFalse(reply.isTrashed, "库里的改动在下一拍")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(reply.isTrashed)
+        XCTAssertNotNil(reply.trashedAt)
+        XCTAssertEqual(viewModel.selectedConversation?.nodeCount, before.count - 1, "条数跟着减")
+        XCTAssertNil(viewModel.debugPathDrift, "软删后：手改出来的显示路径应该和按树重算的一样")
+
+        viewModel.softDelete(nodes: [question])
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(question.isTrashed)
+        XCTAssertEqual(viewModel.currentPath.map(\.id), before.dropLast(2).map(\.id))
+        XCTAssertNil(viewModel.debugPathDrift, "批量软删后也一样")
     }
 
     @MainActor

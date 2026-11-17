@@ -150,13 +150,10 @@ public struct MemoryBenchRecallReader: MemoryBenchWriter {
 
     /// 工具合同摘要（app 注入 `ToolSchemaRenderer` / `RecallTool` 的产物；包内不认识提示词）
     private let contract: @Sendable () -> String?
-    /// 内置快照文件（app = `Bundle.main.url(MemoryBench/…)`，包测试 = `Bundle.module.url(测试夹具目录/…)`）
-    private let floorURL: URL
 
-    public init(profileId: String? = nil, contract: @escaping @Sendable () -> String?, floorURL: URL) {
+    public init(profileId: String? = nil, contract: @escaping @Sendable () -> String?) {
         self.profileId = profileId
         self.contract = contract
-        self.floorURL = floorURL
     }
 
     public func builtInRecipes(defaults: UserDefaults) -> [MemoryBenchRecipe] {
@@ -181,7 +178,6 @@ public struct MemoryBenchRecallReader: MemoryBenchWriter {
             items.append(.init(index: items.count, text: text, fields: fields))
         }
         var previous: MemoryBenchRecallOutput.Y?
-        let floor = floor(for: testCase)
         for (offset, turn) in result.turns.enumerated() {
             let n = offset + 1
             let labels = testCase.labels.filter { $0.from == "turn:\(n)" }
@@ -215,7 +211,7 @@ public struct MemoryBenchRecallReader: MemoryBenchWriter {
                     extra[start.lexicographicallyPrecedes(end) ? "paginationRepeat" : "paginationGap"] = "1"
                 }
                 let ranges = read.returnedRange ?? []
-                var sources = ranges.flatMap { Self.sources($0, version: read.sourceVersion, layer: read.layer, floor: floor) }
+                var sources = ranges.map { Self.source($0, version: read.sourceVersion, layer: read.layer) }
                 if !ranges.isEmpty, read.layer == "wiki索引" { sources = ["layer:wiki索引"] }
                 if !ranges.isEmpty, read.layer == "L1" {
                     let originals = (read.targets ?? []).filter { $0.layer == "original" }
@@ -250,27 +246,6 @@ public struct MemoryBenchRecallReader: MemoryBenchWriter {
         let checks = [("privacyLeak", result.guardrail.privacyLeak), ("l2Impersonation", result.guardrail.l2Impersonation), ("originalOverrun", result.guardrail.originalOverrun)]
             .map { MemoryBenchCheck(name: $0.0, passed: !$0.1, hard: true, detail: nil) }
         return .init(items: items, checks: checks)
-    }
-
-    private func floor(for testCase: MemoryBenchCase) -> MemoryBenchRecallFloor? {
-        guard let input = try? testCase.input.decode(MemoryBenchRecallInput.self) else { return nil }
-        return try? MemoryBenchRecallFloor.load(contentsOf: floorURL, variant: input.snapshot).0
-    }
-
-    static func sources(_ target: RecallTool.Target, version: String?, layer: String,
-                        floor: MemoryBenchRecallFloor?) -> [String] {
-        guard let cid = target.conversationId, let from = target.fromNodeId,
-              let window = floor?.windows.first(where: { $0.id == cid }) else {
-            return [source(target, version: version, layer: layer)]
-        }
-        let nodes = floor?.branch(window).filter { !$0.hidden && !$0.deleted } ?? []
-        guard let low = nodes.firstIndex(where: { $0.id == from }) else {
-            return [source(target, version: version, layer: layer)]
-        }
-        let high = target.lastNodeId.flatMap { last in nodes.firstIndex { $0.id == last }.map { $0 + 1 } }
-            ?? target.toNodeIdExclusive.flatMap { to in nodes.firstIndex { $0.id == to } } ?? low + 1
-        guard low < high else { return [] }
-        return nodes[low..<high].map { key(node: $0.id, conversationId: cid) }
     }
 
     public static func key(page: String, version: String) -> String { "page:\(page)|\(version)" }

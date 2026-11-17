@@ -21,9 +21,11 @@ extension TutuChatMessageSnapshot {
             let body = segments.compactMap { if case .text(let value) = $0 { return value }; return nil }.joined(separator: "\n\n")
             raw = body.isEmpty ? ChatSystemMessage.split(node.content, legacy: node.usesLegacyErrorMarker).body : ChatSystemMessage.split(body, legacy: node.usesLegacyErrorMarker).body
         } else { raw = user ? node.content : ChatSystemMessage.split(node.content, legacy: node.usesLegacyErrorMarker).body }
-        let text = MessageDisplayText.make(raw, role: node.role, scripts: scripts,
-                                           userName: userName, charName: assistantName,
-                                           legacyErrorMarker: node.usesLegacyErrorMarker).body
+        let shown = MessageDisplayText.make(raw, role: node.role, scripts: scripts,
+                                            userName: userName, charName: assistantName,
+                                            legacyErrorMarker: node.usesLegacyErrorMarker).body
+        // AI 发的表情包：图图皮肤先显示成〖表情包：名字〗（毛毡字），不露编号
+        let text = user ? shown : MemeIntentWriter.textForm(shown, detail: false) { MemeStore.fetch($0, in: node.modelContext) }
         let complex = segments?.contains { segment in
             switch segment {
             case .text, .image, .imageRef, .attachment, .audioRef: return false

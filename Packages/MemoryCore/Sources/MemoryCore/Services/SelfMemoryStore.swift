@@ -2,7 +2,7 @@ import Foundation
 
 /// AI 自己的记忆（记忆修复第二刀 B，plan-memory-fix-2）：楼层记忆树 memory/self/<slug>.md，
 /// 格式照 CC memory（顶层 name / description + 两格缩进的 metadata），旁边维护 INDEX.md。
-/// 写入只走 remember / edit_memory / forget_memory 和设置里的编辑页；fs 写工具对 memory/ 一律拒绝。
+/// 写入走 remember / edit_memory / forget_memory、设置里的编辑页，或文件工具写 memory/self/（app 里的 `MemoryFolderWrite`，同一个 `save`）。
 public struct SelfMemory: Equatable, Identifiable {
     public var slug: String
     public var name: String

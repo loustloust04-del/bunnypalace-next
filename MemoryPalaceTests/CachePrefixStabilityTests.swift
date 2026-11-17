@@ -142,7 +142,7 @@ final class CachePrefixStabilityTests: XCTestCase {
     }
 
     func testPinnedExpiryAcrossFiveKeepsStableUTF8AndChangesOnlyReminder() throws {
-        let keys = ["mem_inject_keyword", "mem_inject_full", "mem_inject_vector", "mem_inject_graph", "mem_inject_catalog"]
+        let keys = ["mem_inject_vector", "mem_inject_graph", "mem_inject_catalog"]
         let saved = keys.map { ($0, UserDefaults.standard.object(forKey: $0)) }
         defer {
             for (key, value) in saved {
@@ -150,7 +150,7 @@ final class CachePrefixStabilityTests: XCTestCase {
                 else { UserDefaults.standard.removeObject(forKey: key) }
             }
         }
-        for key in keys { UserDefaults.standard.set(key == "mem_inject_full", forKey: key) }
+        for key in keys { UserDefaults.standard.set(false, forKey: key) }
         let profile = Profile(id: "xctest-prefix-expiry", name: "T", emoji: "", description: "", userName: "阿青", assistantName: "阿白")
         let content = String(repeating: "钉住的复诊安排", count: 8)
         let pinned = Memory(content: content, category: "fact", profileId: profile.id, isUserExplicit: true)

@@ -128,7 +128,9 @@ enum ReadingSignals {
 
         let pid = profile.id
         let desc = FetchDescriptor<Memory>(predicate: #Predicate { $0.profileId == pid })
-        let memories = (try? context.fetch(desc)) ?? []
+        // 钉住的照带；其余的只在开窗口页「每轮全带」勾着时带（读书这条路没有「聊到才带」）
+        let everyRound = MemoryOpenWindow.everyRound(profileId: pid)
+        let memories = ((try? context.fetch(desc)) ?? []).filter { everyRound || $0.isUserExplicit }
         if !memories.isEmpty {
             let injection = MemoryInjector.buildInjection(memories: memories, budget: 1_000)
             if !injection.isEmpty {

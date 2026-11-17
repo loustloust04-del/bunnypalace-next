@@ -108,6 +108,7 @@ struct MemoryTreeGroup: Identifiable, Equatable {
         "heartvoice": "心声", "cc": "CC 同步来的笔记", "self": "自己的记忆",
         "sessions": "上下文摘要", "windows": "窗口总结", "timeline": "时间轴",
         "wiki": "C 档案",
+        "cards": "C2 原子事实", "pending": "待续", "log": "日志", "heartbeat": "自己醒来",
     ]
     var title: String { Self.titles[folder] ?? folder }
 

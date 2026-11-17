@@ -9,6 +9,9 @@ options:
 packages:
   MemoryCore:
     path: Packages/MemoryCore
+  # 重构（11-11，docs/plan-重构.md）：对话页新包。TranscriptCore 双端共用，TranscriptUIKit 只有 iOS 有内容
+  TranscriptKit:
+    path: Packages/TranscriptKit
   sherpa-onnx:
     url: https://github.com/k2-fsa/sherpa-onnx
     exactVersion: "1.13.8"
@@ -88,6 +91,8 @@ targets:
           - "Info-macOS.plist"
           # 兔兔皮肤仅 iOS 私人包使用；不能被共享 sources 自动平铺进 macOS 包。
           - "Resources/TutuSkin"
+          # atrium 纸背景两张图只 iOS 用
+          - "Resources/Atrium"
           #if PERSONAL_APPS
           - "Views/TutuSkin/TutuChatCards.metal"
           - "Views/TutuSkin/TutuChatFelt.metal"
@@ -369,6 +374,10 @@ targets:
       - package: SwiftTerm
       - package: SwiftSoup
       - package: SwiftStreamingMarkdown   # P0.D 流式重写实验；ms0911 起 mac target 也挂（正文两端同一渲染器）
+      - package: TranscriptKit
+        product: TranscriptUIKit
+      - package: TranscriptKit
+        product: TranscriptCore
       - package: mlx-swift-lm   # 小芽本地大脑（模拟器里编进去但运行时绝不初始化，P0 实测一碰就崩）
         product: MLXLLM
       - package: mlx-swift-lm
@@ -564,6 +573,45 @@ targets:
         CODE_SIGN_STYLE: Automatic
         ENABLE_APP_SANDBOX: NO
 
+  # 花园 AI 操作手机的「手」（docs/plan-phone-operate.md P0）：上游 iCTRL 的界面测试包原样编，
+  # 无宿主（不设 AUT / 不依赖花园 target），装到手机上是独立进程，花园走本机端口调它。
+  # 只编 iCTRLUITests + iCTRLKit；上游主 app / 旧系统兼容补丁 / 预编译 CLI 不编不带。
+  PhoneHandsUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget:
+      iOS: "26.0"
+    sources:
+      - path: Packages/iCTRL/iCTRLUITests
+      - path: Packages/iCTRL/iCTRLKit
+      - path: Packages/iCTRL/SKILL.md
+        buildPhase: resources
+      - path: Packages/iCTRL/Scripts/ictrl_rpc.py
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(MP_BUNDLE_ID_BASE).phonehands
+        PRODUCT_NAME: PhoneHandsUITests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_OBJC_BRIDGING_HEADER: Packages/iCTRL/iCTRLUITests/XCTestPrivate-Bridging-Header.h
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "花园的手机操作助手需要本地网络来接收花园发来的指令。"
+        TEST_HOST: ""
+    postBuildScripts:
+      # 照搬上游：测试包不带 XCTest 框架，用手机上开发者镜像里的那份（不然脱离 Xcode 启动不了）
+      - name: "Strip XCTest frameworks from PhoneHands runner"
+        script: |
+          RUNNER_APP="${BUILT_PRODUCTS_DIR}/PhoneHandsUITests-Runner.app"
+          rm -rf "${RUNNER_APP}/Frameworks/XCTAutomationSupport.framework"
+          rm -rf "${RUNNER_APP}/Frameworks/XCTest.framework"
+          rm -rf "${RUNNER_APP}/Frameworks/XCTestCore.framework"
+          rm -rf "${RUNNER_APP}/Frameworks/XCTestSupport.framework"
+          rm -rf "${RUNNER_APP}/Frameworks/XCUIAutomation.framework"
+          rm -rf "${RUNNER_APP}/Frameworks/XCUnit.framework"
+          rm -rf "${RUNNER_APP}/Frameworks/Testing.framework"
+          rm -f  "${RUNNER_APP}/Frameworks/libXCTestSwiftSupport.dylib"
+          rmdir  "${RUNNER_APP}/Frameworks" 2>/dev/null || true
+
   # 真实 iOS 窗口截图：仅编译专用 XCTest，不混入 mac 测试与观察器。
   MemoryPalaceIOSTests:
     type: bundle.unit-test
@@ -682,6 +730,8 @@ schemes:
         MP_TEST_HOST: "1"
         MP_SPLASH: "0"
         MP_BUBBLE_SNAPSHOT_DIR: "/Users/susu/MemoryPalace-docs-media/docs/imessage-ref/ours/coexist-step2"
+        # 像素对拍（TranscriptParityTests）不一致时两张图写这里；用 TEST_RUNNER_ 前缀从命令行传会让模拟器上的宿主连不上
+        MP_PARITY_DIR: "/Users/susu/MemoryPalace-docs-media/docs/evidence/transcript-parity"
   StickerProbeUITests:
     build:
       targets:
@@ -690,3 +740,13 @@ schemes:
     test:
       targets:
         - StickerProbeUITests
+  # 手机操作助手（plan-phone-operate P0）。关掉测试录屏：上游踩过坑，常驻的测试不关会在手机上堆几十 G
+  PhoneHands:
+    build:
+      targets:
+        PhoneHandsUITests: [test]
+    test:
+      targets:
+        - PhoneHandsUITests
+      preferredScreenCaptureFormat: screenshots
+      captureScreenshotsAutomatically: false

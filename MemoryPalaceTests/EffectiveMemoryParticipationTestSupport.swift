@@ -3,7 +3,7 @@ import XCTest
 @testable import 记忆花园
 
 /// 测试造值：把原来的 `conversationMemoryEnabled / slotOn / choices` 三件套折成包里的 `EffectiveMemoryParticipation`
-/// （legacy / A2 勾 / 触发开关按当前 defaults 算；`master` 不给时也按 defaults，与实发同一口径）。
+/// （legacy / A2 勾 / 触发开关 / 每轮全带按当前 defaults 算；`master` 不给时也按 defaults，与实发同一口径）。
 extension EffectiveMemoryParticipation {
     static func testValue(profileId: String, master: Bool? = nil, window: Bool = true, slot: Bool = true,
                           choices: MemoryWindowChoices? = nil,
@@ -14,6 +14,7 @@ extension EffectiveMemoryParticipation {
             choices: choices?.participationChoices,
             legacy: legacy.participationChoices,
             a2Checked: MemoryOpenWindow.isChecked(.a2, profileId: profileId, defaults: defaults),
-            archiveTrigger: RecallTuningStore.load(profileId: profileId, defaults: defaults).archiveTriggerEnabled))
+            archiveTrigger: RecallTuningStore.load(profileId: profileId, defaults: defaults).archiveTriggerEnabled,
+            everyRound: MemoryOpenWindow.everyRound(profileId: profileId, defaults: defaults)))
     }
 }

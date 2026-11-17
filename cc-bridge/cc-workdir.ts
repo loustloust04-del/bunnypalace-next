@@ -7,6 +7,8 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 export function ccWorkdir(env: Record<string, string | undefined> = process.env, home: string = homedir()): string {
+  // 文件夹模式（folder-mode.ts）：工作目录就是那个文件夹，写法和 parseFolderMode 归一化后的一致
+  if (env.MP_HUB_MODE === "folder" && env.MP_HUB_FOLDER) return env.MP_HUB_FOLDER.length > 1 ? env.MP_HUB_FOLDER.replace(/\/+$/, "") : env.MP_HUB_FOLDER
   if (env.MP_CC_WORKDIR) return env.MP_CC_WORKDIR
   const legacy = join(home, "Desktop", "cc-rp")
   if (statSync(legacy, { throwIfNoEntry: false })?.isDirectory()) return legacy

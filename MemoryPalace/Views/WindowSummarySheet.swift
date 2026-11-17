@@ -33,7 +33,7 @@ struct WindowSummaryAnchor: Equatable {
     var title: String
 }
 
-/// 一个窗口的窗口总结（只读）：上面 A3 一段（还没有 =「还没压成窗口总结」），下面 A2 一段一段从早到晚，
+/// 一个窗口的窗口总结：上面 A3 一段（还没有 =「还没压成窗口总结」），下面 A2 一段一段从早到晚，
 /// 最下面灰字一组老收尾段；不显示待续（Q2：待续只在时间轴）。
 /// 窗口总结格点行、时间轴条目「看窗口总结」、对话 ⋯「窗口总结」共用；只凭对话 id 打开，读盘在后台。
 /// 不带 NavigationStack：弹层用 `WindowSummarySheet` 包一层，时间轴条目弹层里直接推进来
@@ -51,6 +51,13 @@ struct WindowSummaryPage: View {
     @Environment(\.settingsMetrics) private var m
     @State private var doc: WindowSummaryReader.Doc? = nil
     @State private var loaded = false
+    @State private var rewriteAsk: SummaryRewriteAsk? = nil
+
+    private func ask(_ target: SummaryRewrite.Target, segment: SessionSegment? = nil) {
+        rewriteAsk = SummaryRewriteAsk(target: target, conversationId: conversationId, windowTitle: windowTitle,
+                                       segmentTitle: segment?.title ?? "",
+                                       segmentCount: doc?.a2.filter(SummaryRewrite.rewritable).count ?? 0)
+    }
 
     private var anchoredIndex: Int? {
         guard let anchor, let doc else { return nil }
@@ -73,6 +80,7 @@ struct WindowSummaryPage: View {
 
     private var content: some View {
         List {
+            SummaryRewriteStatusSection(conversationId: conversationId)
             if anchor != nil, loaded, anchoredIndex == nil {
                 Text("时间轴里那一段在这个窗口里找不到了（可能切了分支或删了）")
                     .font(.system(size: m.secondarySize))
@@ -90,12 +98,22 @@ struct WindowSummaryPage: View {
                             .foregroundColor(Theme.textMuted)
                             .panelRowBackground()
                     }
+                    if !isGone {
+                        SummaryRewriteActions(conversationId: conversationId, profileId: profileId, rewriteLabel: "Rewrite",
+                                              onRewrite: { ask(.a3) }, writer: .window)
+                            .panelRowBackground()
+                    }
                 } header: {
                     Text("「\(windowTitle)」· A3 \(doc.a3 == nil ? "还没有" : "一段") · A2 \(doc.a2.count) 段")
                         .textCase(nil)
                 }
                 if !doc.a2.isEmpty {
                     Section {
+                        if !isGone, doc.a2.contains(where: SummaryRewrite.rewritable) {
+                            SummaryRewriteActions(conversationId: conversationId, profileId: profileId, rewriteLabel: "Rewrite all",
+                                                  onRewrite: { ask(.window) }, writer: .context)
+                                .panelRowBackground()
+                        }
                         ForEach(Array(doc.a2.enumerated()), id: \.offset) { i, seg in
                             VStack(alignment: .leading, spacing: 0) {
                                 if i == anchoredIndex {
@@ -104,6 +122,10 @@ struct WindowSummaryPage: View {
                                         .foregroundColor(Theme.branchIndicator)
                                 }
                                 WindowSegmentCard(segment: seg)
+                                if !isGone, SummaryRewrite.rewritable(seg), let id = seg.lastNodeId {
+                                    SummaryRewriteActions(conversationId: conversationId, profileId: profileId, rewriteLabel: "Rewrite",
+                                                          onRewrite: { ask(.segment(lastNodeId: id), segment: seg) })
+                                }
                             }
                             .id("a2-\(i)")
                             .panelRowBackground()
@@ -158,7 +180,8 @@ struct WindowSummaryPage: View {
         }
         .toolPageBackground()
         .panelSheetTitle("窗口总结")
-        .task(id: conversationId) {
+        .modifier(SummaryRewriteConfirm(ask: $rewriteAsk, profileId: profileId))
+        .task(id: "\(conversationId)|\(SummaryRewriteStatus.shared.revision)") {
             let cid = conversationId, pid = profileId
             doc = await Task.detached(priority: .userInitiated) {
                 WindowSummaryReader.load(conversationId: cid, profileId: pid)
@@ -264,6 +287,7 @@ struct ContextSummarySheet: View {
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @State private var doc: WindowSummaryReader.Doc? = nil
     @State private var loaded = false
+    @State private var rewriteAsk: SummaryRewriteAsk? = nil
 
     private var segments: [SessionSegment] { doc?.a2 ?? [] }
 
@@ -280,11 +304,20 @@ struct ContextSummarySheet: View {
     var body: some View {
         NavigationStack {
             List {
+                SummaryRewriteStatusSection(conversationId: conversationId)
                 if !segments.isEmpty {
                     Section {
                         ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
-                            WindowSegmentCard(segment: seg)
-                                .panelRowBackground()
+                            VStack(alignment: .leading, spacing: 0) {
+                                WindowSegmentCard(segment: seg)
+                                if SummaryRewrite.rewritable(seg), let id = seg.lastNodeId {
+                                    SummaryRewriteActions(conversationId: conversationId, profileId: profileId, rewriteLabel: "Rewrite") {
+                                        rewriteAsk = SummaryRewriteAsk(target: .segment(lastNodeId: id), conversationId: conversationId,
+                                                                       windowTitle: windowTitle, segmentTitle: seg.title)
+                                    }
+                                }
+                            }
+                            .panelRowBackground()
                         }
                     } header: {
                         Text("「\(windowTitle)」· \(segments.count) 段")
@@ -303,6 +336,7 @@ struct ContextSummarySheet: View {
             }
             .toolPageBackground()
             .panelSheetTitle("上下文摘要")
+            .modifier(SummaryRewriteConfirm(ask: $rewriteAsk, profileId: profileId))
             #if os(macOS)
             .frame(minWidth: 460, minHeight: 520)
             #endif
@@ -313,7 +347,7 @@ struct ContextSummarySheet: View {
                 }
             }
         }
-        .task(id: conversationId) {
+        .task(id: "\(conversationId)|\(SummaryRewriteStatus.shared.revision)") {
             let cid = conversationId, pid = profileId
             doc = await Task.detached(priority: .userInitiated) {
                 WindowSummaryReader.loadContext(conversationId: cid, profileId: pid)

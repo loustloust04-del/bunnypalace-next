@@ -2,6 +2,13 @@
 import SwiftUI
 import SwiftData
 
+/// 气泡模式头像下那一行，TA 不说话时显示什么（11-16：正在放的歌 / 置顶消息），点了做什么
+struct BubbleIdleLine {
+    let text: String
+    let icon: String
+    let action: () -> Void
+}
+
 struct BubbleChatIdentity<Avatar: View>: View {
     let name: String
     let viewModel: ConversationViewModel
@@ -12,6 +19,8 @@ struct BubbleChatIdentity<Avatar: View>: View {
     var zoomNamespace: Namespace.ID? = nil
     /// 对话所属那台 hub（阶段卡按它读）
     var hubId: String = CCBridgeWebSocketClient.primaryHubId
+    /// TA 说话时这一行是说话状态；不说话时让给它（nil = 不出这一行）
+    var idleLine: BubbleIdleLine? = nil
     @ViewBuilder let avatar: Avatar
     @State private var details: BubbleTurnDetails?
 
@@ -56,12 +65,21 @@ struct BubbleChatIdentity<Avatar: View>: View {
                     }
                     .accessibilityIdentifier("bubble-turn-status")
                     .accessibilityHint("查看本轮思考和工具过程")
+                } else if let idleLine {
+                    Button(action: idleLine.action) {
+                        Label(idleLine.text, systemImage: idleLine.icon)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.chat.textSecondary)
+                            .lineLimit(1)
+                    }
+                    .accessibilityIdentifier("bubble-idle-line")
                 }
             }
             .padding(.horizontal, 13)
-            .padding(.vertical, status == nil ? 6 : 8)
+            .padding(.vertical, status == nil && idleLine == nil ? 6 : 8)
             .glassEffect(.regular.tint(Color.white.opacity(0.15)), in: .capsule)
-            .frame(maxWidth: status == nil ? 170 : 260)
+            // 右边是 ⋯ › 两格宽的胶囊（11-16），两行时最宽 180，再宽就压到它
+            .frame(maxWidth: status == nil && idleLine == nil ? 170 : 180)
         }
         .buttonStyle(.plain)
         .sheet(item: $details) { BubbleTurnSheet(viewModel: viewModel, details: $0) }

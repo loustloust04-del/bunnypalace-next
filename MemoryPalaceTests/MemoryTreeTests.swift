@@ -122,7 +122,7 @@ final class MemoryTreeTests: XCTestCase {
         XCTAssertTrue(hits[0].path.hasPrefix("memory/"))
     }
 
-    // MARK: - fs 工具对 memory/ 的只读契约
+    // MARK: - `execute`（不经 `run` 的只读入口）对 memory/ 不写；写 memory/ = 写那种记忆，在 `MemoryFolderWriteTests`
 
     func testWriteToolsRejectMemoryPaths() {
         SummaryFileStore.save(makeSummary(), conversationId: convId, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid), conversationTitle: "t")

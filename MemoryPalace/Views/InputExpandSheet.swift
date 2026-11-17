@@ -74,10 +74,12 @@ struct InputExpandSheet: View {
 ///      独占编辑下组字期不可能有合法外部写，重放反而是回盖风险）
 /// 出方向：组字中间态不进 binding（含拼音的 marked 文本不出门，比主框更严——
 /// 候选确认 marked 消失的那次 didChange 才提交终值），非组字每键提交（=原 TextEditor 节奏，
-/// 保 triggerSend(fromBinding:) 读到最新值）。
-private struct ExpandInputTextView: UIViewRepresentable {
+/// 保 triggerSend(fromBinding:) 读到最新值）。整理台的 Edit 页也用它（打中文不回拼音）。
+struct ExpandInputTextView: UIViewRepresentable {
     @Binding var text: String
     let uiFont: UIFont
+    /// 条目详情页点开是先看，不弹键盘；新建态才出现即聚焦
+    var autoFocus = true
 
     func makeUIView(context: Context) -> UITextView {
         let tv = UITextView()
@@ -89,7 +91,7 @@ private struct ExpandInputTextView: UIViewRepresentable {
         context.coordinator.lastCommittedText = text
         context.coordinator.textView = tv
         // 原 FocusState+onAppear 的等价物：出现即聚焦
-        DispatchQueue.main.async { [weak tv] in tv?.becomeFirstResponder() }
+        if autoFocus { DispatchQueue.main.async { [weak tv] in tv?.becomeFirstResponder() } }
         return tv
     }
 

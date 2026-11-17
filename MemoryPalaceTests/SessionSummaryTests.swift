@@ -126,7 +126,7 @@ final class SessionSummaryTests: XCTestCase {
         let msgs = [SessionSegmentWriter.Message(id: "1", role: "user", content: "下周三复诊", date: nil),
                     SessionSegmentWriter.Message(id: "2", role: "assistant", content: "记住了", date: nil)]
         let t = SessionSegmentWriter.transcript(msgs, speakers: .init(userName: "粟粟", assistantName: "小克"))
-        XCTAssertEqual(t, "粟粟：下周三复诊\n\n小克：记住了")
+        XCTAssertEqual(t, "粟粟：下周三复诊\n\n我：记住了", "写手自己那一方标「我」，和提示词要它写的「我：「……」」一致")
     }
 
     /// v4-1 §四：上一段全文进输入、待续不进

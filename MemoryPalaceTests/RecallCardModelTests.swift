@@ -130,12 +130,12 @@ final class RecallCardModelTests: XCTestCase {
         let suppression = RecallSuppression(source: source(), reason: .budget)
         let model = RecallCardModel.make(receipt: receipt(delivery([item(K.page)]), suppressions: [suppression, suppression]),
                                         legacyHits: 0, mode: .inline)
-        XCTAssertEqual(model.tuningLine, "档案触发 开 · 一轮最多 3 页 · 冷却 3 句 · 最多翻 3 次 · 超预算 2")
+        XCTAssertEqual(model.tuningLine, "系统推送给助手 开 · 一轮最多 3 页 · 冷却 3 句 · 最多翻 3 次 · 超预算 2")
         var noCooldown = RecallTestTuning.make()
         noCooldown.cooldownEnabled = false
         let local = RecallCardModel.make(receipt: receipt(delivery([item(K.page)], route: "local"), tuning: noCooldown),
                                         legacyHits: 0, mode: .inline)
-        XCTAssertEqual(local.tuningLine, "档案触发 开 · 一轮最多 3 页 · 最多翻 3 次 · 本机")
+        XCTAssertEqual(local.tuningLine, "系统推送给助手 开 · 一轮最多 3 页 · 最多翻 3 次 · 本机")
     }
 
     func testGateCopyMasterWindowSlotLegacyChoicesTrigger() {
@@ -152,8 +152,26 @@ final class RecallCardModelTests: XCTestCase {
                                            "archive": true, "previousWindow": true, "pinned": false])).gateLine,
                        "本窗划掉了：时间轴 · 钉住")
         XCTAssertEqual(model(gate(triggerOff: true), items: [item(K.legacyFragment)]).gateLine,
-                       "档案触发关着，碎片按旧规则带")
+                       "系统推送给助手关着，碎片按旧规则带", "11-15 之前的回执（没有 everyRound 这一项）照旧这样写")
         XCTAssertNil(model(gate(triggerOff: true)).gateLine, "没有 legacy 碎片时不写这句")
+        func every(_ everyRound: Bool?, triggerOff: Bool) -> RecallGateSnapshot {
+            RecallGateSnapshot(off: nil, participates: true, triggerOff: triggerOff, legacy: false,
+                               choices: ["timeline": true, "pending": true, "selfMemory": true,
+                                         "archive": true, "previousWindow": true, "pinned": true],
+                               a2Checked: true, everyRound: everyRound, hiddenFragments: 0, hiddenTimeline: 0)
+        }
+        for triggerOff in [false, true] {
+            XCTAssertEqual(model(every(true, triggerOff: triggerOff), items: [item(K.legacyFragment)]).gateLine,
+                           "每轮全带勾着，批过的记忆条目都带")
+            XCTAssertNil(model(every(true, triggerOff: triggerOff)).gateLine, "这一轮没有这样带的条目就不写")
+        }
+        XCTAssertEqual(model(every(false, triggerOff: true), items: [item(K.legacyFragment)]).gateLine,
+                       "系统推送给助手关着，碎片按旧规则带", "每轮全带没勾还带了：试验的按意思找")
+        XCTAssertNil(model(every(false, triggerOff: false), items: [item(K.legacyFragment)]).gateLine)
+        // 老回执解码：没有 everyRound 键 = nil
+        let old = #"{"off":null,"participates":true,"triggerOff":true,"legacy":true,"choices":{},"a2Checked":true,"hiddenFragments":0,"hiddenTimeline":0}"#
+        XCTAssertNil(try? JSONDecoder().decode(RecallGateSnapshot.self, from: Data(old.utf8)).everyRound)
+        XCTAssertNotNil(try? JSONDecoder().decode(RecallGateSnapshot.self, from: Data(old.utf8)))
     }
 
     func testHiddenCountsCopyUsesCandidatesWording() {
@@ -259,7 +277,7 @@ final class RecallCardModelTests: XCTestCase {
         let model = RecallCardModel.make(receipt: receipt(nil, selected: [card, page, fragment]), legacyHits: 0, mode: .inline)
         XCTAssertEqual(model.shape, .card)
         XCTAssertTrue(model.oldLedger)
-        XCTAssertEqual(RecallCardModel.oldLedgerNote, "旧账：只记了档案触发那部分")
+        XCTAssertEqual(RecallCardModel.oldLedgerNote, "旧账：只记了系统推送那部分")
         XCTAssertEqual(model.groups.map(\.kind), [K.page, K.card, K.fragment])
         XCTAssertEqual(model.groups.map { $0.rows.count }, [1, 1, 1])
         XCTAssertEqual(model.groups[0].rows[0].title, "[[人/林栖]] 林栖的航线")

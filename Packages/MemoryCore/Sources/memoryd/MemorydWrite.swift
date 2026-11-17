@@ -79,6 +79,33 @@ enum MemorydWriteOutput {
         }
     }
 
+    /// 通用外壳跑写入这张工作书的产出
+    static func write(_ entries: [WriteJob.Entry], outcome: AgentLoop.Outcome, model: String, existing: String?, spanCount: Int,
+                      to dir: URL, startedAt: Date) throws {
+        let archive: [[String: Any]] = entries.map { entry in
+            var row: [String: Any] = ["id": entry.id, "subject": entry.subject, "type": entry.type, "origin": entry.origin,
+                                      "volatile": entry.volatile, "content": entry.content, "msgs": entry.msgs]
+            if let since = entry.since { row["since"] = since }
+            if let confidence = entry.confidence { row["confidence"] = confidence }
+            if let target = entry.target { row["target"] = target }
+            return row
+        }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        func save(_ value: Any, _ name: String) throws {
+            try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+                .write(to: dir.appendingPathComponent(name), options: .atomic)
+        }
+        try save(archive, "archive.json")
+        let toolCounts = Dictionary(outcome.rounds.flatMap(\.tools).map { ($0, 1) }, uniquingKeysWith: +)
+        try save([
+            "shell": "workspace", "model": model, "stop": outcome.stop.rawValue, "summary": outcome.summary ?? "", "error": outcome.error ?? "",
+            "rounds": outcome.rounds.count, "tools": toolCounts, "span": spanCount, "existing": existing ?? "",
+            "inputTokens": outcome.inputTokens, "outputTokens": outcome.outputTokens, "cacheReadTokens": outcome.cacheReadTokens,
+            "seconds": Int(Date().timeIntervalSince(startedAt)),
+            "cards": archive.count, "updates": entries.filter { $0.target != nil }.count,
+        ] as [String: Any], "trace.json")
+    }
+
     static func write(_ outcome: WriteAgent.Outcome, model: String, existing: String?, spanCount: Int, to dir: URL, startedAt: Date) throws {
         let archive: [[String: Any]] = outcome.ledger.cards.map { card in
             var row: [String: Any] = ["id": card.key, "subject": card.subject, "type": card.type, "origin": card.origin,

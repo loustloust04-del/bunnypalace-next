@@ -180,7 +180,7 @@ enum WikiInjection {
     /// 常驻页那一行
     static func residentLine(indexCount: Int?, hits: [WikiPageHit]) -> String {
         let tail = hits.isEmpty ? "本轮没命中" : "本轮命中：" + hits.map { "\($0.page.title)（“\($0.word)”）" }.joined(separator: "、")
-        return (indexCount.map { "根索引 \($0) 行" } ?? "根索引没勾") + " · \(tail)"
+        return (indexCount.map { "wiki 目录 \($0) 行" } ?? "wiki 目录没勾") + " · \(tail)"
     }
 }
 

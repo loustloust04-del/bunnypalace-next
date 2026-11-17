@@ -124,6 +124,12 @@ struct StickerKeyboardPanel: View {
                             toolButton("phone") { onCallStart() }
                                 .accessibilityLabel("打电话")
                         }
+                        // 一起看（plan-chat-watch-together W1，粟粟：放「＋」不放 ⋯）：收起面板 → 顶栏下面出小窗
+                        toolButton("play.rectangle") {
+                            onDismiss()
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) { ChatWatch.shared.open() }
+                        }
+                        .accessibilityLabel("一起看")
                         #endif
                         toolButton("square.fill.on.circle.fill", isActive: cardVisible && !showMemeGrid) {
                             withAnimation(.easeInOut(duration: 0.2)) {

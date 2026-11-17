@@ -60,6 +60,8 @@ enum Page2Apps {
     /// 默认装没装 = 存档 × 内置表（merged 后的 isEnabled）；认不出的 id → false；系统 App 恒 true（atrium P4）
     static func defaultInstalled(_ toolId: String) -> Bool {
         if RightPanelToolManager.systemToolIds.contains(toolId) { return true }
+        // 网页应用不在内置表里，默认就是装着（plan-garden-webapps §2）；某层卸掉照常记 false
+        if WebAppStore.appID(fromToolID: toolId) != nil { return true }
         let data = defaults.data(forKey: RightPanelToolManager.storageKey)
         return cacheLock.withLock {
             if let defaultsCache, defaultsCache.data == data { return defaultsCache.installed[toolId] ?? false }

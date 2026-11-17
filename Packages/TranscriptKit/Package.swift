@@ -7,10 +7,15 @@ let package = Package(
     name: "TranscriptKit",
     platforms: [.macOS("15.0"), .iOS("26.0")],
     products: [
-        .library(name: "TranscriptCore", targets: ["TranscriptCore"])
+        .library(name: "TranscriptCore", targets: ["TranscriptCore"]),
+        .library(name: "TranscriptUIKit", targets: ["TranscriptUIKit"])
     ],
     targets: [
         .target(name: "TranscriptCore"),
-        .testTarget(name: "TranscriptCoreTests", dependencies: ["TranscriptCore"])
+        // iOS 的列表。mac 上编出来是空的（整文件 #if canImport(UIKit)）
+        .target(name: "TranscriptUIKit", dependencies: ["TranscriptCore"]),
+        .testTarget(name: "TranscriptCoreTests", dependencies: ["TranscriptCore"]),
+        // 要在 iOS 模拟器上跑（mac 上是空的）
+        .testTarget(name: "TranscriptUIKitTests", dependencies: ["TranscriptUIKit", "TranscriptCore"])
     ]
 )

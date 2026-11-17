@@ -15,6 +15,7 @@ enum ConversationTitler {
     static func plainText(_ raw: String) -> String {
         if MemeToken.match(raw) != nil { return "[表情包]" }
         var text = ContentCleaner.extractThinking(from: raw).content
+        text = text.replacingOccurrences(of: #"\[meme:[0-9A-Fa-f-]{36}\]"#, with: "[表情包]", options: .regularExpression)
         text = replacingFences(in: text)
         text = text.replacingOccurrences(of: #"!\[[^\]]*\]\([^)]*\)"#, with: "[图片]", options: .regularExpression)
         text = text.replacingOccurrences(of: #"\[([^\]]+)\]\([^)]*\)"#, with: "$1", options: .regularExpression)

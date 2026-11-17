@@ -141,7 +141,12 @@ enum BackupStore {
         var day = loadDayManifest(date: date) ?? DayManifest(date: date)
 
         // 跑当前所有 profile (走 ProfileManager.loadProfiles 静态而非 @State, 后台 context 安全)
-        let profiles = ProfileManager.loadProfiles()
+        // 连着电脑文件夹的楼层不进备份（plan-folder-floor，粟粟 11-16）：那些对话的原件在电脑上。
+        // 当天早些时候（连上之前）已经记进今天这份清单的条目也拿掉，不然今天的备份里还带着它（kimi P1 审 #3）；以前日期的备份不动
+        let allProfiles = ProfileManager.loadProfiles()
+        let folderIds = Set(allProfiles.filter(\.isFolderFloor).map(\.id))
+        let profiles = allProfiles.filter { !folderIds.contains($0.id) }
+        day.profiles.removeAll { folderIds.contains($0.profileId) }
 
         // 预扫总对话数给 progress callback 用
         var totalConvCount = 0
@@ -168,7 +173,8 @@ enum BackupStore {
             for ref in existing { shaTable[ref.conversationId] = ref.sha256 }
 
             var newRefs: [ConversationRef] = []
-            for conv in conversations {
+            // 电脑上同步来的 session 不备份（原件在电脑上）。按对话本身挡：这一层后来「不连了」变回普通楼层，它们也不会被带走
+            for conv in conversations where !conv.isFolderSession {
                 let convId = conv.id
                 let nodeDescriptor = FetchDescriptor<MessageNode>(
                     predicate: #Predicate<MessageNode> { $0.conversationId == convId && $0.profileId == pid }
@@ -263,6 +269,7 @@ enum BackupStore {
         let stamp = preRestoreDateString()
         var day = DayManifest(date: stamp)
 
+        // 恢复前快照包含全部楼层，电脑文件夹楼层也在内（粟粟 11-17「含」）：这份是恢复出错时的退路，不能缺；平时的时间机器备份不带它们
         let profiles = ProfileManager.loadProfiles()
         var written = 0
         var totalSize = 0
@@ -273,7 +280,8 @@ enum BackupStore {
             )
             guard let conversations = try? context.fetch(convDescriptor) else { continue }
             var refs: [ConversationRef] = []
-            for conv in conversations {
+            // 电脑上同步来的 session 不进快照（粟粟 11-17）：原件在电脑上，丢了能再拉；这一层在手机上开的对话照常进
+            for conv in conversations where !conv.isFolderSession {
                 let convId = conv.id
                 let nodeDescriptor = FetchDescriptor<MessageNode>(
                     predicate: #Predicate<MessageNode> { $0.conversationId == convId && $0.profileId == pid }
@@ -335,7 +343,13 @@ enum BackupStore {
         result.preRestoreEntry = preEntry
 
         // 2. 决定 scope 内目标 (pid -> 备份里属于该 scope 的 conv 集)
-        let targetByPid: [String: [ConversationRef]] = filterScope(day: day, scope: scope)
+        var targetByPid: [String: [ConversationRef]] = filterScope(day: day, scope: scope)
+        // 整库还原一份平时的备份时，不碰现在连着电脑文件夹的楼层（plan-folder-floor，kimi P1 审 #2）：连上之前留下的旧备份里有它，
+        // 照常还原会把它连上之后的对话当「多出来的」删掉、再把旧的灌回来。恢复前快照本来就包含这些楼层，照常还原；
+        // 她单独点这一层 / 这一条来还原的，是她明确要的，也照常
+        if case .everything = scope, !date.hasPrefix("pre-restore-") {
+            targetByPid = targetByPid.filter { !FolderFloor.isFolder($0.key) }
+        }
         // 洞 6: 本次还原覆盖到的楼层集合. 范围内的楼层之间可以互相覆盖归属(备份对它们是全局真相),
         // 范围外的楼层一律不许碰 —— 那是偷.
         let restoredProfileIds = Set(targetByPid.keys)
@@ -417,7 +431,8 @@ enum BackupStore {
         let descriptor = FetchDescriptor<Conversation>(
             predicate: #Predicate<Conversation> { $0.profileId == pid }
         )
-        let removed = ((try? context.fetch(descriptor)) ?? []).filter { !backupConvIds.contains($0.id) }
+        // 电脑上同步来的 session 本来就不在任何备份里：还原时不算「多出来的」，不删（删了要等电脑那头有变化才会再同步回来）
+        let removed = ((try? context.fetch(descriptor)) ?? []).filter { !backupConvIds.contains($0.id) && !$0.isFolderSession }
         PreviousWindowPicker.invalidateCopies(of: Set(removed.lazy.map(\.id)), context: context)
         for conv in removed {
             let convId = conv.id

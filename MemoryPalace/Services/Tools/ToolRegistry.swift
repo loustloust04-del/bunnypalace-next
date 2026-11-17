@@ -7,8 +7,8 @@ import Foundation
 /// 新 reflection 风行为走 inner_voice 的 mode 复用，不加新 tool（B-D4）。
 enum ToolRegistry {
 
-    /// 五个记忆写工具（关参与窗不下发）：执行前复查拒绝时文案要说清是「本窗关了记忆参与」，不是抽屉里关着
-    static let memoryWriteNames: Set<String> = SelfMemoryTool.names.union([PendingNotesTool.toolName, WikiSuggestTool.toolName])
+    /// 六个记忆写工具（关参与窗不下发）：执行前复查拒绝时文案要说清是「本窗关了记忆参与」，不是抽屉里关着
+    static let memoryWriteNames: Set<String> = SelfMemoryTool.names.union([PendingNotesTool.toolName, WikiSuggestTool.toolName, MemoryCardTool.toolName])
 
     struct Entry {
         let definition: ToolDefinition
@@ -47,13 +47,24 @@ enum ToolRegistry {
         entries.append(Entry(definition: RecallTool.definition, enabledIf: { _ in RecallTool.enabled }))
 
         // 自己的记忆（记忆修复第二刀 B2）：remember / edit_memory / forget_memory，受记忆总开关管；关参与窗不下发
-        entries += SelfMemoryTool.definitions.map { d in Entry(definition: d, enabledIf: { ctx in SelfMemoryTool.enabled && ctx.memoryWriteTools }) }
+        entries += SelfMemoryTool.definitions.map { d in
+            Entry(definition: d, enabledIf: { ctx in
+                SelfMemoryTool.enabled && ctx.memoryWriteTools && PermissionCenter.capabilityEnabled(.memorySelf, profileId: ctx.profileId)
+            })
+        }
 
         // 待续（v5 §3-2）：标做完了 / 淡了；总开关 && A4 时间轴开着才给；关参与窗不下发
         entries.append(Entry(definition: PendingNotesTool.definition, enabledIf: { ctx in PendingNotesTool.enabled && ctx.memoryWriteTools }))
 
-        // 给 wiki 提整理方向（C2/C3 v2 第 4 段）：只交待批方向；总开关 && C3 开着才给；关参与窗不下发
-        entries.append(Entry(definition: WikiSuggestTool.definition, enabledIf: { ctx in WikiSuggestTool.enabled && ctx.memoryWriteTools }))
+        // 给 wiki 提整理方向（C2/C3 v2 第 4 段）：只交待批方向；总开关 && C3 开着 && 「记忆文件」权限不是不允许才给；关参与窗不下发
+        entries.append(Entry(definition: WikiSuggestTool.definition, enabledIf: { ctx in
+            WikiSuggestTool.enabled && ctx.memoryWriteTools && PermissionCenter.capabilityEnabled(.memoryFiles, profileId: ctx.profileId)
+        }))
+
+        // 动记忆条目（粟粟 11-14）：记忆总开关开着 && 「记忆条目」权限不是不允许（每次询问也下发，真调用时一笔一问）；关参与窗不下发
+        entries.append(Entry(definition: MemoryCardTool.definition, enabledIf: { ctx in
+            MemoryCardTool.enabled && ctx.memoryWriteTools && PermissionCenter.capabilityEnabled(.memoryCards, profileId: ctx.profileId)
+        }))
 
         // 问问题（官端 AskUserQuestion 同款）：常开，受 sendToolsEnabled 总开关连坐
         entries.append(Entry(definition: AskUserTool.definition, enabledIf: { _ in true }))
@@ -86,6 +97,14 @@ enum ToolRegistry {
         entries += BrowserOperateTools.definitions.map { d in
             Entry(definition: d, enabledIf: { ctx in PermissionCenter.capabilityEnabled(.browserOperate, profileId: ctx.profileId) })
         }
+        // 自己醒来的任务（plan-wake-heartbeat §4）：「自己醒来」不是不允许就发；建的时候总开关关着也能建（回话里说）
+        entries.append(Entry(definition: HeartbeatTaskTool.definition, enabledIf: { ctx in
+            PermissionCenter.capabilityEnabled(.selfWake, profileId: ctx.profileId)
+        }))
+        // 一起看小窗开着网页才发（plan-chat-watch-together W3）
+        entries.append(Entry(definition: BrowserOperateTools.videoDefinition, enabledIf: { ctx in
+            ChatWatch.shared.hasPage && PermissionCenter.capabilityEnabled(.browserOperate, profileId: ctx.profileId)
+        }))
         #endif
 
         // 设备工具 11 件（plan-设备工具 P1）+ macOS run_command（plan-离线沙箱-phase1）：按域档位下发（askOnce 也下发，真调用时 tool loop 弹卡）

@@ -559,6 +559,23 @@ enum Acknowledgements {
             ),
         ]),
 
+        // 设计参考（粟粟 11-12）：借的是做法和思路，没有搬代码；以后真用到代码的照上面各节列全文
+        LicenseSection(title: "设计参考", entries: [
+            LicenseEntry(
+                name: "salle-obscure",
+                licenseType: "MIT",
+                copyright: "Copyright (c) 2026 sachi4clover；私人影院 × AI 陪看的教程。一起看的画面节拍、切镜判断、拼图、从画面读字幕、截屏「3+1」等做法参考了它，此处致谢",
+                repositoryURL: "https://github.com/sachi4clover/salle-obscure",
+                textFileName: "salle-obscure"
+            ),
+            LicenseEntry(
+                name: "wake_UP",
+                licenseType: "PolyForm Noncommercial（未使用其代码）",
+                copyright: "KKarsyline；由对话情境和事件驱动的主动唤醒系统。「自己醒来」的任务工具、显式通知、给下次的自己留话、护栏等设计参考了它，代码全部自己写，此处致谢",
+                repositoryURL: "https://github.com/KKarsyline/wake_UP",
+                textFileName: nil
+            ),
+        ]),
         LicenseSection(title: "仅 Mac 版", entries: [
             LicenseEntry(
                 name: "Wake",

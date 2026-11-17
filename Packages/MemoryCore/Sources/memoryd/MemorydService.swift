@@ -62,6 +62,9 @@ actor MemorydService {
     private let bound = BoundPort()
     /// 实验台：正在跑 / 这次启动以来跑过的（跑完的同时落盘在 `bench-runs/experiments/`）
     private var experiments: [String: MemorydExperiment] = [:]
+    /// 实验台对话列表里每个对话的条数。快照只读、进程活着不会变：启动就在后台数一次，之后都用这份
+    /// （以前每次打开列表现数一遍，数的时候整个服务被占着，别的请求都得等）
+    private let messageCounts: Task<[String: Int], Error>?
 
     init(config: Config, webRoot: URL?) throws {
         self.config = config
@@ -75,6 +78,10 @@ actor MemorydService {
         let snapshot = Self.loadSnapshot(floor: config.floor, profileId: config.profileId)
         self.conversations = snapshot?.source
         self.snapshotInfo = snapshot?.info
+        let profileId = config.profileId
+        self.messageCounts = (snapshot?.source).map { source in
+            Task.detached(priority: .userInitiated) { try MemorydExperimentRunner.messageCounts(source: source, profileId: profileId) }
+        }
     }
 
     /// `exports/` 里最新的 `floor-snapshot-*.json`（文件名带秒级 UTC 时间戳 + `Z`，字典序 = 时间序）。
@@ -220,9 +227,22 @@ actor MemorydService {
             guard method == "POST" else { return .error(405, "只支持 POST") }
             return try await organizeFragments(request)
         }
+        if segments == ["c2", "verdict"] {
+            guard method == "POST" else { return .error(405, "只支持 POST") }
+            return try verdictStart(request)
+        }
+        if segments == ["c2", "verdict", "prompt"] {
+            guard method == "GET" else { return .error(405, "只支持 GET") }
+            // 固定的那段说明（{u} {c} 跑的时候换成称呼）；每次调用实际喂的全文在调用记录里
+            return .json(["text": FragmentVerdict.instructions(names: MemoryExtractor.Names(userName: "{u}", assistantName: "{c}"))])
+        }
+        if segments == ["c2", "prompts"] {
+            guard method == "GET" else { return .error(405, "只支持 GET") }
+            return c2Prompts()
+        }
         if segments == ["conversations"] {
             guard method == "GET" else { return .error(405, "只支持 GET") }
-            return try conversationList()
+            return try await conversationList()
         }
         if segments == ["experiments"] {
             guard method == "GET" else { return .error(405, "只支持 GET") }
@@ -235,6 +255,10 @@ actor MemorydService {
         if segments.count == 2, segments[0] == "experiments" {
             guard method == "GET" else { return .error(405, "只支持 GET") }
             return experimentDetail(segments[1])
+        }
+        if segments.count == 4, segments[0] == "experiments", segments[2] == "calls" {
+            guard method == "GET" else { return .error(405, "只支持 GET") }
+            return experimentCall(segments[1], segments[3])
         }
         if segments == ["bench", "sets"] {
             guard method == "GET" else { return .error(405, "只支持 GET") }
@@ -343,15 +367,16 @@ actor MemorydService {
     }()
 
     /// 快照里这层楼没进回收站的对话，新的在前；条数 = 主线上有正文的消息数（写手看到的那些）
-    private func conversationList() throws -> HTTPResponse {
+    private func conversationList() async throws -> HTTPResponse {
         guard let conversations else { return .error(404, "副本里没有楼层快照（exports/floor-snapshot-*.json）") }
+        let counts = try await messageCounts?.value ?? [:]
         let windows = try conversations.windows(profileId: config.profileId, updatedSince: nil, includeTrashed: false)
             .sorted { $0.updateTime > $1.updateTime }
         let rows = try windows.map { window -> [String: Any] in
             [
                 "id": window.id,
                 "title": window.title,
-                "messages": try MemorydExperimentRunner.messages(window: window, source: conversations).count,
+                "messages": try counts[window.id] ?? MemorydExperimentRunner.messages(window: window, source: conversations).count,
                 "updatedAt": Int64(window.updateTime.timeIntervalSince1970 * 1000),
                 "memoryEnabled": window.memoryEnabled,
                 "isCC": window.isCC,
@@ -383,8 +408,10 @@ actor MemorydService {
                                       progress: "排队")
         experiments[start.id] = start
         let floor = config.floor
+        let calls = callsDir(start.id)
         Task { [weak self] in
-            let done = await MemorydExperimentRunner.run(start, all: all, model: model, floor: floor) { update in
+            let done = await MemorydExperimentRunner.run(start, all: all, model: model, floor: floor,
+                                                         callsDir: calls) { update in
                 await self?.experimentUpdate(update)
             }
             await self?.experimentUpdate(done)
@@ -423,10 +450,124 @@ actor MemorydService {
                 "id": e.id, "at": Int64(e.at.timeIntervalSince1970 * 1000), "status": e.status,
                 "conversationId": e.options.conversationId, "windowTitle": e.windowTitle, "model": e.model,
                 "ranMessages": e.ranMessages, "segments": e.segments.count,
+                "c2": e.options.steps.contains("c2") ? (e.options.writer == "classic" ? "老写法" : (e.options.c2PromptName.isEmpty ? "手机上现在跑的" : e.options.c2PromptName) + " · \(e.options.c2Rounds) 轮") : "",
                 "cards": e.fragments.reduce(0) { $0 + $1.cards.count }, "progress": e.progress,
             ]
         }
         return .json(["experiments": rows])
+    }
+
+    /// `GET /api/c2/prompts`：实验台能选的 C2 提示词（占位 {u} {c} {窗口名} {起} {止} 跑的时候换掉）
+    private func c2Prompts() -> HTTPResponse {
+        var rows: [[String: Any]] = [["id": "app", "name": "手机上现在跑的", "text": MemorydExperimentRunner.appPromptTemplate()]]
+        if let webRoot, let text = try? String(contentsOf: webRoot.appendingPathComponent("c2-prompt-old.md"), encoding: .utf8) {
+            rows.append(["id": "old", "name": "11-12 之前手机上的旧版（对照用）", "text": text])
+        }
+        return .json(["prompts": rows])
+    }
+
+    // MARK: - 写完一批再对着档案下结论（plan-c2-target 步 4；只在实验台）
+
+    /// 被测模型：启动时 `--model` 那个走 `MEMORYD_MODEL_*`；别的模型 id 一律走 `MEMORYD_JUDGE_*` 那组环境变量（请求里给 id）
+    private func verdictModel(_ id: String) -> MemorydModel? {
+        var model = id == config.model?.modelId ? config.model : MemorydModel.fromEnvironment(modelId: id, variables: .judge)
+        // 一次吃一整批原文，模型想得久；system（说明 + 聊天时带着的内容）几次调用都一样，打缓存断点
+        model?.timeout = 900
+        model?.cacheSystem = true
+        if model?.wire == .anthropic { model?.maxTokens = 32000 }
+        return model
+    }
+
+    private func loadExportedFragments() -> [ExportedFragment] {
+        let file = config.floor.appendingPathComponent(FloorSnapshotExportFolder.name).appendingPathComponent("fragments.json")
+        return (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode([ExportedFragment].self, from: $0) } ?? []
+    }
+
+    /// `POST /api/c2/verdict`：见 `MemorydVerdictRequest`。马上回实验 id，后台跑；结果和每次调用在「跑过的实验」里看
+    private func verdictStart(_ request: HTTPRequest) throws -> HTTPResponse {
+        let body: MemorydVerdictRequest
+        do {
+            body = try Self.experimentDecoder.decode(MemorydVerdictRequest.self, from: request.body)
+        } catch {
+            return .error(400, "请求体读不懂：\(error.localizedDescription)")
+        }
+        guard !body.runs.isEmpty || body.dryRun == true else { return .error(400, "runs 至少一项：[{\"model\": \"…\", \"times\": 1}]") }
+        var models: [(spec: MemorydVerdictRequest.RunSpec, model: MemorydModel)] = []
+        for spec in body.runs {
+            guard let model = verdictModel(spec.model) else {
+                return .error(400, "接不上模型 \(spec.model)：启动时 --model 的那个用 \(MemorydModel.Variables.model.key)，别的用 \(MemorydModel.Variables.judge.key)")
+            }
+            models.append((spec, model))
+        }
+        var judge: MemorydModel?
+        if body.judgeRelated == true || body.judgeRuns == true {
+            guard let id = body.judge, let model = verdictModel(id) else { return .error(400, "要裁判就得给 judge（模型 id），并且环境里有它的 key") }
+            judge = model
+        }
+        let job: FragmentVerdict.Job
+        do {
+            job = try MemorydVerdictRunner.job(body, experiments: { self.experiment($0) }, exported: { self.loadExportedFragments() },
+                                               conversations: conversations, profileId: config.profileId,
+                                               exportsDir: config.floor.appendingPathComponent(FloorSnapshotExportFolder.name, isDirectory: true),
+                                               pages: { FragmentVerdict.pages(in: self.wiki, user: $0) })
+        } catch {
+            return .error(400, error.localizedDescription)
+        }
+        guard !job.newCards.isEmpty else { return .error(400, "这一批没有新卡") }
+        let limits = body.limits ?? FragmentVerdict.Limits()
+        let related = FragmentVerdict.related(to: job.newCards, in: job.archive, limits: limits)
+        let wiki = FragmentVerdict.picked(job.pages, for: job.newCards, limits: limits)
+        if body.dryRun == true {
+            // 只看这组上限会捞出哪些卡，不调模型、不留实验
+            return .json(["newCards": job.newCards.count, "pool": job.archive.count,
+                          "existing": related.existing.map(\.id), "deleted": related.deleted.map(\.id),
+                          "existingWhole": related.whole, "wikiPages": wiki.pages.map(\.path), "wikiCut": wiki.cut,
+                          "hits": related.hits.mapValues { $0.map { ["id": $0.id, "score": $0.score] as [String: Any] } }])
+        }
+        if experiments.values.contains(where: { $0.status == "running" }) {
+            return .error(409, "有一个实验还在跑，等它跑完")
+        }
+        let residentChars = job.resident.reduce(0) { $0 + $1.text.trimmingCharacters(in: .whitespacesAndNewlines).count }
+        let report = MemorydVerdictReport(
+            name: body.name ?? "", userName: job.userName, assistantName: job.assistantName, limits: limits,
+            newCards: job.newCards, pool: job.archive, existing: related.existing.map(\.id), deleted: related.deleted.map(\.id),
+            hits: related.hits, lines: job.lines.count, residentChars: residentChars,
+            residentCut: FragmentVerdict.residentBlock(job.resident, maxChars: limits.maxResidentChars).cut,
+            existingWhole: related.whole, wikiPages: wiki.pages.count, wikiCut: wiki.cut)
+        var options = MemorydExperiment.Options(conversationId: body.experiment.flatMap { experiment($0)?.options.conversationId } ?? "job")
+        options.userName = job.userName
+        options.assistantName = job.assistantName
+        options.steps = ["verdict"]
+        options.limit = job.lines.count
+        var start = MemorydExperiment(id: UUID().uuidString, at: Date(), status: "running", options: options,
+                                      windowTitle: job.windowTitle,
+                                      model: models.map { "\($0.model.modelId)×\(min(max($0.spec.times ?? 1, 1), MemorydVerdictRequest.maxTimes))" }.joined(separator: " · "),
+                                      totalMessages: job.lines.count, ranMessages: job.lines.count, progress: "排队")
+        start.verdict = report
+        experiments[start.id] = start
+        let calls = callsDir(start.id)
+        Task { [weak self, start] in
+            let done = await MemorydVerdictRunner.run(start, job: job, request: body, models: models, judge: judge, callsDir: calls) { update in
+                await self?.experimentUpdate(update)
+            }
+            await self?.experimentUpdate(done)
+        }
+        return .json(["id": start.id, "newCards": job.newCards.count, "pool": job.archive.count,
+                      "existing": related.existing.count, "deleted": related.deleted.count])
+    }
+
+    private nonisolated func callsDir(_ id: String) -> URL {
+        config.floor.appendingPathComponent("bench-runs", isDirectory: true).appendingPathComponent("experiments", isDirectory: true)
+            .appendingPathComponent(id + "-calls", isDirectory: true)
+    }
+
+    /// `GET /api/experiments/<id>/calls/<n>`：这一次调用吃进去的提示词、材料，和模型原样回的话
+    private func experimentCall(_ id: String, _ n: String) -> HTTPResponse {
+        guard UUID(uuidString: id) != nil, let number = Int(n), number > 0,
+              let data = try? Data(contentsOf: callsDir(id).appendingPathComponent("\(number).json")) else {
+            return .error(404, "没有这一次调用的记录")
+        }
+        return .jsonRaw(data)
     }
 
     private func experimentDetail(_ id: String) -> HTTPResponse {
@@ -845,6 +986,20 @@ actor MemorydService {
         }
         let rounds = (body["rounds"] as? Int).map { max(5, min($0, 200)) } ?? 40
         let started = Date()
+        if body["workspace"] as? Bool == true {
+            // 通用外壳（plan-agent-workspace A4）：工作台放在副本目录里（私人材料不出这个目录），跑完删掉
+            let work = config.floor.appendingPathComponent("work", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            defer { try? FileManager.default.removeItem(at: work) }
+            let job = WriteJob(windowTitle: window.title, span: try source.span(), before: try source.before(count: 200, skip: 0),
+                               known: existing, names: names)
+            let outcome = await AgentJobRunner.run(job, root: work, caller: model,
+                                                   limits: .init(rounds: rounds, contextChars: 160_000, resultChars: 32_000))
+            let dir = materialDir.appendingPathComponent(run, isDirectory: true)
+            try MemorydWriteOutput.write(job.collect(AgentWorkspace(root: work, writable: job.writable)), outcome: outcome, model: model.modelId,
+                                         existing: existingName, spanCount: to - from, to: dir, startedAt: started)
+            return .jsonRaw((try? Data(contentsOf: dir.appendingPathComponent("trace.json"))) ?? Data("{}".utf8))
+        }
         let outcome = await WriteAgent.run(source: source, caller: model, names: names,
                                            limits: .init(rounds: rounds, contextChars: 120_000, resultChars: 24_000))
         let dir = materialDir.appendingPathComponent(run, isDirectory: true)
@@ -873,6 +1028,7 @@ actor MemorydService {
                     // 第一轮（run 后面没数字）排在第二、三轮前，包里的 agent（runW）排最后
                     func rank(_ run: String) -> String {
                         let rest = run.dropFirst(3)
+                        if rest.hasPrefix("P") { return "99" + rest }
                         return rest.hasPrefix("W") ? "9" + rest : (rest.first?.isNumber == true ? String(rest) : "1" + rest)
                     }
                     return rank(a) < rank(b)
@@ -913,7 +1069,11 @@ actor MemorydService {
                  "source": note.cards.map { "[\($0)] \(byId[$0] ?? "（档案里已有的卡）")" }.joined(separator: "\n")]
             }
         }
-        return .json(["file": name, "model": "write", "total": lines.count, "kept": all,
+        // 这一轮喂给模型的东西（任务书 / 拼材料的脚本）：轮目录里有 fed.md 就带上
+        let fed = parts.count == 2
+            ? (try? String(contentsOf: writeRunsDir.appendingPathComponent(material).appendingPathComponent(parts[1]).appendingPathComponent("fed.md"), encoding: .utf8))
+            : nil
+        return .json(["file": name, "model": "write", "total": lines.count, "kept": all, "fed": fed ?? "",
                       "dropped": [[String: Any]](), "unsure": [[String: Any]](), "verdicts": verdicts(for: name)])
     }
 
@@ -929,11 +1089,12 @@ actor MemorydService {
             let run = String(entry.name.split(separator: "~", maxSplits: 1).last ?? "")
             let row: String
             if run == "existing" { row = "现在的写法（每 20 条填表）" }
-            else if run.hasPrefix("runW") { row = "包里的写入 agent" }
+            else if run.hasPrefix("runP") { row = "通用外壳（工作台）" }
+            else if run.hasPrefix("runW") { row = "包里的写入 agent（专用工具）" }
             else if run.hasPrefix("run3") { row = "自由 agent · 第三轮（长，一件事一条）" }
             else if run.hasPrefix("run2") { row = "自由 agent · 第二轮（短，一个事实一条）" }
             else { row = "自由 agent · 第一轮" }
-            let short = run == "existing" ? "DeepSeek" : run.replacingOccurrences(of: "runW2_", with: "按事交 · ").replacingOccurrences(of: "runW_", with: "")
+            let short = run == "existing" ? "DeepSeek" : run.replacingOccurrences(of: "runP_", with: "").replacingOccurrences(of: "runW2_", with: "按事交 · ").replacingOccurrences(of: "runW_", with: "")
                 .replacingOccurrences(of: "run2", with: "").replacingOccurrences(of: "run3", with: "").replacingOccurrences(of: "run", with: "")
                 .replacingOccurrences(of: "DS", with: "DeepSeek")
             rows.append(["name": entry.name, "label": entry.label, "group": "写入：从原文直接写（同一段 \(found.material)）", "row": row,
@@ -1122,7 +1283,7 @@ actor MemorydService {
         return sets
     }
 
-    /// 题集文件 = `memory-bench-` 开头，但楼层 JSON（`memory-bench-recall-floor-*`）不是题集，显式排除。
+    /// 题集文件 = `memory-bench-` 开头。
     /// 解不开的进 `skipped`（调用方记 error）；测试直接断言 `skipped` 为空 = 不记 error。
     func loadBuiltInSets() -> (sets: [MemoryBenchSet], skipped: [String]) {
         guard let dir = MemorydResources.benchDirectory,
@@ -1130,9 +1291,7 @@ actor MemorydService {
         var sets: [MemoryBenchSet] = []
         var skipped: [String] = []
         for url in urls.filter({
-            $0.pathExtension == "json"
-                && $0.lastPathComponent.hasPrefix("memory-bench-")
-                && !$0.lastPathComponent.hasPrefix("memory-bench-recall-floor-")
+            $0.pathExtension == "json" && $0.lastPathComponent.hasPrefix("memory-bench-")
         }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             do {
                 let data = try Data(contentsOf: url)
@@ -1146,21 +1305,16 @@ actor MemorydService {
 
     private func benchSets() -> HTTPResponse {
         let sets = allSets().map { set -> [String: Any] in
-            var object: [String: Any] = [
+            [
                 "id": set.id,
                 "name": set.name,
                 "writer": set.writer,
                 "source": set.source.rawValue,
                 "caseCount": set.cases.count,
-                "runnable": set.writer == OfflineWikiBenchWriter.id || set.writer == OfflineRecallBench.writerId
+                "runnable": set.writer == OfflineWikiBenchWriter.id
                     || (config.model != nil && Self.modelWriter(set.writer) != nil),
                 "needsModel": Self.modelWriter(set.writer) != nil,
             ]
-            if set.writer == OfflineRecallBench.writerId {
-                let runnable = set.cases.filter { OfflineRecallBench.isRunnable($0) }.count
-                object["partial"] = "\(runnable)/\(set.cases.count)"
-            }
-            return object
         }
         return .json(["sets": sets])
     }
@@ -1231,9 +1385,6 @@ actor MemorydService {
     }
 
     func runBench(_ set: MemoryBenchSet, trial: [TrialRecipe] = []) async throws -> MemoryBenchRun {
-        if set.writer == OfflineRecallBench.writerId {
-            return try await runRecallBench(set)
-        }
         if let writer = Self.modelWriter(set.writer) {
             guard let model = config.model else {
                 return try saveUnmeasurableRun(set, reason: "没接模型：环境里设 \(MemorydModel.keyVariable)，启动加 --model <模型 id>")
@@ -1303,49 +1454,6 @@ actor MemorydService {
             caller: model.caller,
             runId: UUID().uuidString
         )
-    }
-
-    /// recall 写手：Y 半边 13 题（每轮都有 ops）；11 题纯 X 留给刀 3。宿主时区不符整份不可测
-    private func runRecallBench(_ set: MemoryBenchSet) async throws -> MemoryBenchRun {
-        let expected = OfflineRecallBench.timeZone(of: set)
-        let host = Calendar.current.timeZone.identifier
-        if let expected, expected != host {
-            return try saveUnmeasurableRun(set, reason: "宿主时区 \(host) ≠ 题集 \(expected)：请 TZ=\(expected) 启动 memoryd")
-        }
-        guard let floorURL = MemorydResources.recallFloorURL else {
-            throw MemorydError.noRecallFloor
-        }
-        let runnable = set.cases.filter { OfflineRecallBench.isRunnable($0) }
-        let skipped = set.cases.count - runnable.count
-        guard !runnable.isEmpty else {
-            return try saveUnmeasurableRun(set, reason: "没有每轮都带 ops 的用例")
-        }
-        let writer = OfflineRecallBench.writer(floorURL: floorURL)
-        let recipes = [try OfflineRecallBench.recipe(tuning: RecallTuning.defaults)]
-        let models = [MemoryBenchModelRef(credentialId: "", modelId: "offline", name: "离线", local: true)]
-        let floor = config.floor
-        var run = try await MemoryBenchRunner.run(
-            writer: writer, set: set, caseIds: runnable.map(\.id), recipes: recipes, models: models,
-            store: benchStore, profileId: config.profileId, memoryRoot: { floor },
-            local: { testCase, recipe in
-                try await OfflineRecallBench.execute(testCase: testCase, recipe: recipe, floorURL: floorURL)
-            },
-            caller: { _, _ in throw MemorydError.noModelCall },
-            runId: UUID().uuidString
-        )
-        let broken = Set(run.cells.filter { $0.error != nil }.map(\.id))
-        if !broken.isEmpty {
-            run.judgments.removeAll { broken.contains($0.cellId) }
-            run.scores = run.scored(with: writer.scorers)
-        }
-        var notes: [String] = []
-        if !broken.isEmpty { notes.append("\(broken.count) 格出错未计分") }
-        if skipped > 0 { notes.append("主分不可测（X 侧 \(skipped) 题等刀 3）") }
-        if !notes.isEmpty {
-            run.note = [run.note, notes.joined(separator: "；")].compactMap { $0 }.joined(separator: "；")
-            try benchStore.saveRun(run)
-        }
-        return run
     }
 
     private func saveUnmeasurableRun(_ set: MemoryBenchSet, reason: String) throws -> MemoryBenchRun {
@@ -1533,14 +1641,12 @@ actor MemorydService {
 enum MemorydError: LocalizedError {
     case noWiki
     case noModelCall
-    case noRecallFloor
     case notMounted(String)
 
     var errorDescription: String? {
         switch self {
         case .noWiki: return "副本里没有 wiki/"
         case .noModelCall: return "memoryd v1 不调模型"
-        case .noRecallFloor: return "memoryd 资源里缺 memory-bench-recall-floor-xingyan.json"
         case .notMounted(let path):
             return "\(path) 不是 memoryd-mount.sh 做的副本（缺 \(MemorydService.mountMarkerName)）；不碰真楼层，先用 scripts/memoryd-mount.sh 拷一份"
         }

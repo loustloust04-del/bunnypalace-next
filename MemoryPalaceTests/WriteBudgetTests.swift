@@ -109,7 +109,7 @@ final class WriteBudgetTests: XCTestCase {
 
     func testUsageLabels() {
         XCTAssertEqual(UsageKind.timeline.label, "时间轴", "A11：「日记」改「时间轴」")
-        XCTAssertEqual(UsageKind.memory.label, "碎片池")
+        XCTAssertEqual(UsageKind.memory.label, "原子事实")
         XCTAssertEqual(UsageKind.windowSummary.label, "窗口总结")
     }
 }

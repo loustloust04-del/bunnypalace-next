@@ -6,7 +6,7 @@ import SwiftData
 /// 读侧段④：本窗六项、上个窗口冻结 / 复核 / 失效、Z7 进 system 段（plan-recall-slice-4）。夹具名字全虚构
 final class MemoryWindowChoicesTests: XCTestCase {
     private let pid = "xctest-window-choices-云桥城"
-    private let keys = ["mem_master", "mem_content_summary", "mem_content_timeline", "mem_inject_keyword", "mem_inject_full",
+    private let keys = ["mem_master", "mem_content_summary", "mem_content_timeline",
                         "mem_inject_vector", "mem_inject_graph", "mem_inject_catalog",
                         MemoryOpenWindow.a2Key, MemoryOpenWindow.a4Key, MemoryOpenWindow.b4Key, MemoryOpenWindow.cKey,
                         MemoryOpenWindowStore.storageKey, RecallTuningStore.storageKey, "mem_inject_budget"]
@@ -17,7 +17,6 @@ final class MemoryWindowChoicesTests: XCTestCase {
         for k in keys { saved[k] = UserDefaults.standard.object(forKey: k) }
         for k in keys { UserDefaults.standard.removeObject(forKey: k) }
         UserDefaults.standard.set(true, forKey: "mem_master")
-        UserDefaults.standard.set(true, forKey: "mem_inject_full")
     }
 
     override func tearDown() {
@@ -59,10 +58,13 @@ final class MemoryWindowChoicesTests: XCTestCase {
     func testLegacyEqualsTodaysChecksAndDefaultsReadNewKeys() {
         let legacy = MemoryWindowChoices.legacy(profileId: pid)
         XCTAssertEqual(legacy, MemoryWindowChoices(timeline: true, pending: true, selfMemory: true, archive: false,
-                                                   previousWindow: false, pinned: false),
-                       "老窗：待续跟时间轴、钉住跟档案（C 没写过 = 不勾）、没有上个窗口")
+                                                   previousWindow: false, pinned: true),
+                       "老窗：待续跟时间轴、档案 = wiki 目录那一勾（没写过 = 不勾）、钉住只听「钉住的」那一勾（没写过 = 开）、没有上个窗口")
         MemoryOpenWindowStore.save(.c, true, profileId: pid)
-        XCTAssertTrue(MemoryWindowChoices.legacy(profileId: pid).pinned)
+        MemoryWindowChoices.setDefault(.pinned, false, profileId: pid)
+        XCTAssertFalse(MemoryWindowChoices.legacy(profileId: pid).pinned, "wiki 目录勾着也不连带钉住")
+        XCTAssertTrue(MemoryWindowChoices.legacy(profileId: pid).archive)
+        MemoryWindowChoices.setDefault(.pinned, true, profileId: pid)
         let fresh = MemoryWindowChoices.defaults(profileId: pid)
         XCTAssertTrue(fresh.pending && fresh.previousWindow && fresh.pinned, "新增三勾没写过 = 开")
         MemoryWindowChoices.setDefault(.pinned, false, profileId: pid)
@@ -75,13 +77,16 @@ final class MemoryWindowChoicesTests: XCTestCase {
         XCTAssertFalse(MemoryOpenWindowNote.enabled(profileId: pid))
     }
 
-    func testNewArchiveDefaultIsRootOrTriggerAndLegacyRemainsRootOnly() {
+    func testNewArchiveDefaultIsRootOrTriggerOrEveryRoundAndLegacyRemainsRootOnly() {
         for root in [false, true] {
             for trigger in [false, true] {
-                MemoryOpenWindowStore.save(.c, root, profileId: pid)
-                RecallTuningStore.save(RecallTestTuning.make(archiveTriggerEnabled: trigger), profileId: pid)
-                XCTAssertEqual(MemoryWindowChoices.defaults(profileId: pid).archive, root || trigger)
-                XCTAssertEqual(MemoryWindowChoices.legacy(profileId: pid).archive, root)
+                for every in [false, true] {
+                    MemoryOpenWindowStore.save(.c, root, profileId: pid)
+                    RecallTuningStore.save(RecallTestTuning.make(archiveTriggerEnabled: trigger), profileId: pid)
+                    MemoryOpenWindow.setEveryRound(every, profileId: pid)
+                    XCTAssertEqual(MemoryWindowChoices.defaults(profileId: pid).archive, root || trigger || every)
+                    XCTAssertEqual(MemoryWindowChoices.legacy(profileId: pid).archive, root)
+                }
             }
         }
     }
@@ -124,9 +129,40 @@ final class MemoryWindowChoicesTests: XCTestCase {
         XCTAssertEqual(inputs(only).memories.map(\.isUserExplicit), [false], "档案勾、钉住不勾 = 不带钉住")
         XCTAssertNil(inputs(only).selfMemory)
         XCTAssertTrue(inputs(.allOff).memories.isEmpty)
-        XCTAssertTrue(inputs(nil).memories.isEmpty, "老窗：C 没写过 = 钉住也不带（= 今天）")
+        // 什么都没设过的楼层：批过的卡是候选（聊到了才带），钉住的每轮带；老窗也一样（钉住不再跟 wiki 目录那一勾）
+        XCTAssertEqual(inputs(nil).memories.map(\.isUserExplicit).sorted { $0 && !$1 }, [true, false])
+        XCTAssertFalse(inputs(nil).everyRound, "每轮全带没勾：批过的卡只是「聊到了才带」的候选")
+        XCTAssertEqual(inputs(nil).everyRoundMemories.map(\.content), ["星砚喜欢暖奶白"], "不走聊到才带的调用方只拿到钉住的")
+        XCTAssertEqual(inputs(nil).rootIndex, false)
+        var fresh = MemoryWindowChoices.defaults(profileId: pid)
+        XCTAssertTrue(fresh.archive && fresh.pinned, "新窗默认：档案触发开着 = 档案开")
+        XCTAssertEqual(inputs(fresh).memories.count, 2)
+        XCTAssertFalse(inputs(fresh).everyRound)
+        fresh.archive = false
+        XCTAssertEqual(inputs(fresh).memories.map(\.isUserExplicit), [true], "这个窗口划掉了档案：卡不进候选")
+        let unapproved = try store.add(content: "还没批的一张", category: "event", keywords: [], profileId: pid,
+                                       isUserExplicit: false, extractedBy: "t", sourceConversationId: nil, context: context)
+        unapproved.occurredDay = "2026-11-02"
+        try context.save()
+        XCTAssertEqual(inputs(nil).memories.filter { !$0.isUserExplicit }.count, 1, "没批的卡不进")
+        // 聊到才带关、每轮全带没勾：批过的卡没有路能带，不取；wiki 目录那一勾不决定卡带不带
+        RecallTuningStore.save(RecallTestTuning.make(archiveTriggerEnabled: false), profileId: pid)
+        XCTAssertEqual(inputs(nil).memories.map(\.isUserExplicit), [true])
         MemoryOpenWindowStore.save(.c, true, profileId: pid)
-        XCTAssertEqual(inputs(nil).memories.count, 2, "老窗：C 勾上两样都带（= 今天）")
+        XCTAssertEqual(inputs(nil).memories.map(\.isUserExplicit), [true], "wiki 目录勾上：只多一段目录，卡照旧不带")
+        XCTAssertEqual(inputs(nil).rootIndex, true)
+        MemoryOpenWindowStore.save(.c, false, profileId: pid)
+        MemoryOpenWindow.setEveryRound(true, profileId: pid)
+        XCTAssertEqual(inputs(nil).memories.count, 2, "每轮全带勾上：不用 wiki 目录勾着、不用聊到才带关着")
+        XCTAssertTrue(inputs(nil).everyRound)
+        XCTAssertEqual(inputs(nil).everyRoundMemories.count, 2)
+        XCTAssertEqual(inputs(nil).rootIndex, false)
+        var crossed = MemoryWindowChoices.defaults(profileId: pid)
+        XCTAssertTrue(crossed.archive, "新窗默认：每轮全带勾着 = 档案开")
+        crossed.archive = false
+        XCTAssertFalse(inputs(crossed).everyRound, "这个窗口划掉了档案：每轮全带也不带")
+        XCTAssertEqual(inputs(crossed).memories.map(\.isUserExplicit), [true])
+        MemoryOpenWindowStore.save(.c, true, profileId: pid)
         XCTAssertTrue(MemoryInjector.roundInputs(profileId: pid,
                                                  participation: .testValue(profileId: pid, window: false,
                                                                            choices: .init(timeline: true, pending: true, selfMemory: true,

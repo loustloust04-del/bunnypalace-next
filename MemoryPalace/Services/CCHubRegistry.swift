@@ -427,6 +427,18 @@ final class CCHubRegistry {
     /// 只认「还没归属、也还没会话名」= 新对话；已有会话名的老对话保持 nil（= 主 hub）
     func bindNewCCConversation(_ conversation: Conversation) {
         guard conversation.ccHubId == nil, conversation.ccBridgeSessionName == nil else { return }
+        // 电脑文件夹楼层（plan-folder-floor）：连这一层连着的那台，不看全局「上次那台」；那台不在了 → 待绑定，不回落
+        if let folderHub = FolderFloor.hubForNewConversation(
+            profileId: conversation.profileId, exists: { self.status(for: $0) != nil },
+            idForIdentity: { identity in self.hubs.first { self.identity(of: $0.id) == identity }?.id }, unbound: Self.unboundHubId) {
+            conversation.ccHubId = folderHub
+            conversation.ccHubIdentity = folderHub == Self.unboundHubId ? FolderFloor.link(conversation.profileId)?.hubIdentity : identity(of: folderHub)
+            if focus?.chatId == conversation.id, focus?.hubId != folderHub {
+                focus = (conversation.id, folderHub)
+                distributeFocus()
+            }
+            return
+        }
         let id = lastHubId
         let known = identity(of: id)
         guard id != Self.primaryId || known != nil else { return }

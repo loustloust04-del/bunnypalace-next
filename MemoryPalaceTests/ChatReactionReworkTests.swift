@@ -213,6 +213,7 @@ final class ChatReactionReworkTests: XCTestCase {
             vm.regenerate(assistantNodeId: first.id, model: model, profile: h.profile, preset: h.preset,
                           providerManager: h.providerManager, context: h.context)
             try await waitUntil { !vm.assistantTurnInFlight && server.requestBodies.count == 2 }
+            XCTAssertNil(vm.debugPathDrift, "重新生成结束后：手改出来的显示路径应该和按树重算的一样")
             let second = try XCTUnwrap(vm.currentPath.last)
             XCTAssertNotEqual(second.id, first.id)
             XCTAssertEqual(second.content, "（没有回复）", "父节点还有别的回复：保留这条分支")
@@ -335,6 +336,7 @@ final class ChatReactionReworkTests: XCTestCase {
             XCTAssertTrue(vm.editAndResend(u2.id, newText: "第二条（改）", isEdit: true, model: model, profile: h.profile, preset: h.preset,
                                            providerManager: h.providerManager, context: h.context))
             try await waitUntil { !vm.assistantTurnInFlight && server.requestBodies.count == 1 }
+            XCTAssertNil(vm.debugPathDrift, "编辑重发结束后：手改出来的显示路径应该和按树重算的一样")
             let reply = try XCTUnwrap(vm.currentPath.last)
             let edited = try XCTUnwrap(vm.currentPath.dropLast().last)
             XCTAssertEqual(edited.content, "第二条（改）")
@@ -404,7 +406,7 @@ final class ChatReactionReworkTests: XCTestCase {
             try await waitUntil { !vm.assistantTurnInFlight }
             let reply = try XCTUnwrap(vm.currentPath.last)
             let user = try XCTUnwrap(vm.currentPath.dropLast().last)
-            XCTAssertTrue(reply.content.hasPrefix("晚安\n\n⚠️"), reply.content)
+            XCTAssertTrue(reply.content.hasPrefix("晚安\n\n" + ChatSystemMessage.errorMarker), reply.content)
             XCTAssertFalse(reply.content.contains("```"), "存下来的正文没有块残留")
             XCTAssertEqual(store.aiReactions(for: ChatReactionTarget(node: user, blockIndex: 0, blockText: user.content)), ["👍"],
                            "收尾 fence 只写出两个反引号：内容合法照样贴")

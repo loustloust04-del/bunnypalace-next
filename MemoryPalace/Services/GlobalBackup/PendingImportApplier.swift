@@ -47,6 +47,9 @@ enum PendingImportApplier {
         case p1_snapshotUserDefaults = "p1.6"
         case p1_archiveCardLibrary = "p1.7"
         case p1_archiveAssistant = "p1.8"
+        case p1_archivePage2 = "p1.9"
+        case p1_archiveWebApps = "p1.10"
+        case p1_archiveVersions = "p1.11"
         // Phase 2（codex Round 5 #1：verifyPrimary 必须紧跟 installStore + installStoreExternal，
         //          stickers/audiobooks/themes/floors 装之前 — 减少校验失败时的破坏面）
         case p2_installStore = "p2.1"
@@ -61,6 +64,9 @@ enum PendingImportApplier {
         case p2_clearSyncState = "p2.10"
         case p2_installCardLibrary = "p2.11"
         case p2_installAssistant = "p2.12"
+        case p2_installPage2 = "p2.13"
+        case p2_installWebApps = "p2.14"
+        case p2_installVersions = "p2.15"
     }
 
     struct Marker: Codable {
@@ -236,6 +242,18 @@ enum PendingImportApplier {
             (.p1_archiveAssistant, {
                 try archiveAssistantIfIncoming(archive: archiveRoot.appendingPathComponent("assistant", isDirectory: true))
             }),
+            (.p1_archivePage2, {
+                try archiveIfIncoming(staging: StagingPaths.stagingPage2Root, primary: StagingPaths.primaryPage2Root,
+                                      archive: archiveRoot.appendingPathComponent("page2", isDirectory: true))
+            }),
+            (.p1_archiveWebApps, {
+                try archiveIfIncoming(staging: StagingPaths.stagingWebAppsRoot, primary: StagingPaths.primaryWebAppsRoot,
+                                      archive: archiveRoot.appendingPathComponent("webapps", isDirectory: true))
+            }),
+            (.p1_archiveVersions, {
+                try archiveIfIncoming(staging: StagingPaths.stagingVersionsRoot, primary: StagingPaths.primaryVersionsRoot,
+                                      archive: archiveRoot.appendingPathComponent("versions", isDirectory: true))
+            }),
         ]
 
         for (step, action) in p1Steps {
@@ -295,6 +313,15 @@ enum PendingImportApplier {
             }),
             (.p2_installAssistant, {
                 try installAssistant()
+            }),
+            (.p2_installPage2, {
+                try moveIfExists(StagingPaths.stagingPage2Root, to: StagingPaths.primaryPage2Root)
+            }),
+            (.p2_installWebApps, {
+                try moveIfExists(StagingPaths.stagingWebAppsRoot, to: StagingPaths.primaryWebAppsRoot)
+            }),
+            (.p2_installVersions, {
+                try moveIfExists(StagingPaths.stagingVersionsRoot, to: StagingPaths.primaryVersionsRoot)
             }),
             (.p2_applyUserDefaults, {
                 try applyStagingUserDefaults(from: stagingDir)
@@ -409,6 +436,9 @@ enum PendingImportApplier {
             (archiveRoot.appendingPathComponent("floors", isDirectory: true), StagingPaths.primaryFilelibraryRoot, "floors"),
             (archiveRoot.appendingPathComponent("cardlibrary", isDirectory: true), StagingPaths.primaryCardLibraryRoot, "cardlibrary"),
             (archiveRoot.appendingPathComponent("assistant", isDirectory: true), StagingPaths.primaryAssistantRoot, "assistant"),
+            (archiveRoot.appendingPathComponent("page2", isDirectory: true), StagingPaths.primaryPage2Root, "page2"),
+            (archiveRoot.appendingPathComponent("webapps", isDirectory: true), StagingPaths.primaryWebAppsRoot, "webapps"),
+            (archiveRoot.appendingPathComponent("versions", isDirectory: true), StagingPaths.primaryVersionsRoot, "versions"),
         ]
 
         SearchIndexStore.removeFiles()
@@ -481,6 +511,12 @@ enum PendingImportApplier {
     /// 小芽对话 + 账本：包里带了这段（staging 在）才把本机的归档；旧包没有 → 本机现有的不动（粟粟 10-15 拍板 7）
     static func archiveAssistantIfIncoming(staging: URL = StagingPaths.stagingAssistantRoot,
                                            primary: URL = StagingPaths.primaryAssistantRoot, archive: URL) throws {
+        guard FileManager.default.fileExists(atPath: staging.path) else { return }
+        try moveIfExists(primary, to: archive)
+    }
+
+    /// page2 / 网页应用同款：包里带了才把本机的归档，旧包没有 → 本机现有的不动
+    static func archiveIfIncoming(staging: URL, primary: URL, archive: URL) throws {
         guard FileManager.default.fileExists(atPath: staging.path) else { return }
         try moveIfExists(primary, to: archive)
     }

@@ -19,9 +19,4 @@ enum MemorydResources {
         }
         return url.deletingLastPathComponent()
     }
-
-    /// 内置虚构楼层（recall-24 的 `snapshot` 目标；与 app 资源 / 包测试夹具逐字节相同）
-    static var recallFloorURL: URL? {
-        Bundle.module.url(forResource: "memory-bench-recall-floor-xingyan", withExtension: "json", subdirectory: "MemoryBench")
-    }
 }

@@ -198,8 +198,9 @@ private struct BubbleMenuOverlayContent: View {
     @State private var previewNaturalHeight: CGFloat = 0
     /// 预览框下面还有没露出来的内容（框内滚动时底边渐隐用）
     @State private var previewMoreBelow = true
-    /// 二级菜单：点带 children 的行，卡内原地换成这一页（顶上「返回」）
-    @State private var submenu: MenuActionSpec?
+    /// 二级菜单：点带 children 的行，卡内原地换成这一页（顶上「返回」）；可以一层套一层（11-16：更多 ▸ 身份 ▸），返回退一层
+    @State private var submenuStack: [MenuActionSpec] = []
+    private var submenu: MenuActionSpec? { submenuStack.last }
     /// 表情条末尾「+」：隐藏输入框拉起系统 emoji 键盘（10-29 甲，iMessage 做法）
     @State private var emojiPickerActive = false
 
@@ -490,6 +491,8 @@ private struct BubbleMenuOverlayContent: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(MenuRowButtonStyle(insetH: 2))
+        .disabled(spec.isDisabled)
+        .opacity(spec.isDisabled ? 0.4 : 1)
         .accessibilityLabel(spec.title)
     }
 
@@ -499,7 +502,7 @@ private struct BubbleMenuOverlayContent: View {
     private func menuRow(_ spec: MenuActionSpec) -> some View {
         Button {
             if spec.children != nil {
-                withAnimation(.spring(response: 0.26, dampingFraction: 0.9)) { submenu = spec }
+                withAnimation(.spring(response: 0.26, dampingFraction: 0.9)) { submenuStack.append(spec) }
             } else {
                 tapped(then: spec.handler)
             }
@@ -526,12 +529,14 @@ private struct BubbleMenuOverlayContent: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(MenuRowButtonStyle())
+        .disabled(spec.isDisabled)
+        .opacity(spec.isDisabled ? 0.4 : 1)
     }
 
     /// 二级页顶上那行：‹ 父项标题，点回一级
     private func backRow(_ title: String) -> some View {
         Button {
-            withAnimation(.spring(response: 0.26, dampingFraction: 0.9)) { submenu = nil }
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.9)) { _ = submenuStack.popLast() }
         } label: {
             HStack(spacing: 14) {
                 Image(systemName: "chevron.left")

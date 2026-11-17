@@ -52,8 +52,21 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
     case twitter
     // AI 在花园浏览器里动手（plan-ai-browser-operate）：打开 / 看 / 点 / 填 / 翻 / 后退；默认每次询问
     case browserOperate
+    // 自己醒来（plan-wake-heartbeat）：AI 给自己建任务、到点醒来去做；默认每次询问
+    case selfWake
     // 运行命令（plan-离线沙箱 phase1/phase2）：macOS 原生 shell / iOS app 内 Alpine 沙箱；默认 askOnce（粟粟拍）
     case shell
+    // 记忆条目（助手的 memory_card：加 / 改 / 删 / 钉从聊天里记下的卡）：默认每次询问，而且是一笔一问（`asksEveryCall`）
+    case memoryCards
+    // 助手自己的记忆和待续（remember / edit_memory / forget_memory、pending_notes 记一条 / 标做完 / 淡了，
+    // 或用文件工具写 memory/self/、memory/pending/）：默认自动允许（一直是它直接写）
+    case memorySelf
+    // 别的记忆文件（用文件工具直接改 wiki 页、suggest_wiki_direction 提整理方向）：默认每次询问，一笔一问
+    case memoryFiles
+    // 用文件工具改这一层的 Prompt（文件库 › Prompt：插槽和楼层字段，如助手设定）：默认每次询问，一笔一问
+    case promptEdit
+    // 网页应用（plan-garden-webapps §6.4）：AI 把它写的网页放到花园桌面；默认每次询问
+    case webApps
     #if os(macOS)
     // 编程会话（W-N N5 AI 工具，mac only）：读这台 Mac 上编程 agent 的会话记录；默认不允许
     case codingSessions
@@ -93,6 +106,12 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         case .shell: return ("deviceTools.shell", false)
         case .twitter: return ("twitter.aiTool", true)   // 无历史 key；新能力纯本地，老装机迁移也写允许
         case .browserOperate: return ("browserOperate.enabled", false)
+        case .selfWake: return ("wake.tool.enabled", false)
+        case .memoryCards: return ("memoryCards.tool", false)   // 无历史 key；迁移时跳过，老装机也按新默认 askOnce
+        case .memorySelf: return ("memorySelf.tool", true)      // 同上：无历史 key，迁移时跳过，按新默认自动允许
+        case .memoryFiles: return ("memoryFiles.tool", false)
+        case .webApps: return ("webApps.tool", false)   // 无历史 key，迁移时跳过
+        case .promptEdit: return ("promptEdit.tool", false)
         #if os(macOS)
         case .codingSessions: return ("codingTools.enabled", false)
         #endif
@@ -113,7 +132,7 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
              .calendar, .reminders, .clipboard, .notifications:
             return .notAllowed
         #endif
-        case .memory, .images, .fileLibrary, .toolsMaster, .twitter:
+        case .memory, .images, .fileLibrary, .toolsMaster, .twitter, .memorySelf:
             return .bypass
         #if PERSONAL_APPS
         #if DEBUG
@@ -121,8 +140,8 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
             return .bypass
         #endif
         #endif
-        case .shell, .browserOperate:
-            return .askOnce   // 每对话首次弹卡问一次（shell 粟粟 08-25 拍；浏览器操作同款）
+        case .shell, .browserOperate, .selfWake, .memoryCards, .memoryFiles, .promptEdit, .webApps:
+            return .askOnce   // 每对话首次弹卡问一次（shell 粟粟 08-25 拍；浏览器操作同款）；记忆条目 / 记忆文件 / Prompt 一笔一问（粟粟 11-14）
         #if os(macOS)
         case .codingSessions:
             return .notAllowed   // 母 plan W-N：AI 工具默认关
@@ -159,6 +178,12 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         case .shell: return "运行命令"
         case .twitter: return "推特"
         case .browserOperate: return "AI 操作浏览器"
+        case .selfWake: return "自己醒来"
+        case .memoryCards: return "C2 记忆条目"
+        case .memorySelf: return "自己的记忆"
+        case .memoryFiles: return "记忆文件"
+        case .promptEdit: return "Prompt"
+        case .webApps: return "AI 往桌面放应用"
         #if os(macOS)
         case .codingSessions: return "编程会话"
         #endif
@@ -194,6 +219,12 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         case .notifications: return "AI 可给你发本地通知"
         case .twitter: return "AI 可在本楼层的推特上发推、回复、点赞、关注和刷时间线（纯本地，不碰真 X）"
         case .browserOperate: return "AI 可在花园浏览器里打开网页、点按钮、填字（你看得见、随时接管；发布 / 购买这类先问你，密码不填）"
+        case .selfWake: return "AI 可给自己建任务、到点自己醒来去做（早报、到点来找你）；醒来只用你设成自动允许的工具"
+        case .memoryCards: return "AI 可新加、改、删、钉从聊天里记下的记忆条目（每次询问 = 每一笔都出卡等你点；每笔都进记忆日志，能 Undo）"
+        case .memorySelf: return "AI 可记、改、忘掉它自己的记忆（文件库 › 记忆 里它自己的那一格），可记待续、标做完 / 淡了"
+        case .memoryFiles: return "AI 可给 wiki 提整理方向、用文件工具直接改 wiki 页（每次询问 = 每一笔都出卡等你点；wiki 页改之前存一版历史）"
+        case .promptEdit: return "AI 可用文件工具改这一层的 Prompt，如助手设定（每次询问 = 每一笔都出卡等你点；每次改都存一版历史，能回到上一版）"
+        case .webApps: return "AI 可把它写的网页做成你花园桌面上的全屏应用（点图标就打开，数据存在应用里）"
         case .shell:
             // 文案按平台分：macOS 是真机器上的 shell（零隔离），iOS 是 app 内的 Linux 沙箱
             #if os(macOS)
@@ -218,6 +249,12 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         if name == "run_command" { return .shell }
         if name == "local_twitter" { return .twitter }
         if name.hasPrefix("browser_") { return .browserOperate }   // 🔴 绝不能落进 toolsMaster 兜底（默认 bypass = shell 裸奔）
+        if name == "heartbeat_task" { return .selfWake }
+        if name == MemoryCardTool.toolName { return .memoryCards }   // 🔴 同上，不能落进 toolsMaster 兜底（默认 bypass = 不问就改卡）
+        if SelfMemoryTool.names.contains(name) { return .memorySelf }
+        // 给 wiki 提整理方向 = 往她的记忆里交东西：同记忆文件那一档（pending_notes 写待续归「自己的记忆」，看的是哪个动作，在 `forCall`）
+        if name == WikiSuggestTool.toolName { return .memoryFiles }
+        if WebAppTools.names.contains(name) { return .webApps }
         #if os(macOS)
         // 精确四名，不按前缀：MCP 工具以原名下发，同前缀的 code_review 之类不能被劫持进这个域
         if CodingTools.names.contains(name) { return .codingSessions }
@@ -242,9 +279,11 @@ enum PermissionDomain: String, CaseIterable, Identifiable {
         return domains
     }
     static var toolDomains: [PermissionDomain] {
-        var domains: [PermissionDomain] = [.toolsMaster, .webSearch, .voiceProactive, .pocket, .calendar, .reminders, .clipboard, .notifications, .shell, .twitter]
+        var domains: [PermissionDomain] = [.toolsMaster, .webSearch, .voiceProactive, .pocket, .calendar, .reminders, .clipboard, .notifications, .shell, .twitter, .memoryCards, .memorySelf, .memoryFiles, .promptEdit]
         #if os(iOS)
         domains.append(.browserOperate)   // 花园浏览器只在 iOS
+        domains.append(.selfWake)   // 自己醒来先只在 iPhone 跑（heartbeat 在人页）
+        domains.append(.webApps)   // 网页应用第一版只在 iPhone 花园桌面
         #endif
         return domains
     }
@@ -441,7 +480,7 @@ enum PermissionCenter {
         for domain in PermissionDomain.allCases {
             guard d.object(forKey: domain.storageKey) == nil else { continue }
             // shell 无历史 key，老装机也按新默认 askOnce 走（粟粟拍）；不写 notAllowed
-            if domain == .shell { continue }
+            if [.shell, .memoryCards, .memorySelf, .memoryFiles, .promptEdit, .webApps].contains(domain) { continue }
             if let explicit = d.object(forKey: domain.legacy.key) as? Bool {
                 d.set((explicit ? PermissionLevel.bypass : .notAllowed).rawValue, forKey: domain.storageKey)
             } else if existingInstall {

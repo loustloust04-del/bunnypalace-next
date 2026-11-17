@@ -127,6 +127,11 @@ struct HTMLArtifactPreviewSheet: View {
 
                     Menu {
                         Button {
+                            WebAppInstaller.present(html: content, suggestedTitle: pageTitle)
+                        } label: {
+                            Label("放到桌面", systemImage: "square.grid.2x2")
+                        }
+                        Button {
                             savedPath = saveArtifactToLibrary(content: content, title: pageTitle, profileId: profileId)
                         } label: {
                             Label("保存到文件库", systemImage: "books.vertical")

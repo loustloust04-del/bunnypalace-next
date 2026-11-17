@@ -114,6 +114,8 @@ actor SessionCloseout {
     private var dayChecked: [String: (updated: Date, day: String, isCC: Bool)] = [:]
     /// 日切上次没写成：到这个时间以后再查。
     private var dayRetryAt: [String: Date] = [:]
+    /// 日切被拦下已经记过日志的（窗口 → 停在哪 + 原因）
+    private var dailySkipNoted: [String: String] = [:]
     #if DEBUG
     private(set) var dailyWorkCounts = (claims: 0, pathFetches: 0)
     #endif
@@ -186,6 +188,13 @@ actor SessionCloseout {
     }
 
     func setRegenerating(_ on: Bool) { regenerating = on }
+
+    /// 手动 Rewrite / Undo（`SummaryRewrite`）：占住这个窗口跑完 body，日常写手照旧等它；后台正在写这个窗口 / 正在搬迁 = nil，不排队
+    func exclusive<T>(_ conversationId: String, job: String, _ body: () async -> T) async -> T? {
+        guard !regenerating, busy[conversationId] == nil, claim(conversationId, job: job, retry: {}) else { return nil }
+        defer { release(conversationId) }
+        return await body()
+    }
 
     /// 等日常写手停手的结果（10-16）
     enum IdleWait: Equatable {
@@ -439,7 +448,12 @@ actor SessionCloseout {
                     try Self.saveA2($0, profileId: pid)
                 })
                 await MainActor.run { NotificationCenter.default.post(name: .memoryDidChange, object: nil) }
-                guard done else { return .skipped }
+                guard done else {
+                    noteDailySkip(cid, profileId: pid, title: title, formal: s.segments.filter { !$0.isTail }.count,
+                                  at: max(0, s.segments.filter { !$0.isTail }.count - before) + 1, of: parts.count, model: ctx.model(.context).name)
+                    return .skipped
+                }
+                dailySkipNoted[cid] = nil
                 MemoryHealthStore.recordOK(.context, profileId: pid, modelName: ctx.model(.context).name,
                                            note: Self.contextNote(added: parts.count, title: title))
                 CacheDiagLog.shared.log("📝 上下文摘要（\(isCC ? "CC" : "API日切")）: ✅ \(title)（\(parts.count) 份）")
@@ -450,6 +464,18 @@ actor SessionCloseout {
                 return .failed(retryAt: cooldown["\(Writer.context.rawValue)|\(cid)"])
             }
         }
+    }
+
+    /// 日切写到一半被拦下（预算闸 / 开关关了 / 模型没回内容）：写入日志记一行。每次巡检都会再来，
+    /// 同一个窗口停在同一处、同一个原因只记一次；写成了再清
+    private func noteDailySkip(_ cid: String, profileId: String, title: String, formal: Int, at: Int, of: Int, model: String) {
+        let why = MemoryWriteLog.meter?.skip ?? "模型没回内容"
+        let key = "\(formal)|\(why)"
+        guard dailySkipNoted[cid] != key else { return }
+        dailySkipNoted[cid] = key
+        MemoryWriteLog.record(writer: .a2, profileId: profileId, ok: false,
+                              note: "《\(title.isEmpty ? "没有标题" : title)》这次要写 \(of) 份，写到第 \(at) 份被拦下：\(why)（下次巡检接着写）",
+                              model: model, memoryRoot: FileLibraryStore.memoryRoot(profileId: profileId))
     }
 
     /// 最近动过的所有窗口补日切；失败、冷却、占用都不算已查过。
@@ -1147,13 +1173,9 @@ final class SessionCloseoutTrigger {
     /// container：占到窗口后复查本窗参与（P2-d）；调用方拿不到就留 nil = 不复查
     nonisolated static func context(profile: Profile, providers: ProviderManager, chat: ProviderModel? = nil,
                                     container: ModelContainer? = nil) -> SessionCloseout.Context {
-        let chat = chat ?? providers.resolveModel(conversationModelId: nil, profileModelId: nil, globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
-        let memory = ConversationViewModel.memoryModel(providerManager: providers, fallback: chat)
-        let available = FragmentModelRoute.remoteCredentials(providers.enabledProviders).flatMap(\.models)
+        let memory = MemoryWriterModels.extract(providers: providers, chat: chat)
         var models: [SessionCloseout.Writer: ProviderModel] = [:]
-        for w in SessionCloseout.Writer.allCases {
-            models[w] = MemoryWriterModels.resolve(choice: MemoryWriterModels.choice(w.id), memoryModel: memory, available: available)
-        }
+        for w in SessionCloseout.Writer.allCases { models[w] = MemoryWriterModels.actual(w.id, providers: providers, chat: chat) }
         var context = SessionCloseout.Context(profile: profile, model: memory, writerModels: models)
         context.container = container
         return context
@@ -1168,6 +1190,7 @@ final class SessionCloseoutTrigger {
     }
 
     private func requestCCOnMain(conversationId: String, profileId: String, now: Date = Date()) {
+        guard !FolderFloor.isFolder(profileId) else { return }   // 连着电脑文件夹的楼层：自动的都不写（见 requestOnMain）
         guard SessionCloseout.enabled, let pm = profileManager, let providers = providerManager else { return }
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
         if let last = lastCCRequest[conversationId], now.timeIntervalSince(last) < 60 { return }
@@ -1188,52 +1211,141 @@ final class SessionCloseoutTrigger {
         Task { @MainActor in self.requestFragmentsCCOnMain(conversationId: conversationId, profileId: profileId) }
     }
 
-    private func requestFragmentsCCOnMain(conversationId: String, profileId: String) {
-        guard MemoryFlags.masterEnabled, MemoryFlags.factsEnabled, let pm = profileManager, let providers = providerManager else { return }
+    /// C2 尾巴：放下了的窗口（静默够了；刚新开对话时不等）里没写过的满 `wholeTailMinimum` 条就交给整段写手写一次。
+    /// 不然聊不到「每满 N 条」的窗口、和每个窗口最后那一截永远不写
+    private func flushFragmentTails(newConversationId: String?, activeConversationId: String?, profileId: String?) {
+        guard MemoryFlags.masterEnabled, MemoryFlags.factsEnabled, let pm = profileManager else { return }
+        let pid = profileId ?? pm.currentProfile.id
+        let except = Set([newConversationId, activeConversationId].compactMap { $0 })
+        Task { @MainActor in
+            for cid in await FragmentWatch.shared.tails(idle: newConversationId != nil ? 0 : SessionCloseout.idleInterval, except: except) {
+                self.requestFragmentsCCOnMain(conversationId: cid, profileId: pid, tail: true)
+            }
+        }
+    }
+
+    private func requestFragmentsCCOnMain(conversationId: String, profileId: String, tail: Bool = false) {
+        guard !FolderFloor.isFolder(profileId) else { return }   // 同上：碎片池的每满 N 条、尾巴都不写
+        guard MemoryFlags.masterEnabled, MemoryFlags.factsEnabled else { return }
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure { PerfGuardrails.suppress("memoryExtract"); return }
         #endif
+        // 尾巴只归整段写手（老写手每 20 条一写，尾巴本来就短）
+        guard let job = fragmentJob(conversationId: conversationId, profileId: profileId)?.job, job.whole || !tail else { return }
+        Task.detached(priority: .utility) { await FragmentBatch.run(job, tail: tail) }
+    }
+
+    /// C2 跑一批要用的东西：这一轮实际跑哪个模型、叫什么名字、用不用整段写手、每满几条
+    private func fragmentJob(conversationId: String, profileId: String) -> (job: FragmentBatch.Job, route: FragmentModelRoute.Resolved)? {
+        guard let pm = profileManager, let providers = providerManager else { return nil }
         let profile = pm.profiles.first { $0.id == profileId } ?? pm.currentProfile
         let chat = providers.resolveModel(conversationModelId: nil, profileModelId: nil, globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
         let route = FragmentModelRoute.resolve(providerManager: providers, chatFallback: chat)
-        let caller = FragmentModelRoute.caller(for: route.route, providerManager: providers, conversationId: conversationId, profileId: profileId)
-        let names = MemoryExtractor.Names(userName: profile.userName, assistantName: profile.assistantName)
-        let container = pm.container
-        Task.detached(priority: .utility) {
-            let context = ModelContext(container)
-            context.autosaveEnabled = false
-            let cid = conversationId, pid = profileId
-            let source = SwiftDataConversationSource(container: container)
-            guard let conv = try? source.window(profileId: pid, idOrPrefix: cid), conv.memoryEnabled else { return }
-            let nodes = SessionCloseout.mainPathNodes(conv, source: source)
-            guard let claim = await FragmentWatch.shared.due(conversationId: cid, pathIds: nodes.map(\.id), dates: nodes.map(\.createTime),
-                                                            threshold: FragmentWatch.every())
-            else { return }
-            let msgs = nodes[claim.range].map {
-                FragmentPool.Message(id: $0.id, role: $0.role, content: CatalogOriginalText.body(of: $0, cacheKey: $0.id), date: $0.createTime)
+        // 整段写手（plan-c2-whole-span-writer）：云上模型都用它（她改没改提示词都一样）；攒得多、认领水位之后全部
+        let whole = FragmentWatch.usesWhole(local: route.isLocal)
+        let job = FragmentBatch.Job(
+            conversationId: conversationId, profileId: profileId,
+            names: MemoryExtractor.Names(userName: profile.userName, assistantName: profile.assistantName),
+            caller: FragmentModelRoute.caller(for: route.route, providerManager: providers, conversationId: conversationId, profileId: profileId),
+            local: route.isLocal, modelName: route.displayName, fallbackNote: route.fallbackNote,
+            whole: whole, every: whole ? FragmentWatch.wholeEvery() : FragmentWatch.every(), container: pm.container,
+            resident: { [container = pm.container] in
+                FragmentResident.current(profile: profile, conversationId: conversationId, context: container.mainContext)
+            })
+        return (job, route)
+    }
+
+    /// 对话 ⋯「重新记这个窗口」第一步：后台数一数从起点起要读多少、大约几批、估计花多少、写入预算够不够，交给确认框。
+    /// 上次重新记没跑完（预算用完 / 被掐断）= 接着那里算。记忆关着 / 窗口不参与 / 这一轮不是整段写手 = nil
+    func prepareRerecord(conversationId: String, profileId: String) async -> FragmentRerecord.Prompt? {
+        guard MemoryFlags.masterEnabled, MemoryFlags.factsEnabled, let providers = providerManager,
+              let made = fragmentJob(conversationId: conversationId, profileId: profileId), made.job.whole else { return nil }
+        let job = made.job
+        var priced: (provider: APICredential, modelId: String)?
+        if case .remote(let model) = made.route.route, let provider = providers.provider(for: model) { priced = (provider, model.modelId) }
+        let startDay = MemoryStartDay.current
+        return await Task.detached(priority: .userInitiated) { () -> FragmentRerecord.Prompt? in
+            guard let path = FragmentBatch.path(job) else { return nil }
+            let ids = path.nodes.map(\.id)
+            var resumeAt: Int?
+            if await job.watch.isRedoing(conversationId: conversationId),
+               let backlog = await job.watch.backlog(conversationId: conversationId, pathIds: ids), backlog >= FragmentWatch.wholeTailMinimum {
+                resumeAt = ids.count - backlog
             }
-            let outcome = await MemoryWriteLog.metered {
-                await FragmentPool.process(msgs, names: names, caller: caller,
-                                           local: route.isLocal, profileId: pid,
-                                           modelName: route.displayName, fallbackNote: route.fallbackNote) { fragments in
-                    // 认领超时作废了就不落库（10-16 astra #3）
-                    guard await FragmentWatch.shared.holds(conversationId: cid, token: claim.token) else { throw FragmentPoolError.staleClaim }
-                    return try FragmentPool.write(fragments, messages: msgs, profileId: pid, conversationId: cid,
-                                                  extractedBy: route.displayName, store: SwiftDataMemoryStore(), context: context)
-                }
+            let plan = FragmentRerecord.plan(dates: path.nodes.map(\.createTime), sizes: path.nodes.map(FragmentBatch.size),
+                                             startDay: startDay, every: job.every, resumeAt: resumeAt)
+            let dream = job.dreams && !job.local && FragmentDream.isOn()
+            var cost: Double?
+            if let priced {
+                let usage = FragmentRerecord.estimatedUsage(plan, dream: dream)
+                let usd = BudgetCalculator.actualCost(provider: priced.provider, modelId: priced.modelId,
+                                                      usage: TokenUsage(inputTokens: usage.input, outputTokens: usage.output))
+                cost = usd > 0 ? usd : nil
             }
-            // 写成（含合法空包）/ 整包拒收才挪水位；预算跳过 / 断网 / 请求或落库失败留着下次再来（同 API 那条路，10-16 astra #2）
-            await FragmentWatch.shared.finish(conversationId: cid, claim: claim, outcome: outcome)
-            if case .done(let added) = outcome, added > 0 {
-                await MainActor.run { NotificationCenter.default.post(name: .memoryDidChange, object: nil) }
-            }
+            let confirm = FragmentRerecord.confirmText(plan, startDay: startDay, cost: cost, budget: WriteBudgetStore.remaining(), dream: dream)
+            return FragmentRerecord.Prompt(conversationId: conversationId, profileId: profileId, plan: plan, text: confirm.text, canRun: confirm.canRun)
+        }.value
+    }
+
+    /// 她确认了：水位挪回起点（接着跑的不挪），一批接一批跑到追上。返回给她看的那句结果
+    func rerecord(_ prompt: FragmentRerecord.Prompt, progress: @escaping (_ batch: Int, _ of: Int) async -> Void) async -> String {
+        guard MemoryFlags.masterEnabled, MemoryFlags.factsEnabled,
+              let job = fragmentJob(conversationId: prompt.conversationId, profileId: prompt.profileId)?.job, job.whole else {
+            return "📝 现在记不了：记忆关着，或这一轮用的不是整段写法"
         }
+        let startDay = MemoryStartDay.current
+        return await Task.detached(priority: .utility) {
+            let report = await FragmentRerecord.begin(job, plan: prompt.plan, startDay: startDay, progress: progress)
+            return FragmentRerecord.summary(report, budgetOut: report.stop == .skipped && WriteBudgetStore.exceeded())
+        }.value
+    }
+
+    /// 手动「重新整理」第一步（`FragmentReorganize`）：后台数一数这一层有几张 Draft、出自几个窗口、大约几批、估计花多少，交给确认框。
+    /// 记忆 / C2 关着、C2 选的是本机模型 = nil
+    func prepareReorganize(profileId: String, host: UUID) async -> FragmentReorganize.Prompt? {
+        guard FragmentReorganize.blocked() == nil, let pm = profileManager, let providers = providerManager else { return nil }
+        let chat = providers.resolveModel(conversationModelId: nil, profileModelId: nil, globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
+        let route = FragmentModelRoute.resolve(providerManager: providers, chatFallback: chat)
+        var priced: (provider: APICredential, modelId: String)?
+        if case .remote(let model) = route.route, let provider = providers.provider(for: model) { priced = (provider, model.modelId) }
+        let container = pm.container
+        let every = FragmentWatch.wholeEvery()
+        return await Task.detached(priority: .userInitiated) {
+            FragmentReorganize.prepare(profileId: profileId, host: host, container: container, every: every, cost: { input, output in
+                guard let priced else { return nil }
+                let usd = BudgetCalculator.actualCost(provider: priced.provider, modelId: priced.modelId,
+                                                      usage: TokenUsage(inputTokens: input, outputTokens: output))
+                return usd > 0 ? usd : nil
+            }, budget: WriteBudgetStore.remaining())
+        }.value
+    }
+
+    /// 她确认了：一批接一批走「C2 整理」。返回给她看的那句结果
+    func reorganize(_ prompt: FragmentReorganize.Prompt, shouldStop: @escaping @Sendable () -> Bool,
+                    progress: @escaping (_ batch: Int, _ of: Int) async -> Void) async -> String {
+        let pid = prompt.profileId
+        let every = FragmentWatch.wholeEvery()
+        return await Task.detached(priority: .utility) {
+            let report = await FragmentReorganize.begin(prompt.plan, profileId: pid, every: every, job: { cid in
+                await MainActor.run { SessionCloseoutTrigger.shared.fragmentJob(conversationId: cid, profileId: pid)?.job }
+            }, shouldStop: shouldStop, inBackground: { await FragmentReorganize.appInBackground() }, progress: progress)
+            return FragmentReorganize.summary(report, budgetOut: report.stop == .skipped && WriteBudgetStore.exceeded(),
+                                              needsReview: FragmentDream.needsReview())
+        }.value
     }
 
     /// newConversationId 非空 = 刚新建了对话：最近 12 小时聊过的立刻收尾（各写手「新建对话时先写掉」开着的），不等静默。
     /// 收尾巡检完再看 A4：这一层今天（05:00 起）还没拼过就拼最近几天（A2 刚落盘的段也算进去）
     private func requestOnMain(newConversationId: String?, activeConversationId: String?, profileId: String?) {
+        // 连着电脑文件夹的楼层（plan-folder-floor，粟粟 11-16）：那里是干活的对话，自动的记忆写入一样都不做——
+        // 碎片尾巴、收尾巡检、时间轴都在这一个口子后面；CC 回话落地的两声在 requestCCOnMain / requestFragmentsCCOnMain 各挡一次。
+        // 她手动点的（现在写 / 重录 / 整理 / 重写主调）不挡：那是她明确要的（kimi P1 审 #1）。
+        // 判断的对象就是下面真正拿去收口的那一层：传进来的号找不到时会回落到当前楼层，按回落后的算
+        if let pm = profileManager {
+            if (profileId.flatMap { id in pm.profiles.first { $0.id == id } } ?? pm.currentProfile).isFolderFloor { return }
+        } else if let profileId, FolderFloor.isFolder(profileId) { return }
+        flushFragmentTails(newConversationId: newConversationId, activeConversationId: activeConversationId, profileId: profileId)
         guard SessionCloseout.closeoutEnabled || SessionCloseout.enabled || SessionCloseout.timelineEnabled,
               let pm = profileManager, let providers = providerManager else { return }
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
@@ -1271,6 +1383,7 @@ final class SessionCloseoutTrigger {
     /// A4 一天一条（第 7 段）：C3 每天那次先等它（`CatalogRunner.dailyTick`）。今天拼过就直接回来；正在拼就等它拼完
     @discardableResult
     func timelineDaily(profile: Profile) async -> TimelineDaily.Report? {
+        guard !profile.isFolderFloor else { return nil }   // 每天自动拼的那次；连着电脑文件夹的楼层不拼
         guard SessionCloseout.timelineEnabled, let pm = profileManager, let providers = providerManager else { return nil }
         let input = Self.timelineInput(profile: profile, providers: providers, container: pm.container, manual: false)
         return await Task.detached(priority: .utility) { await Self.runTimeline(input, force: false) }.value

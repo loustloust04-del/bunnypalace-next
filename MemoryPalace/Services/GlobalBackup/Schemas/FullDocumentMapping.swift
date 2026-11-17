@@ -429,7 +429,9 @@ extension FullMemoryDocument {
             organizedPage: model.organizedPage,
             organizeRejectedAt: model.organizeRejectedAt,
             subject: model.subject,
-            speaker: model.speaker
+            speaker: model.speaker,
+            confidence: model.confidence,
+            sourceNodeIds: model.sourceNodeIds
         )
     }
 
@@ -465,6 +467,8 @@ extension FullMemoryDocument {
         mem.organizeRejectedAt = organizeRejectedAt
         mem.subject = subject
         mem.speaker = speaker
+        mem.confidence = confidence
+        mem.sourceNodeIds = sourceNodeIds
         return mem
     }
 }

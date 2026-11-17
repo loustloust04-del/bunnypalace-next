@@ -113,14 +113,6 @@ struct MemoryHealthStatusView: View {
         .buttonStyle(.plain)
     }
 
-    /// 红的时候的原因 / 连续几次 / 模型 / 时间（编号页状态行用；都是早就存了的）
-    static func failureDetail(_ s: MemoryHealthStore.Status) -> String {
-        var parts = ["原因：\(s.lastErrorMessage ?? "没记下")", "连续 \(s.failStreak) 次"]
-        if let model = s.modelName, !model.isEmpty { parts.append("用的 \(model)") }
-        if let at = s.lastError { parts.append(relative(at)) }
-        return parts.joined(separator: " · ")
-    }
-
     static func relative(_ date: Date) -> String {
         let f = RelativeDateTimeFormatter()
         f.locale = Locale(identifier: "zh_CN")
@@ -130,33 +122,19 @@ struct MemoryHealthStatusView: View {
 }
 
 #if os(macOS)
-/// A5（她裁「不删」）：mac 设置 · 记忆页保留的条目 CRUD —— 分档列表（钉住 / 编辑 / 硬删）+ 手动添加。
+/// A5（她裁「不删」）：mac 设置 · 记忆页保留的条目区——一行一条（和记忆页同一个行），点一条开唯一的那张详情页（改 / 钉 / 删都在那里，
+/// 记进记忆日志、在记忆日志里能 Undo）；「手动添加记忆」开同一张页的新建态。11-15 起不再就地改、不再硬删（删了进 Deleted）。
 /// 第 2 类例外：iOS 这块在右栏「记忆」面板，设置页没有；接在 `MemoryPageContent()` 之后。
-///
-/// **刷新合同（plan-x §1-A5）**：本节四条写路径（添加 / 钉住·取消钉住 / 编辑 / 硬删）**提交成功后**
-/// post `.memoryDidChange`，共用核（`MemoryPageContent`）订阅后刷统计；本节自己也订阅它，
-/// 好让共用核那两条写路径（整理完成 / 单独做梦）刷到这个列表。切楼层仍先清空。
+/// 列表订阅 `.memoryDidChange` 刷新（共用核那两条写路径——整理完成 / 单独做梦——也刷得到）。切楼层仍先清空。
 struct MacMemoryEntriesSections: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     @Environment(\.settingsMetrics) private var m
 
     @State private var memories: [Memory] = []
-    @State private var newNoteText = ""
-    @State private var editingNoteId: UUID? = nil
-    @State private var editingNoteText = ""
-    /// D9 确认：点删除只置 pending（存 Memory.id + 楼层 ID），确认分支才按 ID 在最新列表里重找再删
-    @State private var pendingDelete: PendingMemoryDelete?
+    @State private var entryTarget: MemoryEntryTarget?
 
-    private struct PendingMemoryDelete {
-        let profileId: String
-        let memoryId: UUID
-    }
-
-    /// 第二刀 A1：档案不分冷热，mac 条目列表按分类分组
-    private static let categories: [(String, String)] = [
-        ("relationship", "关系"), ("preference", "偏好"), ("fact", "事实"), ("goal", "目标"), ("context", "近况"),
-    ]
+    private var profileId: String { profileManager?.currentProfile.id ?? "" }
 
     var body: some View {
         Group {
@@ -167,41 +145,21 @@ struct MacMemoryEntriesSections: View {
                         .foregroundColor(Theme.textMuted)
                         .padding(.vertical, 8)
                 } else {
-                    let grouped = Dictionary(grouping: memories) { mem in
-                        Self.categories.contains { $0.0 == mem.category } ? mem.category : "other"
-                    }
-                    ForEach(Self.categories + [("other", "其他")], id: \.0) { key, label in
-                        if let items = grouped[key], !items.isEmpty {
-                            let color = Theme.branchIndicator
-                            Text(label)
-                                .font(m.sectionHeader)
-                                .foregroundColor(color)
-                                .padding(.top, 4)
-
-                            ForEach(items, id: \.id) { memory in
-                                memoryRow(memory, tierColor: color)
-                            }
+                    ForEach(memories, id: \.id) { memory in
+                        Button { entryTarget = .existing(memory) } label: {
+                            MemoryRow(item: MemoryRowItem(memory)) { EmptyView() }
                         }
+                        .buttonStyle(.plain)
                     }
                 }
-            }
-
-            Section("手动添加记忆") {
-                TextEditor(text: $newNoteText)
-                    .font(m.body)
-                    .frame(height: 50)
-                    .padding(6)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.mainBg))
-                    .scrollContentBackground(.hidden)
-
-                Button {
-                    addNote()
-                } label: {
-                    Text("添加")
+                Button { entryTarget = .new(profileId: profileId) } label: {
+                    Label("手动添加记忆", systemImage: "plus")
                         .font(m.secondary)
                         .foregroundColor(ShellStyle.text)
                 }
                 .buttonStyle(MacSettingsButton())
+                // 挂在常在的这一行上（挂在 Group 上会分到每一行）
+                .memoryEntryPage($entryTarget)
             }
         }
         .onAppear { refreshMemories() }
@@ -212,163 +170,11 @@ struct MacMemoryEntriesSections: View {
         .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in
             refreshMemories()
         }
-        .confirmationDialog(
-            "删除这条记忆？",
-            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("删除", role: .destructive) { confirmDelete() }
-            Button("取消", role: .cancel) { pendingDelete = nil }
-        }
     }
 
-    private func memoryRow(_ memory: Memory, tierColor: Color) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            // Header
-            HStack(spacing: 6) {
-                Circle().fill(tierColor).frame(width: 5, height: 5)
-
-                let categoryLabels: [String: String] = [
-                    "preference": "偏好", "fact": "事实", "relationship": "关系",
-                    "goal": "目标", "context": "近况",
-                ]
-                Text(categoryLabels[memory.category] ?? memory.category)
-                    .font(m.caption)
-                    .foregroundColor(Theme.mainBg)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(tierColor.opacity(0.7)))
-
-                if memory.isUserExplicit {
-                    Image(systemName: "pin.fill")
-                        .font(m.caption)
-                        .foregroundColor(Theme.branchIndicator)
-                }
-
-                Spacer()
-
-                Text(memory.updatedAt.formatted(.dateTime.month().day().hour().minute()))
-                    .font(m.secondary)
-                    .foregroundColor(Theme.textMuted.opacity(0.6))
-            }
-
-            // Content
-            if editingNoteId == memory.id {
-                TextEditor(text: $editingNoteText)
-                    .font(m.body)
-                    .frame(height: 50)
-                    .padding(4)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.mainBg))
-                    .scrollContentBackground(.hidden)
-
-                HStack(spacing: 8) {
-                    Button("取消") { editingNoteId = nil }
-                        .font(m.secondary).foregroundColor(Theme.textMuted).buttonStyle(.plain)
-                    Button("保存") { saveEdit(memory) }
-                        .font(m.secondary).foregroundColor(Theme.mainBg)
-                        .padding(.horizontal, 10).padding(.vertical, 3)
-                        .background(Capsule().fill(Theme.branchIndicator))
-                        .buttonStyle(.plain)
-                }
-            } else {
-                Text(memory.content)
-                    .font(m.body)
-                    .foregroundColor(Theme.textPrimary)
-                    .lineLimit(3)
-            }
-
-            // Actions
-            if editingNoteId != memory.id {
-                HStack(spacing: 12) {
-                    Button(memory.isUserExplicit ? "取消钉住" : "钉住") { togglePin(memory) }
-                        .font(m.secondary).foregroundColor(Theme.textMuted).buttonStyle(.plain)
-
-                    Button("编辑") {
-                        editingNoteText = memory.content
-                        editingNoteId = memory.id
-                    }
-                    .font(m.secondary).foregroundColor(Theme.textMuted).buttonStyle(.plain)
-
-                    Button("删除") { askDelete(memory) }
-                        .font(m.secondary).foregroundColor(Theme.danger).buttonStyle(.plain)
-                }
-            }
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.assistantBubble))
-    }
-
-    // MARK: - 四条写路径（成功才 post）
-
-    private func addNote() {
-        let text = newNoteText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        let profileId = profileManager?.currentProfile.id ?? ""
-        let store = SwiftDataMemoryStore()
-        do {
-            try store.add(
-                content: text, category: "fact", keywords: [],
-                profileId: profileId, isUserExplicit: true, extractedBy: "manual",
-                sourceConversationId: nil, context: modelContext
-            )
-        } catch {
-            return
-        }
-        newNoteText = ""
-        // 本节自己也订阅 .memoryDidChange → refreshMemories()，这里不再先刷一遍（R6b S3）
-        NotificationCenter.default.post(name: .memoryDidChange, object: nil)
-    }
-
-    private func saveEdit(_ memory: Memory) {
-        let store = SwiftDataMemoryStore()
-        do {
-            try store.update(id: memory.id, content: editingNoteText, keywords: memory.keywords, context: modelContext)
-        } catch {
-            return
-        }
-        editingNoteId = nil
-        // 本节自己也订阅 .memoryDidChange → refreshMemories()，这里不再先刷一遍（R6b S3）
-        NotificationCenter.default.post(name: .memoryDidChange, object: nil)
-    }
-
-    private func togglePin(_ memory: Memory) {
-        memory.isUserExplicit.toggle()
-        if memory.isUserExplicit { memory.decayWeight = 1.0 }
-        do {
-            try modelContext.save()
-        } catch {
-            return
-        }
-        // 本节自己也订阅 .memoryDidChange → refreshMemories()，这里不再先刷一遍（R6b S3）
-        NotificationCenter.default.post(name: .memoryDidChange, object: nil)
-    }
-
-    private func askDelete(_ memory: Memory) {
-        pendingDelete = PendingMemoryDelete(profileId: profileManager?.currentProfile.id ?? "",
-                                            memoryId: memory.id)
-    }
-
-    /// 确认分支才写：按 pending 的楼层 ID 读最新列表，再按 Memory.id 找对象（列表变了也删对那条）
-    private func confirmDelete() {
-        guard let pending = pendingDelete else { return }
-        pendingDelete = nil
-        let store = SwiftDataMemoryStore()
-        let latest = store.listAll(profileId: pending.profileId, context: modelContext)
-        guard let target = latest.first(where: { $0.id == pending.memoryId }) else { return }
-        modelContext.delete(target)
-        do {
-            try modelContext.save()
-        } catch {
-            return
-        }
-        // 本节自己也订阅 .memoryDidChange → refreshMemories()，这里不再先刷一遍（R6b S3）
-        NotificationCenter.default.post(name: .memoryDidChange, object: nil)
-    }
-
+    /// 活着的，钉住在前、新→旧（同记忆页）
     private func refreshMemories() {
-        let profileId = profileManager?.currentProfile.id ?? ""
-        let store = SwiftDataMemoryStore()
-        memories = store.listAll(profileId: profileId, context: modelContext)
+        memories = MemoryArchiveOrder.split(SwiftDataMemoryStore().listAll(profileId: profileId, context: modelContext)).active
     }
 }
 #endif
@@ -376,9 +182,7 @@ struct MacMemoryEntriesSections: View {
 // MARK: - Memory Page（壳 — 内容全交给 MemoryPageContent 共用核，两端一份 body）
 
 struct MemoryPage: View {
-    @AppStorage("memoryExplanationExpanded") private var memoryExplanationExpanded = true
     @Environment(ProfileManager.self) private var profileManager: ProfileManager?
-    @Environment(\.settingsMetrics) private var m
     #if os(iOS)
     @State private var memorySearchRoute: SettingsRoute?
     #endif
@@ -387,39 +191,14 @@ struct MemoryPage: View {
         // 搜索锚点：命中叶子条目时滚到那一行
         ScrollViewReader { anchorProxy in
         SettingsSectionList(.list) {
-            // 说明卡（设置-记忆 专属，page2 不显示）
+            // 状态卡（设置-记忆 专属；记忆系统说明挪到页底一行，粟粟 11-15）
             Section {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { memoryExplanationExpanded.toggle() }
-                } label: {
-                    HStack {
-                        Text("记忆系统说明")
-                            .font(m.body)
-                            .foregroundColor(Theme.textSecondary)
-                        Spacer()
-                        Image(systemName: memoryExplanationExpanded ? "chevron.down" : "chevron.right")
-                            .font(m.caption)
-                            .foregroundColor(Theme.textMuted)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-
-                if memoryExplanationExpanded {
-                    VStack(alignment: .leading, spacing: 6) {
-                        explanationLine("每聊几轮（默认 3 轮），后台用提取模型（也可以换本机模型）把最近对话里值得记住的事填成一张张碎片（C2）")
-                        explanationLine("钉住的、关系类、偏好类：每次都会想起")
-                        explanationLine("其余的看「检索」区：全量就全带上；关键词 / 按意思找就聊到相关才带上")
-                        explanationLine("你或{{char}}删掉的记忆会进「已删除」，可以恢复".expandingMacros(profile: profileManager?.currentProfile))
-                    }
-                }
-
                 MemoryHealthStatusView(profileId: profileManager?.currentProfile.id ?? "")
             }
             .listRowBackground(Theme.mainBg)
             .listRowSeparator(.hidden)
 
-            // 共用核：六组 Section
+            // 共用核：设置-记忆 的各节
             MemoryPageContent()
                 #if os(iOS)
                 .environment(\.settingsRoutePush) { memorySearchRoute = $0 }
@@ -437,6 +216,8 @@ struct MemoryPage: View {
             case .memoryArchiveTrigger: ArchiveTriggerPage(searchTarget: SettingsSearchRouter.shared.flashingAnchor)
             case .memoryRecallBrowse: RecallBrowsePage(searchTarget: SettingsSearchRouter.shared.flashingAnchor)
             case .memoryOpenWindow: MemoryOpenWindowPage(searchTarget: SettingsSearchRouter.shared.flashingAnchor)
+            case .memoryCCSync: MemoryCCSyncPage()
+            case .memoryAuditSettings: MemoryAuditSettingsPage()
             default: EmptyView()
             }
         }
@@ -450,11 +231,5 @@ struct MemoryPage: View {
         #endif
         .settingsAnchorScroll(anchorProxy)
         }
-    }
-
-    private func explanationLine(_ text: String) -> some View {
-        Text(text)
-            .font(m.caption)
-            .foregroundColor(Theme.textSecondary)
     }
 }

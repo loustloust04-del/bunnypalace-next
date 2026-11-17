@@ -11,8 +11,9 @@ public func visiblePath(window: ConversationWindow, nodes: [ConversationMessage]
         legacyCurrentNodeId: window.currentNodeId)
     let lookup = Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
     return resolution.pathIds.compactMap { id -> ConversationMessage? in
-        guard let node = lookup[id], !node.isTrashed, !node.isSourceHidden, !node.isSyntheticRoot,
-              node.role == "user" || node.role == "assistant", node.hasDisplayableContent else { return nil }
+        guard let node = lookup[id], !node.isSourceHidden, !node.isSyntheticRoot,
+              DisplayPath.isDisplayable(role: node.role, hasDisplayableContent: node.hasDisplayableContent,
+                                        isTrashed: node.isTrashed) else { return nil }
         return node
     }
 }

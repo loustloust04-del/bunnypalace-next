@@ -3,7 +3,7 @@ import SwiftData
 @testable import 记忆花园
 
 /// 刀2（plan-memory-usable）：单条 CRUD 还权的数据语义测试。
-/// 编辑=写回+清向量+自动钉住；软删=supersede 可恢复；已失效再删=真删。
+/// 软删=supersede 可恢复；已失效再删=真删。编辑 / 新加（11-15 起不自动钉）的测试在 `MemoryEntryActionsTests`。
 final class MemoryCrudTests: XCTestCase {
 
     var container: ModelContainer!
@@ -26,23 +26,12 @@ final class MemoryCrudTests: XCTestCase {
     }
 
     @discardableResult
-    private func seed(_ content: String = "喜欢暖奶白", pinned: Bool = false) -> Memory {
+    private func seed(_ content: String = "喜欢暖奶白") -> Memory {
         try! store.add(content: content, category: "preference", keywords: ["暖奶白"],
-                       profileId: pid, isUserExplicit: pinned, extractedBy: "test",
+                       profileId: pid, isUserExplicit: false, extractedBy: "test",
                        sourceConversationId: nil, context: context)
         let all = try! store.listAll(profileId: pid, context: context)
         return all.first(where: { $0.content == content })!
-    }
-
-    /// 编辑语义 = AddMemorySheet.commit 编辑分支
-    private func applyEdit(_ m: Memory, content: String, category: String) {
-        m.content = content
-        m.category = category
-        m.isUserExplicit = true
-        m.decayWeight = 1.0
-        m.embeddingData = nil
-        m.updatedAt = Date()
-        try! context.save()
     }
 
     /// 软删语义 = MemoryPanelView.deleteMemory（修复第一刀：不看开关）
@@ -54,19 +43,6 @@ final class MemoryCrudTests: XCTestCase {
             context.delete(m)
         }
         try! context.save()
-    }
-
-    func testEditRewritesContentClearsEmbeddingAndPins() {
-        let m = seed()
-        m.embeddingData = Data([1, 2, 3])
-        try! context.save()
-
-        applyEdit(m, content: "最喜欢暖奶白和浅灰薄荷", category: "preference")
-
-        XCTAssertEqual(m.content, "最喜欢暖奶白和浅灰薄荷")
-        XCTAssertNil(m.embeddingData, "编辑后向量必须失效，等 backfill 重算")
-        XCTAssertTrue(m.isUserExplicit, "⧫① 人工编辑过的条目自动钉住")
-        XCTAssertEqual(m.decayWeight, 1.0)
     }
 
     func testSoftDeleteSupersedesAndIsRecoverable() {
@@ -97,10 +73,5 @@ final class MemoryCrudTests: XCTestCase {
         applyDelete(m)
         XCTAssertNotNil(m.supersededAt)
         XCTAssertEqual(try! store.listAll(profileId: pid, context: context).count, 1, "开关关也不真删")
-    }
-
-    func testManualAddIsPinned() {
-        let m = seed("手动加的", pinned: true)
-        XCTAssertTrue(m.isUserExplicit, "手动新增天然钉住（AddMemorySheet 既有语义）")
     }
 }

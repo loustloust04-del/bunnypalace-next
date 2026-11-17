@@ -6,6 +6,8 @@ import SwiftUI
 /// 碰网页 = 接管。
 struct AIOperatorOverlay: View {
     let controller: MiniBrowserController
+    /// 一起看小窗里（W3）：流光贴小窗圆角；确认卡不放网页上（太挤），小窗自己在下面出
+    var compact = false
     @State private var op = BrowserOperator.shared
     @AppStorage(AIOperatorOverlay.cursorColorKey) private var cursorHex = ""
 
@@ -27,7 +29,7 @@ struct AIOperatorOverlay: View {
                     .contentShape(Rectangle())
                     .onTapGesture { op.takeOver() }
                     .ignoresSafeArea()
-                EdgeGlow()
+                EdgeGlow(compact: compact)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
                     .transition(.opacity)
@@ -52,9 +54,14 @@ struct AIOperatorOverlay: View {
                 }
                 .transition(.opacity)
             }
-            if let confirm = op.confirm, op.controller === controller {
-                confirmCard(confirm)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            if !compact, let confirm = op.confirm, op.controller === controller {
+                VStack {
+                    Spacer()
+                    AIConfirmCard(confirm: confirm)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 24)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .animation(.easeInOut(duration: 0.3), value: operating)
@@ -83,76 +90,78 @@ struct AIOperatorOverlay: View {
         .frame(height: 38)
         .background(Capsule().fill(Color.black.opacity(0.78)))
         .shadow(color: .black.opacity(0.18), radius: 12, y: 6)
-        .padding(.top, 8)
-    }
-
-    private func confirmCard(_ confirm: BrowserOperator.Confirm) -> some View {
-        VStack {
-            Spacer()
-            VStack(spacing: 14) {
-                Image(systemName: "hand.raised")
-                    .font(.system(size: 22))
-                    .foregroundStyle(Theme.textPrimary)
-                    .frame(width: 44, height: 44)
-                    .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(Color.white)
-                        .shadow(color: Theme.cardShadow, radius: Theme.cardShadowRadius, y: 1))
-                Text(confirm.text)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                    .multilineTextAlignment(.center)
-                VStack(spacing: 8) {
-                    Button { op.answer(.once) } label: {
-                        Text("允许这一次")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(Color.white)
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.branchIndicator))
-                    }
-                    Button { op.answer(.conversation) } label: {
-                        Text("这个对话里都允许")
-                            .font(.system(size: 15))
-                            .foregroundStyle(Theme.textPrimary)
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.branchIndicator, lineWidth: 1))
-                    }
-                    Button { op.answer(.deny) } label: {
-                        Text("不允许")
-                            .font(.system(size: 15))
-                            .foregroundStyle(Theme.textSecondary)
-                            .frame(maxWidth: .infinity, minHeight: 40)
-                    }
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(20)
-            .background(RoundedRectangle(cornerRadius: 28, style: .continuous).fill(Theme.mainBg)
-                .shadow(color: .black.opacity(0.18), radius: 24, y: 10))
-            .padding(.horizontal, 16)
-            .padding(.bottom, 24)
-        }
+        .padding(.top, compact ? 6 : 8)
     }
 }
 
-/// 整圈糊开的柔光：两种灰调慢慢转（6 秒一圈）、轻轻呼吸（2.3 秒）。
-/// 粟粟 11-11「颜色选太丑了不要这么多颜色，灰一点」：五色彩虹 → 灰薄荷 + 灰藕紫
-private struct EdgeGlow: View {
-    private static let colors: [Color] = [Color(hex: 0xA7B8AF), Color(hex: 0xB9B3C2), Color(hex: 0xA7B8AF)]
+/// 写动作确认卡：花园浏览器里叠在网页底部；一起看小窗在小窗下面
+struct AIConfirmCard: View {
+    let confirm: BrowserOperator.Confirm
+    @State private var op = BrowserOperator.shared
 
     var body: some View {
-        TimelineView(.animation) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let angle = Angle.degrees((t / 6).truncatingRemainder(dividingBy: 1) * 360)
-            let breathe = 0.62 + 0.14 * sin(t * 2 * .pi / 2.3)
-            let gradient = AngularGradient(colors: Self.colors, center: .center, angle: angle)
-            ZStack {
-                RoundedRectangle(cornerRadius: 54, style: .continuous)
-                    .strokeBorder(gradient, lineWidth: 22)
-                    .blur(radius: 16)
-                RoundedRectangle(cornerRadius: 54, style: .continuous)
-                    .strokeBorder(gradient, lineWidth: 5)
-                    .blur(radius: 4)
+        VStack(spacing: 14) {
+            Image(systemName: "hand.raised")
+                .font(.system(size: 22))
+                .foregroundStyle(Theme.textPrimary)
+                .frame(width: 44, height: 44)
+                .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(Color.white)
+                    .shadow(color: Theme.cardShadow, radius: Theme.cardShadowRadius, y: 1))
+            Text(confirm.text)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Theme.textPrimary)
+                .multilineTextAlignment(.center)
+            VStack(spacing: 8) {
+                Button { op.answer(.once) } label: {
+                    Text("允许这一次")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.white)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.branchIndicator))
+                }
+                Button { op.answer(.conversation) } label: {
+                    Text("这个对话里都允许")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Theme.textPrimary)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.branchIndicator, lineWidth: 1))
+                }
+                Button { op.answer(.deny) } label: {
+                    Text("不允许")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                }
             }
-            .opacity(breathe)
+            .buttonStyle(.plain)
+        }
+        .padding(20)
+        .background(RoundedRectangle(cornerRadius: 28, style: .continuous).fill(Theme.mainBg)
+            .shadow(color: .black.opacity(0.18), radius: 24, y: 10))
+    }
+}
+
+/// 整圈糊开的柔光：两种灰调（粟粟 11-11「不要这么多颜色，灰一点」），轻轻呼吸（2.3 秒）。
+/// 不用 TimelineView 逐帧重画：全屏两层模糊每帧重算会把主线程占满（11-11 实测 AI 操作时点按要等 7 秒）；
+/// 糊好的圈只画一次，呼吸交给系统动画（只改透明度）
+private struct EdgeGlow: View {
+    var compact = false
+    private static let gradient = AngularGradient(colors: [Color(hex: 0xA7B8AF), Color(hex: 0xB9B3C2), Color(hex: 0xA7B8AF)], center: .center)
+    @State private var breathing = false
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: compact ? 18 : 54, style: .continuous)
+                .strokeBorder(Self.gradient, lineWidth: compact ? 12 : 22)
+                .blur(radius: compact ? 8 : 16)
+            RoundedRectangle(cornerRadius: compact ? 18 : 54, style: .continuous)
+                .strokeBorder(Self.gradient, lineWidth: compact ? 3 : 5)
+                .blur(radius: compact ? 2 : 4)
+        }
+        .drawingGroup()
+        .opacity(breathing ? 0.76 : 0.6)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 2.3).repeatForever(autoreverses: true)) { breathing = true }
         }
     }
 }

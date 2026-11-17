@@ -666,15 +666,17 @@ struct PromptAssembler {
     }
 
     /// 记忆槽两层：常驻层 =「我的记忆」+ C 档案根索引 + 档案常驻，命中层 = 触发词命中的页 + 档案本轮相关。
-    /// 实发组装和记忆面板「下一轮会想起什么」预览共用（预览 = 实发）
+    /// 实发组装和记忆面板「下一轮会想起什么」预览共用（预览 = 实发）。
+    /// `cards` = 钉住的以外走哪几路（`MemoryInjector.cardRetrievers`）；不给 = `memories` 里的全带
     static func memoryLayers(profile: Profile, selfMemory: String?, memories: [Memory], recentMessages: [String], budget: Int?,
-                             wiki: WikiInjectionSnapshot? = nil, now: Date = MemoryClock.now, wikiScanMessages: [String]? = nil)
+                             wiki: WikiInjectionSnapshot? = nil, now: Date = MemoryClock.now, wikiScanMessages: [String]? = nil,
+                             cardIndex: String = "", cards: [MemoryRetriever] = [FullFallbackRetriever()])
         -> RecallMemoryLayers {
         let pages = wikiHits(wiki, profile: profile, recentMessages: wikiScanMessages ?? recentMessages)
-        let split = MemoryInjector.buildInjectionSplit(memories: WikiInjection.dedup(memories, against: pages),
+        let split = MemoryInjector.buildInjectionSplit(memories: WikiInjection.dedup(memories, against: pages), cards: cards,
                                                        recentMessages: recentMessages,
                                                        budget: budget ?? MemoryInjector.tokenBudget, now: now)
-        let stableText = [selfMemory ?? "", wiki.map { WikiInjection.indexBlock($0, user: profile.userName) } ?? "",
+        let stableText = [selfMemory ?? "", wiki.map { WikiInjection.indexBlock($0, user: profile.userName) } ?? "", cardIndex,
                           split.stable.isEmpty ? "" : "[\(archiveLabel(profile))]\n\(split.stable)"]
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")

@@ -21,7 +21,8 @@ final class InspectorRealPathTests: XCTestCase {
         return h
     }
 
-    private func waitUntil(_ description: String, timeout: TimeInterval = 5,
+    /// 上限给得宽：这批测试在合并闸里跑，机器负载 60 时 5 秒不够（11-17 误红过一次）
+    private func waitUntil(_ description: String, timeout: TimeInterval = 30,
                            _ condition: () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline { await Task.yield() }
@@ -58,11 +59,12 @@ final class InspectorRealPathTests: XCTestCase {
     /// 走真实 VM → composePrompt 接线（单测只测 `roundInputs`，删掉这里任何一处传参都得红）
     func testHiddenSourceWindowFragmentsNeverReachSend() async throws {
         let h = try await make(PromptScenario(name: "hidden-source-windows"))
-        // 走「触发关」的全量注入路径（非钉住碎片才会进 X 来源）；trigger 开时由 recall 选择，
+        // 走「每轮全带」那一路（非钉住碎片才会进 X 来源）；trigger 开时由 recall 选择，
         // 与这段要测的过滤接线无关
         var tuning = RecallTestTuning.make()
         tuning.archiveTriggerEnabled = false
         h.overrideDefault(RecallTuningStore.storageKey, try JSONEncoder().encode([h.profile.id: tuning]))
+        MemoryOpenWindow.setEveryRound(true, profileId: h.profile.id)
         func window(_ id: String, enabled: Bool = true, trashed: Bool = false) {
             let c = Conversation(id: id, title: "窗口\(id)", createTime: Date(timeIntervalSince1970: 1),
                                  updateTime: Date(timeIntervalSince1970: 1), currentNodeId: "", provider: "api",

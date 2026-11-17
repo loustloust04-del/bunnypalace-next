@@ -2008,6 +2008,93 @@ test("pickPhoneClient: 只选 iOS，取最近活跃；没有手机就 null", asy
   expect(pickPhoneClient([{ readyState: 1, OPEN: 1 }] as any, info)).toBeNull()   // 旧版 app 没报 platform
 })
 
+// CC 用花园的记忆（粟粟 11-14）：先问一圈这场对话在哪台设备的花园里（规矩和单测在 memory-route.ts / memory-route.test.ts），只发给那一台
+/// 假 app：对探问（memory_cmd + probe）立刻答是不是它的
+function answerMemoryProbes(ws: WebSocket, mine: boolean) {
+  ws.on("message", (d) => {
+    const f = JSON.parse(d.toString())
+    if (f.type === "memory_cmd" && f.probe) ws.send(JSON.stringify({ type: "memory_result", id: f.id, ok: true, mine, result: mine ? "mine" : "not mine" }))
+  })
+}
+
+test("/memory/cmd：转给发话的那台设备、等它的 memory_result；那台不在就 503 说清原因", async () => {
+  const post = (body: unknown) => fetch(`http://127.0.0.1:${TEST_PORT}/memory/cmd`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+  const phone = await openMP()
+  const mac = await openMP()
+  const phoneFrames = collectFrames(phone), macFrames = collectFrames(mac)
+  answerMemoryProbes(phone, true)
+  answerMemoryProbes(mac, false)
+  phone.send(JSON.stringify({ type: "client_info", platform: "ios" }))
+  mac.send(JSON.stringify({ type: "client_info", platform: "macos" }))
+  await new Promise(r => setTimeout(r, 50))
+  phone.send(JSON.stringify({ type: "send", chat_id: "conv-mem", message_id: "m-mem-1", content: "hi", user: "susu", session_name: "mp-mem-t" }))
+  await waitFrame(phoneFrames, f => f.type === "ack" && f.message_id === "m-mem-1")
+
+  const pending = post({ chat_id: "conv-mem", tool: "memory_card", input: { action: "add", content: "岚舟怕打雷。" }, timeout_ms: 5000 })
+  const cmd = await waitFrame(phoneFrames, f => f.type === "memory_cmd" && !f.probe)
+  expect(cmd.chat_id).toBe("conv-mem")
+  expect(cmd.tool).toBe("memory_card")
+  expect(cmd.input).toEqual({ action: "add", content: "岚舟怕打雷。" })
+  expect(cmd.timeout_ms).toBe(5000)   // app 按它给审批卡留时限
+  phone.send(JSON.stringify({ type: "memory_result", id: cmd.id, ok: true, result: "加好了" }))
+  const res = await pending
+  expect(res.status).toBe(200)
+  expect(await res.json()).toEqual({ id: cmd.id, ok: true, result: "加好了" })
+  expect(macFrames.some(f => f.type === "memory_cmd" && !f.probe)).toBe(false)
+
+  // 手机走了、电脑还连着：不改发电脑
+  phone.close()
+  await new Promise(r => setTimeout(r, 100))
+  const gone = await post({ chat_id: "conv-mem", tool: "recall", input: { op: "date" } })
+  expect(gone.status).toBe(503)
+  const body = await gone.json() as any
+  expect(body.ok).toBe(false)
+  expect(body.error).toContain("手机上的花园")
+  await new Promise(r => setTimeout(r, 50))
+  expect(macFrames.some(f => f.type === "memory_cmd" && !f.probe)).toBe(false)
+  mac.close()
+})
+
+test("/memory/cmd：两台手机都连着、hub 没有任何发话记录：一台不回话、一台没有这场对话，命令只到有这场对话的那台", async () => {
+  const post = (body: unknown) => fetch(`http://127.0.0.1:${TEST_PORT}/memory/cmd`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+  const stuck = await openMP(), stranger = await openMP(), hers = await openMP()
+  const stuckFrames = collectFrames(stuck), strangerFrames = collectFrames(stranger), herFrames = collectFrames(hers)
+  answerMemoryProbes(stranger, false)
+  answerMemoryProbes(hers, true)
+  for (const ws of [hers, stranger, stuck]) ws.send(JSON.stringify({ type: "client_info", platform: "ios" }))   // 不回话的那台最后报到 = 最近有动静
+  await new Promise(r => setTimeout(r, 50))
+
+  const pending = post({ chat_id: "conv-two-phones", tool: "fs_list", input: {}, timeout_ms: 5000 })
+  const cmd = await waitFrame(herFrames, f => f.type === "memory_cmd" && !f.probe, 6_000)
+  expect(cmd.tool).toBe("fs_list")
+  hers.send(JSON.stringify({ type: "memory_result", id: cmd.id, ok: true, result: "memory/self/INDEX.md  (12B)" }))
+  const res = await pending
+  expect(await res.json()).toEqual({ id: cmd.id, ok: true, result: "memory/self/INDEX.md  (12B)" })
+  expect(stuckFrames.some(f => f.type === "memory_cmd" && !f.probe)).toBe(false)
+  expect(strangerFrames.some(f => f.type === "memory_cmd" && !f.probe)).toBe(false)
+
+  // 记住了是哪台：第二次不再问一圈，不陪不回话的那台等
+  const probesBefore = stuckFrames.filter(f => f.type === "memory_cmd" && f.probe).length
+  const started = Date.now()
+  const again = post({ chat_id: "conv-two-phones", tool: "fs_list", input: {}, timeout_ms: 5000 })
+  const cmd2 = await waitFrame(herFrames, f => f.type === "memory_cmd" && !f.probe && f.id !== cmd.id)
+  expect(Date.now() - started).toBeLessThan(1_000)
+  hers.send(JSON.stringify({ type: "memory_result", id: cmd2.id, ok: true, result: "ok" }))
+  await again
+  expect(stuckFrames.filter(f => f.type === "memory_cmd" && f.probe).length).toBe(probesBefore)
+
+  // 那台说「不是我的」（对话删了）：立刻回错，不等超时；下次重新问一圈
+  const third = post({ chat_id: "conv-two-phones", tool: "fs_list", input: {}, timeout_ms: 5000 })
+  const cmd3 = await waitFrame(herFrames, f => f.type === "memory_cmd" && !f.probe && f.id !== cmd.id && f.id !== cmd2.id)
+  hers.send(JSON.stringify({ type: "memory_result", id: cmd3.id, ok: false, mine: false, result: "手机上的花园里找不到 chat_id 对应的对话" }))
+  const body3 = await (await third).json() as any
+  expect(body3.ok).toBe(false)
+  expect(body3.result).toContain("找不到")
+  for (const ws of [stuck, stranger, hers]) ws.close()
+}, 20_000)
+
 // 进度卡 B（粟粟 10-03）：报过到的 app 连接收得到 CC 会话 phase；没报到的（脚本 / 老 app）不插队
 test("session_phase：client_info 报到后 send → 收到 working 帧", async () => {
   const ws = await openMP()
@@ -2254,7 +2341,7 @@ const UNTRUSTED_VARIANTS: { name: string; headers: string[]; host?: string }[] =
 ]
 
 test("#068 本机专用 HTTP 端点：带转发头 / 浏览器头 / 非本机 Host 一律 403；不带照旧放行", async () => {
-  for (const path of ["/pocket/cmd", "/twitter/cmd", "/thinking", "/la/lifecycle", "/agent/ask-user", "/agent/book-note"]) {
+  for (const path of ["/pocket/cmd", "/twitter/cmd", "/memory/cmd", "/thinking", "/la/lifecycle", "/agent/ask-user", "/agent/book-note"]) {
     for (const v of UNTRUSTED_VARIANTS) {
       const res = await rawPost(path, v.headers, v.host)
       expect(`${path} ${v.name} → ${res.split("\r\n")[0]}`).toBe(`${path} ${v.name} → HTTP/1.1 403 Forbidden`)

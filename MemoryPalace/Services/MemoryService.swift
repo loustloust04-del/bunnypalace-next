@@ -95,6 +95,7 @@ struct SwiftDataMemoryStore: MemoryStore {
             predicate: #Predicate<Memory> { m in m.id == id }
         )
         guard let memory = try context.fetch(descriptor).first else { return }
+        if memory.content != content || memory.keywords != keywords { memory.confidence = MemoryAudit.handEditedConfidence }
         memory.content = content
         memory.keywords = keywords
         memory.tokenCount = Memory.estimateTokens(content)
@@ -468,19 +469,15 @@ protocol MemoryRetriever {
     func retrieve(_ memories: [Memory], recent: [String]) -> [ScoredMemory]
 }
 
-/// 常驻人格层：只有钉住的（`isPersistent`，两种模式一样），按创建时间排
+/// 常驻人格层：只有钉住的（`isPersistent`），按创建时间排
 struct PersistentRetriever: MemoryRetriever {
-    let explicitOnly: Bool
     var id: String { "persistent" }
     var layer: MemoryLayer { .stable }
     var tier: Int { 0 }
     func retrieve(_ memories: [Memory], recent: [String]) -> [ScoredMemory] {
         // 常驻层全员注入，排序只影响行序——必须按创建时间（永恒稳定）。
         // 按权重排的话 reinforce/衰减每轮微调分数，行序随时翻面 → system 前缀变 → 缓存无声全废（实测踩过）
-        let base = explicitOnly
-            ? memories.filter { $0.isUserExplicit }
-            : memories.filter(MemoryInjector.isPersistent)
-        return base.sorted { $0.createdAt < $1.createdAt }.map { ScoredMemory(memory: $0, score: 1) }
+        memories.filter(MemoryInjector.isPersistent).sorted { $0.createdAt < $1.createdAt }.map { ScoredMemory(memory: $0, score: 1) }
     }
 }
 
@@ -587,35 +584,13 @@ enum MemoryRetrieval {
     }
 }
 
-/// 关键词检索复用共享 BM25：汉字段按相邻双字评分，短段须含齐，长段按当前候选的 df 抑制常见词。
-/// 关键词计两份；只有通过相同词面门槛的正分候选才参加排序。
-struct KeywordRetriever: MemoryRetriever {
-    var id: String { "keyword" }
-    var layer: MemoryLayer { .volatile }
-    var tier: Int { 1 }
-    /// 注入时排除常驻层（它们另走 stable）；recall 传 false——关系/偏好/钉住也要能搜到（修复第一刀·刀6）
-    let excludePersistent: Bool
-
-    init(excludePersistent: Bool = true) { self.excludePersistent = excludePersistent }
-
-    func retrieve(_ memories: [Memory], recent: [String]) -> [ScoredMemory] {
-        let candidates = excludePersistent ? memories.filter { !MemoryInjector.isPersistent($0) } : memories
-        let scores = MemoryBM25.scores(documents: candidates.map {
-            MemoryBM25.document(content: $0.content, keywords: $0.keywords)
-        }, query: recent.joined(separator: "\n"))
-        return candidates.indices.filter { scores[$0] > 0 }.sorted {
-            scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1
-        }.map { ScoredMemory(memory: candidates[$0], score: scores[$0]) }
-    }
-}
-
 /// 向量语义检索层（M2）：query=最近对话尾部句向量，对候选逐条余弦，阈值+topK。
 /// 模型资产未就绪 → 静默返回空并触发下载（绝不打断聊天）。
 struct VectorRetriever: MemoryRetriever {
     var id: String { "vector" }
     var layer: MemoryLayer { .volatile }
     var tier: Int { 1 }
-    /// 同 KeywordRetriever.excludePersistent
+    /// 注入时排除钉住的（它们另走 stable）
     let excludePersistent: Bool
 
     init(excludePersistent: Bool = true) { self.excludePersistent = excludePersistent }
@@ -676,24 +651,25 @@ struct VectorRetriever: MemoryRetriever {
     }
 }
 
-/// 全量兜底：填满剩余预算。excludePersistent 区分两种模式的候选集（现状语义）。
+/// 每轮全带那一路：钉住的以外全部候选，填满剩余预算。
 /// 刀4：排序从衰减分改 createdAt 降序——①分数每轮微调=行序漂移毁缓存（Persistent 同款坑）
 /// ②超预算截断自然落在最老端（新的先装，钉住在 stable 层豁免），截断线移动才 miss 缓存。
 /// 审计台卡片 ⧫6：先按召回优先级（重要度，没定 = 3）高→低，同优先级再新→旧——装不下先丢重要度低的；
 /// 优先级只在她拖重要度时变，不逐轮漂移；全没定时和原来的顺序一样
 struct FullFallbackRetriever: MemoryRetriever {
-    let excludePersistent: Bool   // true=keyword 模式（排除常驻层）；false=纯全量（排除手动钉住）
     var id: String { "fullFallback" }
     var layer: MemoryLayer { .volatile }
     var tier: Int { 99 }
     func retrieve(_ memories: [Memory], recent: [String]) -> [ScoredMemory] {
-        let candidates = excludePersistent
-            ? memories.filter { !MemoryInjector.isPersistent($0) }
-            : memories.filter { !$0.isUserExplicit }
-        return candidates
+        memories.filter { !MemoryInjector.isPersistent($0) }
             .sorted { $0.recallPriority != $1.recallPriority ? $0.recallPriority > $1.recallPriority : $0.createdAt > $1.createdAt }
             .map { ScoredMemory(memory: $0, score: 1) }
     }
+}
+
+extension Memory {
+    /// 这一条露面时的那一行：`说的是谁 · 正文`（没写是谁 / 正文本来就以它开头的就是正文）。拼法只在 `MemoryEntryLine`
+    var lineText: String { MemoryEntryLine.text(subject: subject, content: content) }
 }
 
 // MARK: - Memory Injector
@@ -730,15 +706,18 @@ struct MemoryInjector {
         return f
     }()
 
-    /// 一条记忆进注入的计费 token（全文 = tokenCount；目录 = 目录行实测）。设置页实际注入量复用这条
+    /// 一条记忆进注入的计费 token（全文 = tokenCount + 拼在前面的主语；目录 = 目录行实测）。设置页实际注入量复用这条
     static func injectedCost(_ m: Memory, catalog: Bool) -> Int {
-        catalog ? Memory.estimateTokens(catalogLine(m)) : m.tokenCount
+        if catalog { return Memory.estimateTokens(catalogLine(m)) }
+        let lead = MemoryEntryLine.lead(subject: m.subject, content: m.content)
+        return m.tokenCount + (lead.map { Memory.estimateTokens($0 + MemoryEntryLine.separator) } ?? 0)
     }
 
     /// 目录行：与 recall L1 行格式同族（[日期·分类]），模型见目录 → recall 能对上
     static func catalogLine(_ m: Memory) -> String {
         let label = categoryLabels[m.category] ?? m.category
-        let snippet = m.content.count > 60 ? String(m.content.prefix(60)) + "…" : m.content
+        let line = m.lineText
+        let snippet = line.count > 60 ? String(line.prefix(60)) + "…" : line
         return "- [\(catalogDateFormatter.string(from: m.createdAt))·\(label)] \(snippet)"
     }
 
@@ -748,7 +727,7 @@ struct MemoryInjector {
             ? m.validUntil.map { "（有效到 \(MemoryDay.key($0.addingTimeInterval(-1)))）" } ?? "" : ""
         let expired = !stable && WikiInjection.isExpired(m, now: now) ? "（已过期）" : ""
         let label = categoryLabels[m.category] ?? m.category
-        let text = (catalog ? catalogLine(m) : "- \(m.content)\(validity) [\(label)]") + expired
+        let text = (catalog ? catalogLine(m) : "- \(m.lineText)\(validity) [\(label)]") + expired
         let cost = injectedCost(m, catalog: catalog) + (validity.isEmpty ? 0 : Memory.estimateTokens(validity))
             + (expired.isEmpty ? 0 : Memory.estimateTokens(expired))
         return (text, cost)
@@ -759,7 +738,7 @@ struct MemoryInjector {
         var lines: [String] = []
         var used = 0
         for memory in memories {
-            let snippet = String(memory.content.prefix(40)).replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
+            let snippet = String(memory.lineText.prefix(40)).replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
             let line = "- \(snippet)（已过期）"
             let cost = Memory.estimateTokens(line) + (lines.isEmpty ? Memory.estimateTokens(title + "\n") : 0)
             guard used + cost <= budget else { continue }
@@ -769,7 +748,7 @@ struct MemoryInjector {
         return (lines.isEmpty ? "" : title + "\n" + lines.joined(separator: "\n"), used)
     }
 
-    /// 注入记忆：常驻人格层（始终）+ 关键词检索层（命中对话才注）。开关见「设置-记忆」。
+    /// 注入记忆：给进来的全带（钉住的在前，其余按重要度 / 新旧，预算内）。带哪些由调用方定
     static func buildInjection(memories: [Memory], recentMessages: [String] = [], budget: Int = tokenBudget) -> String {
         let split = buildInjectionSplit(memories: memories, recentMessages: recentMessages, budget: budget)
         if split.stable.isEmpty { return split.volatile }
@@ -777,33 +756,28 @@ struct MemoryInjector {
         return split.stable + "\n" + split.volatile
     }
 
-    /// 按开关组装检索器队伍。改开关组合只动这里——加新检索路（tag 等）= 往对应 tier 加一员。
-    /// M2 起：开 keyword 或 vector 任一 = 智能模式（常驻层启用，全量变兜底）；两个都开 = 同 tier RRF 双路召回。
-    static func activeRetrievers() -> [MemoryRetriever] {
-        let useKeyword = MemoryReadEnvironment.defaults.bool(forKey: "mem_inject_keyword")
-        let useFull = (MemoryReadEnvironment.defaults.object(forKey: "mem_inject_full") as? Bool) ?? true
-        let useVector = MemoryReadEnvironment.defaults.bool(forKey: "mem_inject_vector")
-        if useKeyword || useVector {
-            var list: [MemoryRetriever] = [PersistentRetriever(explicitOnly: false)]
-            if useKeyword { list.append(KeywordRetriever()) }
-            if useVector { list.append(VectorRetriever()) }
-            if useFull { list.append(FullFallbackRetriever(excludePersistent: true)) }
-            return list
-        } else if useFull {
-            return [PersistentRetriever(explicitOnly: true), FullFallbackRetriever(excludePersistent: false)]
-        }
-        return []
+    /// 试验（设置 › 开发调试）：按意思找。只在「聊到才带」关着时起作用
+    static var vectorExperimentOn: Bool { MemoryReadEnvironment.defaults.bool(forKey: "mem_inject_vector") }
+
+    /// 批过的记忆条目不靠「聊到才带」带进来的那几路：每轮全带 = 全量那一路；聊到才带关着时还有试验的按意思找（排在前面）。
+    /// 两样都没有 = 空（这一轮不这样带）。钉住的不归这里，永远带
+    static func cardRetrievers(everyRound: Bool, triggerOn: Bool) -> [MemoryRetriever] {
+        var list: [MemoryRetriever] = []
+        if !triggerOn, vectorExperimentOn { list.append(VectorRetriever()) }
+        if everyRound { list.append(FullFallbackRetriever()) }
+        return list
     }
 
     /// 一轮要注入的记忆原料。实发 `composePrompt` 和记忆面板「下一轮会想起什么」预览都只走这里（预览 = 实发）
     struct RoundInputs {
+        /// 钉住的（「钉住的」勾着）+ 批过的记忆条目（这个窗口里算候选时）。批过的那些每轮全带还是聊到才带看 `everyRound`
         let memories: [Memory]
         let selfMemory: SelfMemoryInjection.Built?
         let archiveBudget: Int
-        /// C 勾着时的 wiki 快照（根索引 + 触发词扫描用）；C 没勾 / 记忆关着 = nil
+        /// wiki 快照（目录 + 触发词扫描用）；wiki 目录没勾且聊到才带关着 / 记忆关着 = nil
         var wiki: WikiInjectionSnapshot? = nil
         var fullText: RecallFullTextCandidates? = nil
-        /// 段④：这一轮带不带档案根索引（本窗 Z6）。nil = 手搭的旧输入，照开窗口页「档案」那一勾
+        /// 段④：这一轮带不带 wiki 目录（本窗 Z6）。nil = 手搭的旧输入，照开窗口页「wiki 目录」那一勾
         var rootIndex: Bool? = nil
         /// 本窗冻结的上窗（Z7 开、参与着、源窗复核过才有）；单独按 tokenBudget 渲染，不扣档案预算。
         var previousWindow: PreviousWindowSnapshot? = nil
@@ -811,9 +785,14 @@ struct MemoryInjector {
         var hiddenSources: Set<String> = []
         /// 候选数：勾着却被来源窗挡掉的碎片条数（同一趟 filter 里数；勾关 / 参与关恒 0）
         var hiddenFragmentCount: Int = 0
+        /// 批过的记忆条目每轮全带（开窗口页「每轮全带」勾着）。不勾 = 只在聊到时带（`RecallSelection` 的 X3）
+        var everyRound = false
+
+        /// 不看这一句聊了什么也带的那一份：钉住的 + 每轮全带勾着时批过的记忆条目。不走「聊到才带」的调用方（自己醒来）用这一份
+        var everyRoundMemories: [Memory] { everyRound ? memories : memories.filter(\.isUserExplicit) }
     }
 
-    /// C 那一勾带哪些档案（plan-memory-c3-catalog 第六节）：她钉住的照带；其余只带碎片池里审计台点过「留下」的，
+    /// 哪些档案能带（plan-memory-c3-catalog 第六节）：她钉住的照带；其余只带碎片池里审计台点过「留下」的，
     /// 没看过的、10 月前的旧原子档案都不带
     static func isInjectable(_ m: Memory) -> Bool {
         m.supersededAt == nil && (m.isUserExplicit || (m.isFragment && m.reviewedAt != nil))
@@ -826,6 +805,31 @@ struct MemoryInjector {
         m.isUserExplicit || !(m.sourceConversationId.map(hidden.contains) ?? false)
     }
 
+    // MARK: - 卡的目录（Z）
+
+    /// 来由：读侧规格 Z 的预算「目录一层最多 30 行」；组多过这个数时只列卡最多的这些组
+    static let maxCardIndexGroups = 30
+    static let cardIndexTitle = "[记忆条目 · 目录]"
+
+    /// 批过的记忆条目按「说的是谁」分成的组名（= 文件库 › 记忆 › 记忆条目 下的文件夹名）。不带卡的内容，也不带张数：
+    /// 张数每批一张卡就变，会让缓存前缀跟着失效；组名只在出现新的人 / 事时才变。没写「说的是谁」的卡不列（没有名字可指）
+    static func cardIndex(_ cards: [Memory]) -> (text: String, groups: Int) {
+        // 每轮都算：先按卡上原样的名字数，再给不同的名字各算一次文件夹名
+        var bySubject: [String: Int] = [:]
+        for card in cards { if let subject = card.subject { bySubject[subject, default: 0] += 1 } }
+        var counts: [String: Int] = [:]
+        for (subject, count) in bySubject where MemoryAudit.cleaned(subject) != nil {
+            counts[MemoryCardFolder.group(subject), default: 0] += count
+        }
+        guard !counts.isEmpty else { return ("", 0) }
+        let kept = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .prefix(maxCardIndexGroups).map(\.key).sorted()
+        let more = counts.count > kept.count ? " 等 \(counts.count) 组" : ""
+        let text = cardIndexTitle + "\n记过这些人和事的记忆条目（\(MemoryCardFolder.root)/ 下一人一个文件夹）："
+            + kept.joined(separator: "、") + more + "\n聊到的会自动带上；这一轮没带上的不等于没记过。"
+        return (text, kept.count)
+    }
+
     /// 这一轮带不带只读 `EffectiveMemoryParticipation`（一处算、处处传，plan-memory-participation §2.3）。
     /// 刀4：listActive 全量在场（未失效即注入）；第二刀 B3：AI 自己的记忆先装，档案用剩下的预算
     static func roundInputs(profileId: String, participation: EffectiveMemoryParticipation,
@@ -834,25 +838,29 @@ struct MemoryInjector {
                             useCachedWiki: Bool = true,
                             previousWindow: PreviousWindowSnapshot? = nil,
                             hiddenSources: Set<String> = []) -> RoundInputs {
-        // v5【开窗口】：B4 / C 各一勾（默认开 = 今天）；段④ 钉住单独一勾
-        let cOn = participation.archive
+        // 四件事各听各的：wiki 目录 / 钉住的 / 批过的记忆条目每轮全带 / 聊到才带
+        let rootOn = participation.archive
         let pinnedOn = participation.pinned
         let triggerOn = participation.pages
+        // 批过的记忆条目：这一轮有路能带才取——每轮全带、聊到才带，或聊到才带关着时试验的按意思找
+        let cardsOn = participation.everyRound || triggerOn || (participation.cards && vectorExperimentOn)
         // 来源窗已删 / 关参与的碎片不带；钉住的豁免（来源窗不存在的照带——plan-memory-participation §2.1 / §2.2）
         // 挡掉的条数在同一趟 filter 里数（账的候选口径，plan-memory-receipt §2.1）
         var hiddenFragmentCount = 0
         let memories: [Memory] = AirTimedSection.run("composePrompt.memory") {
-            guard cOn || pinnedOn else { return [] }
+            guard cardsOn || pinnedOn else { return [] }
             return store.listActive(profileId: profileId, context: context).filter {
-                guard isInjectable($0), $0.isUserExplicit ? pinnedOn : cOn else { return false }
-                if passesSourceWindow($0, hidden: hiddenSources) { return true }
-                hiddenFragmentCount += 1
-                return false
+                guard isInjectable($0), $0.isUserExplicit ? pinnedOn : cardsOn else { return false }
+                guard passesSourceWindow($0, hidden: hiddenSources) else {
+                    hiddenFragmentCount += 1
+                    return false
+                }
+                return true
             }
         }
-        var wiki = cOn || triggerOn ? (warmedWiki?.snapshot ?? (useCachedWiki
+        var wiki = rootOn || triggerOn ? (warmedWiki?.snapshot ?? (useCachedWiki
             ? WikiInjectionCache.shared.snapshot(profileId: profileId, store: wikiStore) : nil)) : nil
-        if !cOn { wiki?.indexLines = [] }
+        if !rootOn { wiki?.indexLines = [] }
         if !triggerOn { wiki?.pages = [] }
         let selfMemory: SelfMemoryInjection.Built? = AirTimedSection.run("composePrompt.selfMemory") {
             participation.selfMemory
@@ -863,20 +871,21 @@ struct MemoryInjector {
         }
         return RoundInputs(memories: memories, selfMemory: selfMemory,
                            archiveBudget: max(0, tokenBudget - (selfMemory?.tokens ?? 0)), wiki: wiki,
-                           fullText: participation.fullText ? warmedWiki?.fullText : nil, rootIndex: cOn,
+                           fullText: participation.fullText ? warmedWiki?.fullText : nil, rootIndex: rootOn,
                            previousWindow: participation.previousWindow ? previousWindow : nil, hiddenSources: hiddenSources,
-                           hiddenFragmentCount: hiddenFragmentCount)
+                           hiddenFragmentCount: hiddenFragmentCount, everyRound: participation.everyRound)
     }
 
-    /// 拆层版本（cacheFriendly 用）：stable=常驻层（逐轮不变，可进缓存前缀），volatile=检索命中/兜底层（每轮可变）。
+    /// 拆层版本（cacheFriendly 用）：stable=钉住的（逐轮不变，可进缓存前缀），volatile=其余的（每轮可变）。
     /// 两段拼接 == buildInjection 输出，预算共享。
-    /// M1 起为检索 pipeline：各检索器产候选 → stable 依序 / volatile 按 tier（同 tier 多路 RRF）→ 共享预算去重。
-    static func buildInjectionSplit(memories: [Memory], recentMessages: [String] = [], budget: Int = tokenBudget,
+    /// `cards` = 钉住的以外走哪几路（`cardRetrievers`）；不给 = 全带（调用方给进来的就是要每轮带的那一份）。
+    /// M1 起为检索 pipeline：各检索器产候选 → stable 依序 / volatile 按 tier 一路一路来 → 共享预算去重。
+    static func buildInjectionSplit(memories: [Memory], cards: [MemoryRetriever] = [FullFallbackRetriever()],
+                                    recentMessages: [String] = [], budget: Int = tokenBudget,
                                     now: Date = MemoryClock.now) -> InjectionSplit {
         guard !memories.isEmpty else { return InjectionSplit(stable: "", volatile: "", hits: []) }
 
-        let retrievers = activeRetrievers()
-        guard !retrievers.isEmpty else { return InjectionSplit(stable: "", volatile: "", hits: []) }   // 全量/关键词都关 → 空注入
+        let retrievers: [MemoryRetriever] = [PersistentRetriever()] + cards
 
         var stableLines: [String] = []
         var volatileLines: [String] = []
@@ -904,7 +913,7 @@ struct MemoryInjector {
             usedTokens += cost
             injected.insert(m.id)
             hits.append(InjectionHit(
-                memoryId: m.id, snippet: String(m.content.prefix(60)),
+                memoryId: m.id, snippet: String(m.lineText.prefix(60)),
                 category: m.category, score: score, retrieverId: retriever, catalog: catalog))
             if catalog {
                 catalogCount += 1
@@ -922,30 +931,17 @@ struct MemoryInjector {
         }
         let expiredReminder = expiredPinnedReminder(expiredPinned, budget: max(0, budget - usedTokens))
         usedTokens += expiredReminder.cost
-        // volatile 层：tier 升序；同 tier 单路直通，多路 RRF 融合（keyword+vector 双路召回）
-        let volatileRetrievers = retrievers.filter { $0.layer == .volatile }
-        // 命中元数据（展示分）：各路原始分，多路命中同条时 vector 优先（余弦可解释）
+        // volatile 层：tier 升序一路一路来（试验的按意思找在前，每轮全带那一路垫后）
+        // 命中元数据（展示分）：先命中的那一路的原始分
         var meta: [UUID: (retriever: String, score: Double?)] = [:]
-        for tier in Set(volatileRetrievers.map(\.tier)).sorted() {
-            let group = volatileRetrievers.filter { $0.tier == tier }
-            let outputs = group.map { r -> [ScoredMemory] in
-                let out = r.retrieve(memories, recent: recentMessages)
-                if r.id == "vector" {
-                    // 成败都带内幕：抓空知道断哪环差多少，抓到知道分数（阈值校准用）
-                    contributions.append("vector \(out.count)[\(VectorRetriever.lastDetail)]")
-                } else {
-                    contributions.append("\(r.id) \(out.count)")
-                }
-                return out
-            }
-            for (r, out) in zip(group, outputs) {
-                for s in out where meta[s.memory.id] == nil || (r.id == "vector" && meta[s.memory.id]?.retriever != "vector") {
-                    meta[s.memory.id] = (r.id, s.score)
-                }
-            }
-            var ranked: [Memory] = outputs.count == 1 ? outputs[0].map(\.memory) : rrfFuse(outputs)
+        for r in retrievers.filter({ $0.layer == .volatile }).sorted(by: { $0.tier < $1.tier }) {
+            let out = r.retrieve(memories, recent: recentMessages)
+            // vector 成败都带内幕：抓空知道断哪环差多少，抓到知道分数（阈值校准用）
+            contributions.append(r.id == "vector" ? "vector \(out.count)[\(VectorRetriever.lastDetail)]" : "\(r.id) \(out.count)")
+            for s in out where meta[s.memory.id] == nil { meta[s.memory.id] = (r.id, s.score) }
+            var ranked = out.map(\.memory)
             // M3 一跳扩展：命中记忆的邻居打折跟进（排在命中之后 = 自然折扣）
-            if tier == 1, MemoryReadEnvironment.defaults.bool(forKey: "mem_inject_graph") {
+            if r.tier == 1, MemoryReadEnvironment.defaults.bool(forKey: "mem_inject_graph") {
                 let byId = Dictionary(uniqueKeysWithValues: memories.map { ($0.id, $0) })
                 var present = Set(ranked.map(\.id)).union(injected)
                 var neighbors: [Memory] = []
@@ -963,7 +959,7 @@ struct MemoryInjector {
                 }
             }
             for m in ranked {
-                let info = meta[m.id] ?? (retriever: group.first?.id ?? "fullFallback", score: nil)
+                let info = meta[m.id] ?? (retriever: r.id, score: nil)
                 if let text = tryAppend(m, to: &volatileLines, catalog: catalogMode, retriever: info.retriever, score: info.score) {
                     volatileUnits.append(InjectedVolatileLine(memoryId: m.id, text: text, expiredIds: []))
                 }
@@ -995,16 +991,6 @@ struct MemoryInjector {
         }
         return result
     }
-
-    /// RRF（Reciprocal Rank Fusion）：多路排序融合，score = Σ 1/(60+rank)。kiwi/paramecium 同款。
-    static func rrfFuse(_ lists: [[ScoredMemory]]) -> [Memory] {
-        var lookup: [UUID: Memory] = [:]
-        for list in lists {
-            for hit in list where lookup[hit.memory.id] == nil { lookup[hit.memory.id] = hit.memory }
-        }
-        return MemoryRankFusion.fuse(lists.map { $0.map { $0.memory.id } }).compactMap { lookup[$0] }
-    }
-
 
     /// 常驻人格层判定：只有她亲手钉住的（C3 ② 起按类别（关系 / 偏好）自动常驻的那批停掉）
     static func isPersistent(_ m: Memory) -> Bool {

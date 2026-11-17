@@ -7,14 +7,32 @@ import Foundation
 import HighlightSwift
 import SwiftUI
 
-private struct HighlightOutput {
+// MP fork（重构 R3）：下面三个类型去掉 private，原生代码块（UIKit/MarkdownCodeBlockView）共用同一条着色队列和同一个展开页
+struct HighlightOutput {
   let code: String
   let text: AttributedString
   /// highlight.js 用上的语言（没标语言时是自动识别的结果）
   let language: String?
 }
 
-private actor HighlightTaskManager: ObservableObject {
+/// MP fork（重构 R1 像素对拍）：还没着色完的代码块数。着色是异步的，截图测试要等它归零再拍，
+/// 否则同一段代码一次拍到彩色、一次拍到没着色的。
+public enum MarkdownHighlightProbe {
+  private static let lock = NSLock()
+  nonisolated(unsafe) private static var count = 0
+
+  public static var pending: Int {
+    lock.lock(); defer { lock.unlock() }
+    return count
+  }
+
+  static func add(_ delta: Int) {
+    lock.lock(); defer { lock.unlock() }
+    count += delta
+  }
+}
+
+actor HighlightTaskManager: ObservableObject {
   /// Shared Highlight instance to avoid creating multiple JSContext/HLJS instances.
   /// Each Highlight() creates its own JSContext and evaluates highlight.min.js (~600KB).
   /// When multiple CodeBlockViews render concurrently, N separate JSContexts cause
@@ -25,6 +43,7 @@ private actor HighlightTaskManager: ObservableObject {
   private var isProcessing = false
 
   func enqueueCode(_ code: String, language: String, completion: @escaping (HighlightOutput) -> Void) {
+    if latest == nil { MarkdownHighlightProbe.add(1) }
     latest = (code, language)
 
     if !isProcessing {
@@ -69,6 +88,7 @@ private actor HighlightTaskManager: ObservableObject {
           }
         }
       }
+      MarkdownHighlightProbe.add(-1)
     }
 
     isProcessing = false
@@ -218,7 +238,7 @@ struct CodeBlockView: View {
 }
 
 /// MP fork: 代码块展开页（sheet）——长代码读起来方便；可切换折行，默认不折（横向滚动）。
-private struct CodeBlockExpandedView: View {
+struct CodeBlockExpandedView: View {
 
   let language: String
   let code: String

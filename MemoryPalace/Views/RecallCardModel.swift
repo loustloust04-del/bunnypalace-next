@@ -76,7 +76,7 @@ struct RecallCardModel: Equatable {
     /// v1 回执：只记了档案触发那部分
     let oldLedger: Bool
 
-    static let oldLedgerNote = "旧账：只记了档案触发那部分"
+    static let oldLedgerNote = "旧账：只记了系统推送那部分"
 
     // MARK: - 分项表（顺序即折叠行顺序）
 
@@ -94,6 +94,7 @@ struct RecallCardModel: Equatable {
         KindSpec(kind: RecallDeliveryItem.Kind.legacyFragment, name: "碎片", unit: "条", isHit: true),
         KindSpec(kind: RecallDeliveryItem.Kind.pinned, name: "钉住", unit: "条", isHit: false),
         KindSpec(kind: RecallDeliveryItem.Kind.rootIndex, name: "档案目录", unit: "行", isHit: false),
+        KindSpec(kind: RecallDeliveryItem.Kind.cardIndex, name: "卡的目录", unit: "组", isHit: false),
         KindSpec(kind: RecallDeliveryItem.Kind.selfMemory, name: "助手的记忆", unit: "条", isHit: false),
         KindSpec(kind: RecallDeliveryItem.Kind.previousWindow, name: "上个窗口", unit: "条", isHit: false),
         KindSpec(kind: RecallDeliveryItem.Kind.a2, name: "上下文摘要", unit: "段", isHit: false),
@@ -157,7 +158,7 @@ struct RecallCardModel: Equatable {
             shape: .card, groups: groups, ledgerGroups: ledger,
             reads: receipt.reads.map(self.read(_:)),
             foldedLine: foldedLine(groups),
-            tuningLine: tuningLine(receipt.decision, route: delivery?.route),
+            tuningLine: tuningLine(receipt.decision, route: delivery?.route, assistantName: assistantName),
             gateNotes: delivery.map { gateNotes($0.gate, assistantName: assistantName) } ?? [],
             gateLine: delivery.flatMap { d in
                 gateLine(d.gate, hasLegacyFragment: d.items.contains { $0.kind == RecallDeliveryItem.Kind.legacyFragment },
@@ -281,7 +282,7 @@ struct RecallCardModel: Equatable {
         guard !numbers.isEmpty else { return 1 }
         switch item.kind {
         case RecallDeliveryItem.Kind.selfMemory: return numbers.reduce(0, +)
-        case RecallDeliveryItem.Kind.rootIndex, RecallDeliveryItem.Kind.previousWindow,
+        case RecallDeliveryItem.Kind.rootIndex, RecallDeliveryItem.Kind.cardIndex, RecallDeliveryItem.Kind.previousWindow,
              RecallDeliveryItem.Kind.expiredReminder: return numbers[0]
         default: return 1
         }
@@ -342,9 +343,9 @@ struct RecallCardModel: Equatable {
         return line
     }
 
-    static func tuningLine(_ decision: RecallTurnDecision, route: String?) -> String {
+    static func tuningLine(_ decision: RecallTurnDecision, route: String?, assistantName: String) -> String {
         let tuning = decision.tuning
-        var parts = ["档案触发 \(tuning.archiveTriggerEnabled ? "开" : "关")",
+        var parts = ["系统推送给\(assistantName) \(tuning.archiveTriggerEnabled ? "开" : "关")",
                      "一轮最多 \(tuning.maximumPages) 页"]
         if tuning.cooldownEnabled { parts.append("冷却 \(tuning.cooldownTurns) 句") }
         parts.append("最多翻 \(tuning.maximumRecallCalls) 次")
@@ -381,8 +382,13 @@ struct RecallCardModel: Equatable {
             let off = choices.filter { gate.choices[$0.0] == false }.map(\.1)
             if !off.isEmpty { parts.append("本窗划掉了：" + off.joined(separator: " · ")) }
         }
-        if gate.triggerOff, hasLegacyFragment {
-            parts.append("档案触发关着，碎片按旧规则带")
+        if hasLegacyFragment {
+            // everyRound 为 nil = 11-15 之前的回执（那时只有聊到才带关着才会有这种碎片）
+            if gate.everyRound == true {
+                parts.append("每轮全带勾着，批过的记忆条目都带")
+            } else if gate.triggerOff {
+                parts.append("系统推送给\(assistantName)关着，碎片按旧规则带")
+            }
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }

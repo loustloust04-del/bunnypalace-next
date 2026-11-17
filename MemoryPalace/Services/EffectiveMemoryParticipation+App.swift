@@ -17,7 +17,8 @@ extension EffectiveMemoryParticipation {
             choices: conversation?.memoryWindowChoices?.participationChoices,
             legacy: legacy.participationChoices,
             a2Checked: MemoryOpenWindow.isChecked(.a2, profileId: profileId, defaults: defaults),
-            archiveTrigger: archiveTrigger ?? RecallTuningStore.load(profileId: profileId, defaults: defaults).archiveTriggerEnabled))
+            archiveTrigger: archiveTrigger ?? RecallTuningStore.load(profileId: profileId, defaults: defaults).archiveTriggerEnabled,
+            everyRound: MemoryOpenWindow.everyRound(profileId: profileId, defaults: defaults)))
     }
 
     /// 来源窗隐藏集（P2-b 用）：本楼层里 `isTrashed || !memoryEnabled` 的窗 id。

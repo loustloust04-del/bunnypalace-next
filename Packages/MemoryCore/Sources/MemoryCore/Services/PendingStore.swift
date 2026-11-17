@@ -52,6 +52,9 @@ public enum PendingStore {}
 public extension PendingStore {
     static let folder = "pending"
     static let fileName = "待续.md"
+    /// 不挂在哪个聊天窗口上的待续记在这个名下（CC 在电脑上的记忆文件夹里加的那几行：那边没有窗口）。
+    /// 没做完的每轮都带（`TimelineStore.injection`：别的待续跟着时间轴里出现过的窗口带，这一组没有窗口可跟）
+    static let ccWindow = "cc"
 
 
     static func fileURL(root: URL) -> URL {

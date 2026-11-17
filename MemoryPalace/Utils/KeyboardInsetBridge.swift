@@ -43,6 +43,9 @@ final class KeyboardInsetBridge: ObservableObject {
     /// 气泡被顶到屏幕中间再复位。发送前置位（1s 窗口），willHide 读到即走无动画一步到终态，
     /// 弹泡动画独占舞台（老版行为等价）。
     var sendDismissUntil: CFTimeInterval = 0
+    /// 最近一次收键盘是不是发送带的（PagingVC 在 willHide 里读完 `sendDismissUntil` 就清零，
+    /// 垫块归零的订阅方要晚一步才知道，所以留一份）。新对话页（TranscriptChatPage）读它
+    var lastHideWasSendDismiss = false
     /// 收键盘 release 握手（research-keyboard-follow-animation §4b）：垫块由 PagingVC hold 到收起流程结束，
     /// release 时它在同一 runloop 里先写这里、再把 extra 发成 0；CardFlowView 的 onChange(extra→0) 在
     /// **同一次 update** 里直写 offset（与塌垫块同帧）。在底 = -inset；离底 = 当前 - hold。控制信号非 @Published。

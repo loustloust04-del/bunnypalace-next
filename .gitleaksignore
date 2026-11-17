@@ -30,3 +30,9 @@ ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:gen
 ef097106f03c250a0c126ea71e95ed33363b1ffa:cc-bridge/fixtures/hub-auth-v2.json:generic-api-key:206
 d8e9b9b66ff507d3f1430c48403054e46e737a3c:cc-bridge/deploy/VPS.md:generic-api-key:185
 d8e9b9b66ff507d3f1430c48403054e46e737a3c:cc-bridge/extra-hosts.test.ts:generic-api-key:92
+37a005a59efbc2f635ef0dccbe0f81aea0cf222f:cc-bridge/hub-folder.test.ts:generic-api-key:32
+924ad5453ca26ee598dbd19b2a7d9e7e7e8ec441:MemoryPalaceTests/EveryRoundCardsTests.swift:generic-api-key:14
+f1562362a925dc259ee06d33c580e74844889aad:cc-bridge/garden-tree-hub.test.ts:generic-api-key:33
+ea93ce531fd70d3df8f4540356a83fdf4bdff2b2:iCTRLKit/SecureChannel.swift:generic-api-key:31
+022992f3e963c93b92404876c6d25f413da70b5f:iCTRLKit/RPCMethod.swift:generic-api-key:21
+c734e7eeeafb42aa706d74718b68f43546e6adeb:iCTRLKit/RPCMethod.swift:generic-api-key:21

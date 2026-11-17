@@ -4,6 +4,22 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<!-- 网页应用（plan-webapp-versions-share §5）：别处的 html「用记忆花园打开」→ 放到桌面小卡；Alternate = 不抢默认打开方式 -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>网页</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.html</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
@@ -54,6 +70,11 @@
 	<array>
 		<string>audio</string>
 		<string>voip</string>
+	</array>
+	<!-- 一轮对话的后台保活（TurnKeepAlive.swift，持续处理任务）：标识要和代码里的 <bundle id>.turn 一致 -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).turn</string>
 	</array>
 	<key>NSUserActivityTypes</key>
 	<array>

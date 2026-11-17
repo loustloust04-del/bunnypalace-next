@@ -4,7 +4,7 @@ import XCTest
 
 final class RecallSelectionTests: XCTestCase {
     private let profileId = "recall-fictional-岚舟"
-    private let keys = ["mem_inject_keyword", "mem_inject_full", "mem_inject_vector", "mem_inject_graph", "mem_inject_catalog", MemoryOpenWindow.cKey]
+    private let keys = ["mem_inject_vector", "mem_inject_graph", "mem_inject_catalog", MemoryOpenWindow.cKey]
     private var saved: [String: Any] = [:]
 
     override func setUp() {
@@ -13,7 +13,6 @@ final class RecallSelectionTests: XCTestCase {
             if let value = UserDefaults.standard.object(forKey: key) { saved[key] = value }
             UserDefaults.standard.set(false, forKey: key)
         }
-        UserDefaults.standard.set(true, forKey: "mem_inject_full")
     }
 
     override func tearDown() {
@@ -32,8 +31,9 @@ final class RecallSelectionTests: XCTestCase {
         .init(path: "人/\(name)", title: name, triggers: [], hook: "谈到\(name)的计划", now: now, version: version)
     }
 
-    private func inputs(pages: [WikiInjectionSnapshot.Page] = [], memories: [Memory] = [], budget: Int = 1_000) -> MemoryInjector.RoundInputs {
-        .init(memories: memories, selfMemory: nil, archiveBudget: budget, wiki: .init(pages: pages))
+    private func inputs(pages: [WikiInjectionSnapshot.Page] = [], memories: [Memory] = [], budget: Int = 1_000,
+                        everyRound: Bool = false) -> MemoryInjector.RoundInputs {
+        .init(memories: memories, selfMemory: nil, archiveBudget: budget, wiki: .init(pages: pages), everyRound: everyRound)
     }
 
     private func select(_ text: String, turn: String = "u1", state: RecallConversationState = .init(),
@@ -107,8 +107,8 @@ final class RecallSelectionTests: XCTestCase {
         otherFloor.occurredDay = "2026-10-28"
         otherFloor.reviewedAt = Date()
         let first = select("林栖的计划进展怎么样", inputs: inputs(memories: [fragment, otherFloor]))
-        XCTAssertEqual(first.decision.selected.map(\.source.path), [fragment.id.uuidString])
-        XCTAssertEqual(first.decision.selected.first?.text, first.layers.volatile)
+        XCTAssertEqual(first.decision.selected.map(\.source.path), [fragment.id.uuidString], "点了卡上记的那个人的名字")
+        XCTAssertEqual(first.layers.volatile, "[关于岚舟·本轮相关]\n" + (first.decision.selected.first?.text ?? ""))
         XCTAssertFalse(first.layers.volatile.contains("另一楼层"))
         var state = RecallConversationState()
         commit(first.decision, state: &state)
@@ -117,6 +117,132 @@ final class RecallSelectionTests: XCTestCase {
         XCTAssertEqual(retained.decision.gateReason, .kept)
         XCTAssertTrue(retained.decision.selected.isEmpty)
         XCTAssertTrue(retained.layers.hits.isEmpty)
+    }
+
+    // MARK: - 记忆条目：聊到了才带（11-14）
+
+    private func card(_ content: String, who: String? = nil, importance: Int? = nil, tags: [String] = [],
+                      approved: Bool = true, age: TimeInterval = 0) -> Memory {
+        let memory = Memory(content: content, category: "fact", keywords: tags, profileId: profileId)
+        memory.occurredDay = "2026-11-01"
+        memory.reviewedAt = approved ? Date() : nil
+        memory.subject = who
+        memory.importance = importance
+        memory.createdAt = Date(timeIntervalSince1970: 1_799_000_000 - age)
+        return memory
+    }
+
+    func testCardsComeOnlyWhenTalkedAboutAndNeverAsAFallback() {
+        let shadow = card("槐序巷皮影作坊每周三开门")
+        let cilantro = card("星砚不吃香菜")
+        let snow = card("云桥城冬天会下雪")
+        let all = inputs(memories: [shadow, cilantro, snow])
+        let unrelated = select("今天帮我看一下这段代码为什么编不过", inputs: all)
+        XCTAssertEqual(unrelated.decision.gateReason, .search)
+        XCTAssertEqual(unrelated.decision.selected, [], "每轮全带没勾：没聊到就一张不带")
+        XCTAssertEqual(unrelated.layers.volatile, "")
+        let related = select("皮影作坊开门了吗", inputs: all)
+        XCTAssertEqual(related.decision.selected.map(\.source.path), [shadow.id.uuidString])
+        XCTAssertEqual(related.layers.volatile, "[关于岚舟·本轮相关]\n- 槐序巷皮影作坊每周三开门 [事实]")
+        XCTAssertEqual(related.layers.hits.map(\.retrieverId), ["keyword"])
+        XCTAssertEqual(related.layers.units.filter { $0.kind == RecallDeliveryItem.Kind.fragment }.map(\.text),
+                       ["- 槐序巷皮影作坊每周三开门 [事实]"], "清单里一张卡一行，头不算卡")
+    }
+
+    /// 出处还在这一轮历史窗口里的记忆条目不推回同一个窗口；出处滑出窗口了、别的窗口记的照带
+    func testCardsWhoseSourceIsStillInViewAreNotPushedBack() {
+        let extracted = card("槐序下周去云桥城看灯会", who: "槐序")
+        extracted.sourceConversationId = "fictional-window"
+        extracted.sourceNodeId = "n7"
+        let noted = card("槐序答应给岚舟带槐花糖", who: "槐序", age: 10)   // 助手在这里亲手记的：没有出处消息
+        noted.sourceConversationId = "fictional-window"
+        let elsewhere = card("槐序在槐序巷开了皮影作坊", who: "槐序", age: 20)
+        elsewhere.sourceConversationId = "other-window"
+        elsewhere.sourceNodeId = "n7"
+        let all = inputs(memories: [extracted, noted, elsewhere])
+        func picked(windowIds: Set<String>, since: Date?) -> Set<String> {
+            let r = RecallSelection.prepare(profile: profile(), conversationId: "fictional-window", turnId: "u1", branchAnchor: "branch",
+                                            text: "槐序最近怎么样了呀", state: .init(), existingDecision: nil, inputs: all, recentMessages: [],
+                                            now: Date(timeIntervalSince1970: 1_800_000_000), tuning: RecallTestTuning.make(),
+                                            windowIds: windowIds, windowSince: since)
+            return Set(r.decision.selected.map(\.source.path))
+        }
+        let everything = Set([extracted, noted, elsewhere].map(\.id.uuidString))
+        XCTAssertEqual(picked(windowIds: [], since: nil), everything, "没给窗口 = 不滤（检查器预览、评测照旧）")
+        XCTAssertEqual(picked(windowIds: ["n7", "n8"], since: noted.createdAt.addingTimeInterval(-60)), [elsewhere.id.uuidString],
+                       "出处消息还在窗口里的、在窗口起点之后亲手记的都不带；别的窗口的同名消息 id 不算")
+        XCTAssertEqual(picked(windowIds: ["n20"], since: noted.createdAt.addingTimeInterval(60)), everything, "出处滑出窗口以后照带")
+    }
+
+    func testCardTagsCountAsItsWordsButHerOwnNameNeverTriggers() {
+        let tagged = card("每周三下午都去", tags: ["皮影作坊", "开门"])
+        let aboutHer = card("喜欢喝桂花茶", who: "岚舟")
+        let aboutAssistant = card("答应过周末陪看皮影戏", who: "星砚")
+        let all = inputs(memories: [tagged, aboutHer, aboutAssistant])
+        XCTAssertEqual(select("皮影作坊开门了吗", inputs: all).decision.selected.map(\.source.path), [tagged.id.uuidString])
+        XCTAssertEqual(select("岚舟和星砚今天都好困呀", inputs: all).decision.selected, [], "她和助手自己的名字天天说，不算点名")
+    }
+
+    func testAtMostThreeCardsOneHeaderAndTheRestAreRecordedAsOverTheLimit() {
+        let cards = [
+            card("喜欢喝桂花茶", who: "槐序", importance: 3, age: 500),
+            card("对花生过敏", who: "槐序", importance: 5, age: 900),
+            card("搬去了云桥城", who: "槐序", importance: 3, age: 10),
+            card("养了一只叫团绒的猫", who: "槐序", importance: 2, age: 5),
+        ]
+        let result = select("槐序最近怎么样了呀", inputs: inputs(memories: cards))
+        XCTAssertEqual(result.decision.selected.map(\.source.path), [cards[1], cards[2], cards[0]].map(\.id.uuidString),
+                       "重要度高的先，同重要度新的先")
+        XCTAssertEqual(result.decision.suppressions.map(\.reason), [.pageLimit])
+        XCTAssertEqual(result.decision.suppressions.first?.source.path, cards[3].id.uuidString)
+        XCTAssertEqual(result.layers.volatile.components(separatedBy: "本轮相关]").count - 1, 1, "三张卡一行头")
+        XCTAssertEqual(result.layers.volatile.components(separatedBy: "\n").count, 4)
+        var more = RecallTestTuning.make()
+        more.maximumFragments = 4
+        XCTAssertEqual(select("槐序最近怎么样了呀", inputs: inputs(memories: cards), tuning: more).decision.selected.count, 4)
+        // 页照样最多 3 页，卡不占页位
+        let pages = (0..<3).map { page("槐序\($0)") }
+        let mixed = select("槐序0 槐序1 槐序2 都还好吗，槐序呢", inputs: inputs(pages: pages, memories: cards, budget: 4_000))
+        XCTAssertEqual(mixed.decision.selected.filter { $0.source.kind == .page }.count, 3)
+        XCTAssertEqual(mixed.decision.selected.filter { $0.source.kind == .fragment }.count, 3)
+    }
+
+    func testCardIndexListsFoldersOnlyWhileTriggerIsOnAndCarriesNoCardText() {
+        let cards = [card("对花生过敏", who: "槐序"), card("搬去了云桥城", who: "槐序"),
+                     card("每周三开门", who: "皮影作坊"), card("冬天会下雪")]
+        let pinned = Memory(content: "钉住的一条", category: "fact", profileId: profileId, isUserExplicit: true)
+        pinned.subject = "团绒"
+        let on = select("今天帮我看一下这段代码为什么编不过", inputs: inputs(memories: cards + [pinned]))
+        let expected = "[记忆条目 · 目录]\n记过这些人和事的记忆条目（memory/cards/ 下一人一个文件夹）：槐序、皮影作坊\n聊到的会自动带上；这一轮没带上的不等于没记过。"
+        XCTAssertTrue(on.layers.stable.hasPrefix(expected), on.layers.stable)
+        XCTAssertFalse(on.layers.stable.contains("花生"))
+        XCTAssertFalse(expected.contains("团绒"), "钉住的每轮都带全文，不进目录")
+        XCTAssertTrue(on.layers.stable.contains("- 团绒 · 钉住的一条"), "钉住的全文那一行以说的是谁开头")
+        XCTAssertEqual(on.layers.units.first { $0.kind == RecallDeliveryItem.Kind.cardIndex }?.shown, "卡的目录 2 组")
+        XCTAssertFalse(select("皮影作坊开门了吗", inputs: inputs(memories: [card("冬天会下雪")])).layers.stable.contains("记忆条目 · 目录"),
+                       "没有一张卡写了说的是谁：没有名字可列，不出目录")
+        let again = select("皮影作坊开门了吗", inputs: inputs(memories: cards + [pinned, card("新写的一张", who: "槐序")]))
+        XCTAssertTrue(again.layers.stable.hasPrefix(expected), "同一批人多一张卡，目录一个字不变（缓存前缀不动）")
+        let off = select("皮影作坊开门了吗", inputs: inputs(memories: cards), tuning: RecallTestTuning.make(archiveTriggerEnabled: false))
+        XCTAssertFalse(off.layers.stable.contains("记忆条目 · 目录"), "聊到才带关着：卡不靠聊到带，不出目录")
+        let every = select("皮影作坊开门了吗", inputs: inputs(memories: cards, everyRound: true))
+        XCTAssertFalse(every.layers.stable.contains("记忆条目 · 目录"), "每轮全带勾着：卡本来就在，不出目录")
+        XCTAssertEqual(select("皮影作坊开门了吗", inputs: inputs(memories: [pinned])).layers.stable.contains("记忆条目 · 目录"), false)
+        let tight = select("皮影作坊开门了吗", inputs: inputs(memories: cards, budget: 5))
+        XCTAssertFalse(tight.layers.stable.contains("记忆条目 · 目录"), "放不下整段不带")
+    }
+
+    func testKeptTopicCarriesTheSameCardsWithoutSearchingAgain() {
+        let shadow = card("槐序巷皮影作坊每周三开门")
+        let other = card("皮影戏的灯要用暖光才好看")
+        let first = select("皮影作坊开门了吗", inputs: inputs(memories: [shadow, other]))
+        XCTAssertEqual(first.decision.selected.map(\.source.path), [shadow.id.uuidString])
+        var state = RecallConversationState()
+        commit(first.decision, state: &state)
+        let kept = select("皮影作坊开门以后灯用暖光吗", turn: "u2", state: state, inputs: inputs(memories: [shadow, other]))
+        XCTAssertEqual(kept.decision.gateReason, .kept)
+        XCTAssertEqual(kept.decision.selected.map(\.source.path), [shadow.id.uuidString], "话题没换：接着带上一轮那张，不重新找")
+        XCTAssertEqual(kept.layers.volatile, first.layers.volatile)
     }
 
     func testReplayRevalidatesBudgetButDoesNotRejudgeDifferentText() {
@@ -145,6 +271,76 @@ final class RecallSelectionTests: XCTestCase {
         XCTAssertLessThanOrEqual(Memory.estimateTokens(kept.layers.stable), tight.archiveBudget)
     }
 
+    /// 钉住的条目进了这一轮的原料（「开窗口带什么 › 钉住的」勾着）就带：和老开关（全量注入 / 关键词命中 / 按意思找）、
+    /// 聊到才带、每轮全带都无关。11-15 之前三个老开关都关时带不进去
+    func testPinnedIsDeliveredWhateverTheOldSwitchesTriggerAndEveryRoundSay() {
+        let pinned = Memory(content: "岚舟明确钉住的一条合成设置", category: "fact", profileId: profileId, isUserExplicit: true)
+        let defaults = UserDefaults.standard
+        let oldKeys = ["mem_inject_full", "mem_inject_keyword"]   // 按意思找在 setUp 里关着：三个都关 = 以前带不进去的那种
+        let before = oldKeys.map { defaults.object(forKey: $0) }
+        defer { for (key, value) in zip(oldKeys, before) { if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) } } }
+        for old in [false, true] {
+            for key in oldKeys { defaults.set(old, forKey: key) }
+            for tuning in [RecallTestTuning.make(), RecallTestTuning.make(archiveTriggerEnabled: false)] {
+                for everyRound in [false, true] {
+                    let layers = select("随便聊聊", inputs: inputs(memories: [pinned], everyRound: everyRound), tuning: tuning).layers
+                    XCTAssertEqual(layers.stable, "[关于岚舟]\n- 岚舟明确钉住的一条合成设置 [事实]",
+                                   "老开关 \(old) · 聊到才带 \(tuning.archiveTriggerEnabled) · 每轮全带 \(everyRound)")
+                    XCTAssertEqual(layers.volatile, "")
+                    XCTAssertEqual(layers.hits.map(\.retrieverId), ["persistent"])
+                }
+            }
+        }
+        XCTAssertEqual(select("随便聊聊", inputs: inputs(memories: [])).layers.stable, "", "没进原料（那一勾没勾）就不带")
+    }
+
+    // MARK: - 每轮全带（11-15）
+
+    /// 每轮全带 × 聊到才带四格：勾着 = 批过的都带（重要度高→低、新→旧），不看这一句聊了什么、不看聊到才带开没开；
+    /// 没勾 = 聊到才带开着只带聊到的，关着一张不带
+    func testEveryRoundCarriesAllApprovedCardsWithOrWithoutTrigger() {
+        let cards = [card("喜欢喝桂花茶", who: "槐序", importance: 3, age: 500), card("对花生过敏", who: "槐序", importance: 5, age: 900),
+                     card("云桥城冬天会下雪", age: 10)]
+        let all = "[关于岚舟·本轮相关]\n- 槐序 · 对花生过敏 [事实]\n- 云桥城冬天会下雪 [事实]\n- 槐序 · 喜欢喝桂花茶 [事实]"
+        for trigger in [true, false] {
+            let tuning = RecallTestTuning.make(archiveTriggerEnabled: trigger)
+            for text in ["今天帮我看一下这段代码为什么编不过", "槐序最近怎么样了呀"] {
+                let on = select(text, inputs: inputs(memories: cards, everyRound: true), tuning: tuning)
+                XCTAssertEqual(on.layers.volatile, all, "每轮全带勾 · 聊到才带 \(trigger) · \(text)")
+                XCTAssertEqual(on.layers.hits.map(\.retrieverId), ["fullFallback", "fullFallback", "fullFallback"])
+                XCTAssertTrue(on.decision.selected.isEmpty, "都已经在了，聊到才带不再单独推")
+                XCTAssertEqual(on.layers.units.map(\.kind), Array(repeating: RecallDeliveryItem.Kind.legacyFragment, count: 3))
+            }
+            let unrelated = select("今天帮我看一下这段代码为什么编不过", inputs: inputs(memories: cards), tuning: tuning)
+            XCTAssertEqual(unrelated.layers.volatile, "", "每轮全带不勾：没聊到不带（聊到才带 \(trigger)）")
+            let named = select("槐序最近怎么样了呀", inputs: inputs(memories: cards), tuning: tuning)
+            XCTAssertEqual(named.layers.volatile,
+                           trigger ? "[关于岚舟·本轮相关]\n- 槐序 · 对花生过敏 [事实]\n- 槐序 · 喜欢喝桂花茶 [事实]" : "",
+                           "每轮全带不勾：聊到才带开着只带聊到的，关着不带")
+        }
+    }
+
+    func testEveryRoundKeepsWikiPagesOnTriggerAndSharesTheBudget() {
+        let cards = [card("对花生过敏", who: "槐序"), card("云桥城冬天会下雪", age: 10)]
+        let withPage = select("林栖的计划进展怎么样", inputs: inputs(pages: [page()], memories: cards, everyRound: true))
+        XCTAssertEqual(withPage.decision.selected.map(\.source.path), ["人/林栖"], "wiki 页照旧聊到才带")
+        XCTAssertTrue(withPage.layers.volatile.hasPrefix(withPage.decision.selected[0].text + "\n\n[关于岚舟·本轮相关]\n"))
+        XCTAssertTrue(withPage.layers.volatile.contains("对花生过敏") && withPage.layers.volatile.contains("冬天会下雪"))
+        let pageCost = withPage.decision.selected[0].tokenCost
+        let tight = select("林栖的计划进展怎么样",
+                           inputs: inputs(pages: [page()], memories: cards,
+                                          budget: pageCost + MemoryInjector.injectedCost(cards[0], catalog: false), everyRound: true))
+        XCTAssertEqual(tight.decision.selected.map(\.source.path), ["人/林栖"])
+        XCTAssertEqual(tight.layers.hits.count, 1, "页先占，剩下的预算只够一条")
+        // 上一轮聊到才带带过的卡，这一轮改成每轮全带：不再当成延续的话题带第二遍
+        let first = select("槐序最近怎么样了呀", inputs: inputs(memories: cards))
+        var state = RecallConversationState()
+        commit(first.decision, state: &state)
+        let kept = select("槐序后来还过敏吗", turn: "u2", state: state, inputs: inputs(memories: cards, everyRound: true))
+        XCTAssertTrue(kept.decision.selected.isEmpty)
+        XCTAssertEqual(kept.layers.volatile.components(separatedBy: "对花生过敏").count - 1, 1)
+    }
+
     func testArchiveSwitchDisablesAllXOutputWithoutDisablingRootOrLegacyFragments() {
         UserDefaults.standard.set(true, forKey: MemoryOpenWindow.cKey)
         let snapshot = WikiInjectionSnapshot(indexLines: ["- [[人/林栖]] 林栖"], pages: [page()])
@@ -170,16 +366,16 @@ final class RecallSelectionTests: XCTestCase {
         fragment.occurredDay = "2026-10-28"
         fragment.reviewedAt = Date()
         fragment.keywords = ["cloudbridge"]
-        UserDefaults.standard.set(false, forKey: "mem_inject_full")
-        UserDefaults.standard.set(true, forKey: "mem_inject_keyword")
-        let legacy = select("完全不同的问题", inputs: inputs(memories: [fragment]),
-                            recent: ["cloudbridge", "完全不同的问题"], tuning: off)
-        XCTAssertTrue(legacy.decision.selected.isEmpty)
-        XCTAssertEqual(legacy.layers.hits.map(\.memoryId), [fragment.id])
-        XCTAssertTrue(legacy.layers.volatile.contains(fragment.content))
-        let withoutHistory = select("完全不同的问题", inputs: inputs(memories: [fragment]),
-                                    recent: ["完全不同的问题"], tuning: off)
-        XCTAssertTrue(withoutHistory.layers.hits.isEmpty)
+        // 关键词命中那一路退掉了：聊到才带关着、每轮全带没勾，历史里出现过关键词也不带
+        let retired = select("完全不同的问题", inputs: inputs(memories: [fragment]),
+                             recent: ["cloudbridge", "完全不同的问题"], tuning: off)
+        XCTAssertTrue(retired.layers.hits.isEmpty)
+        XCTAssertEqual(retired.layers.volatile, "")
+        let every = select("完全不同的问题", inputs: inputs(memories: [fragment], everyRound: true),
+                           recent: ["完全不同的问题"], tuning: off)
+        XCTAssertTrue(every.decision.selected.isEmpty)
+        XCTAssertEqual(every.layers.hits.map(\.memoryId), [fragment.id])
+        XCTAssertTrue(every.layers.volatile.contains(fragment.content))
     }
 
     func testDisabledThenShortRoundCannotResurrectActive() {
@@ -309,10 +505,10 @@ final class RecallSelectionTests: XCTestCase {
         let card = try f.card(gist: "cedar maple 自动卡")
         try f.page(cards: [card])
         try f.page("人/合成人物", title: "Orivale", now: "X1 人物现在")
-        let fragment = Memory(content: "合成碎片补充", category: "fact", profileId: profileId)
+        let fragment = Memory(content: "Orivale cedar maple 合成碎片补充", category: "fact", profileId: profileId)
         fragment.occurredDay = "2026-10-28"
         fragment.reviewedAt = Date()
-        let pinned = Memory(content: "钉住的合成来源", category: "fact", profileId: profileId, isUserExplicit: true)
+        let pinned = Memory(content: "钉住的合成来源 Orivale cedar maple", category: "fact", profileId: profileId, isUserExplicit: true)
         let text = "Orivale cedar maple"
         let input = await fullTextInputs(f, text, memories: [fragment, pinned])
         let result = select(text, inputs: input)

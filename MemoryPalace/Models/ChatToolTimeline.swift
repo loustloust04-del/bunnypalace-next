@@ -41,12 +41,20 @@ struct ChatToolStep: Identifiable, Equatable {
         case "browse_url": return "阅读网页"
         case "chrome_read": return "用 Chrome 读网页"
         case "site_query": return "用 Chrome 查站点"
+        case "garden_app_add": return "放到桌面"
+        case "garden_app_edit": return "改桌面应用"
+        // list / update 11-16 起不再下发（plan-webapp-as-file §2.7），留着给老对话里的记录显示
+        case "garden_app_list": return "看桌面上的应用"
+        case "garden_app_read": return "读应用源码"
+        case "garden_app_update": return "改桌面应用"
         case "browser_open": return "在浏览器里打开网页"
         case "browser_look": return "看浏览器里这一页"
         case "browser_click": return "在浏览器里点了一下"
         case "browser_type": return "在浏览器里填字"
         case "browser_scroll": return "在浏览器里翻页"
         case "browser_back": return "浏览器后退"
+        case "browser_video": return "控制一起看的视频"
+        case "heartbeat_task": return "管自己的任务"
         case "run_command": return "运行命令"
         default: return integration.flatMap { $0.isEmpty ? nil : $0 } ?? name
         }
@@ -80,6 +88,9 @@ struct ChatToolStep: Identifiable, Equatable {
         case "run_command": return "terminal"
         case "browse_url", "chrome_read", "site_query": return "globe"
         case "browser_open", "browser_look", "browser_click", "browser_type", "browser_scroll", "browser_back": return "cursorarrow.rays"
+        case "browser_video": return "play.rectangle"
+        case "garden_app_add", "garden_app_list", "garden_app_read", "garden_app_update", "garden_app_edit": return "square.grid.2x2"
+        case "heartbeat_task": return "alarm"
         default: return "wrench.and.screwdriver"
         }
     }

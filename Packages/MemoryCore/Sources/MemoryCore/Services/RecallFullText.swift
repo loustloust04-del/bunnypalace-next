@@ -58,9 +58,11 @@ public enum RecallFullText {
         guard !words.isEmpty || numericLocator else { return [] }
         let allowed = Set(words + numbers)
         var ordered: [String] = []
+        // 很长的一句（整段贴进来的日志）不同的词上千个：用集合判重，别在数组里线性找
+        var emitted = Set<String>()
         tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
             let word = String(text[range])
-            if allowed.contains(word), !ordered.contains(word) { ordered.append(word) }
+            if allowed.contains(word), emitted.insert(word).inserted { ordered.append(word) }
             return true
         }
         return ordered
@@ -118,6 +120,90 @@ public enum RecallFullText {
             return a.hit.docId < b.hit.docId
         }
         return scored.map(\.hit)
+    }
+}
+
+/// X3 的一张候选卡：词面只算一次（调用方按卡的版本缓存），不带正文。
+public struct RecallFragmentDocument: Equatable, Sendable {
+    public let id: String
+    /// 正文 + 标签的有效词（`RecallFullText.fragmentTokens`）
+    public let tokens: Set<String>
+    /// 卡上记的「说的是谁」；她和助手自己的名字、「不触发的词」调用方先去掉
+    public let identities: [String]
+    /// 重要度（没定 = 3）
+    public let priority: Int
+    public let createdAt: Date
+
+    public init(id: String, tokens: Set<String>, identities: [String], priority: Int, createdAt: Date) {
+        self.id = id
+        self.tokens = tokens
+        self.identities = identities
+        self.priority = priority
+        self.createdAt = createdAt
+    }
+}
+
+public extension RecallFullText {
+    enum FragmentMatch: String, Equatable, Sendable { case lexical, named }
+
+    /// 这句话里哪些词参加比对：false = 所有的词都算（卡 / 页里没出现过的词分量最重，卡得盖住这句话的大半才算，同全文兜底）；
+    /// true = 只算卡 / 页里出现过的词（宽）。
+    /// 定 false 的来由（11-14，一份真实楼层快照，304 张卡 × 1.58 万句过了「太短的不找」的话，只数数量）：
+    /// false 有 1.1% 的句子至少对上一张卡，true 是 4.8%、对上的张数是 4 倍。多出来的那些是对是错没有人工标注能说明，
+    /// 读侧规格「错注比漏注更严重」→ 先取严的。要放宽只改这一个值，改完用 `RecallRealFloorMeasureTests` 再量一遍。
+    static let fragmentQueryUsesCorpusTermsOnly = false
+
+    static func fragmentTokens(_ text: String, tuning: RecallTuning) -> Set<String> {
+        RecallLexical.tokens(SearchTextSegmenter.normalized(text), tuning: tuning)
+    }
+
+    /// X3：一张记忆条目算「聊到了」只有两种（都只看当前这一句，不调模型）——
+    /// - lexical：这句话里分量最重的几个词，卡上对上的够多、分量够重。门槛就是全文兜底那一组
+    ///   （`maximumQueryTerms` / `minimumFullTextTerms` / `fullTextCoverageThreshold`），不另设数；
+    /// - named：这句话点了卡上记的那个人 / 物的名字（同页名触发，按词边界认）。
+    /// 排序：lexical 在前（覆盖高的先、对上的词多的先），named 在后；同档重要度高的先、新的先。
+    /// 这里不截数量：一轮最多几张由 `RecallTurnState` 按 `maximumFragments` 收，冷却的不占名额。
+    static func fragmentHits(text: String, documents: [RecallFragmentDocument], weights: RecallTokenWeights,
+                             excluding: [String], tuning: RecallTuning,
+                             corpusTermsOnly: Bool = fragmentQueryUsesCorpusTermsOnly) -> [(id: String, match: FragmentMatch)] {
+        guard !documents.isEmpty else { return [] }
+        let words = terms(text, excluding: excluding, tuning: tuning).filter {
+            !corpusTermsOnly || (weights.frequencies[$0] ?? 0) > 0
+        }
+        let weight = Dictionary(words.map { ($0, weights.weight($0)) }, uniquingKeysWith: { first, _ in first })
+        let asked = Set(query(words, weights: weight, tuning: tuning))
+        let total = asked.reduce(0) { $0 + (weight[$1] ?? 1) }
+        // 点名按名字只判一次（很多卡记的是同一个人），先用子串挡掉绝大多数再走分词边界
+        let folded = RecallLexical.normalized(text)
+        var namedCache: [String: Bool] = [:]
+        func named(_ identities: [String]) -> Bool {
+            identities.contains { identity in
+                if let known = namedCache[identity] { return known }
+                let key = RecallLexical.normalized(identity).trimmingCharacters(in: .whitespacesAndNewlines)
+                let result = !key.isEmpty && folded.contains(key) && RecallLexical.names([identity], in: text, tuning: tuning)
+                namedCache[identity] = result
+                return result
+            }
+        }
+        var scored: [(document: RecallFragmentDocument, match: FragmentMatch, coverage: Double, count: Int)] = []
+        for document in documents {
+            let matched = document.tokens.intersection(asked)
+            let coverage = total > 0 ? matched.reduce(0) { $0 + (weight[$1] ?? 1) } / total : 0
+            if !matched.isEmpty, matched.count >= tuning.minimumFullTextTerms, coverage >= tuning.fullTextCoverageThreshold {
+                scored.append((document, .lexical, coverage, matched.count))
+            } else if named(document.identities) {
+                scored.append((document, .named, 0, 0))
+            }
+        }
+        scored.sort { a, b in
+            if a.match != b.match { return a.match == .lexical }
+            if a.coverage != b.coverage { return a.coverage > b.coverage }
+            if a.count != b.count { return a.count > b.count }
+            if a.document.priority != b.document.priority { return a.document.priority > b.document.priority }
+            if a.document.createdAt != b.document.createdAt { return a.document.createdAt > b.document.createdAt }
+            return a.document.id < b.document.id
+        }
+        return scored.map { ($0.document.id, $0.match) }
     }
 }
 

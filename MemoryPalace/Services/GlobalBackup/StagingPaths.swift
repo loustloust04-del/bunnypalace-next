@@ -123,6 +123,33 @@ enum StagingPaths {
         AssistantChatStore.defaultURL.deletingLastPathComponent()
     }
 
+    /// page2 主屏：布局（默认 + 各层 floors/<pid>/）+ 外观（壁纸、换过的图标图片）。11-15 起随全量备份
+    static var stagingPage2Root: URL {
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("page2-staging", isDirectory: true))
+    }
+
+    static var primaryPage2Root: URL {
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("Page2", isDirectory: true))
+    }
+
+    /// 老的全局网页应用（plan-garden-webapps）：11-16 起应用在文件库里、不再导出；老备份里带的照旧恢复，下次启动搬进文件库（`WebAppMigration`）
+    static var stagingWebAppsRoot: URL {
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("webapps-staging", isDirectory: true))
+    }
+
+    static var primaryWebAppsRoot: URL {
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("WebApps", isDirectory: true))
+    }
+
+    /// 文件版本历史（`FileVersionStore`：文件库文件、网页应用、角色卡 / 世界书 / Prompt 长字段）。11-16 起随全量备份（plan-webapp-as-file §2.3）
+    static var stagingVersionsRoot: URL {
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("versions-staging", isDirectory: true))
+    }
+
+    static var primaryVersionsRoot: URL {
+        AppPaths.checked(applicationSupportRoot.appendingPathComponent("versions", isDirectory: true))
+    }
+
     /// staging filelibrary 区（floors-staging/，本地路径；iCloud 路径走 FileLibraryStore 拿）
     static var stagingFilelibraryRoot: URL {
         AppPaths.checked(documentsRoot.appendingPathComponent("floors-staging", isDirectory: true))
@@ -196,6 +223,9 @@ enum StagingPaths {
         try? fm.removeItem(at: stagingThemesRoot)
         try? fm.removeItem(at: stagingCardLibraryRoot)
         try? fm.removeItem(at: stagingAssistantRoot)
+        try? fm.removeItem(at: stagingPage2Root)
+        try? fm.removeItem(at: stagingWebAppsRoot)
+        try? fm.removeItem(at: stagingVersionsRoot)
         try? fm.removeItem(at: stagingFilelibraryRoot)
         try? fm.removeItem(at: stagingUserDefaultsURL)
         try? fm.removeItem(at: pendingImportFlagURL)

@@ -494,13 +494,20 @@ struct BubbleModeRow: View {
                 }
                 ForEach(shownBlocks.indices, id: \.self) { i in
                     let blockTarget = ChatReactionTarget(node: node, blockIndex: i, blockText: shownBlocks[i])
-                    quotable(shownBlocks[i], reactionTarget: blockTarget) { forceTail in
-                        // partial 态（流式/reveal）中尾巴归 dots 泡；定格后回到末块
-                        singleBubble(hasTail: forceTail || (isLastInRun && i == shownBlocks.count - 1 && !showPartialDots && !userVoicesBelow)) {
-                            blockText(shownBlocks[i])
-                                #if DEBUG
-                                .environment(\.chatProbeBubbleIndex, i)
-                                #endif
+                    let blockMeme = isUser ? nil : MemeToken.match(shownBlocks[i])
+                    quotable(blockMeme.map { MemeToken.promptText(name: MemeStore.fetch($0, in: modelContext)?.name, detail: nil) } ?? shownBlocks[i],
+                             reactionTarget: blockTarget) { forceTail in
+                        if let blockMeme {
+                            // AI 发的表情包（plan-AI表情包 §3）：这一块无气泡无底，同她发的
+                            MemeMessageView(memeId: blockMeme)
+                        } else {
+                            // partial 态（流式/reveal）中尾巴归 dots 泡；定格后回到末块
+                            singleBubble(hasTail: forceTail || (isLastInRun && i == shownBlocks.count - 1 && !showPartialDots && !userVoicesBelow)) {
+                                blockText(shownBlocks[i])
+                                    #if DEBUG
+                                    .environment(\.chatProbeBubbleIndex, i)
+                                    #endif
+                            }
                         }
                     }
                     // 回应锚到长按的这一个泡：徽标挂在单泡上角（iMessage 式，你的泡左上、AI 的泡右上）
@@ -649,7 +656,7 @@ struct BubbleModeRow: View {
         var blocks = trimmed.isEmpty ? [] : Self.splitBlocks(MessageHTMLSegments.markdownPromotingHTML(body))
         if !isUser {
             // 气泡模式简化会把纯分隔线块删空——拆块时就过滤掉，避免渲染出空气泡
-            blocks = blocks.filter { !BubbleMarkdownSimplifier.isRenderEmpty($0) }
+            blocks = blocks.filter { !BubbleMarkdownSimplifier.isRenderEmpty($0) && !MemeIntentWriter.visible($0).isEmpty }
         }
         #if (DEBUG || PERF_BENCH) && os(iOS)
         // 渲染账本 consumed（perf P0 §5.2）：静态拆块消费的 node.content 快照摘要
@@ -773,6 +780,7 @@ struct BubbleModeRow: View {
     static func streamingVisibleBlocks(_ text: String) -> [String] {
         streamingBlocks(text)
             .map(ChatReactionIntent.streamingVisible)
+            .map(MemeIntentWriter.visible)   // ```meme 块同理：收口换成图之前不露代码块
             .filter { !$0.isEmpty && !BubbleMarkdownSimplifier.isRenderEmpty($0) }
     }
 

@@ -293,7 +293,7 @@ enum AssistantTools {
         if matched.isEmpty {
             return AssistantToolOutcome(resultText: keyword.isEmpty ? "这个楼层还没有记忆" : "没有找到含「\(keyword)」的记忆", isError: false)
         }
-        let list = matched.map { "- [\($0.category)] \($0.content)" }.joined(separator: "\n")
+        let list = matched.map { "- [\($0.category)] \($0.lineText)" }.joined(separator: "\n")
         return AssistantToolOutcome(resultText: "找到 \(matched.count) 条记忆：\n\(list)", isError: false)
     }
 

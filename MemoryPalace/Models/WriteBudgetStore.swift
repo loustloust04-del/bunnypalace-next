@@ -111,11 +111,17 @@ final class WriteBudgetStore: BudgetAccount {
     /// 后台写手动笔前查（在后台线程调）：周期开着且本期已花 ≥ 上限 = 超了
     static func exceeded(defaults: UserDefaults = .standard, now: Date = Date(),
                          records: (Date?) -> [UsageRecord] = { UsageLedger.shared.load(since: $0) }) -> Bool {
+        remaining(defaults: defaults, now: now, records: records).map { $0 <= 0 } ?? false
+    }
+
+    /// 本期还剩多少（在后台线程调）；周期关着 = nil（不限）
+    static func remaining(defaults: UserDefaults = .standard, now: Date = Date(),
+                          records: (Date?) -> [UsageRecord] = { UsageLedger.shared.load(since: $0) }) -> Double? {
         let period = defaults.string(forKey: periodKey).flatMap(WriteBudgetPeriod.init(rawValue:)) ?? .off
-        guard period != .off else { return false }
+        guard period != .off else { return nil }
         let limit = defaults.object(forKey: budgetKey) != nil ? defaults.double(forKey: budgetKey) : defaultBudget
         let since = since(period: period, resetAt: defaults.object(forKey: resetAtKey) as? Date, now: now)
-        return spent(records: records(since), since: since) >= limit
+        return limit - spent(records: records(since), since: since)
     }
 
     /// 状态卡灰字：「写入预算用完，下周一再写」

@@ -13,9 +13,10 @@ struct PermissionPromptHost: View {
             .sheet(item: Binding(
                 get: { req },
                 set: { newValue in
-                    // 拖拽/点外面关闭 = 本次拒绝
+                    // 拖拽/点外面关闭 = 本次拒绝；CC 在电脑上改的那种（folderChange）= 以后再说，那一笔接着等
                     if newValue == nil, let r = PermissionPromptCenter.shared.pendingRequest {
-                        PermissionPromptCenter.shared.respond(to: r.id, allowed: false)
+                        if r.folderChange != nil { PermissionPromptCenter.shared.respond(to: r.id, decision: .timedOut) }
+                        else { PermissionPromptCenter.shared.respond(to: r.id, allowed: false) }
                     }
                 }
             )) { r in

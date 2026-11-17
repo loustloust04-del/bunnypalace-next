@@ -19,6 +19,7 @@ enum SyncStore {
         if BenchIsolation.active { return false }
         #endif
         guard !LocalMode.isOn else { return false }
+        guard !FolderFloor.isFolder(profileId) else { return false }   // 连着电脑文件夹的楼层不同步（plan-folder-floor）；她的开关不动，不连了就恢复
         return enabledProfiles().contains(profileId)
     }
 
@@ -303,6 +304,9 @@ enum SyncStore {
     static func exportChanged(profileId: String, context: ModelContext, progress: ((String) -> Void)? = nil,
                               hubIdentity: (Conversation) -> String? = { CCHubRegistry.exportedIdentity(of: $0) }) -> ExportResult {
         var result = ExportResult()
+        // 连着电脑文件夹的楼层不同步（plan-folder-floor）：不光开关恒关，导出 / 导入本身也不干活——
+        // 不看开关直接调过来的也挡住（kimi P1 审 #4）。云上已有的文档不动
+        guard !FolderFloor.isFolder(profileId) else { return result }
         guard let root = syncRoot(profileId: profileId) else { return result }
         var state = loadExportState(profileId: profileId)
         var hubState = loadHubState(profileId: profileId)
@@ -314,6 +318,8 @@ enum SyncStore {
         let conversations = (try? context.fetch(descriptor)) ?? []
 
         for conversation in conversations {
+            // 电脑上同步来的 session 不上云（原件在电脑上）。按对话本身挡：这一层后来「不连了」变回普通楼层，它们也不会被带走
+            if conversation.isFolderSession { continue }
             result.scanned += 1
             if result.scanned % 50 == 0 { progress?("导出中 \(result.scanned)/\(conversations.count)…") }
             // 只换模式不推进 updateTime（列表按它排），所以按 syncStamp（内容 / 模式取较新）判断要不要导出；hub 归属单独比（impl1 #11）
@@ -601,6 +607,7 @@ enum SyncStore {
     /// hubResolver：对端的 (ccHubId, hub_id) → 本机的 ccHubId（单测注入，缺省读本机 hub 名单）
     static func importAll(profileId: String, context: ModelContext,
                           hubResolver: (String?, String?) -> String? = { CCHubRegistry.resolveSynced(hubId: $0, identity: $1) }) -> ImportResult {
+        guard !FolderFloor.isFolder(profileId) else { return ImportResult() }   // 同 exportChanged：电脑文件夹楼层不导入
         processTombstones(profileId: profileId, context: context)
         var result = ImportResult()
         guard let root = syncRoot(profileId: profileId) else { return result }

@@ -9,40 +9,61 @@ import WebKit
 /// 历史靠 BrowsingHistoryStore（MiniBrowserController.didFinish 自动写）
 struct BrowserView: View {
     @Environment(RightPanelNavigator.self) private var desktopNavigator: RightPanelNavigator?
-    @State private var currentURL: URL? = nil
     /// 当前身份（plan-garden-browser-identities §3）：记住上次用的
     @State private var identity = BrowserIdentityStore.current()
+    #if os(iOS)
+    /// 和聊天弹出来的浏览器同一套标签页（plan-browser-tabs）；🏠 = 回主页，标签页都留着
+    @State private var tabs = BrowserTabs.shared
+    @State private var showHome = BrowserTabs.shared.records.isEmpty
+    /// page2 翻回浏览器：把被聊天里那个浏览器借走的网页拿回来
+    @Environment(\.page2AppActive) private var appActive
+    #else
+    @State private var currentURL: URL? = nil
+    #endif
 
     var body: some View {
         Group {
+        #if os(iOS)
+        if !showHome, !tabs.records.isEmpty {
+            GardenBrowserView(embedded: true, onClose: { showHome = true })
+        } else {
+            BrowserHome(identity: $identity, openTabs: tabs.records, onSelectTab: { id in
+                tabs.select(id)
+                showHome = false
+            }) { url in
+                tabs.open(url, identity: identity)
+                showHome = false
+            }
+            .onAppear { Page2AppBackRegistry.shared.update("browser", canGoBack: false) {} }
+        }
+        #else
         if let url = currentURL {
-            #if os(iOS)
-            GardenBrowserView(initialURL: url, embedded: true, identity: identity, onSwitchIdentity: { other, at in
-                BrowserIdentityStore.setCurrent(other.id)
-                identity = other
-                currentURL = at
-            }, onClose: { currentURL = nil })
-            // 换身份 = 换一个 webView（数据仓建 webView 时就定了）
-            .id(identity.id)
-            #else
             EmbeddedBrowser(initialURL: url, identity: identity, onHome: { currentURL = nil })
                 .id(identity.id)
-            #endif
         } else {
             BrowserHome(identity: $identity) { url in
                 currentURL = url
             }
         }
+        #endif
         }
         .onAppear { consumeDesktopTarget() }
         .onChange(of: desktopNavigator?.pendingTarget) { _, _ in consumeDesktopTarget() }
+        #if os(iOS)
+        .onChange(of: appActive) { _, active in if active { tabs.hostChanged() } }
+        #endif
     }
 
     private func consumeDesktopTarget() {
         guard let target = desktopNavigator?.pendingTarget, target.tool == "browser" else { return }
         desktopNavigator?.pendingTarget = nil
         guard let url = URL(string: target.id), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return }
+        #if os(iOS)
+        tabs.open(url, identity: identity)
+        showHome = false
+        #else
         currentURL = url
+        #endif
     }
 }
 

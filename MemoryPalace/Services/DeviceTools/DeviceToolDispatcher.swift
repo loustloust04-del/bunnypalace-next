@@ -9,6 +9,10 @@ enum DeviceToolDispatcher {
             + [ClipboardTool.definition, OCRImageTool.definition, NotifyTool.definition, OpenURLTool.definition, DeviceInfoTool.definition]
         // plan-离线沙箱 phase1/phase2：macOS = 原生 shell，iOS = app 内 Alpine 沙箱，同名同 schema
         defs.append(RunCommandTool.definition)
+        #if os(iOS)
+        // 网页应用（plan-webapp-as-file §2.7、§6）：放 / 读 / 改（只碰桌面应用的文件，文件库权限关着也能改）；权限域「AI 往桌面放应用」
+        defs += WebAppTools.definitions
+        #endif
         return defs
     }
 
@@ -51,6 +55,9 @@ enum DeviceToolDispatcher {
             return DeviceInfoTool.execute(args: args)
         case RunCommandTool.toolName:
             return await RunCommandTool.execute(args: args, profileId: profileId, conversationId: conversationId, monitorCommand: monitorCommand)
+        case _ where WebAppTools.names.contains(name):
+            let r = await WebAppTools.execute(name: name, inputJSON: inputJSON, conversationId: conversationId ?? "")
+            return DeviceToolExec(text: r.text, isError: r.isError)
         default:
             return DeviceToolIO.fail("not_available", "未知设备工具 \(name)")
         }

@@ -22,9 +22,6 @@ struct MemorydOptions: Equatable {
                          OpenAI 兼容接口（DeepSeek 这类）：MEMORYD_MODEL_WIRE=openai，地址必须给
       --judge-model      给碎片打分的裁判模型；对应 MEMORYD_JUDGE_KEY / MEMORYD_JUDGE_URL / MEMORYD_JUDGE_WIRE
       --allow-unmounted  不是 memoryd-mount.sh 做的副本也照挂（只给测试 / 夹具）
-
-    recall 题（recall-24）按 America/Los_Angeles 记忆日重放；宿主时区不符时整份 run 记不可测。
-    用 TZ=America/Los_Angeles 启动 memoryd。
     """
 
     enum ParseError: LocalizedError, Equatable {

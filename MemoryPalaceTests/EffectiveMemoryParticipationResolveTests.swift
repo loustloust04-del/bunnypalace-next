@@ -89,6 +89,54 @@ final class EffectiveMemoryParticipationResolveTests: XCTestCase {
         XCTAssertFalse(resolve(archiveTrigger: false).pages, "参数传 false 覆盖 store")
     }
 
+    // MARK: - 每轮全带
+
+    /// 「每轮全带」读楼层那一勾（没写过 = 不勾），只听它自己；这个窗口划掉「档案」时不带，老窗不看 wiki 目录那一勾
+    func testEveryRoundComesFromItsOwnFloorCheck() {
+        defaults.set(true, forKey: "mem_master")
+        XCTAssertFalse(resolve().everyRound, "没写过 = 不勾")
+        XCTAssertTrue(resolve().cards, "老窗：批过的记忆条目是候选")
+        for (key, value) in [("mem_inject_full", true), ("mem_inject_keyword", true), (MemoryOpenWindow.cKey, true)] {
+            defaults.set(value, forKey: key)
+            XCTAssertFalse(resolve().everyRound, "\(key) 不决定每轮全带")
+        }
+        for trigger in [true, false] {
+            for root in [true, false] {
+                RecallTuningStore.save(RecallTestTuning.make(archiveTriggerEnabled: trigger), profileId: pid, defaults: defaults)
+                MemoryOpenWindowStore.save(.c, root, profileId: pid, defaults: defaults)
+                MemoryOpenWindow.setEveryRound(true, profileId: pid, defaults: defaults)
+                XCTAssertTrue(resolve().everyRound, "勾着：聊到才带 \(trigger) · wiki 目录 \(root) 都带")
+                XCTAssertEqual(resolve().archive, root, "wiki 目录那一勾只管目录")
+                XCTAssertEqual(resolve().pages, trigger)
+                var crossed = MemoryWindowChoices(timeline: true, pending: true, selfMemory: true, archive: false,
+                                                  previousWindow: false, pinned: true)
+                XCTAssertFalse(resolve(window(crossed)).everyRound, "这个窗口划掉了档案")
+                XCTAssertFalse(resolve(window(crossed)).cards)
+                crossed.archive = true
+                XCTAssertTrue(resolve(window(crossed)).everyRound)
+                MemoryOpenWindow.setEveryRound(false, profileId: pid, defaults: defaults)
+                XCTAssertFalse(resolve().everyRound)
+                XCTAssertFalse(resolve(window(crossed)).everyRound)
+            }
+        }
+        XCTAssertFalse(MemoryOpenWindow.everyRound(profileId: "另一层", defaults: defaults), "只管这一个楼层")
+        defaults.set(false, forKey: "mem_master")
+        MemoryOpenWindow.setEveryRound(true, profileId: pid, defaults: defaults)
+        XCTAssertFalse(resolve().everyRound, "记忆总开关关着什么都不带")
+    }
+
+    /// 老窗的钉住只听楼层「钉住的」那一勾（没写过 = 开），不跟 wiki 目录那一勾
+    func testLegacyPinnedFollowsThePinnedCheckOnly() {
+        defaults.set(true, forKey: "mem_master")
+        for root in [true, false] {
+            MemoryOpenWindowStore.save(.c, root, profileId: pid, defaults: defaults)
+            XCTAssertTrue(resolve().pinned, "wiki 目录 \(root)")
+            MemoryWindowChoices.setDefault(.pinned, false, profileId: pid, defaults: defaults)
+            XCTAssertFalse(resolve().pinned, "wiki 目录 \(root)")
+            MemoryWindowChoices.setDefault(.pinned, true, profileId: pid, defaults: defaults)
+        }
+    }
+
     // MARK: - 本窗 choices / legacy
 
     /// P2-d：窗在回收站 = 本窗关参与（真值表「本窗关参与」含回收站）

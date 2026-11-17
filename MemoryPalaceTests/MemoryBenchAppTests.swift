@@ -53,4 +53,39 @@ final class MemoryBenchAppTests: XCTestCase {
         XCTAssertEqual(store.floorSets().map(\.id), ["a2-set"])
         try store.deleteSet(id: "not-there")
     }
+
+    // MARK: - 本机执行入口（原在召回测试台页的测试里；页删了，执行器还在）
+
+    private static let floorUnavailable = "本楼层的题现在还不能跑"
+
+    private func floorCase() throws -> MemoryBenchCase {
+        let input = MemoryBenchRecallInput(snapshot: "floor", profile: .init(userName: "岚舟", assistantName: "星砚", timeZone: "UTC"), turns: [.init(text: "旧住处呢？")])
+        return MemoryBenchCase(id: "floor-fictional", title: "虚构楼层题", input: try .from(input), labels: [])
+    }
+
+    func testFloorCaseIsExplicitlyRejectedByExecutor() async throws {
+        let recipe = try XCTUnwrap(MemoryBenchWriters.recallReader(profileId: "fictional").builtInRecipes(defaults: .standard).first)
+        do {
+            _ = try await MemoryBenchLocalExecutor.execute(testCase: try floorCase(), recipe: recipe)
+            XCTFail("本楼层的重放还没接，不能跑出结果")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, Self.floorUnavailable)
+        }
+    }
+
+    func testOfflineRunnerAcceptsLocalReferenceWithoutRelaxingCloudWriterRule() async throws {
+        let reader = MemoryBenchWriters.recallReader(profileId: "fictional")
+        let recipe = try XCTUnwrap(reader.builtInRecipes(defaults: .standard).first)
+        let set = MemoryBenchSet(id: "recall-floor", name: "我出的题", writer: "recall", source: .floor, cases: [try floorCase()])
+        let model = MemoryBenchModelRef(credentialId: "local", modelId: "recall", name: "本地离线", local: true)
+        XCTAssertThrowsError(try MemoryBenchRunner.jobs(cases: set.cases, recipes: [recipe], models: [model]))
+        let result = try await MemoryBenchRunner.run(writer: reader, set: set, recipes: [recipe], models: [model],
+            store: store, profileId: "fictional",
+            caller: { _, _ in XCTFail("离线不应出站"); throw MemoryBenchLocalExecutor.Failure("出站") })
+        XCTAssertEqual(result.status, .done)
+        XCTAssertEqual(result.cells.map(\.caseId), set.cases.map(\.id))
+        XCTAssertEqual(result.cells.map(\.error), [Self.floorUnavailable])
+        XCTAssertNil(result.cells.first?.usage)
+        XCTAssertEqual(result.cells.first?.usd, 0)
+    }
 }

@@ -32,6 +32,14 @@ struct FileLibraryPanelView: View {
     @State private var seedEntries: [CatalogSeedDrafts.Entry] = []
     @State private var editingSeed: SeedTarget? = nil
     @State private var seedNotice: String?
+    /// 「记忆条目」：每张没删的卡一个条目（现排的，不在盘上），改了存回卡上；「日志」里两份现排的只读日志
+    @State private var cardEntries: [MemoryCardFolder.Entry] = []
+    @State private var logFiles: [MemoryLogFolder.File] = []
+    @State private var editingCard: CardTarget? = nil
+    /// 待续那份本子（memory/pending/待续.md）：点开能改，存回本子（`MemoryFolderWrite.savePending`）
+    @State private var editingPending: EditingFile? = nil
+    /// 日志 › C2 整理记录里点开的一次记录（和记忆日志里点开的是同一页）
+    @State private var dreamRecord: FragmentDreamRecord? = nil
     /// 修全局卡顿：reload / 外部变更检查都在后台扫盘，回主线程只按最新一次的结果落状态
     @State private var reloadGeneration = 0
     @State private var externalCheckInFlight = false
@@ -107,6 +115,13 @@ struct FileLibraryPanelView: View {
     struct EditingFile: Identifiable { let id = UUID(); let path: String; let content: String; let modifiedAt: Date?; var readOnly = false }
     struct SelfMemoryTarget: Identifiable { let slug: String; var id: String { slug } }
     struct SeedTarget: Identifiable { let entry: CatalogSeedDrafts.Entry; var id: String { entry.path } }
+    /// stamp = 打开时（每次存成后前移）卡的改动时间：别处在这之后动过同一张就拒存
+    final class CardTarget: Identifiable {
+        let entry: MemoryCardFolder.Entry
+        var stamp: Date
+        var id: String { entry.path }
+        init(entry: MemoryCardFolder.Entry) { self.entry = entry; stamp = entry.modifiedAt }
+    }
     /// baseline 每次存成后跟着前移：别处在打开之后改过同一段就拒存
     final class PromptTarget: Identifiable {
         let entry: PromptFolder.Entry
@@ -141,6 +156,8 @@ struct FileLibraryPanelView: View {
         .onReceive(NotificationCenter.default.publisher(for: .profileWillSwitch)) { _ in
             files = []
             seedEntries = []
+            cardEntries = []
+            logFiles = []
             previews = [:]
             displays = [:]
             sortedFiles = []
@@ -161,6 +178,8 @@ struct FileLibraryPanelView: View {
         }
         // 小克通过工具写文件后实时刷新
         .onReceive(NotificationCenter.default.publisher(for: .fileLibraryDidChange)) { _ in reload() }
+        // 记忆条目在别处动了（整理台、助手的 memory_card、这里自己存的）：「记忆条目」那一格跟着刷新
+        .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in if panelOnScreen { reload() } }
         // 修全局卡顿：外部变更检查只在面板可见时循环（不可见就停），扫盘和比对都在后台
         .task(id: externalWatchActive) {
             guard externalWatchActive else { return }
@@ -236,6 +255,15 @@ struct FileLibraryPanelView: View {
         .sheet(item: $editingSeed) { target in
             seedEditorSheet(target.entry)
         }
+        .sheet(item: $editingCard) { target in
+            cardEditorSheet(target)
+        }
+        .sheet(item: $editingPending) { file in
+            pendingEditorSheet(file)
+        }
+        .sheet(item: $dreamRecord) { record in
+            FragmentDreamRecordSheet(record: record)
+        }
         .sheet(item: $editingFile) { f in
             editorSheet(for: f)
                 .sheet(item: $wikiWordCard) { card in
@@ -284,7 +312,8 @@ struct FileLibraryPanelView: View {
                                           profiles: profiles, presets: presets)
                     target.baseline = text
                 },
-                onCancel: { editingPrompt = nil }
+                onCancel: { editingPrompt = nil },
+                versionKey: PromptFolderTools.versionKey(path: entry.path, profileId: pid)
             )
             .interactiveDismissDisabled()
         } else {
@@ -312,6 +341,35 @@ struct FileLibraryPanelView: View {
                                    reload()
                                },
                                onCancel: { editingSeed = nil }, title: entry.name)
+    }
+
+    /// 记忆条目条目不在盘上（同种子待批）：给个不变的时间戳；别处改过由保存时比卡的改动时间拦（`MemoryCardFolder.save`）
+    private func cardEditorSheet(_ target: CardTarget) -> FileEditorSheet {
+        let pid = profileId
+        let entry = target.entry
+        return FileEditorSheet(path: entry.path, initialContent: entry.content, initialModifiedAt: .distantPast,
+                               currentModifiedAt: { .distantPast },
+                               reloadExternalContent: { ReloadedFileContent(content: entry.content, modifiedAt: nil) },
+                               onSaveAsync: { text, baseline in
+                                   target.stamp = try await MemoryCardFolder.save(card: entry.card, text: text, baseline: baseline, stamp: target.stamp,
+                                                                                  profileId: pid, context: modelContext)
+                               },
+                               onCancel: { editingCard = nil }, title: "C2 原子事实")
+    }
+
+    /// 待续：一条一行。改字、改状态（行尾注释里的 state）、删行都存回本子；格式不对的那一行会报出来、整份不动
+    private func pendingEditorSheet(_ file: EditingFile) -> FileEditorSheet {
+        let pid = profileId
+        return FileEditorSheet(path: file.path, initialContent: file.content, initialModifiedAt: .distantPast,
+                               currentModifiedAt: { .distantPast },
+                               reloadExternalContent: { ReloadedFileContent(content: file.content, modifiedAt: nil) },
+                               onSaveAsync: { text, _ in
+                                   try await Task.detached(priority: .userInitiated) {
+                                       _ = try MemoryFolderWrite.savePending(text: text, profileId: pid, writer: .you)
+                                   }.value
+                                   reload()
+                               },
+                               onCancel: { editingPending = nil }, title: "待续")
     }
 
     // MARK: - Header
@@ -924,6 +982,7 @@ struct FileLibraryPanelView: View {
         if folder.path == PromptFolder.root { return "\(folder.fileCount) 段 · 和 Prompt 页同步" }
         if folder.path == PromptFolder.fieldsFolder { return "\(folder.fileCount) 段" }
         if CatalogSeedDrafts.isSeedPath(folder.path) { return "\(folder.fileCount) 份 · 待批提案" }
+        if MemoryCardFolder.isCardPath(folder.path) { return "\(folder.fileCount) 张 · 可编辑" }
         if FileLibraryMemoryFolder.isDiagnosticFolder(folder.path) {
             return "\(folder.fileCount) 个文件 · 只读"
         }
@@ -1326,6 +1385,15 @@ struct FileLibraryPanelView: View {
 
     @ViewBuilder
     private func fileWriteContextMenu(for path: String) -> some View {
+        #if os(iOS)
+        if FileLibraryDisplay.kind(of: path) == .html {
+            Button {
+                if let html = try? FileLibraryStore.read(path, profileId: profileId) {
+                    WebAppInstaller.present(html: html, path: path)
+                }
+            } label: { Label("放到桌面", systemImage: "square.grid.2x2") }
+        }
+        #endif
         Button { startRename(path) } label: { Label("重命名", systemImage: "pencil") }
         Button { copyPath(path) } label: { Label("复制路径", systemImage: "doc.on.doc") }
         if let url = FileLibraryStore.absoluteURL(path, profileId: profileId) {
@@ -1480,10 +1548,11 @@ struct FileLibraryPanelView: View {
         reloadGeneration += 1
         let gen = reloadGeneration
         let pid = profileId
+        let container = modelContext.container
         Task {
-            let loaded = await Task.detached(priority: .userInitiated) { () -> (files: [FileLibraryStore.FileMeta], memory: [FileLibraryStore.FileMeta], seed: [CatalogSeedDrafts.Entry], previews: [String: String], fingerprint: String) in
+            let loaded = await Task.detached(priority: .userInitiated) { () -> (files: [FileLibraryStore.FileMeta], memory: [FileLibraryStore.FileMeta], seed: [CatalogSeedDrafts.Entry], cards: [MemoryCardFolder.Entry], logs: [MemoryLogFolder.File], previews: [String: String], fingerprint: String) in
                 let files = FileLibraryStore.list(profileId: pid)
-                let memory = FileLibraryStore.memoryUIList(profileId: pid)
+                let memory = FileLibraryStore.memoryUIList(profileId: pid) + MemoryRecordsFolder.list(profileId: pid)
                 var p: [String: String] = [:]
                 for meta in files where !FileLibraryStore.isBinaryPath(meta.path) {
                     let isHTML = FileLibraryDisplay.kind(of: meta.path) == .html
@@ -1497,10 +1566,14 @@ struct FileLibraryPanelView: View {
                     }
                 }
                 let seed = CatalogSeedDrafts.entries(wiki: WikiStore(profileId: pid))
-                return (files, memory, seed, p, Self.fingerprint(for: files))
+                let cards = MemoryCardFolder.entries(profileId: pid, container: container)
+                let logs = MemoryLogFolder.files(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)) + [MemoryCardFolder.pinnedFile(cards)]
+                return (files, memory, seed, cards, logs, p, Self.fingerprint(for: files))
             }.value
             guard gen == reloadGeneration, pid == profileId else { return }
             seedEntries = loaded.seed
+            cardEntries = loaded.cards
+            logFiles = loaded.logs
             applyReload(loaded.files, memory: loaded.memory, previews: loaded.previews, fingerprint: loaded.fingerprint)
             then?()
         }
@@ -1530,6 +1603,8 @@ struct FileLibraryPanelView: View {
         }
         for entry in promptEntries { d[entry.path] = FileLibraryPromptFolder.display(entry) }
         for entry in seedEntries { d[entry.path] = FileLibrarySeedFolder.display(entry) }
+        for entry in cardEntries { d[entry.path] = FileLibraryCardFolder.display(entry) }
+        for log in logFiles { d[log.path] = FileLibraryCardFolder.display(log) }
         files = latestFiles
         previews = p
         displays = d
@@ -1559,6 +1634,7 @@ struct FileLibraryPanelView: View {
         FileLibraryMemoryFolder.merge(FileLibraryMemoryFolder.folderIndex(memorySorted), into: &index)
         FileLibraryPromptFolder.merge(promptEntries, into: &index)
         FileLibrarySeedFolder.merge(seedEntries, into: &index)
+        FileLibraryCardFolder.merge(cardEntries, logs: logFiles, into: &index)
         for key in index.keys {
             switch sortMode {
             case .modified: index[key]?.folders.sort { $0.latest > $1.latest }
@@ -1573,7 +1649,8 @@ struct FileLibraryPanelView: View {
         let byModified = sortMode == .modified ? sorted : files.sorted { $0.modifiedAt > $1.modifiedAt }
         recentFiles = Array(byModified.prefix(4))
         var recent: [String: [FileLibraryStore.FileMeta]] = [:]
-        for meta in byModified + memoryFiles.sorted(by: { $0.modifiedAt > $1.modifiedAt }) + FileLibraryPromptFolder.metas(promptEntries) + FileLibrarySeedFolder.metas(seedEntries) {
+        for meta in byModified + memoryFiles.sorted(by: { $0.modifiedAt > $1.modifiedAt }) + FileLibraryPromptFolder.metas(promptEntries) + FileLibrarySeedFolder.metas(seedEntries)
+            + FileLibraryCardFolder.metas(cardEntries) + FileLibraryCardFolder.metas(logFiles) {
             var folder = FileLibraryMemoryFolder.parentFolder(meta.path)
             while !folder.isEmpty {
                 if recent[folder, default: []].count < 3 { recent[folder, default: []].append(meta) }
@@ -1697,6 +1774,14 @@ struct FileLibraryPanelView: View {
             editingSeed = SeedTarget(entry: entry)
             return
         }
+        if let entry = cardEntries.first(where: { $0.path == meta.path }) {
+            editingCard = CardTarget(entry: entry)
+            return
+        }
+        if let log = logFiles.first(where: { $0.path == meta.path }) {
+            editingFile = EditingFile(path: log.path, content: log.content, modifiedAt: nil, readOnly: true)
+            return
+        }
         if FileLibraryMemoryFolder.isMemoryPath(meta.path) {
             openMemoryFile(meta)
             return
@@ -1731,13 +1816,40 @@ struct FileLibraryPanelView: View {
         }
     }
 
-    /// 记忆树：自己的记忆 → 编辑页；C 档案的页 → 可编辑（存历史）；其余 → 同一个查看器，只读（后台读，回来再弹）
+    /// 记忆树：自己的记忆 → 编辑页；C 档案的页 → 可编辑（存历史）；待续 → 可编辑（存回本子）；其余 → 同一个查看器，只读（后台读，回来再弹）
     private func openMemoryFile(_ meta: FileLibraryStore.FileMeta) {
         if let slug = FileLibraryMemoryFolder.selfSlug(meta.path) {
             editingSelfMemory = SelfMemoryTarget(slug: slug)
             return
         }
         let pid = profileId
+        // 整理提案 / 要点卡 / 页历史：只读的投影（`MemoryRecordsFolder`），点开现读
+        if MemoryRecordsFolder.contains(meta.path) {
+            let user = profileManager?.currentProfile.userName ?? ""
+            Task {
+                let text = await Task.detached(priority: .userInitiated) { MemoryRecordsFolder.read(meta.path, profileId: pid, user: user) }.value
+                guard pid == profileId else { return }
+                if let text { editingFile = EditingFile(path: meta.path, content: text, modifiedAt: nil, readOnly: true) } else { operationError = "读不出来：\(meta.path)" }
+            }
+            return
+        }
+        if meta.path == MemoryFolderWrite.pendingPath {
+            Task {
+                let text = await Task.detached(priority: .userInitiated) { MemoryFolderWrite.pendingText(profileId: pid) }.value
+                guard pid == profileId else { return }
+                editingPending = EditingFile(path: meta.path, content: text, modifiedAt: nil)
+            }
+            return
+        }
+        // 日志 › C2 整理记录：点开是记忆日志里那一页（喂了什么、回了什么、每张卡的结论），不是原始 json
+        if let id = MemoryLogFolder.dreamRecordId(meta.path) {
+            Task {
+                let record = await FragmentDreamRecordReader.load(id: id, profileId: pid)
+                guard pid == profileId else { return }
+                if let record { dreamRecord = record } else { operationError = FragmentDreamRecordReader.expiredMessage }
+            }
+            return
+        }
         if let page = FileLibraryMemoryFolder.wikiPagePath(meta.path) {
             Task {
                 let target = await WikiPageTarget.load(profileId: pid, path: page)
@@ -1768,7 +1880,7 @@ struct FileLibraryPanelView: View {
         newFileName = ""
         guard !name.isEmpty else { return }
         guard !FileLibraryMemoryFolder.isMemoryPath(name) else {
-            operationError = "「记忆」文件夹是只读的，新建不了文件"
+            operationError = "「记忆」文件夹里新建不了文件（记忆是聊天和整理写进来的；已有的点开改）"
             return
         }
         guard !PromptFolder.isPromptPath(name) else {
@@ -1800,7 +1912,7 @@ struct FileLibraryPanelView: View {
         }
     }
 
-    /// 删 / 改名后旧 key 的版本记录、上次编辑位置跟着删（改名暂不迁移）
+    /// 删了：版本记录、上次编辑位置跟着删
     private func deleteVersionHistory(_ path: String) {
         let key = FileVersionStore.Key.file(profileId: profileId, relativePath: path)
         Task { try? await FileVersionStore.shared.delete(key: key) }
@@ -1823,7 +1935,8 @@ struct FileLibraryPanelView: View {
         do {
             guard !newPath.isEmpty else { throw NSError(domain: "FileLibrary", code: -3, userInfo: [NSLocalizedDescriptionKey: "文件名不能为空"]) }
             try FileLibraryStore.rename(oldPath, to: newPath, profileId: profileId)
-            deleteVersionHistory(oldPath)
+            // 版本历史 `FileLibraryStore.rename` 自己搬；上次编辑位置不搬
+            FileEditorPositionStore.shared.remove(.file(profileId: profileId, relativePath: oldPath))
             renamingPath = nil
             renameTargetName = ""
             reload()

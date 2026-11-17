@@ -7,6 +7,15 @@ import UIKit
 import AppKit
 #endif
 
+extension Notification.Name {
+    /// userInfo: profileId, path
+    static let fileLibraryFileWritten = Notification.Name("fileLibraryFileWritten")
+    /// userInfo: profileId, path
+    static let fileLibraryFileRemoved = Notification.Name("fileLibraryFileRemoved")
+    /// userInfo: profileId, from, to
+    static let fileLibraryFileRenamed = Notification.Name("fileLibraryFileRenamed")
+}
+
 /// 用户可见的本机文件库。每楼层一库：
 /// Documents/记忆宫殿/floors/{floorSlug}/filesystem/
 /// 纯文件 IO，不依赖 SwiftData。路径一律相对（允许子目录），禁止逃出库根。
@@ -459,18 +468,30 @@ enum FileLibraryStore {
     }
 
     /// 本仓写入后：按实际落盘状态就地更新缓存（一个文件一次 stat）
-    private static func noteWritten(_ url: URL, profileId: String) {
+    private static func noteWritten(_ url: URL, profileId: String, announce: Bool = true) {
         CatalogRecallIndexer.shared.changed(at: url)
         guard isSupportedFile(url), let rel = relativePath(url, profileId: profileId) else { return }
         let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         ListCache.apply(profileId: profileId, upsert: FileMeta(path: rel, bytes: values?.fileSize ?? 0,
                                                               modifiedAt: values?.contentModificationDate ?? Date()))
+        if announce { FileEvent.post(.fileLibraryFileWritten, profileId: profileId, ["path": rel]) }
     }
 
-    private static func noteRemoved(_ url: URL, profileId: String) {
+    private static func noteRemoved(_ url: URL, profileId: String, announce: Bool = true) {
         CatalogRecallIndexer.shared.changed(at: url)
         guard let rel = relativePath(url, profileId: profileId) else { return }
         ListCache.apply(profileId: profileId, remove: [rel])
+        if announce { FileEvent.post(.fileLibraryFileRemoved, profileId: profileId, ["path": rel]) }
+    }
+
+    /// 本仓写入口改了 / 删了 / 改名了一个文件，告诉网页应用表（开着的应用刷新、改名跟着走、删了清掉）。
+    /// 在写队列上，不能同步等主线程：一律主线程异步发
+    enum FileEvent {
+        static func post(_ name: Notification.Name, profileId: String, _ info: [String: String]) {
+            var userInfo = info
+            userInfo["profileId"] = profileId
+            DispatchQueue.main.async { NotificationCenter.default.post(name: name, object: nil, userInfo: userInfo) }
+        }
     }
 
     /// 绕开写入口直接删了一个文件夹的地方调这个，缓存跟着拿掉
@@ -629,8 +650,13 @@ enum FileLibraryStore {
         guard !FileManager.default.fileExists(atPath: targetURL.path) else { throw err("文件已存在：\(newPath)") }
         try FileManager.default.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.moveItem(at: sourceURL, to: targetURL)
-        noteRemoved(sourceURL, profileId: profileId)
-        noteWritten(targetURL, profileId: profileId)
+        noteRemoved(sourceURL, profileId: profileId, announce: false)
+        noteWritten(targetURL, profileId: profileId, announce: false)
+        guard let from = relativePath(sourceURL, profileId: profileId), let to = relativePath(targetURL, profileId: profileId) else { return }
+        // 版本历史跟着走（面板、AI fs_rename 都经过这里）
+        Task { try? await FileVersionStore.shared.move(from: .file(profileId: profileId, relativePath: from),
+                                                       to: .file(profileId: profileId, relativePath: to)) }
+        FileEvent.post(.fileLibraryFileRenamed, profileId: profileId, ["from": from, "to": to])
     }
 
     /// 不存在才建，绝不覆盖（#043 导出包写文件库）。判断和写在同一个写队列里。返回 false = 已存在。
@@ -689,6 +715,9 @@ enum FileLibraryStore {
     // MARK: - 记忆树（floors/{slug}/memory/，系统生成的文档态记忆，fs_* 工具只读可达）
 
     private static let memoryFolderName = "memory"
+    /// 记忆树顶层这几格不进清单、也不给按路径读：`exports/`（楼层快照，整楼层原文）、`lab/`（记忆实验台的记录，一条里有整段提示词）。
+    /// 助手的文件工具、文件库列表、带到电脑上给 CC 的那棵树都走下面的清单，所以都看不到；名字存小写，比的时候把目录名 `lowercased()`
+    static let memoryUnlistedFolders: Set<String> = [FloorSnapshotExportFolder.name, MemoryLabStore.folderName]
     /// fs_* 工具里记忆树的虚拟路径前缀（只读区）
     static let memoryVirtualPrefix = "memory/"
 
@@ -718,7 +747,7 @@ enum FileLibraryStore {
         guard resolvedTarget.path.hasPrefix(resolvedRoot.path + "/") else { return nil }
         let top = resolvedTarget.path.dropFirst(resolvedRoot.path.count + 1)
             .split(separator: "/").first.map(String.init) ?? ""
-        guard top.lowercased() != FloorSnapshotExportFolder.name else { return nil }
+        guard !memoryUnlistedFolders.contains(top.lowercased()) else { return nil }
         return AppPaths.checked(target)
     }
 
@@ -749,7 +778,7 @@ enum FileLibraryStore {
         let rootParentPath = root.standardizedFileURL.path
         var out: [FileMeta] = []
         for case let url as URL in en {
-            if url.lastPathComponent.lowercased() == FloorSnapshotExportFolder.name,
+            if memoryUnlistedFolders.contains(url.lastPathComponent.lowercased()),
                url.deletingLastPathComponent().standardizedFileURL.path == rootParentPath {
                 en.skipDescendants()
                 continue
@@ -783,7 +812,7 @@ enum FileLibraryStore {
         if let entries = FileManager.default.enumerator(at: root, includingPropertiesForKeys: Array(keys)) {
             let rootPath = root.standardizedFileURL.path
             for case let url as URL in entries {
-                if url.lastPathComponent.lowercased() == FloorSnapshotExportFolder.name,
+                if memoryUnlistedFolders.contains(url.lastPathComponent.lowercased()),
                    url.deletingLastPathComponent().standardizedFileURL.path == rootPath {
                     entries.skipDescendants()
                     continue

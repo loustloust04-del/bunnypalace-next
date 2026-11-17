@@ -9,6 +9,7 @@ import { WebSocket, type RawData } from "ws"
 import { readFileSync, readdirSync } from "node:fs"
 import { rollDice } from "./dice"
 import { CARD_KINDS, MCP_INSTRUCTIONS, cardGuideFor } from "./card-guide"
+import { callMemoryTool, isMemoryTool, memoryMcpTools, type McpTool } from "./memory-tools"
 
 const HUB_URL_BASE = process.env.MP_CC_HUB_URL ?? "ws://127.0.0.1:7890/mcp"
 const PING_INTERVAL_MS = 15_000
@@ -234,6 +235,11 @@ function connectHub(): Promise<WebSocket> {
   return connectingPromise
 }
 
+// 花园的记忆（memory-tools.ts）：定义文件读不到也不能让整个 MCP server 起不来，那样连 reply 都没了（不打 stderr，同下面连 hub 的规矩）
+const MEMORY_TOOLS: McpTool[] = (() => {
+  try { return memoryMcpTools() } catch { return [] }
+})()
+
 const server = new Server(
   { name: "cc-bridge-mcp", version: "0.2.0" },
   { capabilities: { tools: {} }, instructions: MCP_INSTRUCTIONS }  // 卡片目录 + 贴表情进 CC 系统提示；完整写法走 card_guide 工具（粟粟 10-03）
@@ -419,7 +425,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
       required: ["action"],
     },
-  }],
+  }, ...MEMORY_TOOLS],
 }))
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -526,6 +532,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const result = await resp.json() as any
     const text = typeof result.result === "string" ? result.result : (result.error ?? "unknown error")
     return { content: [{ type: "text", text }], isError: result.ok !== true }
+  } else if (isMemoryTool(req.params.name)) {
+    // 花园的记忆：和 app 里走 API 的助手同一套工具，hub 转给 app 执行（local_twitter 同款转发）
+    return await callMemoryTool(HUB_URL_BASE.replace(/^ws/, "http").replace(/\/mcp$/, ""), req.params.name, args)
   } else if (req.params.name === "pocket") {
     const httpBase = HUB_URL_BASE.replace(/^ws/, "http").replace(/\/mcp$/, "")
     const resp = await fetch(`${httpBase}/pocket/cmd`, {

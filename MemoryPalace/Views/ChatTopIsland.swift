@@ -43,6 +43,8 @@ final class TopBarCollapseState {
 enum ChatTopBarLayout {
     static let backButton: CGFloat = 44
     static let rightCluster: CGFloat = 88          // ⋯ + ›
+    /// 文章模式 ⋯ 左边的小头像那一格（11-16）：左右两侧一起加宽，岛照样屏幕真居中
+    static let avatarSlot: CGFloat = 34
     static func sideWidth(left: CGFloat, right: CGFloat) -> CGFloat { max(left, right) }
     static var side: CGFloat { sideWidth(left: backButton, right: rightCluster) }
 }
@@ -248,7 +250,8 @@ struct ChatTopIsland: View {
             : "置顶消息")
     }
 
-    private static func preview(_ node: MessageNode) -> String {
+    /// 气泡模式头像下那一行也用（BubbleChatIdentity.idleLine）
+    static func preview(_ node: MessageNode) -> String {
         String(ContentCleaner.clean(node.content, cacheKey: node.id).prefix(60))
     }
 

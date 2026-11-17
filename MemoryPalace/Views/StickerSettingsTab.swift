@@ -21,6 +21,7 @@ struct StickerPage: View {
     @State private var showFileImporter = false
     @State private var statusMessage: String? = nil
     @AppStorage(MemeStore.lookAtImageKey) private var memeSendImageToModel = true
+    @AppStorage(MemeIntentWriter.enabledKey) private var memeAIMaySend = true
 
     var body: some View {
         SettingsSectionList(.list) {
@@ -42,6 +43,11 @@ struct StickerPage: View {
                 Toggle("AI 看原图", isOn: $memeSendImageToModel)
                     .accessibilityIdentifier("meme-send-image-toggle")
                 Text("只在你发出表情包的那一轮把图给模型看；以后它只看名字和描述。模型不能看图时关掉。")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+                Toggle("让 AI 也能发", isOn: $memeAIMaySend)
+                    .accessibilityIdentifier("meme-ai-send-toggle")
+                Text("气泡对话里把表情包的名字告诉 AI，它想发就会单独发一张。名字起得像样，它才挑得准。")
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
             }

@@ -61,6 +61,8 @@ final class AssistantCloudBackend: AssistantBackend {
 
     /// 上一次请求记进账本的花费（没记 / 本机 = nil）
     var lastCostUSD: Double? { router.lastUsageRecord?.costUSD }
+    /// 上一次请求记进账本的那一行（自唤醒拿 token 数，plan-wake-heartbeat）
+    var lastUsage: UsageRecord? { router.lastUsageRecord }
     /// 上一次工具轮的完整回复（种子 checkpoint 要存、续轮要原样回灌）
     private(set) var lastTurnExtras: AssistantTurnExtras?
     /// 上一次请求最后是请求超时失败的

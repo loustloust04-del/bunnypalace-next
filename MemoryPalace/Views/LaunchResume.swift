@@ -37,6 +37,8 @@ enum LastLocationResume {
     /// atrium 点人切层时写目标 profileId：新树按 `ProfileResume` 落回那层上次的页 / 对话。
     /// 推送 / 来电 / 导入 / 小芽这些切层路径不写，走现状（page1 托底草稿）
     static var pendingProfileSwitch: String?
+    /// 切过去落在哪页：nil = 那层上次停的页（atrium）；page0 顶栏换人写 0，留在列表页（11-16）
+    static var pendingProfileSwitchPage: Int?
     /// 恢复到列表页时，挡掉「列表页上选中对话就翻回聊天页」那一次（只认恢复的那条对话）
     private static var holdListPage: String?
     /// 托底草稿要填回的字。输入条在分页子 HC 里拿不到 SceneStorage，装载这个草稿时取走
@@ -51,9 +53,9 @@ enum LastLocationResume {
     }
 
     /// 不管对不对得上都清掉：只吃一次
-    static func takeProfileSwitch(to profileId: String) -> Bool {
-        defer { pendingProfileSwitch = nil }
-        return pendingProfileSwitch == profileId
+    static func takeProfileSwitch(to profileId: String) -> (matched: Bool, page: Int?) {
+        defer { pendingProfileSwitch = nil; pendingProfileSwitchPage = nil }
+        return (pendingProfileSwitch == profileId, pendingProfileSwitchPage)
     }
 
     static func putNewChatText(_ text: String, for conversationId: String) {

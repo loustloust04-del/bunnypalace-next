@@ -35,7 +35,7 @@ struct MemoryAuditHome: View {
         .navigationDestination(item: Bindable(viewState).station) { id in
             AuditStationPage(id: id, viewState: viewState, viewModel: viewModel)
                 .environment(viewModel)   // 推入页不一定继承得到环境：「跳到这条」要拿聊天 VM
-                .modifier(AuditStationTitle(title: AuditStation.all.first { $0.id == id }?.name ?? ""))
+                .modifier(AuditStationTitle(title: id == .recall ? MemoryLabPage.title : AuditStation.all.first { $0.id == id }?.name ?? ""))
         }
         // 每次回到首页都重算（从台里出来数字就是新的）；几路同时要的合成一次，旧的结果不回写
         .task(id: profileId) { refresher.request(load) }
@@ -89,7 +89,7 @@ private struct AuditStationTitle: ViewModifier {
     }
 }
 
-/// 一块方块：台名 / 现场数字（没事写一句状态）/ 一行小字 + 右下图标
+/// 一块方块：台名 / 现场数字（没事写一句状态）/ 右下图标（11-15 起不放说明小字）
 private struct AuditStationTile: View {
     let station: AuditStation
     let pulse: AuditStationPulse?
@@ -132,16 +132,10 @@ private struct AuditStationTile: View {
                     .lineLimit(2)
             }
             Spacer(minLength: 6)
-            HStack(alignment: .bottom, spacing: 6) {
-                Text(station.note)
-                    .font(m.caption)
-                    .foregroundColor(secondary)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: station.icon)
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(secondary)
-            }
+            Image(systemName: station.icon)
+                .font(.system(size: 18, weight: .medium))
+                .foregroundColor(secondary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

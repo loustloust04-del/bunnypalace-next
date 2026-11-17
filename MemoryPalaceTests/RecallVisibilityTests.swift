@@ -3,14 +3,13 @@ import SwiftData
 @testable import 记忆花园
 
 /// 召回可见性（recall-visibility）刀 1/2/4 测试。
-/// buildInjectionSplit 读 UserDefaults 开关，setUp/tearDown 复原所有动过的 key。
+/// buildInjectionSplit 读 UserDefaults 里的目录 / 试验开关，setUp/tearDown 复原所有动过的 key。
 final class RecallVisibilityTests: XCTestCase {
 
     let pid = "xctest-recall-vis"
 
     private let touchedKeys = [
-        "mem_inject_catalog", "mem_inject_keyword", "mem_inject_vector",
-        "mem_inject_full", "mem_inject_graph",
+        "mem_inject_catalog", "mem_inject_vector", "mem_inject_graph",
     ]
 
     override func setUp() {
@@ -41,18 +40,16 @@ final class RecallVisibilityTests: XCTestCase {
     }
 
     func testHitsCarryRetrieverAndScore() throws {
-        UserDefaults.standard.set(true, forKey: "mem_inject_keyword")
         let mems = [
             makeMemory("用户喜欢暖奶白配色", keywords: ["配色"]),
             makeMemory("钉住的记忆", pinned: true),
         ]
         let r = MemoryInjector.buildInjectionSplit(memories: mems, recentMessages: ["配色"])
         let persistent = r.hits.filter { $0.retrieverId == "persistent" }
-        let keyword = r.hits.filter { $0.retrieverId == "keyword" }
+        let rest = r.hits.filter { $0.retrieverId == "fullFallback" }
         XCTAssertFalse(persistent.isEmpty, "常驻层 hit 带 persistent 标（S1 用）")
-        XCTAssertEqual(keyword.count, 1, "关键词命中一条")
-        let score = try XCTUnwrap(keyword.first?.score, "BM25 命中带分数")
-        XCTAssertGreaterThan(score, 0)
+        XCTAssertEqual(rest.map(\.snippet), ["用户喜欢暖奶白配色"], "钉住的以外那一条走每轮全带那一路")
+        XCTAssertEqual(rest.first?.score, 1)
     }
 
     func testHitsRespectBudgetTruncation() {
@@ -79,10 +76,26 @@ final class RecallVisibilityTests: XCTestCase {
         XCTAssertEqual(r.hits.first?.snippet.count, 60, "snippet 截 60 字自含")
     }
 
-    func testEmptySwitchesReturnEmptyHits() {
-        UserDefaults.standard.set(false, forKey: "mem_inject_full")
-        let r = MemoryInjector.buildInjectionSplit(memories: [makeMemory("一条")], recentMessages: [])
-        XCTAssertTrue(r.hits.isEmpty, "无检索器 = 无 hits")
+    /// 钉住的以外一路都不走（每轮全带没勾、也没开试验的按意思找）：只有钉住的
+    func testNoCardRetrieversMeansOnlyPinned() {
+        let mems = [makeMemory("一条"), makeMemory("钉住的", pinned: true)]
+        let r = MemoryInjector.buildInjectionSplit(memories: mems, cards: [], recentMessages: [])
+        XCTAssertEqual(r.hits.map(\.retrieverId), ["persistent"])
+        XCTAssertEqual(r.stable, "- 钉住的 [事实]")
+        XCTAssertEqual(r.volatile, "")
+        XCTAssertTrue(MemoryInjector.cardRetrievers(everyRound: false, triggerOn: true).isEmpty)
+        XCTAssertTrue(MemoryInjector.cardRetrievers(everyRound: false, triggerOn: false).isEmpty, "按意思找在 setUp 里关着")
+        XCTAssertEqual(MemoryInjector.cardRetrievers(everyRound: true, triggerOn: true).map(\.id), ["fullFallback"])
+        XCTAssertEqual(MemoryInjector.cardRetrievers(everyRound: true, triggerOn: false).map(\.id), ["fullFallback"])
+    }
+
+    /// 试验的按意思找只在聊到才带关着时排进来，排在每轮全带那一路前面
+    func testVectorExperimentOnlyWhenTriggerIsOff() {
+        UserDefaults.standard.set(true, forKey: "mem_inject_vector")
+        XCTAssertEqual(MemoryInjector.cardRetrievers(everyRound: false, triggerOn: false).map(\.id), ["vector"])
+        XCTAssertEqual(MemoryInjector.cardRetrievers(everyRound: true, triggerOn: false).map(\.id), ["vector", "fullFallback"])
+        XCTAssertEqual(MemoryInjector.cardRetrievers(everyRound: true, triggerOn: true).map(\.id), ["fullFallback"])
+        XCTAssertTrue(MemoryInjector.cardRetrievers(everyRound: false, triggerOn: true).isEmpty)
     }
 
     // MARK: - 刀 1 · blob 编解码 roundtrip（落库格式）

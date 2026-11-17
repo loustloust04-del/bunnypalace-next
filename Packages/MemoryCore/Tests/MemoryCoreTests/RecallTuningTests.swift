@@ -18,7 +18,8 @@ final class RecallTuningTests: XCTestCase {
     }
 
     func testFactoryDefaultsAndMissingFloor() {
-        let expected = RecallTestTuning.make(archiveTriggerEnabled: false)
+        // 11-14：没设过的楼层「聊到了才带」默认开
+        let expected = RecallTestTuning.make(archiveTriggerEnabled: true)
         XCTAssertEqual(RecallTuning.defaults, expected)
         XCTAssertEqual(RecallTuningStore.load(profileId: "岚舟", defaults: defaults), expected)
         XCTAssertNil(defaults.object(forKey: RecallTuningStore.storageKey), "读取缺省值不写入存储")
@@ -41,7 +42,7 @@ final class RecallTuningTests: XCTestCase {
         RecallTuningStore.save(first, profileId: "岚舟", defaults: defaults)
         XCTAssertEqual(RecallTuningStore.load(profileId: "岚舟", defaults: defaults), first)
         XCTAssertEqual(RecallTuningStore.load(profileId: "星砚", defaults: defaults), second)
-        XCTAssertEqual(RecallTuningStore.load(profileId: "云桥城", defaults: defaults), RecallTestTuning.make(archiveTriggerEnabled: false))
+        XCTAssertEqual(RecallTuningStore.load(profileId: "云桥城", defaults: defaults), RecallTestTuning.make())
     }
 
     func testResetOnlyRemovesSpecifiedFloor() {
@@ -78,10 +79,10 @@ final class RecallTuningTests: XCTestCase {
         defaults.set(99, forKey: "mem_self_recent_count")
         defaults.set(999, forKey: "mem_inject_budget")
         defaults.set(Data("{\"岚舟\":{\"minimumEffectiveLength\":12}}".utf8), forKey: RecallTuningStore.storageKey)
-        var expected = RecallTestTuning.make(archiveTriggerEnabled: false)
+        var expected = RecallTestTuning.make()
         expected.minimumEffectiveLength = 12
         XCTAssertEqual(RecallTuningStore.load(profileId: "岚舟", defaults: defaults), expected)
-        XCTAssertEqual(try JSONDecoder().decode(RecallTuning.self, from: Data("{}".utf8)), RecallTestTuning.make(archiveTriggerEnabled: false))
+        XCTAssertEqual(try JSONDecoder().decode(RecallTuning.self, from: Data("{}".utf8)), RecallTestTuning.make())
     }
 
     func testEveryFieldClampsAtBothLegalBoundariesOnSave() {
@@ -187,23 +188,41 @@ final class RecallTuningTests: XCTestCase {
 
     func testMalformedArchiveUsesFactoryValues() {
         defaults.set(Data("not-a-settings-archive".utf8), forKey: RecallTuningStore.storageKey)
-        XCTAssertEqual(RecallTuningStore.load(profileId: "林栖", defaults: defaults), RecallTestTuning.make(archiveTriggerEnabled: false))
+        XCTAssertEqual(RecallTuningStore.load(profileId: "林栖", defaults: defaults), RecallTestTuning.make())
     }
 
     func testOldJSONKeepsNumbersAndSuppliesNewSwitchDefaults() throws {
         let decoded = try JSONDecoder().decode(RecallTuning.self, from: Data("""
         {"schemaVersion":1,"cooldownTurns":9,"maximumPages":7,"maximumRecallCalls":4}
         """.utf8))
-        XCTAssertFalse(decoded.archiveTriggerEnabled)
+        XCTAssertTrue(decoded.archiveTriggerEnabled, "存档里没有这个键 = 从没设过，吃新默认")
+        XCTAssertEqual(decoded.maximumFragments, RecallTuning.defaultMaximumFragments)
         XCTAssertTrue(decoded.cooldownEnabled)
         XCTAssertEqual(decoded.cooldownTurns, 9)
         XCTAssertEqual(decoded.maximumPages, 7)
         XCTAssertEqual(decoded.maximumRecallCalls, 4)
         var changed = decoded
-        changed.archiveTriggerEnabled = true
+        changed.archiveTriggerEnabled = false
         changed.cooldownEnabled = false
         RecallTuningStore.save(changed, profileId: "synthetic", defaults: defaults)
         XCTAssertEqual(RecallTuningStore.load(profileId: "synthetic", defaults: defaults), changed)
+    }
+
+    /// 升级不许悄悄改她设过的：存档里写着关的楼层照旧关（哪怕当初只是改别的数时一起存下的），
+    /// 改别的数、恢复这一页默认都不会把它翻开；没有存档的楼层才是开
+    func testStoredSwitchSurvivesDefaultChange() throws {
+        defaults.set(Data("{\"岚舟\":{\"schemaVersion\":1,\"archiveTriggerEnabled\":false,\"maximumPages\":5}}".utf8),
+                     forKey: RecallTuningStore.storageKey)
+        XCTAssertFalse(RecallTuningStore.load(profileId: "岚舟", defaults: defaults).archiveTriggerEnabled)
+        XCTAssertTrue(RecallTuningStore.load(profileId: "星砚", defaults: defaults).archiveTriggerEnabled)
+        var latest = RecallTuningStore.load(profileId: "岚舟", defaults: defaults)
+        latest.maximumFragments = 5
+        RecallTuningStore.save(latest, profileId: "岚舟", defaults: defaults)
+        RecallTuningStore.reset(profileId: "岚舟", fields: RecallTuning.Field.archiveTriggerFields, defaults: defaults)
+        let after = RecallTuningStore.load(profileId: "岚舟", defaults: defaults)
+        XCTAssertFalse(after.archiveTriggerEnabled)
+        XCTAssertEqual(after.maximumPages, 5)
+        XCTAssertEqual(after.maximumFragments, RecallTuning.defaultMaximumFragments, "这一页的恢复默认连卡数一起恢复")
     }
 
     func testPageResetPreservesOtherPagePrimaryControlsAndOtherFloor() {

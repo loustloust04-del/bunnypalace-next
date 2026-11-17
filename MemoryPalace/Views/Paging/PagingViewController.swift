@@ -595,6 +595,10 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         NotificationCenter.default.addObserver(
             self, selector: #selector(keyboardWillHide(_:)),
             name: UIResponder.keyboardWillHideNotification, object: nil)
+        // 一起看小窗网页里打字：聊天输入条不跟着键盘跳上来（粟粟 11-11）。单独一个观察者，不碰上面的键盘几何
+        for name in [UIResponder.keyboardWillChangeFrameNotification, UIResponder.keyboardWillHideNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(keyboardForChatWatch(_:)), name: name, object: nil)
+        }
         // 键盘落稳（show/hide/frame 变更动画结束都发）：清过渡态 + 容器终点重采样。
         // 用 didChangeFrame 而非 didShow/didHide 对：interactive dismiss 中途放弃只回
         // didChangeFrame，didShow 不重发（sol 终审 §3 按钮过渡窗）。
@@ -647,6 +651,15 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
                       currentPage, b.extra, b.kbVisible ? 1 : 0, b.kbTransitioning ? 1 : 0, b.barGrowth, b.containerTop, insets,
                       inputBarContainer.map { KBProbe.f($0.frame) } ?? "-", KBProbe.f(view.keyboardLayoutGuide.layoutFrame), off,
                       KBProbe.firstResponderName(in: view.window))
+    }
+
+    /// 键盘是小窗网页叫出来的：输入条藏起来（还绑着键盘，只是看不见点不到）；键盘收了 / 换回聊天输入框就回来
+    @objc private func keyboardForChatWatch(_ notification: Notification) {
+        guard let bar = inputBarContainer else { return }
+        let hide = notification.name != UIResponder.keyboardWillHideNotification && ChatWatch.shared.webViewHasFocus
+        guard bar.isUserInteractionEnabled == hide else { return }
+        bar.isUserInteractionEnabled = !hide
+        UIView.animate(withDuration: 0.15) { bar.alpha = hide ? 0 : 1 }
     }
 
     @objc private func keyboardFrameWillChange(_ notification: Notification) {
@@ -904,6 +917,7 @@ final class PagingViewController: UIViewController, UIScrollViewDelegate {
         let sv = StreamScrollAnchor.AnchorView.chatScrollView
         let sendDismiss = CACurrentMediaTime() < KeyboardInsetBridge.shared.sendDismissUntil
         if sendDismiss { KeyboardInsetBridge.shared.sendDismissUntil = 0 }
+        KeyboardInsetBridge.shared.lastHideWasSendDismiss = sendDismiss
         if sendDismiss {
             // send-scroll-policy（粟粟 09-07 规则 1/2）：发送时按离底距离分档——
             // 1.5 屏内=同帧塌+归底（钉死中间帧，修「发送整页上下滑行一下」）；

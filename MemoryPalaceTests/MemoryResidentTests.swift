@@ -8,7 +8,7 @@ import Observation
 final class MemoryResidentTests: XCTestCase {
 
     private let pid = "xctest-memory-resident"
-    private let keys = ["mem_inject_keyword", "mem_inject_full", "mem_inject_vector", "mem_master",
+    private let keys = ["mem_inject_vector", "mem_master",
                         MemoryOpenWindow.cKey, MemoryOpenWindow.b4Key, "mem_self_recent_count", "mem_inject_budget",
                         "mem_inject_catalog", "mem_content_convhistory", RecallTuningStore.storageKey, MemoryOpenWindowStore.storageKey]
     private var saved: [String: Any?] = [:]
@@ -16,7 +16,7 @@ final class MemoryResidentTests: XCTestCase {
     override func setUp() {
         super.setUp()
         for k in keys { saved[k] = UserDefaults.standard.object(forKey: k) }
-        for k in keys { UserDefaults.standard.removeObject(forKey: k) }   // 默认：全量开、关键词 / 按意思找关
+        for k in keys { UserDefaults.standard.removeObject(forKey: k) }   // 默认：每轮全带没勾、按意思找关
         RecallTuningStore.save(RecallTestTuning.make(), profileId: pid)
     }
 
@@ -36,34 +36,33 @@ final class MemoryResidentTests: XCTestCase {
 
     // MARK: - 规则
 
-    func testDefaultModeOnlyPinned() throws {
-        let rule = try XCTUnwrap(MemoryResident.archiveRule())
+    /// C3 ② 起按类别常驻停掉：只有钉住的
+    func testOnlyPinnedIsResident() {
+        let rule = MemoryResident.archiveRule()
         XCTAssertTrue(rule(mem("钉住的事实", pinned: true)))
-        XCTAssertFalse(rule(mem("关系", category: "relationship")), "默认全量模式：关系不进常驻层（它在全量兜底里）")
-        XCTAssertFalse(rule(mem("偏好", category: "preference")))
-        XCTAssertFalse(rule(mem("事实")))
-    }
-
-    /// C3 ② 起按类别常驻停掉：开了关键词 / 按意思找也只有钉住的
-    func testKeywordOrVectorStillOnlyPinned() throws {
-        UserDefaults.standard.set(true, forKey: "mem_inject_keyword")
-        let rule = try XCTUnwrap(MemoryResident.archiveRule())
-        XCTAssertTrue(rule(mem("钉住", pinned: true)))
         XCTAssertFalse(rule(mem("关系", category: "relationship")))
         XCTAssertFalse(rule(mem("偏好", category: "preference")))
         XCTAssertFalse(rule(mem("事实")))
-        UserDefaults.standard.set(false, forKey: "mem_inject_keyword")
-        UserDefaults.standard.set(true, forKey: "mem_inject_vector")
-        XCTAssertFalse(try XCTUnwrap(MemoryResident.archiveRule())(mem("关系", category: "relationship")), "按意思找同样")
     }
 
-    func testAllRetrievalOffNothingResident() {
-        UserDefaults.standard.set(false, forKey: "mem_inject_full")
-        XCTAssertNil(MemoryResident.archiveRule(), "三个都关：一条都不带")
+    /// 11-15：钉住的算不算常驻和老开关无关（之前三个都关 = 一条都不算）
+    func testPinnedIsResidentWhateverTheOldSwitchesSay() {
+        let oldKeys = ["mem_inject_full", "mem_inject_keyword"]   // 按意思找在 setUp 里清掉了（= 关）
+        let before = oldKeys.map { UserDefaults.standard.object(forKey: $0) }
+        defer {
+            for (key, value) in zip(oldKeys, before) {
+                if let value { UserDefaults.standard.set(value, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) }
+            }
+        }
+        for on in [false, true] {
+            for key in oldKeys { UserDefaults.standard.set(on, forKey: key) }
+            XCTAssertTrue(MemoryResident.archiveRule()(mem("钉住", pinned: true)))
+            XCTAssertFalse(MemoryResident.archiveRule()(mem("关系", category: "relationship")))
+        }
     }
 
     func testUnpinLeavesResident() throws {
-        let rule = try XCTUnwrap(MemoryResident.archiveRule())
+        let rule = MemoryResident.archiveRule()
         let m = mem("钉住的", pinned: true)
         XCTAssertTrue(rule(m))
         MemoryPinPlan.apply([m])
@@ -89,9 +88,9 @@ final class MemoryResidentTests: XCTestCase {
         let a = mem("钉住的", pinned: true), b = mem("也钉住", pinned: true)
         let five = selfMem("five", importance: 5), recent = selfMem("recent")
         let cands: [(memory: SelfMemory, reason: SelfMemoryInjection.Reason)] = [(five, .five), (recent, .recent)]
-        func run(memoryOn: Bool = true, cChecked: Bool = true, injected: Set<UUID>, full: Set<String>?) -> MemoryResident.Summary {
+        func run(memoryOn: Bool = true, pinnedChecked: Bool = true, injected: Set<UUID>, full: Set<String>?) -> MemoryResident.Summary {
             MemoryResident.compute(archive: [a, b], injectedIds: injected, selfCandidates: cands, fullSlugs: full,
-                                   memoryOn: memoryOn, cChecked: cChecked, assistant: "阿白", recentCount: 5)
+                                   memoryOn: memoryOn, pinnedChecked: pinnedChecked, assistant: "阿白", recentCount: 5)
         }
 
         let ok = run(injected: [a.id, b.id], full: [five.slug, recent.slug])
@@ -106,31 +105,28 @@ final class MemoryResidentTests: XCTestCase {
         XCTAssertEqual(budget.selfRows.map(\.gate), [nil, .overBudget])
         XCTAssertEqual(budget.grayCount, 2)
 
-        let cOff = run(cChecked: false, injected: [], full: [five.slug, recent.slug])
-        XCTAssertEqual(cOff.archive.map(\.gate), [.archiveUnchecked, .archiveUnchecked])
-        XCTAssertEqual(cOff.selfRows.map(\.gate), [nil, nil], "C 没勾不影响 B4")
+        let pinnedOff = run(pinnedChecked: false, injected: [], full: [five.slug, recent.slug])
+        XCTAssertEqual(pinnedOff.archive.map(\.gate), [.pinnedUnchecked, .pinnedUnchecked])
+        XCTAssertEqual(pinnedOff.selfRows.map(\.gate), [nil, nil], "「钉住的」没勾不影响 B4")
 
         let b4Off = run(injected: [a.id, b.id], full: nil)
         XCTAssertEqual(b4Off.selfRows.map(\.gate), [.selfUnchecked, .selfUnchecked])
 
-        let off = run(memoryOn: false, cChecked: false, injected: [], full: nil)
+        let off = run(memoryOn: false, pinnedChecked: false, injected: [], full: nil)
         XCTAssertEqual(off.archive.map(\.gate), [.memoryOff, .memoryOff], "记忆关着优先说这个")
         XCTAssertEqual(off.selfRows.map(\.gate), [.memoryOff, .memoryOff])
 
         XCTAssertEqual(MemoryResident.Gate.memoryOff.text, "记忆关着，现在不带")
         XCTAssertEqual(MemoryResident.Gate.archiveUnchecked.text, "C 没勾，现在不带")
+        XCTAssertEqual(MemoryResident.Gate.pinnedUnchecked.text, "「钉住的」没勾，现在不带")
         XCTAssertEqual(MemoryResident.Gate.selfUnchecked.text, "B4 没勾，现在不带")
         XCTAssertEqual(MemoryResident.Gate.overBudget.text, "超出注入预算，这一轮没带")
     }
 
-    /// ⧫7：下半第二段标题按实际——只开全量注入时第二段也每一轮都带
-    func testVolatileTitleFollowsRetrievers() {
-        XCTAssertEqual(InjectionPreviewSections.volatileTitle(), "全量注入开着：预算内都带", "默认全量模式")
-        UserDefaults.standard.set(true, forKey: "mem_inject_keyword")
-        XCTAssertEqual(InjectionPreviewSections.volatileTitle(), "聊到相关话题才会想起的")
-        UserDefaults.standard.set(false, forKey: "mem_inject_keyword")
-        UserDefaults.standard.set(true, forKey: "mem_inject_vector")
-        XCTAssertEqual(InjectionPreviewSections.volatileTitle(), "聊到相关话题才会想起的", "按意思找同样")
+    /// ⧫7：下半第二段标题按实际——每轮全带勾着时第二段也每一轮都带
+    func testVolatileTitleFollowsEveryRound() {
+        XCTAssertEqual(InjectionPreviewSections.volatileTitle(everyRound: true), "每轮全带勾着：预算内都带")
+        XCTAssertEqual(InjectionPreviewSections.volatileTitle(everyRound: false), "聊到相关话题才会想起的")
     }
 
     // MARK: - 走实发那几个函数
@@ -154,26 +150,50 @@ final class MemoryResidentTests: XCTestCase {
                                                            container: container),
                                     memories: store.listAll(profileId: pid, context: context))
         }
+        // 没设过的楼层：批过的卡聊到才带，不在「每一轮都带」里；钉住的每轮带（wiki 目录那一勾没勾也带）
+        let triggered = load(true)
+        XCTAssertEqual(triggered.fullFallbackCount, 0)
+        XCTAssertFalse(triggered.everyRound)
+        XCTAssertFalse(triggered.volatile.contains("关系条"))
+        XCTAssertTrue(triggered.stable.contains("钉住的一条"))
+        XCTAssertEqual(triggered.memoryCount, 1, "下半「共 N 条」：只有钉住的那条是每轮都带的")
+        // 聊到才带关、每轮全带没勾：批过的卡不带（wiki 目录勾着也不带）
+        RecallTuningStore.save(RecallTestTuning.make(archiveTriggerEnabled: false), profileId: pid)
+        defer { RecallTuningStore.reset(profileId: pid) }
         UserDefaults.standard.set(true, forKey: MemoryOpenWindow.cKey)
-        let on = load(true)
-        XCTAssertEqual(on.archive.map(\.memory.id), [pinned.id], "默认全量模式：只有钉住的算常驻")
-        XCTAssertEqual(on.archive.first?.gate, nil)
-        XCTAssertEqual(on.fullFallbackCount, 1, "关系条在全量兜底里，每一轮也带")
-        XCTAssertTrue(on.stable.contains("[关于阿青]") && on.stable.contains("钉住的一条"))
-        XCTAssertEqual(on.memoryCount, 2, "下半「共 N 条」：这一轮带的两条档案")
-
+        let neither = load(true)
+        XCTAssertEqual(neither.fullFallbackCount, 0)
+        XCTAssertEqual(neither.volatile, "")
         UserDefaults.standard.removeObject(forKey: MemoryOpenWindow.cKey)
-        let cOff = load(true)
-        XCTAssertEqual(cOff.archive.map(\.memory.id), [pinned.id], "C 没勾：照样列")
-        XCTAssertEqual(cOff.archive.first?.gate, .archiveUnchecked)
-        XCTAssertEqual(cOff.fullFallbackCount, 0)
+        for trigger in [false, true] {
+            RecallTuningStore.save(RecallTestTuning.make(archiveTriggerEnabled: trigger), profileId: pid)
+            MemoryOpenWindow.setEveryRound(true, profileId: pid)
+            let on = load(true)
+            XCTAssertEqual(on.archive.map(\.memory.id), [pinned.id], "每轮全带勾着：算常驻的还是只有钉住的")
+            XCTAssertEqual(on.archive.first?.gate, nil)
+            XCTAssertTrue(on.everyRound)
+            XCTAssertEqual(on.fullFallbackCount, 1, "关系条每一轮也带（聊到才带 \(trigger)）")
+            XCTAssertTrue(on.volatile.contains("关系条"))
+            XCTAssertFalse(on.stable.contains("记忆条目 · 目录"), "卡都在，不出目录")
+            XCTAssertTrue(on.stable.contains("[关于阿青]") && on.stable.contains("钉住的一条"))
+            XCTAssertEqual(on.memoryCount, 2, "下半「共 N 条」：这一轮带的两条档案")
+            MemoryOpenWindow.setEveryRound(false, profileId: pid)
+        }
+
+        MemoryWindowChoices.setDefault(.pinned, false, profileId: pid)
+        let pinnedOff = load(true)
+        XCTAssertEqual(pinnedOff.archive.map(\.memory.id), [pinned.id], "「钉住的」没勾：照样列")
+        XCTAssertEqual(pinnedOff.archive.first?.gate, .pinnedUnchecked)
+        XCTAssertEqual(pinnedOff.fullFallbackCount, 0)
+        XCTAssertFalse(pinnedOff.stable.contains("钉住的一条"))
+        MemoryWindowChoices.setDefault(.pinned, true, profileId: pid)
 
         let convOff = load(false)
         XCTAssertEqual(convOff.archive.first?.gate, .memoryOff)
     }
 
     /// ⑤-1 P2-b r2（kimi 必修 1）：检查器灰显兜底的 `listActive` 也过来源窗过滤——
-    /// C 不勾时隐藏来源（已删 / 关参与窗）的碎片不列，钉住的照列（钉住豁免）；上下半预览都不带它
+    /// 「钉住的」不勾时隐藏来源（已删 / 关参与窗）的碎片不列，钉住的照列（钉住豁免）；上下半预览都不带它
     @MainActor
     func testSummaryFallbackDropsHiddenSourceFragments() throws {
         let schema = ProfileManager.makeFullSchema()
@@ -192,15 +212,16 @@ final class MemoryResidentTests: XCTestCase {
                                    isUserExplicit: true, extractedBy: "t", sourceConversationId: window.id, context: context)
         try context.save()
         let profile = Profile(id: pid, name: "T", emoji: "🧪", description: "", userName: "阿青", assistantName: "阿白")
-        UserDefaults.standard.removeObject(forKey: MemoryOpenWindow.cKey)
+        MemoryWindowChoices.setDefault(.pinned, false, profileId: pid)
         MainThreadIO.allowMainThreadInThisTest()
         let s = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container,
                                        selfMemories: [])
-        XCTAssertEqual(s.archive.map(\.id), [pinned.id], "C 不勾：隐藏来源碎片不列，钉住的照列")
-        XCTAssertEqual(s.archive.first?.gate, .archiveUnchecked)
+        XCTAssertEqual(s.archive.map(\.id), [pinned.id], "「钉住的」不勾：隐藏来源碎片不列，钉住的照列")
+        XCTAssertEqual(s.archive.first?.gate, .pinnedUnchecked)
 
-        // C 勾着 = 真走 roundInputs：隐藏来源碎片不注，钉住的进 stable
-        UserDefaults.standard.set(true, forKey: MemoryOpenWindow.cKey)
+        // 「钉住的」勾着、每轮全带勾着 = 真走 roundInputs：隐藏来源碎片不注，钉住的进 stable
+        MemoryWindowChoices.setDefault(.pinned, true, profileId: pid)
+        MemoryOpenWindow.setEveryRound(true, profileId: pid)
         let on = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container,
                                         selfMemories: [])
         XCTAssertEqual(on.archive.map(\.id), [pinned.id])
@@ -211,22 +232,6 @@ final class MemoryResidentTests: XCTestCase {
 
     // MARK: - 10-16 astra 返修
 
-    /// #2：开关键词检索后偏好挪去常驻页，普通列表不再列它，选择裁掉它、批量删碰不到
-    func testRuleChangeClipsHiddenSelection() throws {
-        let pinned = mem("钉住", pinned: true), pref = mem("偏好", category: "preference"), fact = mem("事实")
-        let active = [pinned, pref, fact]
-        func visible() -> Set<MemoryRowID> {
-            Set(MemoryResident.panelListed(active, searching: false, rule: MemoryResident.archiveRule()).map { .archive($0.id) })
-        }
-        let selection: Set<MemoryRowID> = [.archive(pref.id), .archive(fact.id), .assistant("s")]
-        XCTAssertEqual(MemoryRowID.clip(selection, to: visible().union([.assistant("s")])), selection, "默认：偏好在普通列表里")
-        UserDefaults.standard.set(true, forKey: "mem_inject_keyword")
-        XCTAssertEqual(MemoryRowID.clip(selection, to: visible().union([.assistant("s")])), selection,
-                       "C3 ② 起开关键词检索偏好也不挪去常驻页")
-        XCTAssertFalse(visible().contains(.archive(pinned.id)), "钉住的在常驻页")
-        XCTAssertEqual(MemoryResident.panelListed(active, searching: true, rule: MemoryResident.archiveRule()).count, 3, "搜索时照旧全列")
-    }
-
     /// #3：只收最新一次刷新；主线程复核掉后台算完后被删 / 取消钉住 / 彻底删的
     func testLoadTicketOnlyLatestAndRevalidate() {
         var t = MemoryResident.LoadTicket()
@@ -236,7 +241,7 @@ final class MemoryResidentTests: XCTestCase {
 
         let a = mem("a", pinned: true), b = mem("b", pinned: true), c = mem("c", pinned: true)
         let s = MemoryResident.compute(archive: [a, b, c], injectedIds: [a.id, b.id, c.id], selfCandidates: [], fullSlugs: nil,
-                                       memoryOn: true, cChecked: true, assistant: "阿白", recentCount: 5)
+                                       memoryOn: true, pinnedChecked: true, assistant: "阿白", recentCount: 5)
         b.supersededAt = Date()
         MemoryPinPlan.apply([c])   // 取消钉住
         let checked = s.revalidated([a, b, c])
@@ -261,16 +266,16 @@ final class MemoryResidentTests: XCTestCase {
         let a = mem("钉住的", pinned: true)
         let five = selfMem("five", importance: 5)
         let off = MemoryResident.compute(archive: [a], injectedIds: [a.id], selfCandidates: [(five, .five)], fullSlugs: [five.slug],
-                                         memoryOn: true, cChecked: true, assistant: "阿白", recentCount: 5, slotOn: false)
+                                         memoryOn: true, pinnedChecked: true, assistant: "阿白", recentCount: 5, slotOn: false)
         XCTAssertEqual(off.archive.map(\.gate), [.slotOff])
         XCTAssertEqual(off.selfRows.map(\.gate), [.slotOff])
         XCTAssertEqual(MemoryResident.Gate.slotOff.text, "预设没开记忆插槽，现在不带")
         let both = MemoryResident.compute(archive: [a], injectedIds: [], selfCandidates: [], fullSlugs: nil,
-                                          memoryOn: false, cChecked: true, assistant: "阿白", recentCount: 5, slotOn: false)
+                                          memoryOn: false, pinnedChecked: true, assistant: "阿白", recentCount: 5, slotOn: false)
         XCTAssertEqual(both.archive.map(\.gate), [.memoryOff])
     }
 
-    /// #6：插槽关 → 下半预览、共 N 条、全量兜底都空；工具尾注照实发过 droppingOffToolMentions
+    /// #6：插槽关 → 下半预览、共 N 条、每轮全带都空；工具尾注照实发过 droppingOffToolMentions
     @MainActor
     func testSummarySlotOffAndToolMentions() throws {
         let container = try ModelContainer(for: Memory.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
@@ -297,6 +302,8 @@ final class MemoryResidentTests: XCTestCase {
 
         UserDefaults.standard.set(true, forKey: "mem_inject_catalog")
         UserDefaults.standard.set(true, forKey: "mem_content_convhistory")
+        // 目录尾注只在每轮全带那一路上出现在预览里
+        MemoryOpenWindow.setEveryRound(true, profileId: pid)
         let raw = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container, selfMemories: [])
         XCTAssertTrue(raw.volatile.contains(MemoryInjector.recallCatalogHint), "不知道工具：尾注原样")
         let noRecall = MemoryResident.summary(profile: profile, participation: .testValue(profileId: pid), container: container,
@@ -729,7 +736,7 @@ final class MemoryResidentTests: XCTestCase {
         XCTAssertNil(off.wiki?.indexCount)
         XCTAssertTrue(off.wiki?.hits.isEmpty == true)
         XCTAssertTrue(off.selfRows.allSatisfy { $0.gate == .selfUnchecked })
-        XCTAssertTrue(off.archive.allSatisfy { $0.gate == .archiveUnchecked })
+        XCTAssertTrue(off.archive.allSatisfy { $0.gate == .pinnedUnchecked })
     }
 
     /// 记忆格 / 常驻页都走 loadSummary：读{助手}的记忆文件、组装注入在后台，主线程一次盘都不碰（对照：同步调用在主线程会碰）

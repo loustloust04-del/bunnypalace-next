@@ -4,19 +4,66 @@ import UIKit
 import WebKit
 
 /// 花园浏览器（docs/plan-inapp-browser-modern.md）：照 iOS 26 Safari，网页铺满、底部玻璃栏。
-/// 紧凑 = 左圆钮 / 地址胶囊 / ⋯；两行 = 地址胶囊 + 按钮排；往下滚缩成只写域名的小胶囊。
-/// 左圆钮第一页是关闭（embedded 时是回 page2 浏览器主页），进了别的页变后退。
-/// embedded = page2 浏览器 app 里内嵌：接 page2 外壳的返回键；网页同样铺满上下（粟粟 11-10「上下有白边」）。
+/// 多窗口（docs/plan-browser-tabs.md）：聊天弹出来的和 page2 浏览器 app 共用 `BrowserTabs` 一套标签页；
+/// 这一层决定显示当前页的网页、新标签页（浏览器主页）还是标签页总览。
+/// embedded = page2 浏览器 app 里内嵌：接 page2 外壳的返回键，关闭 = 回浏览器主页（标签页都留着）。
 struct GardenBrowserView: View {
-    let initialURL: URL
     var embedded = false
-    /// 开在哪个身份里（plan-garden-browser-identities §3）；从聊天点链接弹出来的一律主号
-    var identity: BrowserIdentity = .main
-    /// page2 浏览器里换身份：外面用新身份重开当前网址；nil = 不给换
-    var onSwitchIdentity: ((BrowserIdentity, URL) -> Void)? = nil
     var onClose: () -> Void
 
-    @StateObject private var controller = MiniBrowserController()
+    @State private var tabs = BrowserTabs.shared
+    @State private var showOverview = false
+
+    var body: some View {
+        ZStack {
+            if let record = tabs.active {
+                if record.url != nil, let live = tabs.activeLive() {
+                    GardenTabPage(controller: live.controller, webView: live.webView, tabID: record.id,
+                                  identity: tabs.identity(of: record),
+                                  fallbackURL: URL(string: record.url ?? "") ?? URL(string: "about:blank")!,
+                                  embedded: embedded, generation: tabs.hostGeneration, tabCount: tabs.records.count,
+                                  onShowTabs: openOverview, onClose: onClose)
+                        .id(record.id)
+                } else {
+                    BrowserNewTabPage(record: record, embedded: embedded, tabCount: tabs.records.count,
+                                      onShowTabs: openOverview, onClose: onClose)
+                        .id(record.id)
+                }
+            }
+            if showOverview {
+                BrowserTabOverview { showOverview = false }
+                    .transition(.opacity.combined(with: .scale(scale: 1.04)))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: showOverview)
+        // 标签页全关了：弹出来的浏览器收起，page2 回主页
+        .onChange(of: tabs.records.isEmpty) { _, empty in if empty { showOverview = false; onClose() } }
+        .onDisappear { if !embedded { tabs.hostChanged() } }
+    }
+
+    private func openOverview() {
+        tabs.captureActive()
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            showOverview = true
+        }
+    }
+}
+
+/// 一个标签页：网页 + 底栏（底栏 A，粟粟 11-14：✕ / 🏠 永远在最左，后退在地址胶囊左边，右边标签页数 + ⋯）。
+/// 两行 = 地址胶囊 + 按钮排；往下滚缩成只写域名的小胶囊。
+struct GardenTabPage: View {
+    @ObservedObject var controller: MiniBrowserController
+    let webView: WKWebView
+    let tabID: UUID
+    let identity: BrowserIdentity
+    let fallbackURL: URL
+    var embedded = false
+    /// 网页被 sheet 借走后，page2 据此拿回来
+    var generation = 0
+    var tabCount = 1
+    var onShowTabs: () -> Void
+    var onClose: () -> Void
     @AppStorage(GardenBrowserSettings.layoutKey) private var layout: GardenBrowserToolbarLayout = .compact
     @AppStorage(GardenBrowserSettings.linkOpenModeKey) private var linkOpenMode: GardenLinkOpenMode = .inApp
     @State private var editing = false
@@ -30,17 +77,36 @@ struct GardenBrowserView: View {
     @State private var op = BrowserOperator.shared
     @FocusState private var addressFocused: Bool
 
-    private var currentURL: URL { controller.url ?? initialURL }
+    @State private var identityCount = 1
+
+    private var currentURL: URL { controller.url ?? fallbackURL }
 
     private var host: String {
         let h = currentURL.host() ?? ""
         return h.hasPrefix("www.") ? String(h.dropFirst(4)) : h
     }
 
-    /// 底栏在安全区上方盖住的高度（网页最底下的内容要能滚上来）
-    private var obscuredHeight: CGFloat {
-        if controller.isCollapsed { return 44 }
-        return (layout == .compact ? 56 : 104) + (embedded ? 8 : 0)
+    /// 这一页的高和安全区、底栏顶边，同一个坐标系里实测（不写死栏高：紧凑 / 两行 / 收起 / 内嵌各不一样）
+    private static let space = "gardenTabPage"
+    @State private var pageMetrics = PageMetrics()
+    @State private var barTop: CGFloat?
+
+    struct PageMetrics: Equatable {
+        var height: CGFloat = 0
+        var safeTop: CGFloat = 0
+        var safeBottom: CGFloat = 0
+    }
+
+    /// 网页铺到屏幕最底，底栏顶边往下都算被盖住（含 home 条那段安全区）；多留 4 给玻璃的边
+    private var obscuredBottom: CGFloat {
+        guard let barTop else { return pageMetrics.safeBottom }
+        return max(0, pageMetrics.height + pageMetrics.safeBottom - barTop) + 4
+    }
+
+    /// 网页的固定顶栏 / 底栏让到状态栏下面、玻璃底栏上面。键盘弹着时栏是藏的、页面高也变了，先不动
+    private func pushInsets() {
+        guard !keyboardUp, !editing else { return }
+        controller.setObscuredInsets(top: pageMetrics.safeTop, bottom: obscuredBottom)
     }
 
     /// 紧凑尺寸照 iOS 26 Safari 实测（iPhone 17 Pro / Air 一样）：圆钮 48、胶囊高 48、间距 8、左右各 34、底边贴安全区；
@@ -70,12 +136,13 @@ struct GardenBrowserView: View {
         ZStack(alignment: .bottom) {
             Color(uiColor: .systemBackground).ignoresSafeArea()
 
-            BrowserWebView(initialURL: initialURL, controller: controller, identity: identity)
+            BrowserTabHost(webView: webView, generation: generation)
                 .ignoresSafeArea()
 
             topChrome
 
             bottomBar
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named(Self.space)).minY } action: { barTop = $0 }
                 .tint(.primary)
                 // 大块玻璃（两行版）不会按底下内容自己翻深浅：按网页底色定（Safari 同款，深色网页配深色栏）
                 .environment(\.colorScheme, barColorScheme)
@@ -97,7 +164,7 @@ struct GardenBrowserView: View {
                     .padding(.horizontal, 16)
                     .frame(height: 36)
                     .background(Capsule().fill(Color.black.opacity(0.78)))
-                    .padding(.bottom, obscuredHeight + 24)
+                    .padding(.bottom, obscuredBottom - pageMetrics.safeBottom + 20)
                     .transition(.opacity)
             }
 
@@ -105,23 +172,36 @@ struct GardenBrowserView: View {
                 editOverlay
             }
         }
+        .coordinateSpace(.named(Self.space))
+        .onGeometryChange(for: PageMetrics.self) { proxy in
+            PageMetrics(height: proxy.size.height, safeTop: proxy.safeAreaInsets.top, safeBottom: proxy.safeAreaInsets.bottom)
+        } action: { pageMetrics = $0 }
         .onAppear {
+            identityCount = BrowserIdentityStore.load().count
             BrowserOperator.shared.attach(controller, identity: identity)
-            DispatchQueue.main.async { controller.setBottomObscuredHeight(obscuredHeight) }
+            // page2 外壳的导航钮先退网页，退到头回浏览器主页（plan-page2-app-shell §2.5；plan-browser-tabs §2）
+            if embedded {
+                Page2AppBackRegistry.shared.update("browser", canGoBack: true) { [controller] in
+                    if controller.canGoBack { controller.goBack() } else { onClose() }
+                }
+            }
+            DispatchQueue.main.async { pushInsets() }
             if embedded {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { hideWebViewInputAccessory() }
             }
         }
         .onDisappear { BrowserOperator.shared.detach(controller) }
-        .onChange(of: obscuredHeight) { _, h in controller.setBottomObscuredHeight(h) }
+        // sheet 关了、网页回到 page2：AI 的动作也落回这里
+        .onChange(of: generation) { _, _ in
+            if embedded { BrowserOperator.shared.attach(controller, identity: identity) }
+            pushInsets()
+        }
+        .onChange(of: pageMetrics) { _, _ in pushInsets() }
+        .onChange(of: barTop) { _, _ in pushInsets() }
+        .onChange(of: keyboardUp) { _, _ in pushInsets() }
+        .onChange(of: editing) { _, _ in pushInsets() }
         .onChange(of: controller.title) { _, _ in
             if embedded { hideWebViewInputAccessory() }
-        }
-        .onChange(of: controller.canGoBack, initial: true) { _, canGoBack in
-            // page2 外壳的导航钮先退网页（plan-page2-app-shell §2.5）
-            if embedded {
-                Page2AppBackRegistry.shared.update("browser", canGoBack: canGoBack) { controller.goBack() }
-            }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in keyboardUp = true }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }
@@ -177,18 +257,24 @@ struct GardenBrowserView: View {
         } else if layout == .compact {
             GlassEffectContainer(spacing: 8) {
                 HStack(spacing: 8) {
-                    Button { leadingAction() } label: {
-                        icon(leadingIcon, size: 21, weight: .regular)
+                    Button { onClose() } label: {
+                        icon(embedded ? "house" : "xmark", size: 19, weight: .regular)
                             .frame(width: 48, height: 48)
                             .glassEffect(.regular.interactive(), in: .circle)
                     }
-                    .accessibilityLabel(controller.canGoBack ? "后退" : (embedded ? "浏览器主页" : "关闭"))
+                    .accessibilityLabel(embedded ? "浏览器主页" : "关闭")
                     addressCapsule(inset: false)
-                    moreMenu {
-                        icon("ellipsis", size: 21)
-                            .frame(width: 48, height: 48)
-                            .glassEffect(.regular.interactive(), in: .circle)
+                    HStack(spacing: 0) {
+                        BrowserTabsButton(count: tabCount, onTap: onShowTabs)
+                            .frame(width: 44, height: 48)
+                        moreMenu {
+                            icon("ellipsis", size: 21)
+                                .frame(width: 42, height: 48)
+                                .contentShape(Rectangle())
+                        }
                     }
+                    .padding(.horizontal, 2)
+                    .glassEffect(.regular.interactive(), in: .capsule)
                 }
             }
             .transition(.opacity)
@@ -205,6 +291,8 @@ struct GardenBrowserView: View {
                     moreMenu {
                         icon("ellipsis").frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
                     }
+                    BrowserTabsButton(count: tabCount, onTap: onShowTabs)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                     rowButton(embedded ? "house" : "xmark", label: embedded ? "浏览器主页" : "关闭") { onClose() }
                 }
             }
@@ -216,55 +304,32 @@ struct GardenBrowserView: View {
         }
     }
 
-    private var leadingIcon: String {
-        controller.canGoBack ? "chevron.left" : (embedded ? "house" : "xmark")
-    }
-
-    private func leadingAction() {
-        if controller.canGoBack { controller.goBack() } else { onClose() }
-    }
-
     @ViewBuilder
     private func addressCapsule(inset: Bool) -> some View {
         let content = HStack(spacing: 0) {
-            Menu {
-                Button {
-                    controller.webView?.findInteraction?.presentFindNavigator(showingReplace: false)
-                } label: {
-                    Label("页内查找", systemImage: "text.magnifyingglass")
+            if inset {
+                // 两行版的后退在按钮排里
+                Color.clear.frame(width: 44, height: 46)
+            } else {
+                Button { controller.goBack() } label: {
+                    icon("chevron.left", size: 18)
+                        .frame(width: 44, height: 46)
+                        .contentShape(Rectangle())
                 }
-                Button { attachPageToChat() } label: {
-                    Label("让 AI 看这页", systemImage: "sparkles")
-                }
-                .disabled(op.attachToChat == nil)
-                if let onSwitchIdentity {
-                    let identities = BrowserIdentityStore.load()
-                    if identities.count > 1 {
-                        Section("用别的身份打开") {
-                            ForEach(identities.filter { $0.id != identity.id }) { other in
-                                Button { onSwitchIdentity(other, currentURL) } label: {
-                                    Label(other.name, systemImage: "person.crop.circle")
-                                }
-                            }
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: 0) {
-                    icon("doc.text.magnifyingglass", size: 18)
-                    if onSwitchIdentity != nil {
-                        // 当前身份的色点（只有一个身份时也画：告诉她这是哪份登录态）
-                        Circle()
-                            .fill(identity.color)
-                            .frame(width: 8, height: 8)
-                            .offset(x: -3, y: 9)
-                            .accessibilityLabel("身份：\(identity.name)")
-                    }
-                }
-                .frame(width: 44, height: 46)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .disabled(!controller.canGoBack)
+                .opacity(controller.canGoBack ? 1 : 0.28)
+                .accessibilityLabel("后退")
             }
-            .accessibilityLabel("页面菜单")
+
+            if identityCount > 1 {
+                // 当前身份的色点（有别的身份时才画：告诉她这是哪份登录态）
+                Circle()
+                    .fill(identity.color)
+                    .frame(width: 7, height: 7)
+                    .padding(.trailing, 5)
+                    .accessibilityLabel("身份：\(identity.name)")
+            }
 
             Text(host.isEmpty ? "网页" : host)
                 .font(.system(size: 17, weight: .medium))
@@ -297,6 +362,28 @@ struct GardenBrowserView: View {
 
     private func moreMenu<L: View>(@ViewBuilder label: () -> L) -> some View {
         Menu {
+            Button { BrowserTabs.shared.open(nil, identity: identity) } label: { Label("新标签页", systemImage: "plus.square.on.square") }
+            Button {
+                controller.webView?.findInteraction?.presentFindNavigator(showingReplace: false)
+            } label: {
+                Label("页内查找", systemImage: "text.magnifyingglass")
+            }
+            Button { attachPageToChat() } label: {
+                Label("让 AI 看这页", systemImage: "sparkles")
+            }
+            .disabled(op.attachToChat == nil)
+            if identityCount > 1 {
+                Menu {
+                    ForEach(BrowserIdentityStore.load().filter { $0.id != identity.id }) { other in
+                        Button { BrowserTabs.shared.reopen(tabID, as: other) } label: {
+                            Label(other.name, systemImage: "person.crop.circle")
+                        }
+                    }
+                } label: {
+                    Label("用别的身份打开", systemImage: "person.2")
+                }
+            }
+            Divider()
             Button { controller.goForward() } label: { Label("前进", systemImage: "chevron.right") }
                 .disabled(!controller.canGoForward)
             ShareLink(item: currentURL) { Label("分享…", systemImage: "square.and.arrow.up") }

@@ -29,6 +29,7 @@ struct AppearancePage: View {
     @AppStorage("showMessageUsage") private var showMessageUsage: Bool = true
     /// page0 对话列表样式（和列表 ≡ 筛选面板里那组是同一个 key）
     @AppStorage("page0ListStyle") private var page0ListStyle = "compact"
+    @AppStorage("page0PeopleBarStyle") private var page0PeopleBarStyle = "segment"
     @AppStorage("page0LiquidMetal") private var page0LiquidMetal = true
     @AppStorage("page0MetalFlowers") private var page0MetalFlowers = true
     @AppStorage("gardenSceneEnabled") private var gardenSceneEnabled = true
@@ -383,6 +384,18 @@ struct AppearancePage: View {
                         .foregroundColor(Theme.textMuted)
                 }
                 .searchAnchor("leaf-appear-liststyle")
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Picker("顶栏的人", selection: $page0PeopleBarStyle) {
+                        Text("分段条").tag("segment")
+                        Text("人行").tag("row")
+                    }
+                    .pickerStyle(.segmented)
+                    Text("分段条：一条玻璃条，当前这个人那格亮着带名字，别人只露头像。人行：每个人头像下面都写名字，顶栏高一截。")
+                        .font(m.caption)
+                        .foregroundColor(Theme.textMuted)
+                }
+                .searchAnchor("leaf-appear-peoplebar")
 
                 Toggle(isOn: $page0LiquidMetal) {
                     VStack(alignment: .leading, spacing: 3) {

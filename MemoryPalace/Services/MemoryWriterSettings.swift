@@ -4,9 +4,6 @@ import Foundation
 
 /// 写入那一行的开关（和二级页顶上的开关同一个键）。不含总开关
 enum MemoryWriterSettings {
-    /// 能拨的（滑条只动这些）
-    static let switchable: [MemoryWriterID] = [.a2, .a3, .a4, .b1, .b4, .c2]
-
     static func key(_ id: MemoryWriterID) -> String? {
         switch id {
         case .a2: return "mem_content_summary"
@@ -20,7 +17,7 @@ enum MemoryWriterSettings {
         }
     }
 
-    /// 没写过的默认（= 今天新装的默认，滑条落「中」；C3 同 C2 默认开）。A3 没写过跟老键 `mem_content_summary`（拆开前 A2 / A3 一个开关）
+    /// 没写过的默认（= 今天新装的默认；C3 同 C2 默认开）。A3 没写过跟老键 `mem_content_summary`（拆开前 A2 / A3 一个开关）
     static func isOn(_ id: MemoryWriterID, defaults: UserDefaults = .standard) -> Bool {
         guard let key = key(id) else { return false }
         if let v = defaults.object(forKey: key) as? Bool { return v }
@@ -42,45 +39,6 @@ enum MemoryWriterSettings {
         return master && isOn(id, defaults: defaults)
     }
 
-}
-
-// MARK: - 复杂度滑条（plan §五）
-
-/// 不存值：位置由写入开关算出来；拖一档 = 改一组开关；对不上 = 自定义（nil）
-enum MemoryComplexity {
-    static let names = ["0", "轻", "中", "重"]
-    static let levels: [Set<MemoryWriterID>] = [
-        [.a2],
-        [.a2, .a4],
-        [.a2, .a3, .a4, .b4, .c2],
-        [.a2, .a3, .a4, .b1, .b4, .c2],
-    ]
-
-    static func level(on: Set<MemoryWriterID>) -> Int? {
-        levels.firstIndex(of: on.intersection(MemoryWriterSettings.switchable))
-    }
-
-    static func onSet(defaults: UserDefaults = .standard) -> Set<MemoryWriterID> {
-        Set(MemoryWriterSettings.switchable.filter { MemoryWriterSettings.isOn($0, defaults: defaults) })
-    }
-
-    static func current(defaults: UserDefaults = .standard) -> Int? {
-        level(on: onSet(defaults: defaults))
-    }
-
-    static func apply(_ level: Int, defaults: UserDefaults = .standard) {
-        guard levels.indices.contains(level) else { return }
-        for id in MemoryWriterSettings.switchable {
-            MemoryWriterSettings.set(id, levels[level].contains(id), defaults: defaults)
-        }
-    }
-
-    /// 「中 · 开 5 项」/「自定义 · 开 4 项」
-    static func summary(defaults: UserDefaults = .standard) -> String {
-        let on = onSet(defaults: defaults)
-        let name = level(on: on).map { names[$0] } ?? "自定义"
-        return "\(name) · 开 \(on.count) 项"
-    }
 }
 
 // MARK: - 【开窗口】带什么（plan §三）
@@ -120,6 +78,28 @@ enum MemoryOpenWindow {
 
     /// 二级页里列的（A3 不注入、B1 是工具，都不列）
     static let rows: [MemoryWriterID] = [.a2, .a4, .b4, .c]
+
+    /// 「每轮全带」：批过的原子事实每一轮都带（预算内）。楼层档，没写过 = 不勾；只听它自己，不跟别的开关
+    static let everyRoundKey = "mem_open_every_round"
+
+    static func everyRound(profileId: String, defaults: UserDefaults = MemoryReadEnvironment.defaults) -> Bool {
+        MemoryOpenWindowStore.load(key: everyRoundKey, profileId: profileId, defaults: defaults) ?? false
+    }
+
+    static func setEveryRound(_ on: Bool, profileId: String, defaults: UserDefaults = .standard) {
+        MemoryOpenWindowStore.save(key: everyRoundKey, on, profileId: profileId, defaults: defaults)
+    }
+
+    /// 二级页里另外三勾（纸条那几样的楼层默认）
+    static let noteExtras: [MemoryNoteItem] = [.pending, .previousWindow, .pinned]
+
+    /// 「开窗口带什么」页上勾着几项（一级页那行副标题的数）：上面四项 + 另外三勾 + 原子事实每轮全带
+    static func checkedCount(profileId: String, defaults: UserDefaults = MemoryReadEnvironment.defaults) -> Int {
+        let floor = MemoryWindowChoices.defaults(profileId: profileId, defaults: defaults)
+        return rows.filter { isChecked($0, profileId: profileId, defaults: defaults) }.count
+            + noteExtras.filter { floor[$0] }.count
+            + (everyRound(profileId: profileId, defaults: defaults) ? 1 : 0)
+    }
 }
 
 enum MemoryOpenWindowStore {
@@ -226,6 +206,20 @@ enum MemoryWriterModels {
         defaults.string(forKey: key(id)) ?? ""
     }
 
+    /// 「提取模型」现在实际解析成谁：写手运行时和设置页显示都走这一处（她选的 → 没选 / 停用了按自动：对话那张卡的便宜款 → 对话模型）。
+    /// chat = 退回用的对话模型（nil = 全局选的）
+    static func extract(providers: ProviderManager, chat: ProviderModel? = nil) -> ProviderModel {
+        let chat = chat ?? providers.resolveModel(conversationModelId: nil, profileModelId: nil,
+                                                  globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
+        return ConversationViewModel.memoryModel(providerManager: providers, fallback: chat)
+    }
+
+    /// A2 / A3 这个写手现在实际用谁（单选了且还在启用卡里 → 它；否则 → 提取模型实际解析出来的那个）
+    static func actual(_ id: MemoryWriterID, providers: ProviderManager, chat: ProviderModel? = nil) -> ProviderModel {
+        resolve(choice: choice(id), memoryModel: extract(providers: providers, chat: chat),
+                available: FragmentModelRoute.remoteCredentials(providers.enabledProviders).flatMap(\.models))
+    }
+
     /// 纯函数：单选了且还在启用卡里 → 它；否则 → 提取模型
     static func resolve(choice: String, memoryModel: ProviderModel, available: [ProviderModel]) -> ProviderModel {
         guard !choice.isEmpty, let m = available.first(where: { $0.id == choice }) else { return memoryModel }
@@ -245,6 +239,21 @@ extension MemoryFlags {
         if defaults.object(forKey: "mem_write_a3") == nil { defaults.set(summary, forKey: "mem_write_a3") }
         if defaults.object(forKey: MemoryOpenWindow.a2Key) == nil { defaults.set(summary, forKey: MemoryOpenWindow.a2Key) }
         if defaults.object(forKey: MemoryOpenWindow.a4Key) == nil { defaults.set(timeline, forKey: MemoryOpenWindow.a4Key) }
+        defaults.set(true, forKey: sentinel)
+    }
+
+    /// 11-15「每轮全带」从老开关里拆出来：改之前实际在全带的楼层（聊到才带关 + wiki 目录勾着 + 全量注入开着）勾上，
+    /// 其余不写；之后这一项只听它自己。老键一个不动、不删。只跑一次
+    static func migrateEveryRoundIfNeeded(profileIds: [String], defaults: UserDefaults = .standard) {
+        let sentinel = "mem_every_round_split_v1"
+        guard !defaults.bool(forKey: sentinel) else { return }
+        if (defaults.object(forKey: "mem_inject_full") as? Bool) ?? true {
+            for id in profileIds where MemoryOpenWindowStore.load(key: MemoryOpenWindow.everyRoundKey, profileId: id, defaults: defaults) == nil
+                && MemoryOpenWindow.isChecked(.c, profileId: id, defaults: defaults)
+                && !RecallTuningStore.load(profileId: id, defaults: defaults).archiveTriggerEnabled {
+                MemoryOpenWindow.setEveryRound(true, profileId: id, defaults: defaults)
+            }
+        }
         defaults.set(true, forKey: sentinel)
     }
 }

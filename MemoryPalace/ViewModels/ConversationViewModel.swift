@@ -431,9 +431,7 @@ final class ConversationViewModel {
         }
 
         if isCurrent {
-            nodeMap[newId] = node
-            effectiveChildrenMap[newId] = []
-            if !parentId.isEmpty { effectiveChildrenMap[parentId, default: []].append(newId) }
+            attachToTree(node, under: parentId)
         }
         if onDisplayedPath {
             commitSelection(to: newId, conversation: conversation)
@@ -498,10 +496,11 @@ final class ConversationViewModel {
                 VoiceMessageWriter.processChatIntents(nodeId: newId, context: context, profiles: VoiceMessageWriter.profilesProvider())
             }
         }
-        // 健康记录块同理（voice 同款挂点）
-        if content.contains("```health-log") {
+        // 健康记录 / 表情包块同理（voice 同款挂点）
+        if content.contains("```health-log") || content.contains(MemeIntentWriter.blockTag) || content.contains("〖表情包：") {
             Task { @MainActor in
                 HealthLogIntentWriter.processChatIntents(nodeId: newId, context: context)
+                MemeIntentWriter.processChatIntents(nodeId: newId, context: context)
             }
         }
         #if PERSONAL_APPS
@@ -625,9 +624,7 @@ final class ConversationViewModel {
             }
         }
         if isCurrent {
-            nodeMap[newId] = node
-            effectiveChildrenMap[newId] = []
-            if !parentId.isEmpty { effectiveChildrenMap[parentId, default: []].append(newId) }
+            attachToTree(node, under: parentId)
         }
         if onDisplayedPath {
             commitSelection(to: newId, conversation: conversation)
@@ -855,18 +852,9 @@ final class ConversationViewModel {
 
     /// Background-computed tree data (pure value types, safe to cross threads)
     private struct TreeData {
-        let effectiveChildrenMap: [String: [String]]
-        let rootId: String?
-        let mainPathIds: Set<String>
-        let pathNodeIds: [String]
-        let bubbledBranches: [String: String]
+        /// 走哪条路径、显示哪些节点（纯计算，MemoryCore）
+        let layout: ConversationLayout.Result
         let allNodeIds: Set<String>
-        /// 显示用选择（临时浏览时叠了去目标的路径）与显示路径末端
-        let displaySelection: [String: String]
-        let displayLeafId: String?
-        /// 持久选择表修补结果；changed = 需要写回（旧对话首次生成 / 记录失效）
-        let persistedSelection: [String: String]
-        let selectionChanged: Bool
     }
 
     /// BranchMap v6 用：拍一份只读快照（root + nodeMap + childrenMap + currentPath ids）
@@ -1134,10 +1122,7 @@ final class ConversationViewModel {
             selection: BranchSelection.decode(selectionData),
             legacyCurrentNodeId: currentNodeId)
         let byId = Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
-        return Set(resolution.pathIds.filter { id in
-            guard let n = byId[id] else { return false }
-            return (n.role == "user" || n.role == "assistant") && n.hasDisplayableContent && !n.isTrashed
-        })
+        return Set(resolution.pathIds.filter { byId[$0].map(Self.isDisplayable) ?? false })
     }
 
     /// Heavy lifting on background thread: fetch nodes, build tree, compute path (all with pure IDs)
@@ -1152,30 +1137,19 @@ final class ConversationViewModel {
         )
         let nodes = try bgContext.fetch(descriptor)
 
-        // Lightweight node data for pure computation
-        struct NodeInfo {
-            let id: String
-            let role: String
-            let hasContent: Bool
-            let isTrashed: Bool
-            let parentId: String?
-            let childrenIds: [String]
-        }
-
-        var infoMap: [String: NodeInfo] = [:]
+        var infoMap: [String: ConversationLayout.Node] = [:]
         infoMap.reserveCapacity(nodes.count)
-        for node in nodes {
-            infoMap[node.id] = NodeInfo(id: node.id, role: node.role, hasContent: node.hasDisplayableContent, isTrashed: node.isTrashed, parentId: node.parentId, childrenIds: node.childrenIds)
+        func info(_ node: MessageNode) -> ConversationLayout.Node {
+            .init(parentId: node.parentId, childrenIds: node.childrenIds, role: node.role,
+                  hasDisplayableContent: node.hasDisplayableContent, isTrashed: node.isTrashed)
         }
+        for node in nodes { infoMap[node.id] = info(node) }
 
         // Chase missing ancestors on background context
-        var missingIds = Set<String>()
-        for info in infoMap.values {
-            if let pid = info.parentId, !pid.isEmpty, infoMap[pid] == nil {
-                missingIds.insert(pid)
-            }
+        var toChase = Set<String>()
+        for node in infoMap.values {
+            if let pid = node.parentId, !pid.isEmpty, infoMap[pid] == nil { toChase.insert(pid) }
         }
-        var toChase = missingIds
         while !toChase.isEmpty {
             var nextChase = Set<String>()
             for mid in toChase {
@@ -1185,7 +1159,7 @@ final class ConversationViewModel {
                     predicate: #Predicate<MessageNode> { node in node.id == targetId && node.profileId == targetProfileId }
                 )
                 if let found = try bgContext.fetch(desc).first {
-                    infoMap[found.id] = NodeInfo(id: found.id, role: found.role, hasContent: found.hasDisplayableContent, isTrashed: found.isTrashed, parentId: found.parentId, childrenIds: found.childrenIds)
+                    infoMap[found.id] = info(found)
                     if let pid = found.parentId, !pid.isEmpty, infoMap[pid] == nil {
                         nextChase.insert(pid)
                     }
@@ -1194,58 +1168,9 @@ final class ConversationViewModel {
             toChase = nextChase
         }
 
-        // 选择走唯一 resolver（③b）：持久选择表 → 旧 currentNodeId 路径 → 稳定序第一个。
-        // 根仍是 currentNodeId 的顶层祖先（失效时取无父节点里 id 最小的，至少确定——
-        // 旧写法按 dict 迭代序挑根会「抽盲盒」，见 docs/research-conversation-blank-bug.md）
-        var links: [String: BranchSelection.Link] = [:]
-        links.reserveCapacity(infoMap.count)
-        for (id, info) in infoMap {
-            links[id] = BranchSelection.Link(id: id, parentId: info.parentId, childrenIds: info.childrenIds)
-        }
-        let persisted = BranchSelection.resolve(byId: links, selection: selection, legacyCurrentNodeId: currentNodeId)
-        let effectiveChildren = persisted.children
-
-        // 搜索跳转：显示路径叠一层「去目标」的选择，只在内存里，持久表不动
-        var displaySelection = persisted.selection
-        var displayPathIds = persisted.pathIds
-        if let target = browseTargetId, links[target] != nil,
-           let targetRoot = BranchSelection.trace(from: target, in: links).rootId {
-            displaySelection = BranchSelection.selecting(
-                target, in: persisted.selection,
-                parentOf: { links[$0]?.parentId },
-                childCount: { effectiveChildren[$0]?.count ?? 0 })
-            displayPathIds = BranchSelection.walk(from: targetRoot, children: effectiveChildren,
-                                                  selection: displaySelection, fallbackPath: Set(persisted.pathIds))
-        }
-
-        // Build display path (collect node IDs + bubbled branches)
-        var pathNodeIds: [String] = []
-        var bubbledBranches: [String: String] = [:]
-        var lastDisplayedId: String? = nil
-        for nid in displayPathIds {
-            guard let info = infoMap[nid] else { continue }
-            let isDisplayable = (info.role == "user" || info.role == "assistant") && info.hasContent && !info.isTrashed
-            if isDisplayable {
-                pathNodeIds.append(nid)
-                lastDisplayedId = nid
-            }
-            if (effectiveChildren[nid]?.count ?? 0) > 1 && !isDisplayable, let lastId = lastDisplayedId {
-                bubbledBranches[lastId] = nid
-            }
-        }
-
-        return TreeData(
-            effectiveChildrenMap: effectiveChildren,
-            rootId: displayPathIds.first ?? persisted.rootId,
-            mainPathIds: Set(persisted.pathIds),
-            pathNodeIds: pathNodeIds,
-            bubbledBranches: bubbledBranches,
-            allNodeIds: Set(infoMap.keys),
-            displaySelection: displaySelection,
-            displayLeafId: displayPathIds.last,
-            persistedSelection: persisted.selection,
-            selectionChanged: persisted.changed
-        )
+        return TreeData(layout: ConversationLayout.load(nodes: infoMap, selection: selection, legacyCurrentNodeId: currentNodeId,
+                                                        browseTargetId: browseTargetId),
+                        allNodeIds: Set(infoMap.keys))
     }
 
     /// Apply background results on main thread (re-fetch managed objects for UI)
@@ -1301,29 +1226,27 @@ final class ConversationViewModel {
         nodeMap = fetchedNodeMap
         displayedTreeConversationId = convId
         failedTreeConversationId = nil
-        effectiveChildrenMap = data.effectiveChildrenMap
-        cachedRootId = data.rootId
-        mainPathIds = data.mainPathIds
-        bubbledBranches = data.bubbledBranches
-        currentPath = data.pathNodeIds.compactMap { nodeMap[$0] }
+        effectiveChildrenMap = data.layout.effectiveChildren
+        cachedRootId = data.layout.rootId
+        mainPathIds = data.layout.mainPathIds
+        bubbledBranches = data.layout.bubbledBranches
+        currentPath = data.layout.visibleIds.compactMap { nodeMap[$0] }
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure { perfPathRevision += 1 }
         #endif
-        branchSelection = data.displaySelection
-        displayLeafId = data.displayLeafId
+        branchSelection = data.layout.displaySelection
+        displayLeafId = data.layout.displayLeafId
 
         rebuildBranchInfoMap()
 
         // 旧对话首次生成选择表 / 记录指向的节点没了：修补结果写回（只在确实变了时写）
-        if data.selectionChanged {
-            conversation.branchSelectionData = BranchSelection.encode(data.persistedSelection)
+        if data.layout.selectionChanged {
+            conversation.branchSelectionData = BranchSelection.encode(data.layout.persistedSelection)
             try? context.save()
         }
 
         // 与发消息 / 删消息同口径：只数当前分支路径（数全树会把重新生成的旁支也算进去，打开就翻倍）
-        conversation.nodeCount = currentPath.filter {
-            ($0.role == "user" || $0.role == "assistant") && $0.hasDisplayableContent
-        }.count
+        conversation.nodeCount = displayedMessageCount
         isLoading = false
 
         // CC 入场弹泡（场景 B）：打开带未读的对话 → 尾部连续 assistant 段最近 ≤3 条待弹
@@ -1377,6 +1300,13 @@ final class ConversationViewModel {
         })
     }
 
+    /// 把一个新节点挂进内存里的树（节点表 + 孩子表）的唯一入口。落库、选哪个分支、显示路径由调用方管
+    private func attachToTree(_ node: MessageNode, under parentId: String?) {
+        nodeMap[node.id] = node
+        effectiveChildrenMap[node.id] = []
+        if let parentId, !parentId.isEmpty { effectiveChildrenMap[parentId, default: []].append(node.id) }
+    }
+
     /// Get children IDs for a node
     private func childrenIds(for nodeId: String) -> [String] {
         effectiveChildrenMap[nodeId] ?? []
@@ -1392,25 +1322,49 @@ final class ConversationViewModel {
         bubbledBranches.removeAll()
         displayLeafId = nil
 
-        guard let rootId = cachedRootId ?? findRootId() else { return }
-
-        var lastDisplayedNodeId: String? = nil
-        let pathIds = BranchSelection.walk(from: rootId, children: effectiveChildrenMap,
-                                           selection: branchSelection, fallbackPath: mainPathIds)
-        for nid in pathIds {
-            guard let node = nodeMap[nid] else { break }
-            let isDisplayable = (node.role == "user" || node.role == "assistant") && node.hasDisplayableContent && !node.isTrashed
-            if isDisplayable {
-                currentPath.append(node)
-                lastDisplayedNodeId = nid
-            }
-            if childrenIds(for: nid).count > 1 && !isDisplayable, let lastId = lastDisplayedNodeId {
-                bubbledBranches[lastId] = nid
-            }
-            displayLeafId = nid
-        }
+        guard let projected = projectedPath() else { return }
+        currentPath = projected.display.visibleIds.compactMap { nodeMap[$0] }
+        bubbledBranches = projected.display.bubbledBranches
+        displayLeafId = projected.leafId
 
         rebuildBranchInfoMap()
+    }
+
+    /// 按内存里的树 + 当前选择算出显示路径（不改状态）。走到第一个内存里没有的节点为止；
+    /// 哪些显示、分叉点记到谁身上同载入时（DisplayPath）
+    private func projectedPath() -> (leafId: String?, display: DisplayPath.Result)? {
+        guard let rootId = cachedRootId ?? findRootId() else { return nil }
+        let pathIds = BranchSelection.walk(from: rootId, children: effectiveChildrenMap,
+                                           selection: branchSelection, fallbackPath: mainPathIds)
+            .prefix(while: { nodeMap[$0] != nil })
+        // 正在生成的那条占位还没内容，按显示规则是「不显示」，但流式要有地方画：单独算进去
+        let display = DisplayPath.project(pathIds: pathIds,
+                                          isDisplayable: { id in
+                                              nodeMap[id].map { Self.isDisplayable($0) || (id == activeAssistantNodeId && !$0.isTrashed) } ?? false
+                                          },
+                                          childCount: { childrenIds(for: $0).count })
+        return (pathIds.last, display)
+    }
+
+    #if DEBUG
+    /// 测试用（plan-重构 R6 4d 的网兜）：手改出来的显示路径和按树重算的结果差在哪；nil = 一致
+    var debugPathDrift: String? {
+        let shown = currentPath.map(\.id)
+        let recomputed = projectedPath()?.display.visibleIds ?? []
+        guard shown != recomputed else { return nil }
+        func label(_ ids: [String]) -> String {
+            ids.map { "\(nodeMap[$0]?.role ?? "?"):\($0.prefix(4))" }.joined(separator: " ")
+        }
+        return "手改 [\(label(shown))] ≠ 重算 [\(label(recomputed))]"
+    }
+    #endif
+
+    /// 当前这条路径上显示出来的消息数（侧栏行、上下文压缩状态用）。路径里可能有手动加进去、还没内容的占位，所以再滤一遍
+    var displayedMessageCount: Int { currentPath.filter(Self.isDisplayable).count }
+
+    /// 一个节点显不显示在对话里（规则本身在 MemoryCore 的 DisplayPath）
+    private static func isDisplayable(_ node: MessageNode) -> Bool {
+        DisplayPath.isDisplayable(role: node.role, hasDisplayableContent: node.hasDisplayableContent, isTrashed: node.isTrashed)
     }
 
     /// 分叉点选哪个孩子（③b 唯一规则，地图 / 分支长度 / 计数都走它）
@@ -1492,8 +1446,7 @@ final class ConversationViewModel {
         var currentId: String? = childId
         while let nid = currentId, let node = nodeMap[nid], !visited.contains(nid) {
             visited.insert(nid)
-            let isDisplayable = (node.role == "user" || node.role == "assistant") && node.hasDisplayableContent && !node.isTrashed
-            if isDisplayable { count += 1 }
+            if Self.isDisplayable(node) { count += 1 }
             currentId = selectedChild(of: nid, among: effectiveChildrenMap[nid] ?? [])
         }
         return count
@@ -1672,9 +1625,7 @@ final class ConversationViewModel {
         var current: String? = nodeId
         while let nid = current, let node = nodeMap[nid], !visited.contains(nid) {
             visited.insert(nid)
-            if (node.role == "user" || node.role == "assistant") && node.hasDisplayableContent && !node.isTrashed {
-                return node
-            }
+            if Self.isDisplayable(node) { return node }
             current = childrenIds(for: nid).first
         }
         return nil
@@ -1871,29 +1822,7 @@ final class ConversationViewModel {
             .sorted { ($0.pinnedAt ?? .distantPast) > ($1.pinnedAt ?? .distantPast) }
     }
 
-    func softDelete(_ node: MessageNode) {
-        // 1) Instantly remove from display path (single-item diff, no lag)
-        let deletedId = node.id
-        currentPath.removeAll { $0.id == deletedId }
-
-        // 2) Defer SwiftData mutation so UI updates first, then notify sidebar
-        let conv = selectedConversation
-        DispatchQueue.main.async { [self] in
-            node.isTrashed = true
-            node.trashedAt = Date()
-            // 软删除是"内容改动"，同步更新对话的 updateTime + nodeCount + 走 3s
-            // debounce 重排（之前漏了，导致 sidebar 行里 nodeCount 不减、位置不变）
-            if let conv {
-                conv.updateTime = Date()
-                conv.nodeCount = currentPath.filter {
-                    ($0.role == "user" || $0.role == "assistant") && $0.hasDisplayableContent
-                }.count
-                markConversationDirty()
-            }
-            // 显式落盘：只靠 autosave 时 didSave 发不发没证实（S5 探针），全文索引靠 didSave 跟进回收站状态
-            try? node.modelContext?.save()
-        }
-    }
+    func softDelete(_ node: MessageNode) { softDelete(nodes: [node]) }
 
     // MARK: - 多选批量（research-multi-select-bubbles §3）
 
@@ -1911,6 +1840,7 @@ final class ConversationViewModel {
     func softDelete(nodes: [MessageNode]) {
         guard !nodes.isEmpty else { return }
         let ids = Set(nodes.map(\.id))
+        // 先从显示路径里拿掉（界面马上动），库里的改动放到下一拍
         currentPath.removeAll { ids.contains($0.id) }
 
         let conv = selectedConversation
@@ -1920,13 +1850,13 @@ final class ConversationViewModel {
                 node.isTrashed = true
                 node.trashedAt = now
             }
+            // 软删是「内容改动」：对话的更新时间 + 条数跟着变，侧栏重排
             if let conv {
                 conv.updateTime = now
-                conv.nodeCount = currentPath.filter {
-                    ($0.role == "user" || $0.role == "assistant") && $0.hasDisplayableContent
-                }.count
+                conv.nodeCount = displayedMessageCount
                 markConversationDirty()
             }
+            // 显式落盘：只靠 autosave 时 didSave 发不发没证实（S5 探针），全文索引靠 didSave 跟进回收站状态
             try? nodes.first?.modelContext?.save()
         }
     }
@@ -1943,7 +1873,7 @@ final class ConversationViewModel {
 
     // MARK: - Conversation Delete / Restore
 
-    func softDeleteConversation(_ conversation: Conversation) {
+    func softDeleteConversation(_ conversation: Conversation) { guard !MainSession.isMain(conversation) else { return }   // mainsession 删不掉
         conversation.isTrashed = true
         conversation.trashedAt = Date()
         // S4：碰 updateTime 让软删状态走 LWW 传播到对端（之前漏了 → 删除不同步）
@@ -2176,6 +2106,12 @@ final class ConversationViewModel {
             if assistantTurnInFlight != oldValue {
                 // 起 turn 的入口都从 selectedConversation 起（send / regenerate / editAndResend / trigger）
                 ProfileTurnActivity.shared.generatingProfileId = assistantTurnInFlight ? selectedConversation?.profileId : nil
+                #if os(iOS)
+                let inFlight = assistantTurnInFlight
+                MainActor.assumeIsolated {
+                    TurnKeepAlive.shared.turnChanged(inFlight: inFlight) { [weak self] in self?.stopTurnForKeepAliveExpiry() }
+                }
+                #endif
             }
             #if os(iOS)
             ChatParagraphPrewarm.turnInFlight = assistantTurnInFlight   // perf L1 ① 闲置门：流式中不补段落视图池
@@ -2412,11 +2348,8 @@ final class ConversationViewModel {
         let onDisplayedPath = isCurrent && displayLeafId == pending.assistantNode.id
         // 展示态只在还停在这场对话时更新（sheet 按 conversationId 匹配，正常必然在；防御切走的竞态）
         if isCurrent {
-            nodeMap[userNode.id] = userNode
-            nodeMap[newAssistantId] = newAssistant
-            effectiveChildrenMap[userNode.id] = [newAssistantId]
-            effectiveChildrenMap[pending.assistantNode.id, default: []].append(userNode.id)
-            effectiveChildrenMap[newAssistantId] = []
+            attachToTree(userNode, under: pending.assistantNode.id)
+            attachToTree(newAssistant, under: userNode.id)
         }
         if onDisplayedPath {
             commitSelection(to: newAssistantId, conversation: conversation)
@@ -2510,8 +2443,8 @@ final class ConversationViewModel {
     @ObservationIgnored var ccReplySettleGrace: TimeInterval = 3
     /// 只贴了表情、没留节点的 CC 回复 id（测试注入独立 suite）
     @ObservationIgnored var ccReactOnlyReplies = CCReactOnlyReplies()
-    /// cancel 时定位要写「（已停止）」闭合的节点
-    private var activeAssistantNodeId: String?
+    /// cancel 时定位要写「（已停止）」闭合的节点（测试要摆出「正在流式」的状态，故非 private）
+    var activeAssistantNodeId: String?
     /// 正在回复的对话（计时器投递跨窗口判忙要读，故非 private）
     var activeConversationId: String?
     @ObservationIgnored var wikiInjectionCache = WikiInjectionCache.shared
@@ -2990,6 +2923,16 @@ final class ConversationViewModel {
         try? pending.context.save()
     }
 
+    #if os(iOS)
+    /// 后台保活被系统收回 / 她在系统进度界面点了取消：这一轮按「停止生成」收口（已收到的内容保留）
+    @MainActor
+    private func stopTurnForKeepAliveExpiry() {
+        guard assistantTurnInFlight, let id = activeAssistantNodeId,
+              let context = reactionTurns[id]?.context ?? nodeMap[id]?.modelContext else { return }
+        cancelAssistantTurn(context: context)
+    }
+    #endif
+
     /// stop 按钮：取消当前 turn。provider cancel 不回调 onComplete/onError
     /// （ChatService.swift cancel 只杀 task），所以闭合标记必须在这里写——
     /// 否则 placeholder 留空，下一轮 history 又是 user+user。
@@ -3188,7 +3131,7 @@ final class ConversationViewModel {
             branchAnchor: branchAnchor, text: recallUser?.content ?? "", state: recallState,
             existingDecision: existingReceipt?.decision, inputs: memoryInputs,
             recentMessages: wikiScan, now: MemoryClock.now, tuning: RecallTuningStore.load(profileId: profile.id),
-            enabled: recallEnabled)
+            enabled: recallEnabled, windowIds: windowIds, windowSince: apiMessages.first.flatMap { nodeMap[$0.id]?.createTime })
         let currentConvId = conversation?.id ?? ""
         let worldBooks = sendContext.worldBooks
 
@@ -3232,9 +3175,9 @@ final class ConversationViewModel {
         // 语音通话中让路：否则 AI 把内容写进 ```voice 块 → 通话朗读只读到清洗后的空正文（和通话打架）。
         let capabilityHint: String? = {
             let voiceHint = CallSession.activeSnapshot ? nil : VoicePromptInjector.hint(profile: profile)
-            // 10-29：只有气泡对话教「贴表情会叫你 / 怎么给她贴表情」；文章对话一个字不变
-            let bubbleHint = conversation?.isBubbleMode == true ? ChatReactionIntent.promptHint : nil
-            let parts = [fileLibraryHint, voiceHint, bubbleHint].compactMap { $0 }
+            // 10-29：只有气泡对话教「贴表情会叫你 / 怎么给她贴表情」+ 11-12 发表情包（plan-AI表情包）；文章对话一个字不变
+            let bubbleHints = conversation?.isBubbleMode == true ? [ChatReactionIntent.promptHint, MemeIntentWriter.promptHint(profileId: profile.id, context: context)] : []
+            let parts = ([fileLibraryHint, voiceHint] + bubbleHints).compactMap { $0 }
             return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
         }()
 
@@ -3773,6 +3716,7 @@ final class ConversationViewModel {
                 if let image = parts.image { images.append(image) }
                 if fromEnd == 0, permitted, !imagesAllowed, meme != nil, MemeStore.sendsImageToModel { visionWithheldNode = node }
             }
+            if node.role == "assistant" { content = MemeIntentWriter.textForm(content, detail: true) { MemeStore.fetch($0, in: node.modelContext) } }   // AI 发的表情包同样换成〖表情包：名字——描述〗，不附图
             // 引用注入（粟粟：AI 得看得见引用的哪段）——markdown 引用块前置；
             // 老消息 replyQuote=nil 零字节变化（前缀缓存安全），注入串随消息落库后逐轮稳定
             if node.role == "user", let rq = node.replyQuote, !rq.isEmpty {
@@ -3970,7 +3914,7 @@ final class ConversationViewModel {
             )
             return true   // 已受理（排队），UI 清输入框
         }
-
+        if MainSession.isMain(conversation), MainSession.isClearCommand(text) { clearMainSession(conversation, context: context); return true }   // mainsession 里 /clear = 存档换新
         // L3 斜杠命令路径：text 是 / 开头 + 当前 model 是 ccBridge → raw 直发不走 LLM 流式
         if isCC, text.hasPrefix("/"), !attachments.contains(where: { $0.kind == .card }) {   // 带卡片的斜杠文字按普通消息发
             sendCCSlashCommand(text, conversation: conversation, context: context)
@@ -4070,12 +4014,7 @@ final class ConversationViewModel {
             }
         }
 
-        // Add to nodeMap and path
-        nodeMap[userNodeId] = userNode
-        effectiveChildrenMap[userNodeId] = []
-        if let parentId {
-            effectiveChildrenMap[parentId, default: []].append(userNodeId)
-        }
+        attachToTree(userNode, under: parentId)
         currentPath.append(userNode)
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure { perfPathRevision += 1 }
@@ -4322,9 +4261,7 @@ final class ConversationViewModel {
         if !turnEvents.isEmpty { reactionEventOwners.insert(assistantNodeId) }
 
         parent.childrenIds.append(assistantNodeId)
-        nodeMap[assistantNodeId] = assistantNode
-        effectiveChildrenMap[assistantNodeId] = []
-        effectiveChildrenMap[parent.id, default: []].append(assistantNodeId)
+        attachToTree(assistantNode, under: parent.id)
         currentPath.append(assistantNode)
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure { perfPathRevision += 1 }
@@ -4477,7 +4414,7 @@ final class ConversationViewModel {
     /// 等着的贴表情马上再投一次
     @MainActor
     func ccTurnSettled(chatId: String, hubId: String, settledAt: Date) {
-        if ccWaitingHub[chatId] == hubId, let since = ccWaitingSince[chatId], since <= settledAt {
+        if ccWaitingHub[chatId] == hubId, let since = ccWaitingSince[chatId], since.timeIntervalSince1970.rounded(.down) <= settledAt.timeIntervalSince1970 {   // 帧里的时间只到秒，按秒比：同一秒内就收口的（刚发出就被拦下）也清
             ccWaitingSince.removeValue(forKey: chatId)
         }
         ChatReactionTrigger.shared.turnDidEnd()
@@ -4626,65 +4563,10 @@ final class ConversationViewModel {
         }
     }
 
-    /// 工具调用时闸（tool loop 用）：notAllowed 直接拒；askOnce 未答先弹卡。返回 nil = 放行，非 nil = 拒绝文案。
+    /// 工具过闸（审批卡，粟粟 10-03）：本体在 `PermissionGate.toolGate`，CC 那头动记忆（`MemoryCCBridge`）过的是同一个
     @MainActor
-    /// 工具过闸（审批卡，粟粟 10-03）：放行用哪份参数（卡上可能改过命令），或回给模型的拒绝说明
     private func toolPermissionGate(toolName: String, argumentsJSON: String = "", conversation: Conversation, context: ModelContext) async -> ToolGate {
-        if toolName == AskUserTool.toolName || toolName == TurnStatusTool.toolName { return .proceed(argumentsJSON) }
-        let domain = PermissionDomain.forTool(named: toolName)
-        switch PermissionCenter.level(domain, profileId: conversation.profileId) {
-        case .bypass:
-            return .proceed(argumentsJSON)
-        case .notAllowed:
-            if let app = PermissionCenter.blockingApp(domain, profileId: conversation.profileId) {
-                return .deny(PermissionCenter.notInstalledDenial(app))   // atrium P3⑥a：没装 App 挡住的，说清是哪个 App
-            }
-            return .deny("permission_denied：用户未允许「\(domain.displayName)」。\(PermissionCenter.adjustHint)")
-        case .askOnce:
-            var grants = PermissionGrants(raw: conversation.permGrantsRaw)
-            if !grants.isResolved(domain) {
-                // run_command 的弹卡带命令预览：只给第一行、截 80 字（plan-离线沙箱-phase1 §1.3）
-                var detail: String? = nil
-                if domain == .shell, let cmd = DeviceToolIO.str(DeviceToolIO.args(argumentsJSON), "command") {
-                    let firstLine = cmd.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? cmd
-                    detail = "$ " + String(firstLine.prefix(80))
-                }
-                #if os(macOS)
-                // 编程会话：卡上写清这次要查什么（R-WN5 #10）
-                if domain == .codingSessions { detail = CodingTools.permissionDetail(name: toolName, argumentsJSON: argumentsJSON) }
-                #endif
-                // 正看着这个对话：审批卡出在对话底部（完整命令 / 参数，可改命令，不超时）；否则照旧弹窗
-                let decision: PermissionPromptCenter.Decision
-                #if os(iOS)
-                if domain == .browserOperate, BrowserOperator.shared.hasOpenBrowser {
-                    // 花园浏览器正盖着聊天：卡出在浏览器里（plan-ai-browser-operate 收尾）
-                    switch await BrowserOperator.shared.askPermission() {
-                    case .once: decision = .allowedOnce
-                    case .conversation: decision = .allowed
-                    case .deny: decision = .deniedOnce
-                    }
-                } else {
-                    decision = await PermissionPromptCenter.shared.decide(
-                        domain, detail: detail,
-                        approval: .init(conversationId: conversation.id, toolName: toolName, argumentsJSON: argumentsJSON, conversationGrant: true))
-                }
-                #else
-                decision = await PermissionPromptCenter.shared.decide(
-                    domain, detail: detail,
-                    approval: .init(conversationId: conversation.id, toolName: toolName, argumentsJSON: argumentsJSON, conversationGrant: true))
-                #endif
-                // 超时（卡没弹出来 / 走开）、卡上「允许这一次 / 拒绝 / 改了再允许」都不写对话授权，下次再问
-                let outcome = PermissionGate.outcome(decision, domain: domain, originalArgs: argumentsJSON)
-                if let allow = outcome.record {
-                    grants.record(domain, allow: allow)
-                    conversation.permGrantsRaw = grants.raw
-                    try? context.save()
-                }
-                return outcome.gate
-            }
-            return grants.isAllowed(domain) ? .proceed(argumentsJSON)
-                : .deny("permission_denied：用户本次未允许「\(domain.displayName)」。\(PermissionCenter.adjustHint)")
-        }
+        await PermissionGate.toolGate(toolName: toolName, argumentsJSON: argumentsJSON, conversation: conversation, context: context)
     }
 
     /// 加密值（plan-secure-ask §3/§4，只 run_command + MCP 调）：参数里有 {{secret:…}} 占位时**每次**弹卡问
@@ -4802,7 +4684,7 @@ final class ConversationViewModel {
     /// 五个写工具被拒是那个原因，不是抽屉里关着——照通用文案说会让对方去抽屉里看，而那一行显示开着
     static func toolUnavailableMessage(name: String, memoryParticipationOff: Bool = false) -> String {
         if memoryParticipationOff, ToolRegistry.memoryWriteNames.contains(name) {
-            return "\(name)：这个对话关了记忆参与，remember / edit_memory / forget_memory / pending_notes / suggest_wiki_direction 这一轮没给你，这次做不了。如实告诉对方，不要再试。"
+            return "\(name)：这个对话关了记忆参与，remember / edit_memory / forget_memory / pending_notes / suggest_wiki_direction / memory_card 这一轮没给你，这次做不了。如实告诉对方，不要再试。"
         }
         return "\(name) 这个工具现在没开（设置或工具抽屉里关着，这一轮没给你），这次做不了。如实告诉对方，不要再试。"
     }
@@ -5222,7 +5104,7 @@ final class ConversationViewModel {
     /// library = 这轮有文件库说明（工具开着、文件库开着）：正在读 / 药单 / 文件库摘要跟着它（以前都在文件库说明里）
     func turnStatusNote(profileId: String, library: Bool) -> String? {
         // P1-b：当前时间一直写（不看「时间感知」开关），精确到分钟；人设时区不同时 CharacterTimeContext 照旧另给一行
-        var lines = [Self.statusTimeLine(now: MemoryClock.now)]
+        var lines = [Self.statusTimeLine(now: MemoryClock.now)] + MainActor.assumeIsolated { WakeRecent.statusLines(profileId: profileId, current: selectedConversation) }   // 自己醒来做的事（plan-floor-main-thread B）
         if library {
             let reading = currentBookHint(profileId: profileId).trimmingCharacters(in: .whitespacesAndNewlines)
             if !reading.isEmpty { lines.append(reading) }
@@ -5555,9 +5437,7 @@ final class ConversationViewModel {
                 // 10-29 返工 #6：先消费 react 块、做完静默回滚，再存最终状态、再起记忆提取 / 摘要这些旁路
                 let silentRemoved = MainActor.assumeIsolated { self.settleReactionTurn(nodeId: assistantNodeId) }
                 streamingText = ""
-                conversation.nodeCount = currentPath.filter {
-                    ($0.role == "user" || $0.role == "assistant") && $0.hasDisplayableContent
-                }.count
+                conversation.nodeCount = displayedMessageCount
                 if !silentRemoved, conversation.title == ConversationTitler.placeholderTitle {
                     let firstUserMsg = currentPath.first(where: { $0.role == "user" && !$0.content.isEmpty })?.content ?? ""
                     if !firstUserMsg.isEmpty {
@@ -5575,7 +5455,7 @@ final class ConversationViewModel {
                 self.commitBudgetSpend(providerManager: providerManager, model: model, usage: usage)
                 if MemoryFlags.masterEnabled && conversation.memoryEnabled {
                     // v5 C2：只看称呼 + 这一截，不带主提示词；画像（做梦）v5 Q4 下线，不再自动写
-                    self.extractMemoriesIfNeeded(profileId: profile.id, conversationId: conversation.id,
+                    self.extractMemoriesIfNeeded(profile: profile, conversationId: conversation.id, windowTitle: conversation.title,
                                                  names: MemoryExtractor.Names(userName: profile.userName, assistantName: profile.assistantName),
                                                  model: model, providerManager: providerManager, context: context)
                 }
@@ -5826,18 +5706,9 @@ final class ConversationViewModel {
                             results.append(ToolResultBlock(toolUseId: call.id, text: m.text, isError: m.isError))
                         } else if call.name.hasPrefix("fs_") {
                             segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: nil, iconName: nil))
-                            // 修全局卡顿：fs_list / fs_search 要枚举整库（search 还要读每个文件），挪到后台跑；写类工具照旧
-                            let r: FileLibraryTools.Result
-                            if ["fs_list", "fs_search"].contains(call.name) {
-                                let name = call.name, json = call.argumentsJSON, pid = profileId, userName = profile.userName
-                                r = await Task.detached(priority: .userInitiated) {
-                                    FileLibraryTools.execute(name: name, inputJSON: json, profileId: pid, userName: userName)
-                                }.value
-                            } else {
-                                r = MainThreadIO.tolerated("#033 AI 文件工具主线程执行") {
-                                    FileLibraryTools.execute(name: call.name, inputJSON: Self.executionArgs(call), profileId: profileId, userName: profile.userName)
-                                }
-                            }
+                            // 读类在后台跑（修全局卡顿）；写 memory/ = 写那种记忆、写 Prompt 文件夹 = 改那一段，都在 `FileLibraryTools.run` 里分
+                            let r = await FileLibraryTools.run(name: call.name, inputJSON: Self.executionArgs(call), profileId: profileId, userName: profile.userName,
+                                                               actor: MemoryCardTool.actorName(profile.assistantName), conversation: conversation, source: MemoryCardTool.source(of: assistantNode, context: context), context: context)
                             if ["fs_write", "fs_append", "fs_edit", "fs_rename", "fs_delete"].contains(call.name) {
                                 fileLibraryDidChange = true
                             }
@@ -5863,6 +5734,12 @@ final class ConversationViewModel {
                             let r = CardGuideTool.execute(inputJSON: Self.executionArgs(call),
                                                           available: gate.map { Set(ToolRegistry.enabledDefinitions($0).map(\.name)) })
                             segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "卡片说明"))
+                            results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
+                        } else if call.name == HeartbeatTaskTool.name {
+                            // 自己醒来的任务（plan-wake-heartbeat §4）：权限闸（「自己醒来」）已在循环头判过
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "自己醒来", iconName: "alarm"))
+                            let r = HeartbeatTaskTool.execute(inputJSON: Self.executionArgs(call), profileId: profileId, conversationId: conversation.id)
+                            segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "自己醒来"))
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                         } else if call.name == ProfileCardTool.toolName {
                             segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "资料卡", iconName: "person.crop.circle"))
@@ -5918,6 +5795,12 @@ final class ConversationViewModel {
                                 ? SelfMemoryTool.execute(name: call.name, inputJSON: Self.executionArgs(call), profileId: profileId, conversationId: conversation.id)
                                 : SelfMemoryTool.Result(text: "这场对话关了记忆参与，不能写记忆", isError: true)
                             segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "记忆"))
+                            results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
+                        } else if call.name == MemoryCardTool.toolName {
+                            // 动记忆条目（「记忆条目」权限闸已在循环头判过，每次询问 = 一笔一问）：留痕进记忆日志，操作人 = 助手名
+                            segs.append(.toolUse(id: call.id, name: call.name, inputJSON: replayArgs, integrationName: "记忆条目", iconName: "rectangle.stack"))
+                            let r = MemoryCardTool.execute(inputJSON: Self.executionArgs(call), profileId: profileId, conversationId: conversation.id, memoryEnabled: conversation.memoryEnabled, actor: profile.assistantName, source: MemoryCardTool.source(of: assistantNode, context: context), context: context)
+                            segs.append(.toolResult(toolUseId: call.id, text: r.text, isError: r.isError, integrationName: "记忆条目"))
                             results.append(ToolResultBlock(toolUseId: call.id, text: r.text, isError: r.isError))
                         } else if call.name == PendingNotesTool.toolName {
                             // v5 §3-2：标待续（读写 memory/pending/，放后台）；这场对话关了「记忆参与」就不动
@@ -6195,7 +6078,7 @@ final class ConversationViewModel {
             if ws.hasCandidates {
                 // 正在握手的那次别掐：掐了重来只会更晚连上（旧 connect 同目标时也是不动在途连接）
                 if !ws.isConnecting { ws.reconnectNow() }
-            } else if ws === ccBridgeClient, let provider = providerManager.provider(for: model), let url = URL(string: provider.baseURL) {
+            } else if ws === ccBridgeClient, CCBridgeEndpoints.allowsLocalFallback, let provider = providerManager.provider(for: model), let url = URL(string: provider.baseURL) {
                 // 卡片的地址只属于主 hub（B2「口令不串」2）：附加 hub 一律只用 Registry 给的配对。
                 // 口令只认主 hub 本机副本（impl1 #1），不读可能被 iCloud 改过的 cc-bridge
                 let key = hubRegistry.pairedPrimaryToken ?? ""
@@ -6204,6 +6087,8 @@ final class ConversationViewModel {
         }
         // 楼层语音设置先同步进 cc-rp CLAUDE.md 标记块（同一条 WS、排在 send 帧前；内容没变不发）
         ws.syncVoiceInstructions(VoicePromptInjector.ccInstructionsBlock(profile: profile))
+        // 花园记忆 → CC 家的 garden-memory/（开关开着才发；卡没变不发；后台读库，不挡这一条消息）
+        GardenMemorySync.sync(profile: profile, container: conversation.modelContext?.container, client: ws)
         let content = payload.messages.last(where: { $0.role == "user" })?.content ?? ""
         let headers = payload.additionalHeaders
         ws.sendUserMessage(
@@ -6214,7 +6099,7 @@ final class ConversationViewModel {
             session: headers["X-MP-CCSession"],
             replyTo: headers["X-MP-ReplyTo"],
             attachments: payload.imageMap[content] ?? [],
-            effort: payload.sampling.reasoningEffort       // 已换成这个模型的档位（prepareRouterPayload）
+            effort: payload.sampling.reasoningEffort, account: FolderFloor.account(for: conversation)   // 档位已换成这个模型的；账号只有电脑文件夹楼层带
         )
         markCCWaiting(conversation: conversation, ws: ws, providerManager: providerManager)
     }
@@ -6261,11 +6146,7 @@ final class ConversationViewModel {
                 parent.childrenIds.append(userNodeId)
             }
         }
-        nodeMap[userNodeId] = userNode
-        effectiveChildrenMap[userNodeId] = []
-        if let parentId {
-            effectiveChildrenMap[parentId, default: []].append(userNodeId)
-        }
+        attachToTree(userNode, under: parentId)
         currentPath.append(userNode)
         markPop(userNodeId)
         commitSelection(to: userNodeId, conversation: conversation)
@@ -6304,9 +6185,7 @@ final class ConversationViewModel {
                 userNode.childrenIds.append(sysNodeId)
                 // 失败回执绑在发起的那条命令下；用户已切走就只落库，不把路径拉回来（③b）
                 if self.selectedConversation?.id == conversation.id {
-                    self.nodeMap[sysNodeId] = sysNode
-                    self.effectiveChildrenMap[sysNodeId] = []
-                    self.effectiveChildrenMap[userNodeId, default: []].append(sysNodeId)
+                    self.attachToTree(sysNode, under: userNodeId)
                 }
                 if self.selectedConversation?.id == conversation.id, self.displayLeafId == userNodeId {
                     self.currentPath.append(sysNode)
@@ -6322,8 +6201,10 @@ final class ConversationViewModel {
     /// C2 碎片池（v5 §3-1、plan §七）：每满 N 条新消息（`mem_c2_every` 默认 20，两边加起来；和 CC 那条路同一份水位 `FragmentWatch`）
     /// 把这一截交给小小模型填严格 JSON，只加不改不删。消息和 A2 同口径（`sessionMessages`，工具调用写成中性的 [调用了 …]）。
     /// 不带主提示词；模型默认跟提取模型，选了本机但没装 / 在后台这一轮用提取模型（第一次碰到没装弹一次提示）
-    private func extractMemoriesIfNeeded(profileId: String, conversationId: String, names: MemoryExtractor.Names,
+    /// 写成一批之后接「C2 整理」（`FragmentDream`）；这条路只有 API 窗口走，「聊天时本来就带着的内容」取这个窗口的（`FragmentResident`）
+    private func extractMemoriesIfNeeded(profile: Profile, conversationId: String, windowTitle: String, names: MemoryExtractor.Names,
                                          model: ProviderModel, providerManager: ProviderManager, context: ModelContext) {
+        let profileId = profile.id
         #if (DEBUG || PERF_BENCH) && os(iOS)
         if PerfHarness.strictMeasure { PerfGuardrails.suppress("memoryExtract"); return }   // 测量角色旁路早退（perf P0 §3.2）
         #endif
@@ -6338,34 +6219,51 @@ final class ConversationViewModel {
         let caller = FragmentModelRoute.caller(for: route.route, providerManager: providerManager,
                                                conversationId: conversationId, profileId: profileId)
         let store = memoryStore
-        let every = FragmentWatch.every()
+        // 整段写手（plan-c2-whole-span-writer）：云上模型都用它（她改没改提示词都一样）；攒得多、认领水位之后全部
+        let whole = FragmentWatch.usesWhole(local: route.isLocal)
+        let every = whole ? FragmentWatch.wholeEvery() : FragmentWatch.every()
         Task.detached { [weak self] in
             // 没满 N 条 / 第一次见这个窗口 / 这个窗口正在跑：不动（水位成功处理后才提交，astra #3）
             guard let claim = await FragmentWatch.shared.due(conversationId: conversationId, pathIds: path.map(\.id),
-                                                             dates: path.map(\.date), threshold: every) else { return }
+                                                             dates: path.map(\.date), threshold: every,
+                                                             sizes: whole ? path.map(\.content.count) : nil) else { return }
             let recent = path[claim.range].map { FragmentPool.Message(id: $0.id, role: $0.role, content: $0.content, date: $0.date) }
+            // 认领到了才取（不是每轮回复都取一遍）
+            let resident = await MainActor.run { FragmentResident.current(profile: profile, conversationId: conversationId, context: context) }
+            var wholeContext: FragmentPool.WholeContext?
+            if whole {
+                let before = FragmentWatch.before(path, upTo: claim.range.lowerBound, size: { $0.content.count })
+                    .map { FragmentPool.Message(id: $0.id, role: $0.role, content: $0.content, date: $0.date) }
+                let known = await MainActor.run {
+                    FragmentPool.knownCards(profileId: profileId, conversationId: conversationId, store: store, context: context)
+                }
+                wholeContext = FragmentPool.WholeContext(windowTitle: windowTitle, before: before, known: known, resident: resident)
+            }
+            let written = FragmentCardIds()
             if route.localMissing {
                 await MainActor.run {
                     guard !UserDefaults.standard.bool(forKey: Self.fragmentLocalHintKey) else { return }
                     UserDefaults.standard.set(true, forKey: Self.fragmentLocalHintKey)
-                    self?.transientNotice = TransientNotice("🧠 C2 碎片池选的本机模型还没下载——去「设置 › 记忆 › C2 碎片池」下载；这一轮先用 \(route.displayName)")
+                    self?.transientNotice = TransientNotice("🧠 C2 原子事实选的本机模型还没下载——去「设置 › 记忆 › C2 原子事实」下载；这一轮先用 \(route.displayName)")
                 }
             }
             // 进后台被停下 / 断网 / 开关关了：不算失败，下一轮重来；整包拒收按失败记（连续 3 包状态卡变红）
             let outcome = await MemoryWriteLog.metered {
                 await FragmentPool.process(recent, names: names, caller: caller, local: route.isLocal, profileId: profileId,
-                                           modelName: route.displayName, fallbackNote: route.fallbackNote) { fragments in
+                                           modelName: route.displayName, fallbackNote: route.fallbackNote, whole: wholeContext) { fragments in
                     // 认领超时作废了（另一轮已经接手）就不落库（10-16 astra #3）
                     guard await FragmentWatch.shared.holds(conversationId: conversationId, token: claim.token) else {
                         throw FragmentPoolError.staleClaim
                     }
-                    return try await MainActor.run {
-                        try FragmentPool.write(fragments, messages: recent, profileId: profileId, conversationId: conversationId,
-                                               extractedBy: route.displayName, store: store, context: context)
+                    let ids = try await MainActor.run {
+                        try FragmentPool.insert(fragments, messages: recent, profileId: profileId, conversationId: conversationId,
+                                                extractedBy: route.displayName, store: store, context: context)
                     }
+                    written.set(ids)
+                    return ids.count
                 }
             }
-            // 写成（含合法空包）/ 整包拒收才挪水位；预算跳过 / 断网 / 请求或落库失败留着下次再来（同 CC 那条路，10-16 astra #2）
+            // 写成（含合法空包）/ 老写手整包拒收才挪水位；预算跳过 / 断网 / 请求或落库失败 / 整段写手整包拒收留着下次再来（同 CC 那条路，10-16 astra #2）
             await FragmentWatch.shared.finish(conversationId: conversationId, claim: claim, outcome: outcome)
             switch outcome {
             case .done(let added) where added > 0:
@@ -6373,10 +6271,16 @@ final class ConversationViewModel {
                     self?.transientNotice = TransientNotice("🧠 记住 \(added) 条")
                     NotificationCenter.default.post(name: .memoryDidChange, object: nil)
                 }
-            case .failed, .rejected:
+            case .failed, .rejected, .held:
                 await MainActor.run { self?.transientNotice = TransientNotice("🧠 记忆提取失败") }
             default:
                 break
+            }
+            // 「C2 整理」：水位收好之后才做，没跑成不影响写手；本机模型装不下这份材料，不做
+            if !route.isLocal, !written.ids.isEmpty {
+                await FragmentDream.run(.init(profileId: profileId, conversationId: conversationId, windowTitle: windowTitle, names: names,
+                                              messages: recent, cardIds: written.ids, resident: resident, modelName: route.displayName, caller: caller),
+                                        container: context.container)
             }
         }
     }
@@ -6539,7 +6443,7 @@ final class ConversationViewModel {
     /// M7 图片转述：3 条之前的旧图后台生成 80 字描述（每轮最多 2 张），存 node.imageDescsData。
     private func transcribeImagesIfNeeded(model: ProviderModel, providerManager: ProviderManager, context: ModelContext) {
         guard UserDefaults.standard.object(forKey: "imageTranscriptionEnabled") as? Bool ?? true else { return }
-        let msgs = currentPath.filter { ($0.role == "user" || $0.role == "assistant") && $0.hasDisplayableContent }
+        let msgs = currentPath.filter(Self.isDisplayable)
         guard msgs.count > 3 else { return }
         var batch: [(node: MessageNode, name: String, data: Data)] = []
         outer: for node in msgs.dropLast(3) where node.role == "user" {
@@ -6595,9 +6499,7 @@ final class ConversationViewModel {
         )
         context.insert(node)
         parent.childrenIds.append(node.id)
-        nodeMap[node.id] = node
-        effectiveChildrenMap[node.id] = []
-        effectiveChildrenMap[parent.id, default: []].append(node.id)
+        attachToTree(node, under: parent.id)
         commitSelection(to: node.id, conversation: conversation)
         currentPath.append(node)
         try? context.save()
@@ -6674,9 +6576,7 @@ final class ConversationViewModel {
         }
 
         userParent.childrenIds.append(newAssistantId)
-        nodeMap[newAssistantId] = newNode
-        effectiveChildrenMap[newAssistantId] = []
-        effectiveChildrenMap[userParentId, default: []].append(newAssistantId)
+        attachToTree(newNode, under: userParentId)
 
         // Replace old node in path with new one
         if let idx = currentPath.firstIndex(where: { $0.id == assistantNodeId }) {
@@ -6834,9 +6734,7 @@ final class ConversationViewModel {
         context.insert(newAssistantNode)
 
         newUserNode.childrenIds.append(newAssistantId)
-        nodeMap[newAssistantId] = newAssistantNode
-        effectiveChildrenMap[newAssistantId] = []
-        effectiveChildrenMap[newUserId, default: []].append(newAssistantId)
+        attachToTree(newAssistantNode, under: newUserId)
         currentPath.append(newAssistantNode)
         markPop(newAssistantId)
 
@@ -6894,8 +6792,8 @@ final class ConversationViewModel {
         var initialChoices: MemoryWindowChoices {
             if let choices = conversation.memoryWindowChoices { return choices }
             var legacy = MemoryWindowChoices.legacy(profileId: profileId)
-            // 老窗触发与根索引独立；纸条档案行显示实际开着的状态，不为显示改写老窗。
-            legacy.archive = legacy.archive || RecallTuningStore.load(profileId: profileId).archiveTriggerEnabled
+            // 老窗触发、每轮全带与根索引独立；纸条档案行显示实际开着的状态，不为显示改写老窗。
+            legacy.archive = legacy.archive || RecallTuningStore.load(profileId: profileId).archiveTriggerEnabled || MemoryOpenWindow.everyRound(profileId: profileId)
             return legacy
         }
     }

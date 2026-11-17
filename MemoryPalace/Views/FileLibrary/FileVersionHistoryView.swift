@@ -47,6 +47,11 @@ enum FileVersionHistory {
         enabled ? key : nil
     }
 
+    /// 这一版是谁存的：助手用文件工具写的显示名字，其余照来源
+    static func label(_ version: FileVersionStore.Version) -> String {
+        version.actor.map { "\($0) 写的" } ?? sourceLabel(version.source)
+    }
+
     static func sourceLabel(_ source: FileVersionStore.Source) -> String {
         switch source {
         case .manualSave: "保存"
@@ -88,6 +93,8 @@ struct FileVersionHistoryView: View {
     let currentContent: String
     let onRestore: (FileVersionHistory.Restored) -> Void
     var store: FileVersionStore = .shared
+    /// 「恢复到这一版？」下面那句；桌面网页应用是直接写文件，不经编辑器
+    var restoreHint = FileVersionDiffView.editorRestoreHint
 
     @State private var entries: [FileVersionHistory.Entry]?
     @State private var loadError: String?
@@ -134,7 +141,8 @@ struct FileVersionHistoryView: View {
     private func list(_ entries: [FileVersionHistory.Entry]) -> some View {
         List(entries) { entry in
             NavigationLink {
-                FileVersionDiffView(key: key, entry: entry, currentContent: currentContent, store: store) { restored in
+                FileVersionDiffView(key: key, entry: entry, currentContent: currentContent, store: store, restoreHint: restoreHint,
+                                    olderID: entries.firstIndex(of: entry).flatMap { $0 + 1 < entries.count ? entries[$0 + 1].version.id : nil }) { restored in
                     onRestore(restored)
                     dismiss()
                 }
@@ -154,7 +162,7 @@ struct FileVersionHistoryView: View {
                     .font(.system(size: Theme.F.body))
                     .foregroundColor(Theme.textPrimary)
                 HStack(spacing: 6) {
-                    Text(FileVersionHistory.sourceLabel(entry.version.source))
+                    Text(FileVersionHistory.label(entry.version))
                     if entry.matchesCurrent { Text("· 和现在一样") }
                 }
                 .font(.system(size: Theme.F.caption))
@@ -204,13 +212,20 @@ struct FileVersionDiffView: View {
     let entry: FileVersionHistory.Entry
     let currentContent: String
     let store: FileVersionStore
+    var restoreHint = Self.editorRestoreHint
+    /// 上一版（更老的那版）：这一版就是现在这份时，改成看「这一版比上一版改了什么」，和列表上的 +N −N 对得上
+    var olderID: String? = nil
     let onRestore: (FileVersionHistory.Restored) -> Void
+
+    static let editorRestoreHint = "编辑器里的内容会换成这一版，保存后才生效；没保存前可以在编辑器顶部换回。"
 
     @State private var versionText: String?
     @State private var prepared: Prepared?
     @State private var expandedFolds: Set<Int> = []
     @State private var loadError: String?
     @State private var confirmRestore = false
+    /// true = 对比的是上一版 → 这一版（这一版和现在一样）
+    @State private var comparesWithOlder = false
 
     private struct Prepared: Sendable {
         let diff: LineDiff.Result
@@ -240,7 +255,7 @@ struct FileVersionDiffView: View {
                 if prepared.diff.lines.isEmpty {
                     placeholder("两边都是空的")
                 } else if prepared.diff.added == 0 && prepared.diff.removed == 0 {
-                    placeholder("和现在一样")
+                    placeholder(comparesWithOlder ? "和上一版一样" : "和现在一样")
                 } else {
                     lines(prepared)
                 }
@@ -267,17 +282,26 @@ struct FileVersionDiffView: View {
             }
             Button("取消", role: .cancel) { }
         } message: {
-            Text("编辑器里的内容会换成这一版，保存后才生效；没保存前可以在编辑器顶部换回。")
+            Text(restoreHint)
         }
         .task { await load() }
     }
 
     private var summary: some View {
         HStack(spacing: 10) {
-            Text(FileVersionHistory.sourceLabel(entry.version.source))
+            Text(FileVersionHistory.label(entry.version))
                 .foregroundColor(Theme.textMuted)
             if let diff {
-                if diff.added == 0 && diff.removed == 0 {
+                if comparesWithOlder {
+                    // 这一版就是现在这份：讲「这一版比上一版改了什么」
+                    Text("就是现在这版 · 比上一版").foregroundColor(Theme.textMuted)
+                    if diff.removed > 0 {
+                        Text("删了 \(diff.removed) 行").foregroundColor(FileVersionDiffPalette.removedInk)
+                    }
+                    if diff.added > 0 {
+                        Text("加了 \(diff.added) 行").foregroundColor(FileVersionDiffPalette.addedInk)
+                    }
+                } else if diff.added == 0 && diff.removed == 0 {
                     Text("和现在一样").foregroundColor(Theme.textMuted)
                 } else {
                     // 讲「这版之后又改了什么」：删行 = 这版有现在没了，增行 = 之后新加的
@@ -410,9 +434,14 @@ struct FileVersionDiffView: View {
                 return
             }
             versionText = text
-            let current = currentContent
-            prepared = await Task.detached(priority: .userInitiated) {
-                let diff = LineDiff.compute(old: text, new: current)
+            var old = text, new = currentContent
+            if text == currentContent, let olderID, let older = try await store.content(key: key, id: olderID) {
+                old = older
+                new = text
+                comparesWithOlder = true
+            }
+            prepared = await Task.detached(priority: .userInitiated) { [old, new] in
+                let diff = LineDiff.compute(old: old, new: new)
                 return Prepared(diff: diff, highlights: LineDiff.inlineHighlights(diff.lines),
                                 segments: LineDiff.segments(diff.lines))
             }.value

@@ -82,12 +82,22 @@ final class ReadingSignalsTests: XCTestCase {
         )
         let mem = Memory(content: "她在准备 GRE，读英文原著攒词汇", category: "goal", profileId: profile.id)
         ctx.insert(mem)
+        ctx.insert(Memory(content: "钉住的：周末去图书馆", category: "fact", profileId: profile.id, isUserExplicit: true))
         try ctx.save()
+        let saved = UserDefaults.standard.object(forKey: MemoryOpenWindowStore.storageKey)
+        defer {
+            if let saved { UserDefaults.standard.set(saved, forKey: MemoryOpenWindowStore.storageKey) }
+            else { UserDefaults.standard.removeObject(forKey: MemoryOpenWindowStore.storageKey) }
+        }
 
         let pkg = ReadingSignals.buildPersonaPackage(profile: profile, context: ctx)
         XCTAssertTrue(pkg.contains("你是小岚"))
         XCTAssertTrue(pkg.contains("禾禾"))
         XCTAssertTrue(pkg.contains("温柔、直接"))
-        XCTAssertTrue(pkg.contains("GRE"), "记忆注入段带进人格包")
+        XCTAssertTrue(pkg.contains("周末去图书馆"), "钉住的带进人格包")
+        XCTAssertFalse(pkg.contains("GRE"), "「每轮全带」没勾：没钉住的不带")
+        MemoryOpenWindow.setEveryRound(true, profileId: profile.id)
+        let every = ReadingSignals.buildPersonaPackage(profile: profile, context: ctx)
+        XCTAssertTrue(every.contains("GRE") && every.contains("周末去图书馆"), "「每轮全带」勾着：记忆注入段带进人格包")
     }
 }

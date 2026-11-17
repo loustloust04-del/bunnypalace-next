@@ -17,15 +17,17 @@ public struct EffectiveMemoryParticipation: Sendable, Equatable {
         /// 本窗六项；nil = 老窗 → 用 `legacy`
         public var choices: Choices?
         /// `legacy(profileId:)`：timeline = pending = A4 勾、selfMemory = B4 勾、
-        /// archive = pinned = C 勾、previousWindow = false
+        /// archive = C 勾、pinned = 「钉住的」那一勾、previousWindow = false
         public var legacy: Choices
         /// `MemoryOpenWindow.isChecked(.a2)`
         public var a2Checked: Bool
         /// `RecallTuning.archiveTriggerEnabled`
         public var archiveTrigger: Bool
+        /// 开窗口页「每轮全带」那一勾（楼层档；本窗没有这一项，照楼层勾）
+        public var everyRound: Bool
 
         public init(master: Bool, window: Bool, slot: Bool, choices: Choices?,
-                    legacy: Choices, a2Checked: Bool, archiveTrigger: Bool) {
+                    legacy: Choices, a2Checked: Bool, archiveTrigger: Bool, everyRound: Bool = false) {
             self.master = master
             self.window = window
             self.slot = slot
@@ -33,6 +35,7 @@ public struct EffectiveMemoryParticipation: Sendable, Equatable {
             self.legacy = legacy
             self.a2Checked = a2Checked
             self.archiveTrigger = archiveTrigger
+            self.everyRound = everyRound
         }
     }
 
@@ -75,12 +78,16 @@ public struct EffectiveMemoryParticipation: Sendable, Equatable {
     public let participates: Bool
 
     // X 自动注入（都已含 on）
-    /// C 碎片 + 根索引
+    /// wiki 目录（根索引）。只管这一段，不决定批过的记忆条目带不带
     public let archive: Bool
     /// 钉住
     public let pinned: Bool
-    /// 触发词命中的 wiki 页：`on && (isLegacy || choices.archive) && archiveTrigger`
-    /// ← `MemoryInjector.roundInputs` 的 `triggerOn` 现状
+    /// 批过的记忆条目在这个窗口里算不算候选：`on && (isLegacy || choices.archive)`（本窗划掉「档案」= 不算）
+    public let cards: Bool
+    /// 批过的记忆条目每轮全带：`cards && switches.everyRound`
+    public let everyRound: Bool
+    /// 聊到了才带（wiki 页 + 批过的记忆条目）：`cards && archiveTrigger`
+    /// ← `MemoryInjector.roundInputs` 的 `triggerOn`
     public let pages: Bool
     /// 原文兜底候选 = `pages`（VM 预热段的 `windowArchive != false` 写法并入同一式）
     public let fullText: Bool
@@ -116,7 +123,9 @@ public struct EffectiveMemoryParticipation: Sendable, Equatable {
         choices = c
         archive = gate && c.archive
         pinned = gate && c.pinned
-        pages = gate && (s.choices == nil || c.archive) && s.archiveTrigger
+        cards = gate && (s.choices == nil || c.archive)
+        everyRound = cards && s.everyRound
+        pages = cards && s.archiveTrigger
         fullText = pages
         selfMemory = gate && c.selfMemory
         previousWindow = gate && s.choices != nil && c.previousWindow
@@ -146,7 +155,7 @@ extension RecallGateSnapshot {
                   choices: ["timeline": p.choices.timeline, "pending": p.choices.pending,
                             "selfMemory": p.choices.selfMemory, "archive": p.choices.archive,
                             "previousWindow": p.choices.previousWindow, "pinned": p.choices.pinned],
-                  a2Checked: p.switches.a2Checked,
+                  a2Checked: p.switches.a2Checked, everyRound: p.everyRound,
                   hiddenFragments: p.off == nil ? hiddenFragments : 0,
                   hiddenTimeline: p.participates ? hiddenTimeline : 0)
     }

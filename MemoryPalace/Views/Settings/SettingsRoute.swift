@@ -10,6 +10,8 @@ enum SettingsRoute: String, Hashable {
     /// 「我 › 权限」某行「N 个人单独设了」；mac 上是哪个域看 `PermissionOverridesSelection`
     case permissionOverrides
     case memoryExtractPrompt
+    /// 提取提示词 › Edit
+    case memoryExtractCustomPrompt
     /// 记忆 v5：写入编号的二级页（A2 / A3 / A4 / B1 / B4 / C / C2 / C3）
     case memoryWriterA2, memoryWriterA3, memoryWriterA4, memoryWriterB1, memoryWriterB4, memoryWriterC, memoryWriterC2, memoryWriterC3
     /// C3 二级页 › 不触发的词
@@ -17,6 +19,10 @@ enum SettingsRoute: String, Hashable {
     /// 记忆 v5：写入预算 / 开窗口带什么 / 待续 / 档案列表 / {助手}的记忆列表 / 审计台
     case memoryWriteBudget, memoryOpenWindow, memoryPending, memoryArchiveList, memorySelfList, memoryAudit
     case memoryArchiveTrigger, memoryRecallBrowse
+    /// 记忆一级页（粟粟 11-15）：接口 › 和 CC 同步 / 最底下 审计台设置、记忆系统说明
+    case memoryCCSync, memoryAuditSettings, memoryExplainer
+    /// 设置 › 开发调试 › 记忆 · 没做完的
+    case memoryUnfinished
     /// 审计台「整理提案」› 一份提案的详情；mac 上打开哪份看 `WikiProposalSelection`
     case memoryProposal
     /// 一份提案 › 一个目录项的详情和原料；mac 上打开哪一项看 `WikiProposalSelection.item`

@@ -79,6 +79,16 @@ final class CCRelayPairingTests: XCTestCase {
         XCTAssertEqual(CCBridgeEndpoints.configuredURLs(defaults: defaults).map(\.absoluteString), ["wss://relay.example.com/cc"])
     }
 
+    /// 模拟器里直接启动的 app：没显式配过 hub 就不连默认的本机地址（那是她正在用的 hub）；显式配了照连。真机、Mac、XCTest 宿主不变
+    func testSimulatorDoesNotFallBackToTheDefaultLocalHub() {
+        XCTAssertFalse(CCBridgeEndpoints.localFallbackAllowed(simulator: true, environment: [:]))
+        XCTAssertTrue(CCBridgeEndpoints.localFallbackAllowed(simulator: true, environment: ["XCTestConfigurationFilePath": "/x"]))
+        XCTAssertTrue(CCBridgeEndpoints.localFallbackAllowed(simulator: false, environment: [:]))
+        XCTAssertTrue(CCBridgeEndpoints.configuredURLs(defaults: defaults, localFallbackAllowed: false).isEmpty)
+        defaults.set("ws://127.0.0.1:17890/cc", forKey: CCBridgeEndpoints.overrideKey)
+        XCTAssertEqual(CCBridgeEndpoints.configuredURLs(defaults: defaults, localFallbackAllowed: false).map(\.absoluteString), ["ws://127.0.0.1:17890/cc"])
+    }
+
     func testManualTargetChangeDropsRelay() throws {
         let p = try XCTUnwrap(payload(#"{"mpcc":1,"u":"ws://192.168.1.2:7890/cc","u2":"ws://100.64.0.2:7890/cc","u3":"wss://relay-a.example.com/cc","p3":"pinA=","t":"t"}"#))
         CCBridgeEndpoints.save(p, defaults: defaults)

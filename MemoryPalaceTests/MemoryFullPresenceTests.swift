@@ -112,7 +112,7 @@ final class MemoryFullPresenceTests: XCTestCase {
         try! context.save()
 
         let memories = store.listActive(profileId: pid, context: context)
-        let order = FullFallbackRetriever(excludePersistent: false).retrieve(memories, recent: []).map(\.memory.content)
+        let order = FullFallbackRetriever().retrieve(memories, recent: []).map(\.memory.content)
         XCTAssertEqual(order, ["重要度五", "没定的新", "没定的旧", "重要度一"])
     }
 

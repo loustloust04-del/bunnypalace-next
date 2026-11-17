@@ -55,6 +55,10 @@ struct PersonPermissionSections: View {
             PermissionDomainRow(domain: .clipboard, target: target)
             PermissionDomainRow(domain: .shell, target: target)   // 只能比默认严（下拉里只列更严的档）
             PermissionDomainRow(domain: .twitter, target: target)
+            PermissionDomainRow(domain: .memoryCards, target: target)
+            PermissionDomainRow(domain: .memorySelf, target: target)
+            PermissionDomainRow(domain: .memoryFiles, target: target)
+            PermissionDomainRow(domain: .promptEdit, target: target)
         } header: {
             Text("AI 能做什么")
         }

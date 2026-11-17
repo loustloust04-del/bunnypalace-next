@@ -64,7 +64,7 @@ private struct MacConversationTitle: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
-                Text(conversation.title)
+                Text(MainSession.listTitle(conversation))
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.textPrimary)
                     .lineLimit(1)

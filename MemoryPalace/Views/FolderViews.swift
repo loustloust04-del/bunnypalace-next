@@ -358,10 +358,11 @@ struct AvatarNameCapsule<Avatar: View>: View {
     }
 }
 
-struct BubbleChatHeader<Identity: View, Actions: View>: View {
+struct BubbleChatHeader<Identity: View, Trailing: View>: View {
     let onBack: () -> Void
     @ViewBuilder let identity: Identity
-    @ViewBuilder let actions: Actions
+    /// 右边：⋯ › 胶囊（11-16 起跟文章模式同一颗，ContentView.chatTrailingCapsule）
+    @ViewBuilder let trailing: Trailing
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -377,14 +378,7 @@ struct BubbleChatHeader<Identity: View, Actions: View>: View {
                 }
                 .accessibilityLabel("返回对话列表")
                 Spacer(minLength: 0)
-                Menu { actions } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(Theme.chat.textSecondary)
-                        .frame(width: 44, height: 44)
-                        .glassEffect(.regular.tint(Color.white.opacity(0.15)).interactive(), in: .circle)
-                }
-                .accessibilityLabel("更多")
+                trailing
             }
             .buttonStyle(.plain)
         }

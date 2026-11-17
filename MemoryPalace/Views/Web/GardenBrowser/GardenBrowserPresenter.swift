@@ -53,36 +53,46 @@ enum GardenBrowser {
         GardenBrowserRouting.destination(for: url, mode: GardenBrowserSettings.linkOpenMode) == .inApp && present(url)
     }
 
-    /// 从最顶层的控制器弹 sheet（照思考过程面板：先到七成高、往上拖铺满、往下拖关；粟粟 11-08 选 A）。
-    /// 从最顶层弹：sheet 里点的链接也能叠在上面。page2 浏览器 app 是内嵌全屏，不走这里
-    @discardableResult
-    static func present(_ url: URL) -> Bool {
-        guard let top = topViewController() else { return false }
-        let box = HostBox()
-        let host = UIHostingController(rootView: GardenBrowserView(initialURL: url, onClose: { box.host?.dismiss(animated: true) }))
-        box.host = host
-        host.modalPresentationStyle = .pageSheet
-        if let sheet = host.sheetPresentationController {
-            sheet.detents = [.custom(identifier: .init("garden72")) { $0.maximumDetentValue * 0.72 }, .large()]
-            sheet.prefersGrabberVisible = true
-        }
-        top.present(host, animated: true)
-        return true
+    /// 开着的那个浏览器 sheet（多窗口后只有一个：再点链接只新开标签页，不再叠一层 sheet；plan-browser-tabs §2）
+    private static weak var sheet: UIViewController?
+
+    private static var sheetIsUp: Bool {
+        guard let sheet else { return false }
+        return sheet.presentingViewController != nil && !sheet.isBeingDismissed
     }
 
-    /// AI 要动手（plan-ai-browser-operate）：用当前身份弹出来，直接铺满，你看着它操作
+    /// 聊天里的链接、一起看「放大」等：主号新开一个标签页；浏览器没开就从最顶层弹 sheet
+    ///（照思考过程面板：先到七成高、往上拖铺满、往下拖关；粟粟 11-08 选 A）。page2 浏览器 app 是内嵌全屏，不走这里
+    @discardableResult
+    static func present(_ url: URL) -> Bool {
+        BrowserTabs.shared.open(url, identity: .main)
+        return show(large: false)
+    }
+
+    /// AI 要动手（plan-ai-browser-operate）：用当前身份新开一页，直接铺满，你看着它操作
     @discardableResult
     static func presentForAI(_ url: URL, identity: BrowserIdentity) -> Bool {
+        BrowserTabs.shared.open(url, identity: identity)
+        return show(large: true)
+    }
+
+    private static func show(large: Bool) -> Bool {
+        if sheetIsUp, let sheet {
+            if large, let controller = sheet.sheetPresentationController {
+                controller.animateChanges { controller.selectedDetentIdentifier = .large }
+            }
+            return true
+        }
         guard let top = topViewController() else { return false }
         let box = HostBox()
-        let host = UIHostingController(rootView: GardenBrowserView(initialURL: url, identity: identity,
-                                                                    onClose: { box.host?.dismiss(animated: true) }))
+        let host = UIHostingController(rootView: GardenBrowserView(onClose: { box.host?.dismiss(animated: true) }))
         box.host = host
         host.modalPresentationStyle = .pageSheet
-        if let sheet = host.sheetPresentationController {
-            sheet.detents = [.large()]
-            sheet.prefersGrabberVisible = true
+        if let controller = host.sheetPresentationController {
+            controller.detents = large ? [.large()] : [.custom(identifier: .init("garden72")) { $0.maximumDetentValue * 0.72 }, .large()]
+            controller.prefersGrabberVisible = true
         }
+        sheet = host
         top.present(host, animated: true)
         return true
     }

@@ -33,7 +33,7 @@ final class Memory {
     var speaker: String? = nil       // 用户自述 | AI 观察 | AI 承诺
 
     // SC-B2 出处锚 + 软失效
-    var sourceQuote: String?         // 10-40 字逐字引用（机械校验过的出处证据）
+    var sourceQuote: String?         // 出处那条消息的开头（代码截的，换行并成空格、最多 120 字；不经模型、没有校验）
     var sourceNodeId: String?        // 引用所在消息 node id（跳转锚）
     var supersededAt: Date?          // 软失效：nil=活着，有值=出排名不出库（可复活）
 
@@ -68,6 +68,12 @@ final class Memory {
     var organizedAt: Date?           // 整理过了：批了的提案用到了它，或分拣判「单条就够」
     var organizedPage: String?       // 整理进了哪一页（wiki 相对路径）；空 + organizedAt 有值 = 单条就够
     var organizeRejectedAt: Date?    // 整理时驳回，不再自动整理
+
+    // C2 整段写手给的置信度（轻量迁移，一个可选字段；老写法 / 手加 / 改版前的都是 nil）
+    var confidence: Int? = nil       // 0–100，这条信息本身有多可信
+
+    // 整段写手标的全部出处（轻量迁移，一个可选字段；老写法 / 手加 / 改版前的都是 nil，不回填）
+    var sourceNodeIds: [String]? = nil // 这件事出自的那几条消息的 node id，按对话顺序；跳转锚仍是 sourceNodeId（写手交的第一个）
 
     var isOrganized: Bool { organizedAt != nil }
     var isSingleEnough: Bool { organizedAt != nil && organizedPage == nil }

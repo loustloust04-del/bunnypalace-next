@@ -173,8 +173,9 @@ final class MemoryRetrievalTests: XCTestCase {
         let plain = Memory(content: "云桥城地图画好了", category: "fact", profileId: "synthetic-keywords")
         let boosted = Memory(content: plain.content, category: "fact", keywords: ["云桥城"], profileId: "synthetic-keywords")
         let unrelated = Memory(content: "云 桥 城", category: "fact", keywords: ["云", "桥", "城"], profileId: "synthetic-keywords")
-        let hits = KeywordRetriever(excludePersistent: false).retrieve([plain, unrelated, boosted], recent: ["云桥城"])
-        XCTAssertEqual(hits.map { $0.memory.id }, [boosted.id, plain.id])
+        let hits = MemoryRetrieval.search(query: "云桥城", documents: [plain, unrelated, boosted].map(MemoryRetrievalDocument.init),
+                                          embedder: RecordingMemoryEmbedder(ready: false)).ids
+        XCTAssertEqual(hits, [boosted.id, plain.id])
     }
 
     func testShortHanSegmentsRequireEveryBigramAndRemainORWithOtherTerms() {
@@ -190,8 +191,9 @@ final class MemoryRetrievalTests: XCTestCase {
                        MemoryBM25.scores(documents: documents, query: "orbit"), "不完整姓名不能借另一段的命中追加分数")
         let full = Memory(content: "张小明完成了航图", category: "fact", profileId: "synthetic-short")
         let partial = Memory(content: "小明整理了记录", category: "fact", keywords: ["小明"], profileId: "synthetic-short")
-        let hits = KeywordRetriever(excludePersistent: false).retrieve([partial, full], recent: ["张小明"])
-        XCTAssertEqual(hits.map { $0.memory.id }, [full.id])
+        let hits = MemoryRetrieval.search(query: "张小明", documents: [partial, full].map(MemoryRetrievalDocument.init),
+                                          embedder: RecordingMemoryEmbedder(ready: false)).ids
+        XCTAssertEqual(hits, [full.id])
     }
 
     func testLongHanCommonTermCutoffUsesCandidateCountAndStrictDocumentFrequency() {
@@ -235,15 +237,6 @@ final class MemoryRetrievalTests: XCTestCase {
             XCTAssertEqual(MemoryRetrieval.search(query: normalized, documents: [keywordOnly],
                                                   embedder: RecordingMemoryEmbedder(ready: false)).ids, [keywordOnly.id])
         }
-    }
-
-    func testKeywordRetrieverKeepsPinnedRecallButExcludesItFromInjectionCandidates() {
-        let pinned = Memory(content: "orbit", category: "fact", profileId: "synthetic", isUserExplicit: true)
-        let ordinary = Memory(content: "orbit marble", category: "fact", keywords: ["orbit"], profileId: "synthetic")
-        let candidates = [pinned, ordinary]
-        let recalled = KeywordRetriever(excludePersistent: false).retrieve(candidates, recent: ["orbit"])
-        XCTAssertEqual(Set(recalled.map { $0.memory.id }), Set(candidates.map(\.id)))
-        XCTAssertEqual(KeywordRetriever().retrieve(candidates, recent: ["orbit"]).map { $0.memory.id }, [ordinary.id])
     }
 
     func testVectorOnlyRecallDeduplicatesAndEmbedsQueryOnceWithoutBackfill() {

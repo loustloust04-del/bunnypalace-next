@@ -151,8 +151,8 @@ extension Conversation {
     /// 同步导出用的「这条对话最后一次变化」：内容（updateTime）和模式（displayModeUpdatedAt）取较新的
     var syncStamp: Date { max(updateTime, displayModeUpdatedAt ?? .distantPast) }
 
-    /// 只读归档（群聊首批）：不续聊、不重生成
-    var isReadOnlyArchive: Bool { archiveKind == Self.groupReadOnlyArchive }
+    /// 只读归档：不续聊、不重生成。群聊首批的归档，和电脑上同步来的 session（文件夹楼层看历史，插话做完前只读）
+    var isReadOnlyArchive: Bool { archiveKind == Self.groupReadOnlyArchive || archiveKind == FolderHistory.archiveKind }
 
     var recallState: RecallConversationState {
         get { recallStateData.flatMap { try? JSONDecoder().decode(RecallConversationState.self, from: $0) } ?? .init() }

@@ -3,7 +3,7 @@ import SwiftUI
 import SwiftData
 
 // MARK: - 时间轴列表页（plan-memory-c2c3-v2 第 7 段）：一天一组、新的在上；一组 = 主调 + 各时段的项（A2 段 / 没压缩的那截），
-// 每一行的字和注入给模型的那一行一字不差（`TimelineStore.itemText` / `headlineText`）。老条目一条不删：有新记录的日子折在「旧格式」下面（点开看），
+// 每一行的字 = 注入给模型的那一行去掉窗口短编号（`TimelineStore.itemBody` / `legacyBody`；没有主调不写占位）。老条目一条不删：有新记录的日子折在「旧格式」下面（点开看），
 // 只有老条目的日子照旧列出来、标「旧格式」。
 // 顶上一行常驻开关（「正在记」在窗口总结格）；点项看这一项（里面看那段 A2 / 去原文）
 
@@ -365,8 +365,11 @@ struct MemoryTimelineView: View {
             ForEach(model.days) { day in
                 Section {
                     if let r = day.record {
-                        headlineRow(r)
-                            .panelRowBackground()
+                        // 还没有主调、也没有话题词的日子不出这一行（占位字不显示；要重写用顶上「重写某一天…」）
+                        if r.headline != nil || !r.topics.isEmpty || model.regenerating == r.date {
+                            headlineRow(r)
+                                .panelRowBackground()
+                        }
                         let rows = TimelineListLayout.rows(r)
                         ForEach(Array(rows.enumerated()), id: \.element.item.rowKey) { i, row in
                             itemRow(row.item, period: row.period, day: r.date, isLast: i == rows.count - 1 && day.entries.isEmpty)
@@ -444,13 +447,19 @@ struct MemoryTimelineView: View {
         .tint(Theme.branchIndicator)
     }
 
-    /// 主调（和注入那一行同一份字）+ 话题词；长按重写这天的主调
+    /// 主调 + 话题词；长按重写这天的主调
     private func headlineRow(_ r: TimelineDayRecord) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(model.regenerating == r.date ? "正在重写主调…" : TimelineStore.headlineText(r))
-                .font(.system(size: m.bodySize, weight: .semibold))
-                .foregroundColor(r.headline == nil ? Theme.textMuted : Theme.textPrimary)
-                .textSelection(.enabled)
+            if model.regenerating == r.date {
+                Text("正在重写主调…")
+                    .font(.system(size: m.bodySize, weight: .semibold))
+                    .foregroundColor(r.headline == nil ? Theme.textMuted : Theme.textPrimary)
+            } else if let headline = r.headline {
+                Text(headline)
+                    .font(.system(size: m.bodySize, weight: .semibold))
+                    .foregroundColor(Theme.textPrimary)
+                    .textSelection(.enabled)
+            }
             if !r.topics.isEmpty {
                 Text(r.topics.joined(separator: " · "))
                     .font(.system(size: m.secondarySize))
@@ -465,7 +474,7 @@ struct MemoryTimelineView: View {
         }
     }
 
-    /// 一项：时段名（换时段的那项才有）+ 和注入那一行同一份字；点了看这一项
+    /// 一项：时段名（换时段的那项才有）+ 那一行正文（不带窗口短编号）；点了看这一项
     private func itemRow(_ item: TimelineDayRecord.Item, period: String?, day: String, isLast: Bool) -> some View {
         let gone = model.goneIds.contains(item.conversationId)
         return Button {
@@ -479,8 +488,9 @@ struct MemoryTimelineView: View {
                             .font(.system(size: m.secondarySize, design: .serif))
                             .foregroundColor(Theme.textSecondary)
                     }
-                    TimelineLine.text(TimelineStore.itemBody(item), conv: item.conversationId, size: m.secondarySize,
-                                      color: gone || item.kind != .segment ? Theme.textMuted : Theme.textPrimary)
+                    Text(TimelineStore.itemBody(item))
+                        .font(.system(size: m.secondarySize))
+                        .foregroundColor(gone || item.kind != .segment ? Theme.textMuted : Theme.textPrimary)
                         .lineLimit(2)
                     if gone {
                         Text("这个窗口已经删了")
@@ -532,7 +542,7 @@ struct MemoryTimelineView: View {
         .buttonStyle(.plain)
     }
 
-    /// 老条目（旧格式）：标「旧格式」+ 和注入那一行同一份字；点行 = 先看这一条本身（`TimelineEntrySheet`）
+    /// 老条目（旧格式）：标「旧格式」+ 那一行正文（不带窗口短编号）；点行 = 先看这一条本身（`TimelineEntrySheet`）
     private func legacyRow(_ e: TimelineEntry, isLast: Bool) -> some View {
         let gone = model.goneIds.contains(e.conversationId)
         return Button {
@@ -550,7 +560,9 @@ struct MemoryTimelineView: View {
                                 .font(.system(size: m.secondarySize))
                                 .foregroundColor(Theme.textMuted)
                         } else {
-                            TimelineLine.text(TimelineStore.legacyBody(e), conv: e.conversationId, size: m.secondarySize, color: Theme.textSecondary)
+                            Text(TimelineStore.legacyBody(e))
+                                .font(.system(size: m.secondarySize))
+                                .foregroundColor(Theme.textSecondary)
                         }
                     }
                     .lineLimit(2)
@@ -629,20 +641,12 @@ struct MemoryTimelineView: View {
     }
 }
 
-/// 时间轴一行：正文 + 小号灰字的窗口短编号（拼起来就是 `TimelineStore.itemText` / `legacyText`，和注入那一行一字不差）
-enum TimelineLine {
-    static func text(_ body: String, conv: String, size: CGFloat, color: Color, weight: Font.Weight = .regular) -> Text {
-        Text(body).font(.system(size: size, weight: weight)).foregroundColor(color)
-            + Text(" " + TimelineStore.convTag(conv)).font(.system(size: max(size - 3, 9))).foregroundColor(Theme.textMuted)
-    }
-}
-
 private extension TimelineDayRecord.Item {
     var rowKey: String { "\(conversationId)@\(start.timeIntervalSince1970)@\(from ?? title)" }
     func rowId(_ day: String) -> String { "\(day)#\(rowKey)" }
 }
 
-/// 时间轴一项（只读）：日期、这一项那一行（和注入同一份字）、哪种；
+/// 时间轴一项（只读）：日期、这一项那一行（不带窗口短编号）、哪种；
 /// A2 段 →「看上下文摘要」推进窗口总结页、定位到那一段（段号现算）；能定位的都有「去原文」（跳到这一项当天的第一条消息）
 struct TimelineItemSheet: View {
     let item: TimelineDayRecord.Item
@@ -670,8 +674,9 @@ struct TimelineItemSheet: View {
                         Text("\(TimelineStore.dayLabel(day)) · \(item.period().label)")
                             .font(.system(size: m.secondarySize, design: .serif))
                             .foregroundColor(Theme.textSecondary)
-                        TimelineLine.text(TimelineStore.itemBody(item), conv: item.conversationId, size: m.bodySize,
-                                          color: isGone ? Theme.textMuted : Theme.textPrimary, weight: .semibold)
+                        Text(TimelineStore.itemBody(item))
+                            .font(.system(size: m.bodySize, weight: .semibold))
+                            .foregroundColor(isGone ? Theme.textMuted : Theme.textPrimary)
                             .textSelection(.enabled)
                         Text(isGone ? "这个窗口已经删了" : kindText)
                             .font(.system(size: m.secondarySize))
@@ -728,6 +733,13 @@ private extension TimelineEntry {
     var rowId: String { "\(conversationId)@\(start.timeIntervalSince1970)" }
 }
 
+/// 出处托盘里的一条（挂了几条出处时一条一条显示）
+struct MemorySourceMessage: Equatable {
+    let isUser: Bool
+    let at: Date?
+    let text: String
+}
+
 /// 从记忆 app 跳回某个窗口（时间轴、窗口总结格共用）
 enum MemoryConversationLink {
     enum MessageResult { case opened, windowGone, messageGone }
@@ -782,6 +794,32 @@ enum MemoryConversationLink {
         }
         viewModel.navigateToSearchResult(nodeId: nodeId, conversation: conv, context: context)
         return .opened
+    }
+
+    /// 记忆条目出处那条消息现在的原文（Edit 页「出处」现取）：窗口 / 消息没了、删了、藏了、是空的 = nil
+    static func sourceText(of memory: Memory, profileId: String, context: ModelContext) -> String? {
+        guard let cid = memory.sourceConversationId, let nodeId = memory.sourceNodeId else { return nil }
+        let desc = FetchDescriptor<MessageNode>(
+            predicate: #Predicate<MessageNode> { $0.id == nodeId && $0.conversationId == cid && $0.profileId == profileId }
+        )
+        guard let node = try? context.fetch(desc).first, !node.isTrashed, node.hasDisplayableContent else { return nil }
+        let text = node.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    /// 记忆条目挂的全部出处（`sourceNodeIds`）现在的原文，按存的顺序；删了 / 藏了 / 是空的那几条跳过。
+    /// 没挂或只挂了一条 = 空（托盘照旧只显示锚点那一条，`sourceText`）
+    static func sourceMessages(of memory: Memory, profileId: String, context: ModelContext) -> [MemorySourceMessage] {
+        guard let cid = memory.sourceConversationId, let ids = memory.sourceNodeIds, ids.count > 1 else { return [] }
+        let desc = FetchDescriptor<MessageNode>(
+            predicate: #Predicate<MessageNode> { ids.contains($0.id) && $0.conversationId == cid && $0.profileId == profileId }
+        )
+        let byId = Dictionary(((try? context.fetch(desc)) ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return ids.compactMap { id in
+            guard let node = byId[id], !node.isTrashed, node.hasDisplayableContent else { return nil }
+            let text = node.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : MemorySourceMessage(isUser: node.role == "user", at: node.createTime, text: text)
+        }
     }
 
     /// 同 SidebarView.openFromList：load 完再发通知，页 2 才会翻回聊天页（ContentView 只在页 0 时跟 selectedConversation 自动翻）。

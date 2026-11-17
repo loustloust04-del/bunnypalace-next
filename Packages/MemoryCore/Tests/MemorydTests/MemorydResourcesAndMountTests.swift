@@ -19,14 +19,6 @@ final class MemorydBuiltInSetsParityTests: XCTestCase {
             let memoryd = repoRoot.appendingPathComponent("Packages/MemoryCore/Sources/memoryd/MemoryBench/\(name).json")
             XCTAssertEqual(try Data(contentsOf: app), try Data(contentsOf: memoryd), "\(name).json 两份漂了")
         }
-        // recall 的内置楼层：app 资源 == memoryd 资源 == 包测试夹具
-        let name = "memory-bench-recall-floor-xingyan"
-        let app = repoRoot.appendingPathComponent("MemoryPalace/Resources/MemoryBench/\(name).json")
-        let memoryd = repoRoot.appendingPathComponent("Packages/MemoryCore/Sources/memoryd/MemoryBench/\(name).json")
-        let fixture = repoRoot.appendingPathComponent("Packages/MemoryCore/Tests/MemoryCoreTests/Fixtures/conversation-floor-schema1.json")
-        let bytes = try Data(contentsOf: app)
-        XCTAssertEqual(bytes, try Data(contentsOf: memoryd), "\(name).json 两份漂了")
-        XCTAssertEqual(bytes, try Data(contentsOf: fixture), "\(name).json 与包夹具漂了")
     }
 }
 

@@ -95,6 +95,14 @@ enum GlobalExporter {
             sections.append(sec)
             stats.uncompressedBytes += sec.bytes
         }
+        // page2 主屏（布局 + 外观 + 各层网页应用表）和文件版本历史：本机没有就不出这段（恢复时本机现有的不动）。
+        // 网页应用本身是文件库里的 html，跟着文件库走；老的 `webapps` 段不再出（导入照旧认）
+        for (src, name) in [(StagingPaths.primaryPage2Root, "page2"), (StagingPaths.primaryVersionsRoot, "versions")] {
+            if let sec = try exportDirectory(src, as: name, to: workspace) {
+                sections.append(sec)
+                stats.uncompressedBytes += sec.bytes
+            }
+        }
         await MainActor.run { progress.completeSection("themes") }
 
         // B.7
@@ -314,17 +322,20 @@ enum GlobalExporter {
             let convsDir = pidDir.appendingPathComponent("conversations", isDirectory: true)
             try FileManager.default.createDirectory(at: convsDir, withIntermediateDirectories: true)
 
-            let allConvs = try bgContext.fetch(FetchDescriptor<Conversation>(
+            // 连着电脑文件夹的楼层：楼层本身照常导出，对话正文不导出（plan-folder-floor，粟粟 11-16；原件在电脑上）
+            let skipTalk = profile.isFolderFloor
+            let allConvs = skipTalk ? [] : try bgContext.fetch(FetchDescriptor<Conversation>(
                 predicate: #Predicate<Conversation> { $0.profileId == pid }
             ))
-            let allNodes = try bgContext.fetch(FetchDescriptor<MessageNode>(
+            let allNodes = skipTalk ? [] : try bgContext.fetch(FetchDescriptor<MessageNode>(
                 predicate: #Predicate<MessageNode> { $0.profileId == pid }
             ))
             var nodesByConvId: [String: [MessageNode]] = [:]
             for n in allNodes {
                 nodesByConvId[n.conversationId, default: []].append(n)
             }
-            for conv in allConvs {
+            // 电脑上同步来的 session 不导出（原件在电脑上）；这一层后来「不连了」也一样
+            for conv in allConvs where !conv.isFolderSession {
                 try Task.checkCancellation()
                 let nodes = nodesByConvId[conv.id] ?? []
                 let doc = FullConversationDocument(model: conv, nodes: nodes)
@@ -649,6 +660,20 @@ enum GlobalExporter {
         }
         let (sha, bytes) = try SectionHasher.hash(directory: dst)
         return .init(path: "assistant", sha256: sha, bytes: bytes)
+    }
+
+    /// 整个目录原样带（page2 / webapps）。目录不在或是空的 → 不出这段
+    static func exportDirectory(_ src: URL, as name: String, to workspace: URL) throws -> GlobalExportManifest.SectionEntry? {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(atPath: src.path), !contents.isEmpty else { return nil }
+        let dst = workspace.appendingPathComponent(name, isDirectory: true)
+        do {
+            try fm.copyItem(at: src, to: dst)
+        } catch {
+            throw GlobalBackupError.exportFileCopyFailed(src, error)
+        }
+        let (sha, bytes) = try SectionHasher.hash(directory: dst)
+        return .init(path: name, sha256: sha, bytes: bytes)
     }
 
     private static func exportFileLibrary(

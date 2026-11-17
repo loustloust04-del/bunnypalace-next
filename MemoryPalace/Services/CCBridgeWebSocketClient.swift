@@ -429,6 +429,9 @@ final class CCBridgeWebSocketClient: NSObject {
     /// 小克用本地推特（TwitterCCBridge）：收 `twitter_cmd` 帧 → 返回 `twitter_result` 帧原样回给 hub。
     /// app 根接线（ContentView）；未接线时回错，hub 那边不用干等超时。
     @ObservationIgnored var onTwitterCmd: (@MainActor (_ frame: [String: Any]) -> [String: Any])?
+    /// CC 里的助手用花园的记忆（MemoryCCBridge）：收 `memory_cmd` 帧 → 返回 `memory_result` 帧回给 hub。
+    /// 可能要等她在审批卡上点（每次询问那一档），所以是 async；app 根接线（ContentView）
+    @ObservationIgnored var onMemoryCmd: (@MainActor (_ frame: [String: Any]) async -> [String: Any])?
     /// R5：agent 状态快照到货（iOS 设置-Agent 页拉取/写配置后 hub 都回它）。页面 onAppear 注册。
     @ObservationIgnored var onAgentStatusResult: ((_ payload: [String: Any]) -> Void)?
     #if PERSONAL_APPS
@@ -585,6 +588,7 @@ final class CCBridgeWebSocketClient: NSObject {
     /// 按内容去重：跟本进程上次发过的一样就不发；发送失败清掉，下次照发。发 CC 消息前 / 改语音设置时调（主线程）。
     @ObservationIgnored private var lastVoiceInstructions: String?
     func syncVoiceInstructions(_ content: String) {
+        guard hubInfo?.folder == nil else { return }   // 对面是文件夹里的 Claude Code，不是家：语音说明不往那边写（plan-folder-floor）
         guard content != lastVoiceInstructions else { return }
         lastVoiceInstructions = content
         send(["type": "set_voice_instructions", "content": content]) { [weak self] err in
@@ -1739,11 +1743,11 @@ final class CCBridgeWebSocketClient: NSObject {
     /// 「不确定」回执（没打开过的连接 = 「没发出去」），不自动重发。所有回执经 sendTracker 按这次发送尝试结算（A1 R2 N3）
     func sendUserMessage(
         chatId: String, messageId: String, content: String, user: String,
-        session: String?, replyTo: String?, attachments: [PendingChatAttachment], effort: String? = nil
+        session: String?, replyTo: String?, attachments: [PendingChatAttachment], effort: String? = nil, account: String? = nil
     ) {
         guard !isInvalidated else { return }
         var payload = Self.sendFrame(chatId: chatId, messageId: messageId, content: content, user: user,
-                                     session: session, replyTo: replyTo, attachments: attachments, effort: effort)
+                                     session: session, replyTo: replyTo, attachments: attachments, effort: effort, account: account)
         let attempt = sendTracker.didSend(messageId, frame: payload)   // 调用方在 main（sendCCFireAndForget）
         payload["attempt"] = attempt.wire   // A1 R4：这一次发送的编号，新 hub 在 ack / error / 状态里原样带回（旧 hub 不认这个字段，无害）
         guard let data = try? JSONSerialization.data(withJSONObject: payload), let text = String(data: data, encoding: .utf8) else {
@@ -1884,7 +1888,7 @@ final class CCBridgeWebSocketClient: NSObject {
     /// send 帧（纯函数，单测可直接验）
     static func sendFrame(
         chatId: String, messageId: String, content: String, user: String,
-        session: String?, replyTo: String?, attachments: [PendingChatAttachment], effort: String? = nil
+        session: String?, replyTo: String?, attachments: [PendingChatAttachment], effort: String? = nil, account: String? = nil
     ) -> [String: Any] {
         var payload: [String: Any] = [
             "type":       "send",
@@ -1897,6 +1901,8 @@ final class CCBridgeWebSocketClient: NSObject {
         if let replyTo, !replyTo.isEmpty { payload["reply_to"] = replyTo }
         // 思考强度（research-reasoning-effort §2.3）：「默认」不带，hub 不动会话
         if let effort, effort != ReasoningEffort.auto { payload["effort"] = effort }
+        // 电脑文件夹楼层（plan-folder-floor）：这一层选的账号。会话第一次起时 hub 记下，之后带别的来也照原来的；普通楼层不带
+        if let account, !account.isEmpty { payload["account"] = account }
         // C2：当前消息的图 + 文件 base64 进 send 帧（hub 落盘 mp-inbox 让 CC Read/处理真文件）
         let imgPayload: [[String: Any]] = attachments.compactMap { att in
             guard att.isImage, let data = att.imageData, let mime = att.mimeType,
@@ -1910,6 +1916,7 @@ final class CCBridgeWebSocketClient: NSObject {
         }
         if !filePayload.isEmpty { payload["files"] = filePayload }
         if let audio = BunnyVoiceAudio.payload(for: attachments) { payload["audio"] = audio }   // [Bunny patch BP-005]
+        UserDefaults.standard.set(chatId, forKey: "lastCCChatId")   // [Bunny patch BP-011] 一起听「指给他看」发回最近的主对话
         return payload
     }
 
@@ -2823,6 +2830,13 @@ final class CCBridgeWebSocketClient: NSObject {
                     ?? ["type": TwitterCCBridge.resultType, "id": obj["id"] as? String ?? "", "ok": false, "result": "app 还没准备好"]
                 self.sendAck(result, to: source)
             }
+        case MemoryCCBridge.commandType:
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let result = await self.onMemoryCmd?(obj)
+                    ?? ["type": MemoryCCBridge.resultType, "id": obj["id"] as? String ?? "", "ok": false, MemoryCCBridge.mineKey: false, "result": "app 还没准备好"]
+                self.sendAck(result, to: source)
+            }
         case "agent_status_result":
             DispatchQueue.main.async { [weak self] in
                 self?.onAgentStatusResult?(obj)
@@ -2866,6 +2880,14 @@ final class CCBridgeWebSocketClient: NSObject {
                 NotificationCenter.default.post(name: .pmBoardFrame, object: nil, userInfo: ["type": type, "data": data])
             }
         #endif
+        #endif
+        #if DEBUG
+        case "folder_req_result", "folder_changed":
+            // 文件夹楼层看历史（plan-folder-floor P2）：整帧交给 FolderHistorySync，带上是哪台电脑发的
+            let from = hubId
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .folderHistoryFrame, object: nil, userInfo: ["hubId": from, "type": type, "data": data])
+            }
         #endif
         case "agent_book_note":
             // CR-4：AI 读书产物。去重 → 处理 → ack（成功才 ack，失败留 pending 等补投）
@@ -3067,6 +3089,12 @@ final class CCBridgeWebSocketClient: NSObject {
                     // 身份闸：Registry 核过这台的 hub_id 才放行这条连接上排着 / 压着的业务帧
                     let verdict = self.onHello?(hello) ?? .approve
                     self.applyIdentityVerdict(verdict, for: source, hubId: hello.hubId)
+                    #if DEBUG
+                    // 文件夹模式的电脑连上了：看历史的同步从这里起（plan-folder-floor P2）
+                    if hello.folder != nil {
+                        NotificationCenter.default.post(name: .folderHistoryFrame, object: nil, userInfo: ["hubId": self.hubId, "type": "hello"])
+                    }
+                    #endif
                 }
             }
         case "hub_config":
@@ -3305,6 +3333,12 @@ final class CCBridgeWebSocketClient: NSObject {
             #if DEBUG
             print("[CCBridge] voice_instructions_result ok=\(obj["ok"] as? Bool ?? false) changed=\(obj["changed"] as? Bool ?? false) reason=\(obj["reason"] as? String ?? "-")")
             #endif
+        case "garden_tree_need", "garden_tree_result", "garden_tree_changes":
+            // 花园记忆文件夹 ↔ CC 家（只主 hub，`secondaryFrameGate` 已经挡了附加 hub）
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                GardenMemorySync.receive(obj, client: self)
+            }
         case "la_token_nak":
             #if os(iOS)
             let kind = obj["kind"] as? String ?? "update"
@@ -3351,7 +3385,7 @@ final class CCBridgeWebSocketClient: NSObject {
     static let primaryOnlyFrameTypes: Set<String> = [
         "cc_memory_manifest", "cc_memory_files", "cc_memory_changed",
         "vocab_corpus_result",
-        "pocket_cmd", TwitterCCBridge.commandType,
+        "pocket_cmd", TwitterCCBridge.commandType, MemoryCCBridge.commandType,
         "agent_status_result",
         "status_result", "status_alert",
         "warroom_board_result", "warroom_request_result", "pm_req_result",
@@ -3364,8 +3398,8 @@ final class CCBridgeWebSocketClient: NSObject {
 
     static func secondaryFrameGate(_ type: String) -> SecondaryFrameGate {
         switch type {
-        case "pocket_cmd", TwitterCCBridge.commandType: return .reject
-        default: return primaryOnlyFrameTypes.contains(type) || type.hasPrefix("cc_memory_") ? .drop : .pass
+        case "pocket_cmd", TwitterCCBridge.commandType, MemoryCCBridge.commandType: return .reject
+        default: return primaryOnlyFrameTypes.contains(type) || type.hasPrefix("cc_memory_") || type.hasPrefix("garden_tree_") ? .drop : .pass
         }
     }
 
@@ -3382,6 +3416,9 @@ final class CCBridgeWebSocketClient: NSObject {
             probeLog("reject \(type) id=\(id): secondary hub")
             if type == "pocket_cmd" {
                 sendAck(["type": "pocket_result", "id": id, "ok": false, "error": "pocket not available on this hub"], to: source)
+            } else if type == MemoryCCBridge.commandType {
+                sendAck(["type": MemoryCCBridge.resultType, "id": id, "ok": false, MemoryCCBridge.mineKey: false,
+                         "result": "这台电脑的 hub 不是花园的主 hub，动不了花园的记忆"], to: source)
             } else {
                 sendAck(["type": TwitterCCBridge.resultType, "id": id, "ok": false, "result": "这台电脑不能用手机上的推特"], to: source)
             }
@@ -3669,6 +3706,11 @@ extension CCBridgeWebSocketClient: URLSessionWebSocketDelegate {
         #endif
         // CC 小克 memory 同步：每次连上拉一次清单（开关关着时空操作）
         CCMemorySync.connected()
+        // 花园记忆文件夹 → CC 家：连上同步一遍，hub 把 CC 攒着的修改送过来（开关关着时空操作）
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            GardenMemorySync.connected(client: self)
+        }
         #if os(macOS)
         sendBindConfig()   // 绑定开关只本机 Mac 同步给 hub（hub bind-config 持久，这里对齐）
         #endif

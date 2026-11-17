@@ -33,9 +33,9 @@ final class CCHubFrameOwnershipTests: XCTestCase {
         var list: [String] { lock.lock(); defer { lock.unlock() }; return values }
     }
 
-    /// research 表 A 类（20）+ opencli_result
+    /// research 表 A 类（20）+ opencli_result + memory_cmd（CC 用花园的记忆）
     static let typesA = [
-        "cc_memory_manifest", "cc_memory_files", "cc_memory_changed", "vocab_corpus_result", "pocket_cmd", "twitter_cmd",
+        "cc_memory_manifest", "cc_memory_files", "cc_memory_changed", "vocab_corpus_result", "pocket_cmd", "twitter_cmd", "memory_cmd",
         "agent_status_result", "status_result", "status_alert", "warroom_board_result", "warroom_request_result", "pm_req_result",
         "agent_book_note", "trading_report_result", "trading_report_progress", "voice_call_state", "voice_call_snapshot",
         "voice_call_error", "la_query_result", "la_token_nak", "opencli_result",
@@ -151,7 +151,7 @@ final class CCHubFrameOwnershipTests: XCTestCase {
         case "cc_memory_manifest": f["files"] = [["path": "x.md", "hash": "h"]]
         case "cc_memory_files": f["files"] = [["path": "x.md", "content": "c"]]
         case "vocab_corpus_result": f["word"] = "w-\(tag)"; f["ok"] = false
-        case "pocket_cmd", "twitter_cmd": f["id"] = "\(type)-\(tag)"
+        case "pocket_cmd", "twitter_cmd", "memory_cmd": f["id"] = "\(type)-\(tag)"
         case "status_result": f["sources"] = []
         case "status_alert": f["alert"] = ["id": "al-\(tag)", "source": "s", "kind": "bad", "text": "t"]
         case "warroom_board_result": f["tasks"] = []
@@ -176,15 +176,15 @@ final class CCHubFrameOwnershipTests: XCTestCase {
         }
     }
 
-    // MARK: - 分类：53 帧
+    // MARK: - 分类：54 帧
 
     func testFrameTableCoversAll52TypesAndGateMatchesIt() {
         let all = Self.typesA + Self.typesBChanged + Self.typesBInstance + Self.typesC
-        XCTAssertEqual(all.count, 53)
-        XCTAssertEqual(Set(all).count, 53)
+        XCTAssertEqual(all.count, 54)
+        XCTAssertEqual(Set(all).count, 54)
         XCTAssertEqual(CCBridgeWebSocketClient.primaryOnlyFrameTypes, Set(Self.typesA))
         for t in Self.typesA {
-            let expected: CCBridgeWebSocketClient.SecondaryFrameGate = t == "pocket_cmd" || t == "twitter_cmd" ? .reject : .drop
+            let expected: CCBridgeWebSocketClient.SecondaryFrameGate = ["pocket_cmd", "twitter_cmd", "memory_cmd"].contains(t) ? .reject : .drop
             XCTAssertEqual(CCBridgeWebSocketClient.secondaryFrameGate(t), expected, t)
         }
         for t in Self.typesBChanged + Self.typesBInstance + Self.typesC {
@@ -204,6 +204,7 @@ final class CCHubFrameOwnershipTests: XCTestCase {
         client.pocketEnabledForTesting = true
         client.pocketRunnerForTesting = { _, _ in calls.add("pocket") }
         client.onTwitterCmd = { _ in calls.add("twitter"); return [:] }
+        client.onMemoryCmd = { _ in calls.add("memory"); return [:] }
         client.onAgentStatusResult = { _ in calls.add("agent_status") }
         client.onStatusAlert = { _ in calls.add("status_alert"); return true }
         client.onAgentBookNote = { _ in calls.add("book_note"); return true }
@@ -229,12 +230,12 @@ final class CCHubFrameOwnershipTests: XCTestCase {
         for type in Self.typesA {
             client.handleIncoming(text(frameA(type, tag: tag)), source: task)
         }
-        XCTAssertTrue(spin { wire.all.count == baseline + 2 })
+        XCTAssertTrue(spin { wire.all.count == baseline + 3 })
         settle()
 
-        // 只回两条拒绝帧，别的一条不发（status_alert_ack / agent_book_note_ack / trading_report_ack 都没有）
+        // 只回三条拒绝帧，别的一条不发（status_alert_ack / agent_book_note_ack / trading_report_ack 都没有）
         let out = Array(wire.all.dropFirst(baseline))
-        XCTAssertEqual(Set(out.compactMap { $0["type"] as? String }), ["pocket_result", "twitter_result"])
+        XCTAssertEqual(Set(out.compactMap { $0["type"] as? String }), ["pocket_result", "twitter_result", "memory_result"])
         XCTAssertTrue(out.allSatisfy { $0["ok"] as? Bool == false })
         XCTAssertEqual(calls.list, [], "回调 / 执行器一个都没碰")
         XCTAssertEqual(notes.list, [], "全局通知一个都没发")
@@ -275,6 +276,7 @@ final class CCHubFrameOwnershipTests: XCTestCase {
         let task = open(primary)
         let calls = Counter()
         primary.onTwitterCmd = { frame in calls.add("twitter"); return ["type": "twitter_result", "id": frame["id"] as? String ?? "", "ok": true] }
+        primary.onMemoryCmd = { frame in calls.add("memory"); return ["type": "memory_result", "id": frame["id"] as? String ?? "", "ok": true] }
         primary.onAgentStatusResult = { _ in calls.add("agent_status") }
         primary.onStatusAlert = { _ in calls.add("status_alert"); return true }
         primary.onAgentBookNote = { _ in calls.add("book_note"); return false }   // false = 不落 .standard 去重表
@@ -288,8 +290,8 @@ final class CCHubFrameOwnershipTests: XCTestCase {
         let word = "w-\(tag)"
         VocabArcheologyTracker.inFlight.insert(word)
 
-        var types = ["twitter_cmd", "agent_status_result", "status_alert", "agent_book_note", "vocab_corpus_result"]
-        var expectedCalls: Set<String> = ["twitter", "agent_status", "status_alert", "book_note"]
+        var types = ["twitter_cmd", "memory_cmd", "agent_status_result", "status_alert", "agent_book_note", "vocab_corpus_result"]
+        var expectedCalls: Set<String> = ["twitter", "memory", "agent_status", "status_alert", "book_note"]
         var expectedNotes: Set<String> = ["vocabCorpusArrived"]
         #if PERSONAL_APPS
         types += ["trading_report_result", "trading_report_progress", "warroom_request_result"]

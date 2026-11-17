@@ -56,7 +56,6 @@ struct SettingsSearchEntry: Identifiable, Hashable {
     static func memorySubpage(for anchor: String) -> SettingsRoute? {
         if anchor.hasPrefix("leaf-mem-tuning-"),
            let field = RecallTuning.Field(rawValue: String(anchor.dropFirst("leaf-mem-tuning-".count))) {
-            if field == .maximumPages { return nil }
             switch field.page {
             case .archiveTrigger: return .memoryArchiveTrigger
             case .recallBrowse: return .memoryRecallBrowse
@@ -64,12 +63,15 @@ struct SettingsSearchEntry: Identifiable, Hashable {
             }
         }
         switch anchor {
-        case "page-mem-archivetrigger", "leaf-mem-fulltextfallback", "leaf-mem-archivereset":
+        case "page-mem-archivetrigger", "leaf-mem-archivereset", "leaf-mem-maximumpages", "leaf-mem-cooldown":
             return .memoryArchiveTrigger
-        case "page-mem-recallbrowse", "leaf-mem-readcharacters", "leaf-mem-datepage", "leaf-mem-windowpage",
-             "leaf-mem-searchpage", "leaf-mem-wikipage", "leaf-mem-originalpage", "leaf-mem-browsereset":
+        case "leaf-mem-ccmemory", "leaf-mem-garden-to-cc":
+            return .memoryCCSync
+        case "leaf-mem-c2-organize":
+            return .memoryAuditSettings
+        case "page-mem-recallbrowse", "leaf-mem-browsereset":
             return .memoryRecallBrowse
-        case "leaf-mem-catalog", "leaf-mem-rootindex", "leaf-mem-previouswindow", "leaf-mem-pinned", "leaf-mem-opennote":
+        case "leaf-mem-catalog", "leaf-mem-everyround", "leaf-mem-rootindex", "leaf-mem-previouswindow", "leaf-mem-pinned", "leaf-mem-opennote":
             return .memoryOpenWindow
         case "leaf-mem-a3-rewrite":
             return .memoryWriterA3
@@ -135,15 +137,49 @@ extension SettingsSearchEntry {
     }
 }
 
-// MARK: - 锚点页
+// MARK: - 折叠组
 
 extension SettingsSearchEntry {
+    /// 目标页在 pro 根列表的哪个折叠组里（`SettingsFoldRow` 的 AppStorage key，`SettingsView.swift:104-137`）。
+    /// 搜索直接跳进折叠组内的页面时要顺手把组展开——否则用户返回根列表会发现刚去过的按钮「消失」了。
+    /// 根级页面 / 子应用目录里的页 / 无根入口的页面（主题·附件·正则·世界书）返回 nil。
+    static func foldStorageKey(for tab: SettingsView.SettingsTab) -> String? {
+        switch tab {
+        #if os(macOS)
+        case .macWorkspace: return nil
+        #endif
+        #if os(iOS)
+        case .subApps: return nil
+        #endif
+        case .tts, .mcp:
+            return "settingsFold.aiExt"
+        case .claudeCode, .codex, .agent, .terminal, .myComputer:
+            return "settingsFold.devTools"
+        #if PERSONAL_APPS
+        case .trading: return nil
+        #endif
+        case .fileLibrary, .sandbox:
+            return "settingsFold.storage"
+        case .general, .permissions, .data, .config, .appearance, .persona,
+             .memory, .api, .usage, .rightPanel, .debug, .manual, .about,
+             .theme, .attachment, .regex, .worldBook, .xiaoya,
+             .sticker, .health, .calendar, .reading, .vocab, .groupChat:
+            return nil
+        }
+    }
+
     /// 铺了锚点的长页面（plan §八：内容 >1.5 屏才值得滚，短页跳页即可）。
     /// 带 anchor 的条目必属这几页——单测锁住，别往短页偷偷加。
     static let anchoredTabs: Set<SettingsView.SettingsTab> = [
         .appearance, .memory, .persona, .claudeCode,
         .data, .permissions, .vocab, .fileLibrary, .manual, .reading, .tts, .usage, .api
     ]
+
+    /// 跳转前的准备：把目标页所在折叠组展开。赋值 `selectedSettingsTab` 由调用方做。
+    static func expandFoldGroup(for tab: SettingsView.SettingsTab) {
+        guard let key = foldStorageKey(for: tab) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+    }
 }
 
 // MARK: - Registry
@@ -230,7 +266,7 @@ extension SettingsSearchEntry {
                   keywords: ["配对", "我的电脑", "让手机连这台 Mac", "工作目录", "干活目录", "hub", "扫码", "二维码", "电脑", "Mac",
                              "tmux", "连接", "重新连接", "pairing", "computer", "workdir", "connect"]),
             .init(id: "page-agent", title: "Agent", subtitle: "设置 › 编程工具", systemImage: "ri-robot-2",
-                  tab: .agent, keywords: ["自主任务", "共读", "预算", "自动", "agent", "autonomy", "budget"]),
+                  tab: .agent, keywords: ["自主任务", "自己醒来", "heartbeat", "共读", "预算", "自动", "agent", "autonomy", "budget"]),
             .init(id: "page-terminal", title: "终端", subtitle: toolSettings("终端 App › 键盘条 ⚙", mac: "设置 › 编程工具"), systemImage: "terminal",
                   tab: .terminal, keywords: ["快捷键", "按键", "工具条", "命令行", "keyboard", "terminal", "shortcut"]),
             .init(id: "page-rightpanel", title: rightPanelTitle, subtitle: toolSettings("主屏 › 设置 App", mac: "设置"), systemImage: "sidebar.right",
@@ -484,6 +520,9 @@ extension SettingsSearchEntry {
             .init(id: "leaf-appear-liststyle", title: "列表样式", subtitle: "外观 › 对话列表", systemImage: "list.bullet",
                   tab: .appearance, keywords: ["对话列表", "紧凑", "详细", "纯净", "两行", "预览", "未读", "list", "compact", "detailed", "pure", "clean", "preview"],
                   anchor: "leaf-appear-liststyle"),
+            .init(id: "leaf-appear-peoplebar", title: "顶栏的人", subtitle: "外观 › 对话列表", systemImage: "person.2",
+                  tab: .appearance, keywords: ["顶栏", "换人", "切人", "头像", "分段条", "人行", "最近", "people", "switch", "avatar", "top bar"],
+                  anchor: "leaf-appear-peoplebar"),
             .init(id: "leaf-appear-livebg", title: "液态金属背景", subtitle: "外观 › 对话列表", systemImage: "drop",
                   tab: .appearance, keywords: ["液态金属", "金属", "铬", "水银", "动态背景", "背景", "liquid metal", "chrome", "shader", "background"],
                   anchor: "leaf-appear-livebg"),
@@ -652,6 +691,17 @@ extension SettingsSearchEntry {
     // MARK: 叶子 · API
 
     private static var leafAPI: [SettingsSearchEntry] {
+        #if os(iOS)
+        leafAPIShared + [
+            .init(id: "leaf-api-keepalive", title: "后台保活", subtitle: "模型和API › 回复方式", systemImage: "arrow.triangle.2.circlepath",
+                  tab: .api, keywords: ["后台", "保活", "切出去", "切走", "断", "继续", "回完", "background", "keep alive", "continue"]),
+        ]
+        #else
+        leafAPIShared
+        #endif
+    }
+
+    private static var leafAPIShared: [SettingsSearchEntry] {
         [
             .init(id: "leaf-api-keys", title: "API Keys", subtitle: "模型和API › API Keys", systemImage: "key",
                   tab: .api, keywords: ["密钥", "凭证", "供应商", "工具调用", "后台任务用流式", "key", "credential", "provider", "stream"]),
@@ -690,6 +740,12 @@ extension SettingsSearchEntry {
     // MARK: 叶子 · 记忆
 
     private static var leafMemory: [SettingsSearchEntry] {
+        // 节名照一级页（`MemoryPageLayout`，粟粟 11-15）
+        let writeA = "记忆 › 写 · A 纪录片", writeB = "记忆 › 写 · B 日记", writeC = "记忆 › 写 · C 活档案"
+        let readZ = "记忆 › 读 · Z 每轮都带", readX = "记忆 › 读 · X 自动推送"
+        let readY = "记忆 › 读 · Y \(SettingsRoute.assistantName)主动翻", api = "记忆 › 接口"
+        let unfinished = "开发调试 › 记忆 · 没做完的"
+        let pushName = "系统推送给\(SettingsRoute.assistantName)"
         let entries: [SettingsSearchEntry] = [
             // 顶上
             .init(id: "leaf-mem-master", title: "记忆系统总开关", subtitle: "记忆", systemImage: "power",
@@ -698,139 +754,129 @@ extension SettingsSearchEntry {
             .init(id: "leaf-mem-startday", title: "记忆从哪天开始", subtitle: "记忆", systemImage: "calendar.badge.clock",
                   tab: .memory, keywords: ["起点", "开始日期", "从哪天", "不限", "start date", "since"],
                   anchor: "leaf-mem-startday"),
-            .init(id: "leaf-mem-extractmodel", title: "提取模型", subtitle: "记忆", systemImage: "cpu",
-                  tab: .memory, keywords: ["提取", "模型", "副模型", "extract", "model"],
+            .init(id: "leaf-mem-extractmodel", title: "默认模型", subtitle: "记忆", systemImage: "cpu",
+                  tab: .memory, keywords: ["提取模型", "提取", "模型", "副模型", "默认", "extract", "model", "default model"],
                   anchor: "leaf-mem-extractmodel"),
             .init(id: "leaf-mem-writebudget", title: "写入预算", subtitle: "记忆", systemImage: "dollarsign.circle",
                   tab: .memory, keywords: ["预算", "写入", "后台", "花费", "每周", "每天", "budget", "write", "cost"],
                   anchor: "leaf-mem-writebudget"),
-            .init(id: "leaf-mem-complexity", title: "复杂度", subtitle: "记忆", systemImage: "slider.horizontal.below.rectangle",
-                  tab: .memory, keywords: ["滑条", "轻", "中", "重", "complexity", "level"],
-                  anchor: "leaf-mem-complexity"),
-            // 写入 · 记什么（一个编号一行，点进去是这一项的设置）
-            .init(id: "leaf-mem-w-a2", title: "A2 上下文摘要", subtitle: "记忆 › 写入", systemImage: "text.append",
-                  tab: .memory, keywords: ["上下文摘要", "压缩", "尾段", "每 N 回合", "停 N 分钟", "只手动", "触发", "summary", "compress"],
+            // 写 · A / B / C（一个编号一行，点进去是这一项的设置）
+            .init(id: "leaf-mem-w-a2", title: "A2 上下文摘要", subtitle: writeA, systemImage: "text.append",
+                  tab: .memory, keywords: ["上下文摘要", "压缩", "每 N 回合", "停 N 分钟", "只手动", "触发", "纪录片", "summary", "compress"],
                   anchor: "leaf-mem-w-a2"),
-            .init(id: "leaf-mem-w-a3", title: "A3 窗口总结", subtitle: "记忆 › 写入", systemImage: "rectangle.stack",
-                  tab: .memory, keywords: ["窗口总结", "窗口·时间轴", "再压", "收尾", "静默", "24 小时", "分档", "重写", "新格式", "closeout", "window"],
+            .init(id: "leaf-mem-w-a3", title: "A3 窗口总结", subtitle: writeA, systemImage: "rectangle.stack",
+                  tab: .memory, keywords: ["窗口总结", "窗口·时间轴", "再压", "收尾", "静默", "24 小时", "重写", "新格式", "closeout", "window"],
                   anchor: "leaf-mem-w-a3"),
-            .init(id: "leaf-mem-a3-rewrite", title: "用新格式重写所有窗口总结", subtitle: "记忆 › 写入 › A3 窗口总结", systemImage: "arrow.triangle.2.circlepath",
+            .init(id: "leaf-mem-a3-rewrite", title: "用新格式重写所有窗口总结", subtitle: "\(writeA) › A3 窗口总结", systemImage: "arrow.triangle.2.circlepath",
                   tab: .memory, keywords: ["窗口总结", "旧格式", "重写", "新格式", "备份", "rewrite"],
                   anchor: "leaf-mem-a3-rewrite"),
-            .init(id: "leaf-mem-w-a4", title: "A4 时间轴", subtitle: "记忆 › 写入", systemImage: "calendar.day.timeline.left",
+            .init(id: "leaf-mem-w-a4", title: "A4 时间轴", subtitle: writeA, systemImage: "calendar.day.timeline.left",
                   tab: .memory, keywords: ["时间轴", "窗口·时间轴", "日记", "跨窗口时间轴", "窗口", "timeline", "diary"],
                   anchor: "leaf-mem-w-a4"),
-            .init(id: "leaf-mem-w-b1", title: "B1 心声", subtitle: "记忆 › 写入", systemImage: "heart.text.square",
+            .init(id: "leaf-mem-w-b1", title: "B1 心声", subtitle: writeB, systemImage: "heart.text.square",
                   tab: .memory, keywords: ["独白", "心声", "心声进聊天流", "heartvoice", "monologue"],
                   anchor: "leaf-mem-w-b1"),
-            .init(id: "leaf-mem-w-b2", title: "B2 日记", subtitle: "记忆 › 写入", systemImage: "book",
-                  tab: .memory, keywords: ["日记", "还没做", "diary"],
-                  anchor: "leaf-mem-w-b2"),
-            .init(id: "leaf-mem-w-b3", title: "B3 做梦", subtitle: "记忆 › 写入", systemImage: "moon.stars",
-                  tab: .memory, keywords: ["做梦", "还没做", "dream"],
-                  anchor: "leaf-mem-w-b3"),
-            .init(id: "leaf-mem-w-b4", title: "B4 自己记下的", subtitle: "记忆 › 写入", systemImage: "bookmark",
-                  tab: .memory, keywords: ["remember", "自己的记忆", "每日上限", "正文上限", "图数据库", "self memory", "limit"],
+            .init(id: "leaf-mem-w-b4", title: "B4 自己记下的", subtitle: writeB, systemImage: "bookmark",
+                  tab: .memory, keywords: ["remember", "自己的记忆", "每日上限", "正文上限", "self memory", "limit"],
                   anchor: "leaf-mem-w-b4"),
-            .init(id: "leaf-mem-w-c", title: "C 档案", subtitle: "记忆 › 写入", systemImage: "archivebox",
-                  tab: .memory, keywords: ["档案", "从聊天里记住的", "原子档案", "关键词", "archive"],
-                  anchor: "leaf-mem-w-c"),
-            .init(id: "leaf-mem-w-c2", title: "C2 碎片池", subtitle: "记忆 › 写入", systemImage: "atom",
-                  tab: .memory, keywords: ["碎片池", "记新东西", "提取", "每满几条", "提取提示词", "本机模型", "拒收", "fact", "fragment", "prompt"],
+            .init(id: "leaf-mem-w-c2", title: "C2 原子事实", subtitle: writeC, systemImage: "atom",
+                  tab: .memory, keywords: ["原子事实", "碎片池", "C2 碎片池", "记忆条目", "C2 记忆条目", "记新东西", "提取", "每满几条", "提取提示词", "整段读完再写", "改提示词", "你改过的提示词", "占位符", "本机模型", "拒收", "atomic facts", "fact", "fragment", "prompt", "Edit", "edit prompt", "Back to default", "Copy"],
                   anchor: "leaf-mem-w-c2"),
-            .init(id: "leaf-mem-w-c3", title: "C3 整理编目", subtitle: "记忆 › 写入", systemImage: "list.bullet.indent",
-                  tab: .memory, keywords: ["整理编目", "wiki", "整理提案", "审计台", "整理", "每天自动整理", "分拣", "一次最多几个主题", "手动整理最多几轮", "不触发的词", "种子", "播种", "从人设生成基础 wiki", "从 CC 记忆播种", "wiki 体检", "断链", "孤页", "目录漂移", "catalog", "organize", "stop words", "seed"],
+            .init(id: "leaf-mem-w-c3", title: "C3 wiki 整理", subtitle: writeC, systemImage: "list.bullet.indent",
+                  tab: .memory, keywords: ["整理编目", "C3 整理编目", "wiki", "整理提案", "审计台", "整理", "每天自动整理", "分拣", "一次最多几个主题", "手动整理最多几轮", "不触发的词", "种子", "播种", "从人设生成基础 wiki", "从 CC 记忆播种", "wiki 体检", "断链", "孤页", "目录漂移", "catalog", "organize", "stop words", "seed"],
                   anchor: "leaf-mem-w-c3"),
-            .init(id: "leaf-mem-ccmemory", title: "同步 CC 的记忆", subtitle: "记忆 › 写入", systemImage: "arrow.triangle.2.circlepath",
-                  tab: .memory, keywords: ["CC", "CC 记忆", "Claude Code", "同步", "memory", "sync"],
-                  anchor: "leaf-mem-ccmemory"),
-            // 整理 · 怎么管
-            .init(id: "leaf-mem-pending", title: "待续", subtitle: "记忆 › 整理", systemImage: "pin",
-                  tab: .memory, keywords: ["待续", "没做完", "做完了", "淡了", "pending", "todo"],
-                  anchor: "leaf-mem-pending"),
-            .init(id: "leaf-mem-audit", title: "整理台", subtitle: "记忆 › 整理", systemImage: "checklist",
-                  tab: .memory, keywords: ["整理台", "审计台", "审", "留", "删", "碎片池", "整理", "去重", "audit", "review"],
-                  anchor: "leaf-mem-audit"),
-            // 注入 · 塞什么进 prompt
-            .init(id: "leaf-mem-content", title: "回想 · 怎么想起来", subtitle: "记忆 › 回想", systemImage: "doc.text",
-                  tab: .memory, keywords: ["内容", "注入什么", "回想", "recall", "content"],
-                  anchor: "leaf-mem-content"),
-            .init(id: "leaf-mem-openwindow", title: "开窗口带什么", subtitle: "记忆 › 回想", systemImage: "checklist",
-                  tab: .memory, keywords: ["开窗口", "带全文的最近几段", "时间轴天数", "天数", "最近几条", "注入预算比例", "inject", "open window"],
+            // 读 · Z 每轮都带
+            .init(id: "leaf-mem-openwindow", title: "开窗口带什么", subtitle: readZ, systemImage: "checklist",
+                  tab: .memory, keywords: ["开窗口", "每轮都带", "带全文的最近几段", "时间轴天数", "天数", "最近几条", "注入预算比例", "inject", "open window"],
                   anchor: "leaf-mem-openwindow"),
             .init(id: "leaf-mem-catalog", title: "命中的只带一行目录", subtitle: "记忆 › 开窗口带什么", systemImage: "list.bullet.rectangle.portrait",
                   tab: .memory, keywords: ["目录式注入", "目录", "按需", "catalog"],
                   anchor: "leaf-mem-catalog"),
-            .init(id: "leaf-mem-budget", title: "注入预算", subtitle: "记忆 › 回想", systemImage: "gauge.with.needle",
+            .init(id: "leaf-mem-budget", title: "注入预算", subtitle: readZ, systemImage: "gauge.with.needle",
                   tab: .memory, keywords: ["token", "预算", "budget", "inject"],
                   anchor: "leaf-mem-budget"),
-            // 检索 · 怎么挑记忆
-            .init(id: "leaf-mem-inject", title: "自动想起 · 聊到了才带", subtitle: "记忆 › 回想", systemImage: "arrow.down.doc",
-                  tab: .memory, keywords: ["注入", "挑选", "策略", "检索", "inject", "strategy"],
-                  anchor: "leaf-mem-inject"),
-            .init(id: "leaf-mem-injectfull", title: "全量注入", subtitle: "记忆 › 回想", systemImage: "tray.full",
-                  tab: .memory, keywords: ["全部", "不筛选", "full", "inject"],
-                  anchor: "leaf-mem-injectfull"),
-            .init(id: "leaf-mem-injectkeyword", title: "关键词命中", subtitle: "记忆 › 回想", systemImage: "text.magnifyingglass",
-                  tab: .memory, keywords: ["关键词", "keyword", "match"],
-                  anchor: "leaf-mem-injectkeyword"),
-            .init(id: "leaf-mem-injectvector", title: "按意思找记忆", subtitle: "记忆 › 回想", systemImage: "point.3.filled.connected.trianglepath.dotted",
-                  tab: .memory, keywords: ["向量检索", "向量语义", "语义", "按意思", "embedding", "vector", "semantic"],
-                  anchor: "leaf-mem-injectvector"),
-            .init(id: "leaf-mem-injectgraph", title: "关联扩展", subtitle: "记忆 › 回想", systemImage: "circle.hexagonpath",
-                  tab: .memory, keywords: ["关联", "图谱", "graph", "related"],
-                  anchor: "leaf-mem-injectgraph"),
-            .init(id: "leaf-mem-convhistory", title: "对话历史搜索", subtitle: "记忆 › 回想", systemImage: "clock.arrow.circlepath",
-                  tab: .memory, keywords: ["搜索旧对话", "历史", "history", "search"],
-                  anchor: "leaf-mem-convhistory"),
-            .init(id: "leaf-mem-recall", title: "想起来了", subtitle: "记忆 › 回想", systemImage: "rectangle.compress.vertical",
-                  tab: .memory, keywords: ["原地", "弹出", "隐藏", "recall", "disclosure"], anchor: "leaf-mem-recall"),
-            .init(id: "page-mem-archivetrigger", title: "档案触发", subtitle: "记忆 › 回想", systemImage: "archivebox",
-                  tab: .memory, keywords: ["自动想起", "聊到才带", "archive", "trigger"], anchor: "page-mem-archivetrigger"),
-            .init(id: "page-mem-recallbrowse", title: "翻记忆", subtitle: "记忆 › 回想", systemImage: "book",
-                  tab: .memory, keywords: ["对话历史搜索", "翻旧对话", "recall", "browse"], anchor: "page-mem-recallbrowse"),
-            .init(id: "leaf-mem-archivetrigger", title: "档案触发", subtitle: "记忆 › 回想", systemImage: "archivebox",
-                  tab: .memory, keywords: ["总闸", "自动想起", "archive", "trigger"], anchor: "leaf-mem-archivetrigger"),
-            .init(id: "leaf-mem-maximumpages", title: "一轮最多几页", subtitle: "记忆 › 回想", systemImage: "doc.on.doc",
-                  tab: .memory, keywords: ["页数", "上限", "maximum", "pages"], anchor: "leaf-mem-maximumpages"),
-            .init(id: "leaf-mem-cooldown", title: "冷却", subtitle: "记忆 › 回想", systemImage: "pause.circle",
-                  tab: .memory, keywords: ["停几句", "没接茬", "cooldown", "turns"], anchor: "leaf-mem-cooldown"),
-            .init(id: "leaf-mem-rootindex", title: "档案根索引", subtitle: "记忆 › 开窗口带什么", systemImage: "list.bullet",
-                  tab: .memory, keywords: ["档案目录", "每轮都带", "root", "index"], anchor: "leaf-mem-rootindex"),
+            .init(id: "leaf-mem-everyround", title: "原子事实每轮全带", subtitle: "记忆 › 开窗口带什么", systemImage: "tray.full",
+                  tab: .memory, keywords: ["每轮全带", "全量注入", "关键词命中", "全部", "不筛选", "记忆条目", "full", "inject", "every round"],
+                  anchor: "leaf-mem-everyround"),
+            .init(id: "leaf-mem-rootindex", title: "wiki 目录", subtitle: "记忆 › 开窗口带什么", systemImage: "list.bullet",
+                  tab: .memory, keywords: ["档案根索引", "根索引", "档案目录", "每轮都带", "root", "index"], anchor: "leaf-mem-rootindex"),
             .init(id: "leaf-mem-previouswindow", title: "上一个窗口最后几条", subtitle: "记忆 › 开窗口带什么", systemImage: "clock",
                   tab: .memory, keywords: ["上窗", "快照", "previous", "window"], anchor: "leaf-mem-previouswindow"),
             .init(id: "leaf-mem-pinned", title: "钉住的", subtitle: "记忆 › 开窗口带什么", systemImage: "pin",
                   tab: .memory, keywords: ["钉住", "常驻", "pinned", "stable"], anchor: "leaf-mem-pinned"),
             .init(id: "leaf-mem-opennote", title: "新开窗口先弹纸条", subtitle: "记忆 › 开窗口带什么", systemImage: "note.text",
                   tab: .memory, keywords: ["新窗口", "纸条", "窗口透视", "token", "open", "note"], anchor: "leaf-mem-opennote"),
-            .init(id: "leaf-mem-fulltextfallback", title: "页名没对上时搜全文", subtitle: "记忆 › 回想 › 档案触发", systemImage: "doc.text.magnifyingglass",
-                  tab: .memory, keywords: ["一句话最多取几个词", "命中至少几个词", "分量覆盖", "fulltext", "fallback"], anchor: "leaf-mem-fulltextfallback"),
-            .init(id: "leaf-mem-readcharacters", title: "正文最多几个字 3000 · 连目录一共最多几个字 4000", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "textformat",
-                  tab: .memory, keywords: ["字数", "回包", "body", "characters"], anchor: "leaf-mem-readcharacters"),
-            .init(id: "leaf-mem-datepage", title: "时间轴：一页 1 天 · 最多 12 件事", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "calendar",
-                  tab: .memory, keywords: ["时间轴", "分页", "date", "page"], anchor: "leaf-mem-datepage"),
-            .init(id: "leaf-mem-windowpage", title: "窗口总结：一页 10 段", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "rectangle.stack",
-                  tab: .memory, keywords: ["总结", "分页", "window", "segments"], anchor: "leaf-mem-windowpage"),
-            .init(id: "leaf-mem-searchpage", title: "搜索：一页 5 条", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "magnifyingglass",
-                  tab: .memory, keywords: ["结果", "分页", "search", "results"], anchor: "leaf-mem-searchpage"),
-            .init(id: "leaf-mem-wikipage", title: "档案目录：一页 30 行 · 档案页记录：一页 10 条", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "list.bullet.rectangle",
-                  tab: .memory, keywords: ["档案", "记录", "wiki", "records"], anchor: "leaf-mem-wikipage"),
-            .init(id: "leaf-mem-originalpage", title: "原文：一页 8 条消息", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "text.bubble",
-                  tab: .memory, keywords: ["原文", "消息", "original", "messages"], anchor: "leaf-mem-originalpage"),
-            .init(id: "leaf-mem-archivereset", title: "恢复本楼层默认", subtitle: "记忆 › 回想 › 档案触发", systemImage: "arrow.counterclockwise",
+            // 读 · X 自动推送
+            .init(id: "leaf-mem-archivetrigger", title: pushName, subtitle: readX, systemImage: "archivebox",
+                  tab: .memory, keywords: ["系统推送", "聊到才带", "档案触发", "自动推送", "总闸", "自动想起", "记忆条目", "archive", "trigger"], anchor: "leaf-mem-archivetrigger"),
+            .init(id: "page-mem-archivetrigger", title: pushName, subtitle: readX, systemImage: "archivebox",
+                  tab: .memory, keywords: ["系统推送", "聊到才带", "档案触发", "自动推送", "自动想起", "archive", "trigger"], anchor: "page-mem-archivetrigger"),
+            .init(id: "leaf-mem-maximumpages", title: "一轮最多几页", subtitle: "\(readX) › \(pushName)", systemImage: "doc.on.doc",
+                  tab: .memory, keywords: ["页数", "上限", "maximum", "pages"], anchor: "leaf-mem-maximumpages"),
+            .init(id: "leaf-mem-cooldown", title: "冷却", subtitle: "\(readX) › \(pushName)", systemImage: "pause.circle",
+                  tab: .memory, keywords: ["停几句", "没接茬", "cooldown", "turns"], anchor: "leaf-mem-cooldown"),
+            .init(id: "leaf-mem-archivereset", title: "恢复本楼层默认", subtitle: "\(readX) › \(pushName)", systemImage: "arrow.counterclockwise",
                   tab: .memory, keywords: ["恢复", "楼层", "reset", "defaults"], anchor: "leaf-mem-archivereset"),
-            .init(id: "leaf-mem-browsereset", title: "恢复本楼层默认", subtitle: "记忆 › 回想 › 翻记忆", systemImage: "arrow.counterclockwise",
+            // 读 · Y {助手}主动翻
+            .init(id: "leaf-mem-convhistory", title: "翻记忆", subtitle: readY, systemImage: "clock.arrow.circlepath",
+                  tab: .memory, keywords: ["对话历史搜索", "搜索旧对话", "主动翻", "历史", "history", "search"],
+                  anchor: "leaf-mem-convhistory"),
+            .init(id: "page-mem-recallbrowse", title: "翻记忆", subtitle: readY, systemImage: "book",
+                  tab: .memory, keywords: ["对话历史搜索", "翻旧对话", "recall", "browse"], anchor: "page-mem-recallbrowse"),
+            .init(id: "leaf-mem-browsereset", title: "恢复本楼层默认", subtitle: "\(readY) › 翻记忆", systemImage: "arrow.counterclockwise",
                   tab: .memory, keywords: ["恢复", "楼层", "reset", "defaults"], anchor: "leaf-mem-browsereset"),
+            // 接口
+            .init(id: "leaf-mem-ccsync", title: "和 CC 同步", subtitle: api, systemImage: "arrow.triangle.2.circlepath",
+                  tab: .memory, keywords: ["CC", "Claude Code", "同步", "接口", "sync"],
+                  anchor: "leaf-mem-ccsync"),
+            .init(id: "leaf-mem-ccmemory", title: "同步 CC 的记忆", subtitle: "\(api) › 和 CC 同步", systemImage: "arrow.triangle.2.circlepath",
+                  tab: .memory, keywords: ["CC", "CC 记忆", "Claude Code", "同步", "memory", "sync"],
+                  anchor: "leaf-mem-ccmemory"),
+            .init(id: "leaf-mem-garden-to-cc", title: "和 CC 同步记忆文件夹", subtitle: "\(api) › 和 CC 同步", systemImage: "folder",
+                  tab: .memory, keywords: ["CC", "Claude Code", "读记忆", "写记忆", "让 CC 读到这里的记忆", "记忆文件夹", "C2 原子事实", "C2 记忆条目", "记忆条目", "助手设定", "Prompt", "garden-memory", "CLAUDE.md", "同步", "等你点", "Approve", "Reject", "memory", "sync"],
+                  anchor: "leaf-mem-garden-to-cc"),
+            .init(id: "leaf-mem-recall", title: "想起来了", subtitle: api, systemImage: "rectangle.compress.vertical",
+                  tab: .memory, keywords: ["原地", "弹出", "隐藏", "recall", "disclosure"], anchor: "leaf-mem-recall"),
+            // 最底下
+            .init(id: "leaf-mem-auditsettings", title: "审计台设置", subtitle: "记忆", systemImage: "checklist",
+                  tab: .memory, keywords: ["审计台", "整理", "audit", "settings"],
+                  anchor: "leaf-mem-auditsettings"),
+            .init(id: "leaf-mem-c2-organize", title: FragmentDream.actor, subtitle: "记忆 › 审计台设置", systemImage: "wand.and.stars",
+                  tab: .memory, keywords: ["C2 整理", "写完自动整理一遍", "整理留下的条目要我批", "自动整理", "要我批", "拿不准", "auto review", "approve",
+                                           "Organize now", "重新整理", "手动整理", "整理一遍"],
+                  anchor: "leaf-mem-c2-organize"),
+            .init(id: "leaf-mem-explainer", title: "记忆系统说明", subtitle: "记忆", systemImage: "book.closed",
+                  tab: .memory, keywords: ["说明", "记忆系统", "explainer", "help"],
+                  anchor: "leaf-mem-explainer"),
             // 「手动添加记忆」的输入框在 macOS 的 MacMemoryEntriesSections（MemorySettingsPage.swift），
             // iOS 记忆页上没有这一块 → 无锚点
             .init(id: "leaf-mem-add", title: "手动添加记忆", subtitle: "记忆 › 条目管理", systemImage: "plus.circle",
                   tab: .memory, keywords: ["添加", "手动", "add", "memory"]),
+            // 设置 › 开发调试 › 记忆 · 没做完的（调试页没铺锚点 → 只落到调试页）
+            .init(id: "leaf-debug-memory-unfinished", title: "记忆 · 没做完的", subtitle: "开发调试", systemImage: "hammer",
+                  tab: .debug, keywords: ["还没做", "没做完", "记忆", "B2", "B3", "日记", "做梦", "图数据库", "联想召回",
+                                         "按意思找记忆", "关联扩展", "unfinished", "todo"]),
+            .init(id: "leaf-mem-w-b2", title: "B2 日记", subtitle: unfinished, systemImage: "book",
+                  tab: .debug, keywords: ["日记", "还没做", "diary"]),
+            .init(id: "leaf-mem-w-b3", title: "B3 做梦", subtitle: unfinished, systemImage: "moon.stars",
+                  tab: .debug, keywords: ["做梦", "还没做", "dream"]),
+            .init(id: "leaf-mem-injectvector", title: "按意思找记忆", subtitle: unfinished, systemImage: "point.3.filled.connected.trianglepath.dotted",
+                  tab: .debug, keywords: ["向量检索", "向量语义", "语义", "按意思", "embedding", "vector", "semantic"]),
+            .init(id: "leaf-mem-injectgraph", title: "关联扩展", subtitle: unfinished, systemImage: "circle.hexagonpath",
+                  tab: .debug, keywords: ["关联", "图谱", "graph", "related"]),
         ]
         let fields: [RecallTuning.Field] = [.minimumEffectiveLength, .minimumSharedTerms, .activeOverlapThreshold, .cooldownTurns,
-            .identityLookbackMessages, .minimumHanTermLength, .minimumLatinTermLength, .maximumRecallCalls]
+            .minimumHanTermLength, .minimumLatinTermLength, .maximumQueryTerms, .minimumFullTextTerms,
+            .fullTextCoverageThreshold, .maximumFragments, .maximumRecallCalls]
         return entries + fields.map { field in
                 let id = "leaf-mem-tuning-\(field.rawValue)"
-                return .init(id: id, title: field.title, subtitle: "记忆 › 回想 › \(field.page.rawValue)",
+                let section: String
+                switch field.page {
+                case .archiveTrigger: section = readX
+                case .recallBrowse: section = readY
+                case .openWindow: section = readZ
+                }
+                return .init(id: id, title: field.title, subtitle: "\(section) › \(field.page.rawValue.replacingOccurrences(of: "助手", with: SettingsRoute.assistantName))",
                              systemImage: "slider.horizontal.3", tab: .memory,
                              keywords: [field.group, field.explanation, field.rawValue, "recall", "tuning"], anchor: id)
             }
@@ -949,6 +995,9 @@ extension SettingsSearchEntry {
                   tab: .codex, keywords: ["扫码", "配对", "connect", "pairing"]),
             .init(id: "leaf-agent-enable", title: "启用自主任务", subtitle: "Agent › 自主任务", systemImage: "ri-robot-2",
                   tab: .agent, keywords: ["自主", "自动", "autonomy", "task"]),
+            // iPhone 上自主任务换成「自己醒来」（plan-wake-heartbeat §5）
+            .init(id: "leaf-agent-wake", title: "自己醒来", subtitle: "Agent › 自己醒来", systemImage: "alarm",
+                  tab: .agent, keywords: ["自唤醒", "醒来", "心跳", "heartbeat", "任务", "早报", "安静时段", "wake", "schedule"]),
             .init(id: "leaf-agent-coread", title: "共读批注", subtitle: "Agent › 共读批注", systemImage: "book.and.wrench",
                   tab: .agent, keywords: ["共读", "批注", "coread", "annotate"]),
             .init(id: "leaf-agent-budget", title: "预算", subtitle: "Agent › 预算", systemImage: "dollarsign.circle",
@@ -984,6 +1033,8 @@ extension SettingsSearchEntry {
                   tab: .sticker, keywords: ["画画", "笔刷", "水彩", "钢笔", "颜色", "纸", "brush", "watercolor", "pen", "color"]),
             .init(id: "leaf-sticker-meme", title: "AI 看原图", subtitle: "贴纸 › 表情包", systemImage: "face.smiling",
                   tab: .sticker, keywords: ["表情包", "原图", "看图", "meme", "sticker", "vision"]),
+            .init(id: "leaf-sticker-meme-ai", title: "让 AI 也能发", subtitle: "贴纸 › 表情包", systemImage: "face.smiling",
+                  tab: .sticker, keywords: ["表情包", "AI 发表情", "发表情", "meme", "sticker", "send"]),
             .init(id: "leaf-sticker-note", title: "便利贴", subtitle: "贴纸 › 便利贴", systemImage: "note.text",
                   tab: .sticker, keywords: ["便签", "便利贴", "字体", "手写", "note", "sticky", "font"]),
             .init(id: "leaf-health-connect", title: "连接", subtitle: "健康 › 连接", systemImage: "heart.circle",
@@ -1217,9 +1268,10 @@ extension SettingsSearchEntry {
             return "AI 能看什么"
         #endif
         case .toolsMaster, .webSearch, .voiceProactive, .pocket,
-             .calendar, .reminders, .clipboard, .shell, .twitter, .browserOperate:
+             .calendar, .reminders, .clipboard, .shell, .twitter, .browserOperate, .memoryCards,
+             .memorySelf, .memoryFiles, .promptEdit, .webApps:
             return "AI 能做什么"
-        case .notifications:
+        case .notifications, .selfWake:
             return "AI 自主行为"
         }
     }

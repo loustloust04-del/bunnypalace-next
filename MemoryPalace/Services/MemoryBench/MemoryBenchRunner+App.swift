@@ -161,15 +161,7 @@ enum MemoryBenchWriters {
     }
 
     static func recallReader(profileId: String? = nil) -> MemoryBenchRecallReader {
-        MemoryBenchRecallReader(profileId: profileId, contract: recallContract, floorURL: floorURL)
-    }
-
-    /// 内置快照随 app 资源走（`Resources/MemoryBench/`）；资源缺失时给不存在的路径，
-    /// 让 `Reader.floor(for:)` 返回 nil（与旧 loader 找不到文件等价），不崩。
-    static var floorURL: URL {
-        Bundle.main.url(forResource: "memory-bench-recall-floor-xingyan", withExtension: "json", subdirectory: "MemoryBench")
-            ?? Bundle.main.url(forResource: "memory-bench-recall-floor-xingyan", withExtension: "json")
-            ?? URL(fileURLWithPath: "/nonexistent/memory-bench-recall-floor-xingyan.json")
+        MemoryBenchRecallReader(profileId: profileId, contract: recallContract)
     }
 
     static let all: [any MemoryBenchWriter] = [MemoryBenchC2Writer(), recallReader()]

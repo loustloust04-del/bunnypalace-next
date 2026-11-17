@@ -124,10 +124,14 @@ final class MemoryAttributionPersistenceTests: XCTestCase {
             XCTAssertEqual(migrated.organizeRejectedAt, time.addingTimeInterval(8))
             XCTAssertNil(migrated.subject)
             XCTAssertNil(migrated.speaker)
+            XCTAssertNil(migrated.confidence, "老库没有置信度这一列：加上后是空的，不回填")
+            XCTAssertNil(migrated.sourceNodeIds, "老库没有全部出处这一列：加上后是空的，不回填；锚点照旧")
             let short = try XCTUnwrap(memories.first { $0.id == shortID })
             XCTAssertEqual(short.content, "嗯", "旧库不套新提取校验")
             XCTAssertNil(short.subject)
             XCTAssertNil(short.speaker)
+            XCTAssertNil(short.confidence)
+            XCTAssertNil(short.sourceNodeIds)
             XCTAssertNil(short.occurredDay)
             XCTAssertNil(short.organizedAt)
             XCTAssertNil(short.organizedPage)
@@ -149,8 +153,10 @@ final class MemoryAttributionPersistenceTests: XCTestCase {
                                     sourceConversationId: "fictional-conversation")
                 memory.subject = "虚构灯塔-\(index)"
                 memory.speaker = speaker
+                memory.confidence = index == 0 ? nil : 40 + index
                 memory.sourceQuote = "虚构出处第\(index)条"
                 memory.sourceNodeId = "fictional-node-\(index)"
+                memory.sourceNodeIds = index == 0 ? nil : ["fictional-node-\(index)", "fictional-node-\(index)-b"]
                 memory.createdAt = time
                 memory.updatedAt = time.addingTimeInterval(1)
                 memory.occurredDay = "2026-10-17"
@@ -165,9 +171,13 @@ final class MemoryAttributionPersistenceTests: XCTestCase {
                 let decoded = try decode(payload)
                 XCTAssertEqual(decoded.subject, memory.subject)
                 XCTAssertEqual(decoded.speaker, speaker)
+                XCTAssertEqual(decoded.confidence, memory.confidence)
+                XCTAssertEqual(decoded.sourceNodeIds, memory.sourceNodeIds)
                 let restored = decoded.toModel()
                 XCTAssertEqual(restored.subject, memory.subject)
                 XCTAssertEqual(restored.speaker, speaker)
+                XCTAssertEqual(restored.confidence, memory.confidence)
+                XCTAssertEqual(restored.sourceNodeIds, memory.sourceNodeIds)
                 context.insert(restored)
             }
             try context.save()
@@ -178,12 +188,17 @@ final class MemoryAttributionPersistenceTests: XCTestCase {
             let stored = try context.fetch(FetchDescriptor<Memory>())
             XCTAssertEqual(stored.count, speakers.count)
             XCTAssertEqual(Set(stored.compactMap(\.speaker)), Set(speakers))
+            XCTAssertEqual(stored.map(\.confidence).sorted { ($0 ?? -1) < ($1 ?? -1) }, [nil, 41, 42], "置信度过备份、落盘、重开还是同一个数；没给的还是空")
+            XCTAssertEqual(Set(stored.map { $0.sourceNodeIds?.joined(separator: ",") ?? "-" }),
+                           ["-", "fictional-node-1,fictional-node-1-b", "fictional-node-2,fictional-node-2-b"], "全部出处过备份、落盘、重开顺序不变；没有的还是空")
             for memory in stored {
                 let payload = try encode(FullMemoryDocument(model: memory))
                 XCTAssertEqual(payload, try XCTUnwrap(expected[memory.id]), "磁盘重开及再导出不能丢归因或改变原字段")
                 let again = try decode(payload).toModel()
                 XCTAssertEqual(again.subject, memory.subject)
                 XCTAssertEqual(again.speaker, memory.speaker)
+                XCTAssertEqual(again.confidence, memory.confidence)
+                XCTAssertEqual(again.sourceNodeIds, memory.sourceNodeIds)
                 XCTAssertEqual(again.content, memory.content)
             }
         }
@@ -195,19 +210,25 @@ final class MemoryAttributionPersistenceTests: XCTestCase {
                             sourceConversationId: "fictional-old-conversation")
         memory.subject = "这个值必须从旧备份夹具删除"
         memory.speaker = "AI 承诺"
+        memory.confidence = 77
         memory.tokenCount = 9
         memory.sourceQuote = "虚构旧出处"
         memory.sourceNodeId = "fictional-old-node"
+        memory.sourceNodeIds = ["fictional-old-node", "fictional-old-node-b"]
         memory.createdAt = time
         memory.updatedAt = time
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encode(FullMemoryDocument(model: memory))) as? [String: Any])
         object.removeValue(forKey: "subject")
         object.removeValue(forKey: "speaker")
+        XCTAssertNotNil(object.removeValue(forKey: "confidence"), "新备份里有这个键")
+        XCTAssertNotNil(object.removeValue(forKey: "sourceNodeIds"), "新备份里有这个键")
         XCTAssertNil(object["subject"])
         XCTAssertNil(object["speaker"])
         let legacy = try decode(JSONSerialization.data(withJSONObject: object))
         XCTAssertNil(legacy.subject)
         XCTAssertNil(legacy.speaker)
+        XCTAssertNil(legacy.confidence, "老备份没这个键 = 空")
+        XCTAssertNil(legacy.sourceNodeIds, "老备份没这个键 = 空")
         let expected = try encode(legacy)
         let firstURL = root.appendingPathComponent("old-backup-import.store")
         try autoreleasepool {
@@ -245,6 +266,7 @@ final class MemoryAttributionPersistenceTests: XCTestCase {
             let restored = try XCTUnwrap(context.fetch(FetchDescriptor<Memory>()).first)
             XCTAssertNil(restored.subject, "没有出处角色不应猜归因")
             XCTAssertNil(restored.speaker)
+            XCTAssertNil(restored.confidence)
             XCTAssertEqual(restored.content, "嗯")
             XCTAssertEqual(try encode(FullMemoryDocument(model: restored)), expected)
         }

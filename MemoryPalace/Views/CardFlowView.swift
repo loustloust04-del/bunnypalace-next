@@ -185,7 +185,7 @@ struct StreamScrollAnchor: UIViewRepresentable {
         }
 
         /// L2-T3b 回归修复（09-09）：isAtBottom 的 onScrollGeometryChange 判定在首帧同步渲染
-        /// 落地后卡死（只翻 0 不回 1，模拟器+真机双实锤；geometry API stuck 记忆卡家族）。
+        /// 落地后卡死（只翻 0 不回 1，模拟器+真机双实锤；geometry API stuck 记忆条目家族）。
         /// 换 UIKit KVO 直读，语义等价（off + adjustedTop < 200，含 margin 修正——裸 offset
         /// 判定假翻的教训沿用）。closure 由 CardFlowView onAppear 挂，楼层重建时覆盖指向新 State。
         private static var atBottomObs: NSKeyValueObservation?
@@ -466,6 +466,10 @@ struct CellGrowthAnchor: UIViewRepresentable {
 
 struct CardFlowView: View {
     @Environment(\.chatMetrics) private var metrics
+    #if os(iOS)
+    /// 一起看小窗占掉顶上多高：列表留白 / 渐隐跟着让（plan-chat-watch-together W1）
+    @State private var chatWatch = ChatWatch.shared
+    #endif
     /// mac 全屏模式下正文装在卡里：卡自己画了底（可能带壁纸），卡内就不再各画一层
     @Environment(\.macChatCarded) private var macChatCarded
     var viewModel: ConversationViewModel
@@ -1124,7 +1128,7 @@ struct CardFlowView: View {
                                 inputBarBottom: keyboardBridge.containerTop + keyboardBridge.barVisibleHeight,
                                 keyboardVisible: keyboardBridge.kbVisible,
                                 enabled: !viewModel.currentPath.isEmpty && !stickerVM.isEditingStickers,
-                                topFadeEnd: chatBubbleMode ? 180 : 130
+                                topFadeEnd: (chatBubbleMode ? 180 : 130) + chatWatch.occupiedHeight
                             )
                             .frame(width: 0, height: 0)
                         }
@@ -1156,7 +1160,8 @@ struct CardFlowView: View {
                     .contentMargins(.top, 100, for: .scrollContent)
                     // contentMargins.bottom = 物理底 = 反转后视觉顶 = 给 nav/blur 区留空间
                     // （150：顶部玻璃胶囊行压到 ~144pt，50 会让翻到顶的消息被挡——粟粟真机两轮定稿，两模式统一）
-                    .contentMargins(.bottom, 150, for: .scrollContent)
+                    // + 一起看小窗占的高（plan-chat-watch-together W1）
+                    .contentMargins(.bottom, 150 + chatWatch.occupiedHeight, for: .scrollContent)
                     // + iPhone 系统竖条换成自绘 ChatScrubber（plan-chat-scrubber）；iPad 保持系统条
                     .modifier(ChatListScrollChrome())
                     .compositingGroup()
@@ -1167,7 +1172,8 @@ struct CardFlowView: View {
                             inputBarBottom: keyboardBridge.containerTop + keyboardBridge.barVisibleHeight,
                             keyboardVisible: keyboardBridge.kbVisible,
                             hasInputGeometry: keyboardBridge.containerTop > 0,
-                            bubbleMode: chatBubbleMode
+                            bubbleMode: chatBubbleMode,
+                            extraTop: chatWatch.occupiedHeight
                         )
                     }
                     // 状态栏 tap → 滚视觉顶（最旧消息 = 物理底）。走 UIKit 绝对 offset，不 scrollTo 首条（长对话卡数秒）
@@ -2095,9 +2101,7 @@ struct ChatInputBar: View {
         #endif
         let hubBlocker = ccHubBlocker
         return VStack(spacing: metrics.composerStackSpacing) {
-            if let hubBlocker, let conv = viewModel.selectedConversation {
-                CCHubBlockedBanner(conversation: conv, blocker: hubBlocker, viewModel: viewModel)
-            }
+            CCHubComposerNotices(conversation: viewModel.selectedConversation, blocker: hubBlocker, viewModel: viewModel)
             // A4：引用 + 附件同一横排（AttachmentChipRow 里引用排第一个）。✕ 取消引用。
             // 排队消息也在这排（⏳ chip，✕ = 取消排队写回输入框）。
             if hasChipRow {
@@ -2396,7 +2400,12 @@ struct ChatInputBar: View {
             ChatInputHandle.shared.issueText("")
             #endif
         }) { return false }
-        let outgoing = selectedAttachments + linkReads.attachments(for: trimmed)
+        var outgoing = selectedAttachments + linkReads.attachments(for: trimmed)
+        #if os(iOS)
+        // 一起看（plan-chat-watch-together W2）：小窗开着就带上进度 / 字幕 / 画面（看不了图的模型只带文字）
+        outgoing += ChatWatch.shared.attachmentsForSend(
+            includeImages: VisionCapability.of(currentModel, providerType: providerManager.provider(for: currentModel)?.type) != .no)
+        #endif
         let modelInput = ChatAttachmentPromptBuilder.modelInput(text: trimmed, attachments: outgoing)
 
         // 预算 pre-check：被拦时返回 false，子 view 保留 text
@@ -4270,43 +4279,10 @@ struct BubbleView: View {
 
     var isUser: Bool { node.role == "user" }
 
-    private var messageError: String? {
-        guard !isUser else { return nil }
-        if case .text(let text)? = ChatDisplaySnapshot.segments(of: node)?.last,
-           let error = ChatSystemMessage.split(text, legacy: node.usesLegacyErrorMarker).error { return error }
-        return ChatSystemMessage.split(node.content, legacy: node.usesLegacyErrorMarker).error
-    }
-
-    private var messageNotice: String? {
-        guard !isUser else { return nil }
-        if case .text(let text)? = ChatDisplaySnapshot.segments(of: node)?.last,
-           let notice = ChatSystemMessage.split(text, legacy: node.usesLegacyErrorMarker).notice { return notice }
-        return ChatSystemMessage.split(node.content, legacy: node.usesLegacyErrorMarker).notice
-    }
-
-    private var hasMessageBody: Bool {
-        if isStreaming || (messageError == nil && messageNotice == nil) { return true }
-        if let segments = ChatDisplaySnapshot.segments(of: node), !segments.isEmpty {
-            // 普通回复挂思考：正文看 content；只剩报错 / 已停止时只画思考行，思考隐藏就整个不画（不出空正文泡）
-            if segments.isAttachedThinkingReply {
-                return !ChatSystemMessage.split(node.content, legacy: node.usesLegacyErrorMarker).body.isEmpty
-                    || (segments.attachedThinkingText != nil && DisclosureKind.thinking.mode != .hidden)
-            }
-            return !ChatSystemMessage.removingTrailingError(from: segments, legacy: node.usesLegacyErrorMarker).isEmpty
-        }
-        return !ChatSystemMessage.split(node.content, legacy: node.usesLegacyErrorMarker).body.isEmpty
-    }
-
     /// 卡库第二批「edited」浮层里的卡名：当前楼层绑定的卡（只在有 cardEditedAt 时读）
     private var editedCardName: String? {
         HTMLEmbedPermission.boundCard(profileId: profileManager?.currentProfile.id,
                                       cards: profileManager?.characterCardManager?.cards ?? [])?.name
-    }
-
-    /// ⑤a：用户消息也跑显示规则（placement 1），只改显示副本，不写 MessageNode
-    private func userDisplayText(_ text: String) -> String {
-        RegexPipeline.run(regexScripts, text: text, phase: .display, placement: RegexPipeline.userPlacement,
-                          userName: userName, charName: assistantName)
     }
 
     /// 正文渲染器一处选（面 5.2；ms0911 起两端同走 fork `ChatMarkdownView`——划词 / 引用 / HTML 卡；
@@ -4334,9 +4310,8 @@ struct BubbleView: View {
     /// 这里只服务定稿/用户/vm 缺失路径；抽出供 iOS/macOS 两分支复用（顺带治 type-check）。
     @ViewBuilder
     private func simpleStaticBody(thinking: String?, displayText: String) -> some View {
-        // Thinking block (collapsible)：[thinking] 标签提取 或 CC 思考链回传（ccThinking）或原生思考摘要（thinking 回传 §3.8，回复完成后出现）
-        if let thinking = thinking ?? (showCCThinking ? node.ccThinking : nil)
-            ?? (isStreaming ? nil : ChatDisplaySnapshot.segments(of: node)?.nativeThinkingText), !thinking.isEmpty {
+        // Thinking block (collapsible)：思考从哪来（[thinking] 标签 / CC 思考链 / 原生思考摘要）在 MessageDisplay.articleBody 里定
+        if let thinking {
             ThinkingDisclosure(text: thinking, nodeId: node.id, profileId: node.profileId,
                                summary: node.thinkingSummary,
                                onNeedSummary: { [node, providerManager] in
@@ -4524,14 +4499,17 @@ struct BubbleView: View {
         #if (DEBUG || PERF_BENCH) && os(iOS)
         let _ = AirPerfProbe.enabled ? PerfCount.hit("bubbleBody") : ()
         #endif
+        // 整条是不是系统胶囊、气泡画不画、下面挂哪种结尾胶囊：唯一出处 MessageDisplay.frame
+        let frame = MessageDisplay.frame(of: node, isStreaming: isStreaming)
         VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
             if isUser { bookRefTag }
-            if node.role == "system" {
-                ChatSystemCapsule(text: node.content, symbol: node.content.hasPrefix("⚠") ? "exclamationmark.circle" : "info.circle",
-                                  isError: node.content.hasPrefix("⚠"))
+            if let system = frame.system {
+                ChatSystemCapsule(text: system.text, symbol: system.isError ? "exclamationmark.circle" : "info.circle",
+                                  isError: system.isError)
             } else {
-                if hasMessageBody { innerBody }
-                if let messageError {
+                if frame.hasBody { innerBody }
+                switch frame.tail {
+                case .error(let messageError)?:
                     // 报错「去改」（plan-api-draft-and-fix-jump §3.5）：按文字认类型，点了才去账本找卡
                     let fixKind = isStreaming ? nil : FixJump.kind(for: messageError)
                     ChatSystemCapsule(text: messageError, symbol: "exclamationmark.circle", isError: true,
@@ -4542,9 +4520,9 @@ struct BubbleView: View {
                                           FixJump.perform(kind, nodeId: node.id, errorText: messageError,
                                                           providerManager: providerManager, viewModel: viewModel)
                                       } })
-                } else if let messageNotice {
+                case .notice(let messageNotice)?:
                     ChatSystemCapsule(text: messageNotice, symbol: "pause.circle")
-                } else if let raw = node.replyOutcome, let outcome = ReplyOutcome(rawValue: raw), outcome.isAbnormal {
+                case .outcome(let outcome)?:
                     let presentation = ReplyOutcomePresentation.make(outcome: outcome, isLatestAssistant: isLatestAssistant,
                                                                      isStreaming: isStreaming)
                     let primary = outcome == .truncatedLength ? onContinue : onRegenerate
@@ -4554,8 +4532,10 @@ struct BubbleView: View {
                                       secondaryTitle: presentation.secondaryTitle,
                                       secondaryAction: presentation.secondaryTitle == nil ? nil : onRegenerate,
                                       detailText: outcomeDetail)
+                case nil:
+                    EmptyView()
                 }
-                if !hasMessageBody, let branchInfo {
+                if !frame.hasBody, let branchInfo {
                     BranchIndicator(info: branchInfo, showPicker: $showBranchPicker, onSwitchBranch: onSwitchBranch)
                 }
             }
@@ -4837,10 +4817,17 @@ struct BubbleView: View {
             .sheet(isPresented: $showTextSelect) {
                 TextSelectSheet(text: textSelectContent, onQuoteText: onQuoteText)
             }
-        } else if let memeId = MemeToken.match(node.content) {
-            memeArticleBody(memeId)
         } else {
-            articleModeBody
+            // 文章模式气泡里画哪一种正文：唯一出处 MessageDisplay.articleBody
+            let content = MessageDisplay.articleBody(
+                of: node, isStreaming: isStreaming, streamsLive: !isUser && isStreaming && viewModel != nil,
+                context: .init(scripts: regexScripts, userName: userName, charName: assistantName,
+                               showCCThinking: showCCThinking))
+            if case .meme(let memeId) = content {
+                memeArticleBody(memeId)
+            } else {
+                articleModeBody(content)
+            }
         }
     }
 
@@ -4866,7 +4853,7 @@ struct BubbleView: View {
         menuSpecs(copyTitle: "复制本段", copyText: { quoteText }, voicePath: voicePath)
     }
 
-    private var articleModeBody: some View {
+    private func articleModeBody(_ content: MessageDisplay.ArticleBody) -> some View {
         let userVoiceNote = isUserVoiceNote
         return VStack(alignment: isUser ? .trailing : .leading, spacing: 8) {
             // 文章署名常显，只把名字向正文方向内移6pt，不挪卡片徽标。
@@ -4924,89 +4911,64 @@ struct BubbleView: View {
                     }
                     .padding(.bottom, 1)
                 }
-                // L2-T2：流式正文改走 ArticleStreamingBody（fork 增量渲染），这里只管
-                // 静态/用户路径（Phase 5 断链后流式中 node.content 是上次值/空，无妨——
-                // 流式分支不再从这条链取数）
-                // 卡开场的 {{char}}/{{user}} 只在显示副本展开（③b），存储原文不动
-                let display = MessageDisplayText.make(node.content, role: node.role, scripts: regexScripts,
-                                                      userName: userName, charName: assistantName, cacheKey: node.id,
-                                                      legacyErrorMarker: node.usesLegacyErrorMarker)
                 #if (DEBUG || PERF_BENCH) && os(iOS)
                 // 渲染账本 consumed（perf P0 §5.2）：静态正文消费的 node.content 快照摘要
                 let _ = PerfHarness.strictMeasure && (isUser || !isStreaming)
                     ? PerfRenderLedger.noteConsumed(nodeId: node.id, content: node.content, mode: "article") : ()
                 #endif
 
-                if isUser {
-                    if let segs = ChatDisplaySnapshot.segments(of: node), !segs.isEmpty {
-                        let textOnly = segs.compactMap { seg -> String? in
-                            if case .text(let s) = seg { return s }
-                            return nil
-                        }.joined(separator: "\n\n")
-                        let hasComplexSegments = segs.contains { seg in
-                            switch seg {
-                            case .text, .image, .imageRef, .attachment, .audioRef: return false
-                            default: return true
-                            }
-                        }
-                        if hasComplexSegments {
-                            MessageSegmentsView(
-                                segments: segs,
-                                selectedFont: selectedFont,
-                                fontScale: fontScale,
-                                lineSpacingScale: lineSpacingScale,
-                                paragraphSpacingScale: paragraphSpacingScale,
-                                regexScripts: regexScripts, userName: userName, charName: assistantName,
-                                isUser: true,
-                                profileId: node.profileId,
-                                nodeId: node.id,
-                                onQuoteText: onQuoteText
-                            )
-                        } else if !textOnly.isEmpty {
-                            // B34：user 和 assistant 走同一个 Markdown 渲染器 = 同字号同行距同段距
-                            markdownBody(userDisplayText(textOnly))
-                        } else if segs.userVoiceNote {
-                            // 纯语音：不画文字（content 那行只给 AI 看），胶囊 + 转文字占气泡位；长按走外面这条消息的菜单
-                            ForEach(segs.audioRefs, id: \.path) { v in
-                                UserVoiceNoteView(path: v.path, duration: v.duration, script: v.script,
-                                                  nodeId: node.id, profileId: node.profileId, ownMenu: false,
-                                                  speaker: userName, createTime: node.createTime)
-                            }
-                        }
+                // 「什么情况画哪一种」在 MessageDisplay.articleBody 里定，这里只管照着画
+                switch content {
+                case .markdown(let text, let thinking):
+                    if isUser {
+                        // B34：user 和 assistant 走同一个 Markdown 渲染器 = 同字号同行距同段距
+                        markdownBody(text)
                     } else {
-                        // B34：见上
-                        markdownBody(display.body)
+                        simpleStaticBody(thinking: thinking, displayText: text)
                     }
-                } else if node.contentType == "heartvoice" || node.content.hasPrefix("💭 心声\n\n") {
+                case .segments(let segs):
+                    if isUser {
+                        MessageSegmentsView(
+                            segments: segs,
+                            selectedFont: selectedFont,
+                            fontScale: fontScale,
+                            lineSpacingScale: lineSpacingScale,
+                            paragraphSpacingScale: paragraphSpacingScale,
+                            regexScripts: regexScripts, userName: userName, charName: assistantName,
+                            isUser: true,
+                            profileId: node.profileId,
+                            nodeId: node.id,
+                            onQuoteText: onQuoteText
+                        )
+                    } else {
+                        // Claude v2 导入：按段渲染（每段独立折叠，顺序严格）
+                        renderableSegmentsBody(segs)
+                    }
+                case .userVoiceNote:
+                    // 纯语音：不画文字（content 那行只给 AI 看），胶囊 + 转文字占气泡位；长按走外面这条消息的菜单
+                    ForEach(ChatDisplaySnapshot.segments(of: node)?.audioRefs ?? [], id: \.path) { v in
+                        UserVoiceNoteView(path: v.path, duration: v.duration, script: v.script,
+                                          nodeId: node.id, profileId: node.profileId, ownMenu: false,
+                                          speaker: userName, createTime: node.createTime)
+                    }
+                case .heartvoice(let heartText):
                     // 心声：默认 collapsed 成 💭 chip，点开 = 日记本卡片
-                    // 老消息兼容：早期 v1 把 "💭 心声\n\n" 前缀塞 content 里、contentType="text"，剥前缀
-                    let heartText: String = {
-                        if node.contentType == "heartvoice" { return node.content }
-                        let prefix = "💭 心声\n\n"
-                        return node.content.hasPrefix(prefix)
-                            ? String(node.content.dropFirst(prefix.count))
-                            : node.content
-                    }()
                     HeartvoiceCardView(text: heartText, time: node.createTime)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                } else if let segs = ChatDisplaySnapshot.segments(of: node), segs.hasRenderableSegments {
-                    // Claude v2 导入：按段渲染（每段独立折叠，顺序严格）。
-                    // 只挂语音条（audioRef-only）的消息不进这里——正文继续走下面纯文本分支
-                    renderableSegmentsBody(segs)
-                } else {
+                case .streaming:
                     // L2-T2 (D10=b)：流式中 thinking+正文整体交给 fork 增量渲染
                     // （BubbleView body 不再随 token 全文重进 markdown parse/diff）；
                     // 定稿（isStreaming 翻 false）回落静态分支（ChatMarkdownView + T3 缓存）
-                    if !isUser, isStreaming, let vm = viewModel {
+                    if let vm = viewModel {
                         ArticleStreamingBody(
                             node: node,
                             viewModel: vm,
                             conversationId: vm.selectedConversation?.id ?? "",
                             regexScripts: regexScripts, userName: userName, charName: assistantName
                         )
-                    } else {
-                        simpleStaticBody(thinking: display.thinking, displayText: display.body)
                     }
+                case .meme, .empty:
+                    EmptyView()
                 }
 
                 // Anthropic server-side web search 引用源 chip 横排（segmented 渲染分支已在 MessageSegmentsView 内集成无需重复）
@@ -5465,95 +5427,6 @@ struct BranchPickerList: View {
     }
 }
 
-// MARK: - TagPickerPopover（聊天页 nav ⋯ Menu 的「移到文件夹」sheet）
-//
-// 09-26 标签 → 文件夹（一对一）：单选，写 `Conversation.folderId`；再点当前那个 = 移出。
-
-struct TagPickerPopover: View {
-    let conversationId: String
-    let profileId: String
-
-    @Environment(\.modelContext) private var modelContext
-    @Environment(\.dismiss) private var dismiss
-    @Query private var tags: [ConversationTag]
-    @Query private var conversations: [Conversation]
-
-    init(conversationId: String, profileId: String) {
-        self.conversationId = conversationId
-        self.profileId = profileId
-        _tags = Query(
-            filter: #Predicate<ConversationTag> { $0.profileId == profileId },
-            sort: \ConversationTag.order
-        )
-        _conversations = Query(filter: #Predicate<Conversation> { $0.id == conversationId })
-    }
-
-    private var conversation: Conversation? { conversations.first }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("移到文件夹")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(Theme.chat.textPrimary)
-                Spacer()
-                Button("完成") { dismiss() }
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(Theme.chat.branchIndicator)
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 16)
-            .padding(.bottom, 12)
-
-            Divider()
-
-            if tags.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 36))
-                        .foregroundColor(Theme.chat.textMuted.opacity(0.5))
-                    Text("还没有文件夹")
-                        .font(.system(size: 14))
-                        .foregroundColor(Theme.chat.textMuted)
-                    Text("去对话列表顶上的 ＋ 新建")
-                        .font(.system(size: 12))
-                        .foregroundColor(Theme.chat.textMuted.opacity(0.7))
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(tags) { tag in
-                            let isOn = conversation?.folderId == tag.id
-                            Button {
-                                conversation?.folderId = isOn ? nil : tag.id
-                                try? modelContext.save()
-                            } label: {
-                                HStack(spacing: 10) {
-                                    FolderIconView(tag: tag, size: 18)
-                                    Text(tag.name)
-                                        .font(.system(size: 15))
-                                        .foregroundColor(Theme.chat.textPrimary)
-                                    Spacer()
-                                    Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
-                                        .font(.system(size: 18))
-                                        .foregroundColor(isOn ? Theme.chat.branchIndicator : Theme.chat.textMuted.opacity(0.4))
-                                }
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 12)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            Divider().padding(.leading, 20)
-                        }
-                    }
-                }
-            }
-        }
-        .macEscapeToDismiss { dismiss() }   // S1-5
-    }
-}
-
 // MARK: - Transient Notice Capsule (B20 part 2)
 
 /// 极简临时提示胶囊（已切换到分支等）。挂在 chat page 顶部。
@@ -5577,29 +5450,3 @@ private struct TransientNoticeCapsule: View {
 #if os(macOS)
 #endif
 
-#if os(iOS)
-/// 独立 modifier，避免给 CardFlow 的大视图表达式叠加两个 Observation 泛型。
-private struct CardFlowCallPresentation<CallContent: View>: ViewModifier {
-    let conversationID: String?
-    @Binding var presented: Bool
-    let callContent: CallContent
-    func body(content: Content) -> some View {
-        content.fullScreenCover(isPresented: $presented) { callContent }
-            .modifier(NativeCallPresentation(conversationID: conversationID, presented: $presented))
-    }
-}
-
-private struct NativeCallPresentation: ViewModifier {
-    let conversationID: String?
-    @Binding var presented: Bool
-    func body(content: Content) -> some View {
-        content
-            .onChange(of: NativeCallCoordinator.shared.readyToPresent, initial: true) { _, _ in presentIfReady() }
-            .onChange(of: conversationID) { _, _ in presentIfReady() }
-    }
-    private func presentIfReady() {
-        if NativeCallCoordinator.shared.readyToPresent,
-           NativeCallCoordinator.shared.current?.chat_id == conversationID { presented = true }
-    }
-}
-#endif

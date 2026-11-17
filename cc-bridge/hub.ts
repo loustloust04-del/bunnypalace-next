@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket, type RawData } from "ws"
 import { createServer, IncomingMessage, ServerResponse } from "node:http"
 import { spawn } from "node:child_process"
 import { mkdir, readdir, readFile, stat, unlink } from "node:fs/promises"
+import { watch, type FSWatcher } from "node:fs"
 import { DirtyDirScanner } from "./dir-watch"
 import { blockLedger, describeLagVitals, procSample, timedExecFileSync, timedSyncFs, timeHandler, wsSite } from "./block-ledger.ts"
 import { networkInterfaces, homedir, hostname, loadavg } from "node:os"
@@ -40,9 +41,12 @@ import {
 } from "./askuser.ts"
 import { parseReaderOutput, buildBookNotePayload } from "./reader-daemon.ts"
 import { ccWorkdir, codexWorkdir, ccProjectSlug } from "./cc-workdir.ts"
+import { GARDEN_MEMORY_DIR, writeGardenMemory } from "./garden-memory.ts"
+import { GardenTreeSync } from "./garden-tree.ts"
+import { routeMemoryCommand, type ProbeAnswer } from "./memory-route.ts"
 import {
   BindPrefsCache, type HubConfig, type MachineInfo, type ToolAvailability, buildHelloPayload, buildMcpConfig, detectTools, listDirs,
-  loadHubConfig, loadOrCreateHubId, pickMcpConfig, readMachineInfo, resolveAgentWorkdir, sameDir, saveHubConfig, saveJsonPrivate, validateWorkdir,
+  loadHubConfig, loadOrCreateHubId, pickMcpConfig, readMachineInfo, resolveAgentWorkdir, sameDir, saveHubConfig, saveJsonPrivate, validateWorkdir, writeFilePrivate,
 } from "./hub-config.ts"
 import { OpencliBridge, parseOpencliReq } from "./opencli-bridge.ts"
 import { CC_MEMORY_DIR, ccMemorySnapshots, fetchFrames, manifest as ccMemoryManifest, MemoryReplies, watchMemoryDir } from "./cc-memory-sync.ts"
@@ -50,6 +54,10 @@ import { buildTerminalUsagePayload, readTranscriptUsage, readRateLimits, context
 import { buildTerminalInitPayload, parseMouseAnyFlag } from "./terminal-init.ts"
 import { buildPasteResultPayload, pasteToTmux, type PasteResult } from "./terminal-paste.ts"
 import { buildFreshTerminalLaunch, type TerminalLaunch } from "./terminal-launch.ts"
+import {
+  type Account, type FolderMode, FOLDER_UNTRUSTED_MESSAGE, SessionAccounts, accountPreflight, buildFolderLaunchCommand, buildFolderSettings, folderRejectsFrame,
+  isFolderTrustPrompt, parseAccounts, parseFolderMode,
+} from "./folder-mode.ts"
 import { TerminalSizeTracker, type TerminalSize } from "./terminal-size.ts"
 import {
   type TerminalEngine, type TerminalWindow, type TerminalStateSource, buildTerminalStatePayload,
@@ -87,6 +95,7 @@ import { k2Enabled, WarroomScanWorker, warroomScanRunner } from "./warroom-scan-
 import { WarroomLedger, TargetBusy, retryBusy, type TaskRow } from "./warroom-ledger.ts"
 import { WarroomDispatcher, realSpawnT2, type TargetInfo } from "./warroom-dispatch.ts"
 import { PM_FRAMES, pmRelay } from "./pm-relay.ts"
+import { makeFolderRelay } from "./folder-relay.ts"
 import { TmuxState, parsePaneTitles, parsePaneMeta, TMUX_PANES_ARGS, type PaneMeta } from "./tmux-state.ts"
 import { PaneStream } from "./tmux-pane-stream.ts"
 import { chainTmuxWrite, fetchPanes, k1Enabled, sharedTmuxControl, startSharedTmuxControl, TmuxCommandError, TmuxUncertainError, tmuxLoadBuffer, tmuxRun, tmuxRunCounts, waitTmuxWriteSettled } from "./tmux-control"
@@ -497,6 +506,39 @@ try { mkdirSync(SECRETS_DIR, { recursive: true }) } catch {}
 // ── #046 T3：hub 配置（[+] 窗口的干活目录 / 内嵌 hub 端口）+ hello 帧的素材 ──
 const hubConfigPath = join(SECRETS_DIR, "hub-config.json")
 let hubConfig: HubConfig = loadHubConfig(hubConfigPath)
+
+// ── 文件夹模式（docs/plan-folder-floor.md P0）──
+// 没设 MP_HUB_MODE=folder 就是 null：下面所有 `folderMode` 分支都不走，主 hub 行为不变。
+const folderMode: FolderMode | null = parseFolderMode()
+/// 文件夹模式下 --settings 用的那份（hook 不往文件夹里写）；startHub 里写
+const folderSettingsPath = join(SECRETS_DIR, "folder-settings.json")
+/// 账号（hub-config.json 的 accounts，手改；没配 = 只有默认账号 ~/.claude + claude）
+const accountSetup = parseAccounts(hubConfig.accounts)
+for (const p of accountSetup.problems) console.warn(`[hub] hub-config accounts：${p}`)
+/// 配过 accounts 才按账号取配置目录；没配（主 hub 现状）走原来写死 ~/.claude 的路，逐字不变
+const accountsConfigured = Array.isArray(hubConfig.accounts)
+const sessionAccountsPath = join(SECRETS_DIR, "session-accounts.json")
+const sessionAccounts = new SessionAccounts(accountSetup.accounts, {
+  read: () => { try { return readFileSync(sessionAccountsPath, "utf-8") } catch { return undefined } },
+  write: (text) => writeFilePrivate(sessionAccountsPath, text),
+})
+/// 文件夹模式：看历史走本机的看板服务（folder-relay.ts）。登记的文件夹和账号是这台 hub 自己的配置，手机改不了
+const folderRelay = folderMode
+  ? makeFolderRelay(() => ({
+      folder: folderMode.folder,
+      accounts: sessionAccounts.list.map((a) => ({ id: a.id, config_dir: a.configDir })),
+      notify: `http://127.0.0.1:${PORT}/folder/changed`,
+    }))
+  : null
+let folderRegistered = false
+/// 这个 claude 对话号是哪个账号开的（transcript 在那个账号的配置目录下）。只有一个账号时不查，直接默认
+function accountOfClaudeSession(claudeSessionId: string): Account {
+  const all = sessionAccounts.list
+  if (all.length > 1) {
+    for (const [name, b] of sessionMap) if (b.claudeSessionId === claudeSessionId) return sessionAccounts.of(name) ?? all[0]
+  }
+  return all[0]
+}
 /// 内嵌 hub（Mac App）用的 mcp 配置：listen 拿到真实端口后才写（见 writeGeneratedMcpConfig）
 const generatedMcpConfigPath = join(SECRETS_DIR, "mcp.json")
 const HUB_VERSION = "t3"
@@ -522,9 +564,13 @@ let generatedMcpConfigThisBoot: string | null = null
 function writeGeneratedMcpConfig(token: string | undefined): void {
   generatedMcpConfigThisBoot = null
   const bin = process.env.MP_CC_MCP_SERVER_BIN
-  if (!bin || !existsSync(bin)) return
+  // 文件夹模式：没给二进制就用源码里的 mcp-server.ts（同一个 bun 跑），一律连本实例的端口和口令——
+  // 不用进程目录里那份 .mcp.json（那是主 hub 的，连 7890）
+  const folderArgs = folderMode && !bin ? [join(import.meta.dir, "mcp-server.ts")] : null
+  if (!folderArgs && (!bin || !existsSync(bin))) return
   try {
-    saveJsonPrivate(generatedMcpConfigPath, buildMcpConfig(bin, PORT, token))
+    if (folderMode) saveJsonPrivate(folderSettingsPath, buildFolderSettings(import.meta.dir))
+    saveJsonPrivate(generatedMcpConfigPath, folderArgs ? buildMcpConfig(process.execPath, PORT, token, folderArgs) : buildMcpConfig(bin!, PORT, token))
     generatedMcpConfigThisBoot = generatedMcpConfigPath
   } catch (e: any) {
     console.warn(`[hub] mcp 配置写不进去，对话 Agent 不带 MCP: ${e?.message}`)
@@ -854,6 +900,7 @@ let claudeProjectDirCache: { key: string; dir: string; at: number } | undefined
 
 /// claude transcript 路径（同 claudeTranscriptPath），工作目录缓存 60s：没设 MP_CC_WORKDIR 时 ccWorkdir() 要同步 stat 一次，不放在每次发消息上
 function sendTranscriptPath(claudeSessionId: string): string {
+  if (accountsConfigured) return claudeTranscriptPath(claudeSessionId)   // 配了账号：按账号取目录，不走下面只认 ~/.claude 的缓存
   const home = process.env.HOME ?? ""
   const key = `${home}\0${process.env.MP_CC_WORKDIR ?? ""}`
   const now = Date.now()
@@ -1032,15 +1079,21 @@ export class SessionExistsError extends Error {
 
 // DRY_RUN: 测试用，所有 tmux 调用 noop；hasSession 默认 true 避免误拒 send，kill 过的（再 spawn 之前）算没了
 const dryRunKilled = new Set<string>()
+/// MP_CC_TMUX_DRY_RUN=empty（测试用）：会话起过才算在，起的时候把命令打出来；别的值照旧当所有会话都在
+const dryRunEmpty = process.env.MP_CC_TMUX_DRY_RUN === "empty"
+const dryRunSpawned = new Set<string>()
 const dryRunRunner: TmuxRunner = {
   send: () => Promise.resolve(),
   sendRaw: () => Promise.resolve(),
   key: async () => {},
   capture: async () => "",
-  hasSession: (session) => !dryRunKilled.has(session),
+  hasSession: (session) => dryRunEmpty ? dryRunSpawned.has(session) && !dryRunKilled.has(session) : !dryRunKilled.has(session),
   list: () => [],
   paneTitles: () => new Map(),
-  spawn: async (session) => { dryRunKilled.delete(session) },
+  spawn: async (session, cwd, command) => {
+    dryRunKilled.delete(session); dryRunSpawned.add(session)
+    if (dryRunEmpty) console.log(`[dry-run] spawn ${session} cwd=${cwd} :: ${command}`)
+  },
   kill: async (session) => { dryRunKilled.add(session) },
   paste: async () => ({ ok: true }),
 }
@@ -1181,7 +1234,10 @@ interface QueuedSend { tag: string; sc?: SendCtx }
 const pendingSends = new Map<string, QueuedSend[]>()
 
 /// 对话 Agent 的 --mcp-config：cwd 的 .mcp.json（launchd hub，start_cc.sh 渲染的）→ 内嵌 hub 现写的那份 → 没有（null，不带参数）
-function ccMcpConfig(): string | null { return pickMcpConfig(`${process.cwd()}/.mcp.json`, generatedMcpConfigThisBoot) }
+function ccMcpConfig(): string | null {
+  if (folderMode) return generatedMcpConfigThisBoot   // 只认本实例这次启动写的那份
+  return pickMcpConfig(`${process.cwd()}/.mcp.json`, generatedMcpConfigThisBoot)
+}
 function mcpConfigArg(): string {
   const cfg = ccMcpConfig()
   return cfg ? ` --mcp-config '${cfg}'` : ""
@@ -1220,7 +1276,7 @@ function windowLaunch(engine: TerminalEngine): TerminalLaunch {
     ccModel: CC_MODEL,
     mcpConfig: ccMcpConfig(),
     claudeSessionId: crypto.randomUUID(),
-    cleanClaude: !sameDir(claudeCwd, claudeHome),
+    cleanClaude: !!folderMode || !sameDir(claudeCwd, claudeHome),   // 文件夹模式没有「家」，[+] 开的 Claude 一律干净参数
   })
 }
 
@@ -1228,6 +1284,12 @@ function windowLaunch(engine: TerminalEngine): TerminalLaunch {
 // spawn 新会话时由 hub 生成 uuid（--session-id），重 spawn 时 --resume 同一 id → CC 记得该对话历史。
 // map 持久化在 secrets/session-map.json（gitignore），key = tmux session 名。
 interface SessionBinding { claudeSessionId: string; chatId?: string; updatedAt: string; transport?: "tmux" | "stream" }
+/// 「账号:Claude 对话号」→ 这台 hub 的会话名。看板服务按同一种 key 给 session 编号，手机拿它认出「这条是我在手机上开的」
+function folderHubSessions(): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [name, b] of sessionMap) out[`${(sessionAccounts.of(name) ?? sessionAccounts.list[0]).id}:${b.claudeSessionId}`] = name
+  return out
+}
 const sessionMapPath = join(SECRETS_DIR, "session-map.json")
 export const sessionMap = new Map<string, SessionBinding>()
 function loadSessionMap(): void {
@@ -1320,7 +1382,7 @@ export const sessionModels = new SessionModelTracker({
   },
   transcriptPath: async (b) => b.kind === "claude" ? sendTranscriptPath(b.id) : (codexRolloutCache.get(b.id) ?? await codexRollouts.lookup(b.id)),
   // 没有任何选择：claude 按 hub 默认拉起；codex 没有
-  fallback: (name) => sessionEngine(name) === "claude" && !isWindowSession(name) ? CC_MODEL : undefined,
+  fallback: (name) => !folderMode && sessionEngine(name) === "claude" && !isWindowSession(name) ? CC_MODEL : undefined,
   // 落盘的选择带时间进比较（hub 重启后内存里的选择没了）；default 照 (b) 按 hub 默认
   record: (name) => {
     const p = sessionEngine(name) === "claude" ? ccModels.get(name) : undefined
@@ -1379,7 +1441,23 @@ function warmSessionModels(): void {
 /// claude 把 transcript 写在 ~/.claude/projects/<cwd 的 / 全替换成 ->/<sessionId>.jsonl
 export function claudeTranscriptPath(claudeSessionId: string): string {
   const projDir = ccProjectSlug(ccWorkdir())
-  return join(process.env.HOME ?? "", ".claude", "projects", projDir, `${claudeSessionId}.jsonl`)
+  // 没配账号时路径和原来逐字一样（~/.claude）；配了就按开这条对话的账号取配置目录
+  const configDir = accountsConfigured ? accountOfClaudeSession(claudeSessionId).configDir : join(process.env.HOME ?? "", ".claude")
+  return join(configDir, "projects", projDir, `${claudeSessionId}.jsonl`)
+}
+
+/// 这次启动不成了、也不该自动再试（文件夹没信任 / 账号的启动检查没过 / 账号没了）：排着的消息逐条回原因、
+/// 进度状态收回 idle——别让手机上那条消息干等、那条对话一直转圈。返回回了几条
+function failQueuedSends(name: string, reason: "untrusted_folder" | "launch_failed" | "account", message: string): number {
+  const queued = pendingSends.get(name) ?? []
+  pendingSends.delete(name)
+  for (const q of queued) {
+    const mid = /\smessage_id="([^"]*)"/.exec(q.tag)?.[1]
+    if (mid) broadcastFrame(JSON.stringify(sendErrorFrame(mid, message, q.sc?.appAttempt)))
+  }
+  broadcastFrame(JSON.stringify({ type: "session_blocked", session_name: name, reason, message }))
+  onLaPhaseEvent(name, { kind: "abort" })
+  return queued.length
 }
 
 // spawn 一个 session，安排 boot 完成后标记就绪 + flush 排队消息。
@@ -1406,6 +1484,26 @@ export async function spawnSession(name: string, chatId?: string, isRetry = fals
   }
   const bound = sessionMap.get(name)
   const engine = sessionEngine(name)
+  // 账号（folder-mode.ts）：这条会话定的账号已经不在配置里 → 不起（回落默认账号会续不上、还会开出一条串号的新对话）
+  const account = sessionAccounts.of(name)
+  if (!account || (folderMode && engine === "codex")) {
+    endStartup(name, gen)
+    const why = !account ? "这条对话的账号已经不在这台电脑的配置里" : "文件夹模式第一版不支持 Codex"
+    failQueuedSends(name, "account", why)
+    throw new Error(why)
+  }
+  sessionAccounts.markStarted(name)
+  // 自带启动器的账号：先跑一遍它的检查，不过就带着它的原话回去（直接起的话进程秒退，屏幕来不及截）
+  if (engine === "claude" && account.command !== "claude") {
+    const why = await accountPreflight(account)
+    if (!ownsStartup(name, gen)) return
+    if (why) {
+      endStartup(name, gen)
+      const msg = `账号「${account.label}」起不来：${why}`
+      console.warn(`[hub] ${name} ${msg}（${failQueuedSends(name, "launch_failed", msg)} 条排队消息回了原因）`)
+      throw new Error(msg)
+    }
+  }
   // resume 判定：claude 查 transcript 存在性；codex 只看有无绑定（无存在性检查——
   // resume 失败走 finishBoot 的死亡兜底：清绑定重试 fresh，同一条恢复链）
   const canResume = engine === "codex"
@@ -1413,7 +1511,7 @@ export async function spawnSession(name: string, chatId?: string, isRetry = fals
     : !!bound && existsSync(claudeTranscriptPath(bound.claudeSessionId))
   // stream 传输：spawn_cc 显式指定 > 开关；绑定里的 transport 只做记录不否决（09-04 前绑定优先 → 走过一次 stream
   // 就永远 stream，关开关也回不来）。codex 只有 tmux
-  const wantStream = engine === "claude" && (transport ?? transportOf(name)) === "stream"
+  const wantStream = !folderMode && engine === "claude" && (transport ?? transportOf(name)) === "stream"   // 文件夹模式第一版只有带终端的
   // 模型（cc-model.ts）：读转录是 await（进门已占代次，期间进来的消息照旧排队）；回来先核对代次
   let launch: LaunchModel = { model: CC_MODEL, source: "默认" }
   if (engine === "claude" && cont?.modelOverride) {
@@ -1424,7 +1522,9 @@ export async function spawnSession(name: string, chatId?: string, isRetry = fals
     launch = await resolveLaunchModel(name, canResume ? bound : undefined)
     if (!ownsStartup(name, gen)) { console.log(`[hub] ${name} 读完模型时这次启动已被清掉 / 取代 → 收手`); return }
   }
-  if (engine === "claude") noteSessionModelChoice(name, launch.model)
+  // 文件夹模式没选过模型就不传 --model（用账号自己的默认），hub 不知道它实际是哪个：不报家里那个写死的默认，等第一轮做完从转录里读
+  const modelUnknown = !!folderMode && engine === "claude" && launch.source.startsWith("默认")
+  if (engine === "claude" && !modelUnknown) noteSessionModelChoice(name, launch.model)
   else void refreshSessionModel(name)   // codex 没有 --model：只能从 rollout 读（新会话还没有，第一轮做完再算）
   if (wantStream) { askUserClearForSession(name, "respawn"); spawnStreamSession(name, chatId, isRetry, bound, canResume, launch.model, gen); return }
   const spawnedAtMs = Date.now()
@@ -1444,6 +1544,17 @@ export async function spawnSession(name: string, chatId?: string, isRetry = fals
       sessionMap.set(name, { claudeSessionId: fresh, chatId: chatId ?? bound?.chatId, updatedAt: new Date().toISOString() })
       saveSessionMap()
       command = freshTerminalLaunch("claude", fresh, launch.model).command + effortArg("claude", wantedEffort.get(name))
+    }
+    if (folderMode) {
+      // 文件夹里的 CC 要正常干活：不用家里那套陪伴参数（禁工具 / 只认 hub 的 MCP / 写死模型），hook 走 --settings
+      const id = sessionMap.get(name)!.claudeSessionId
+      command = buildFolderLaunchCommand({
+        command: account.command, mcpConfig: ccMcpConfig(), settingsPath: folderSettingsPath,
+        model: launch.source.startsWith("默认") ? undefined : launch.model,
+        session: canResume ? { resume: id } : { fresh: id },
+      }) + effortArg("claude", wantedEffort.get(name))
+    } else if (account.command !== "claude") {
+      command = command.replace(/^claude /, `${account.command} `)
     }
   }
   const startEffort = normalizeEffort(engine, wantedEffort.get(name))
@@ -1486,6 +1597,11 @@ export async function spawnSession(name: string, chatId?: string, isRetry = fals
       } else {
         endStartup(name, gen)
         console.error(`[hub] ${name} died again on retry — giving up (queued msgs kept for next send)`)
+        // 文件夹模式：最常见是账号的启动命令自己退出了（比如 🍆 的出口检查没过）。不闷着排队，把原因回给手机
+        if (folderMode) {
+          const why = `这条对话在电脑上起不来（账号「${account.label}」）：去电脑上手动跑一次 ${account.command}，看它报什么`
+          failQueuedSends(name, "launch_failed", why)
+        }
       }
       return
     }
@@ -1532,6 +1648,16 @@ export async function spawnSession(name: string, chatId?: string, isRetry = fals
     if (tmux.hasSession(name) && round < 4) {
       const pane = await tmux.capture(name)
       bootPane = pane
+      // 文件夹模式：文件夹没在 Claude Code 里信任过 → 不替人点（那是她的决定），也不能把排队的消息打进这个弹窗
+      // （默认选中的是「No, exit」，回车 = 退出）。收掉会话、清掉这个没开始过的对话号、把原因回给手机
+      if (folderMode && engine === "claude" && isFolderTrustPrompt(pane)) {
+        endStartup(name, gen)
+        if (!canResume) { sessionMap.delete(name); saveSessionMap() }
+        await tmux.kill(name).catch(() => {})
+        const n = failQueuedSends(name, "untrusted_folder", FOLDER_UNTRUSTED_MESSAGE)
+        console.warn(`[hub] ${name} 停在「信任这个文件夹吗」→ 不代答，会话收掉，${n} 条排队消息回了原因`)
+        return
+      }
       const dialog = bootDialogs.find(([marker]) => pane.includes(marker))
       if (dialog) {
         try {
@@ -2192,9 +2318,11 @@ function mimeFromExt(ext: string): string {
     default: return "application/octet-stream"
   }
 }
+/// 收发件箱放哪：家里在工作目录下（老样子）；文件夹模式放本实例的状态目录——不往人家的文件夹里写
+function attachRoot(): string { return folderMode ? SECRETS_DIR : ccWorkdir() }
 // susu→CC：把 send 帧里的 base64 图写到 mp-inbox，返回落盘路径（给 CC Read）
 function saveInboundImages(chatId: string, images: any[]): string[] {
-  const dir = join(ccWorkdir(), "mp-inbox", chatId.slice(0, 16))
+  const dir = join(attachRoot(), "mp-inbox", chatId.slice(0, 16))
   const paths: string[] = []
   try { mkdirSync(dir, { recursive: true }) } catch {}
   let i = 0
@@ -2209,7 +2337,7 @@ function saveInboundImages(chatId: string, images: any[]): string[] {
 }
 // susu→CC：把 send 帧里的 base64 文件写到 mp-inbox（保留原名/后缀），返回路径
 function saveInboundFiles(chatId: string, files: any[]): string[] {
-  const dir = join(ccWorkdir(), "mp-inbox", chatId.slice(0, 16))
+  const dir = join(attachRoot(), "mp-inbox", chatId.slice(0, 16))
   const paths: string[] = []
   try { mkdirSync(dir, { recursive: true }) } catch {}
   let i = 0
@@ -2230,7 +2358,7 @@ function stageOutboundFile(chatId: string, srcPath: string): { name: string; mim
     const resolved = srcPath.startsWith("/") ? srcPath : join(ccWorkdir(), srcPath)
     if (!existsSync(resolved)) { console.warn(`[hub] outbound file not found: ${resolved}`); return null }
     if (statSync(resolved).size > MAX_FILE_BYTES) { console.warn(`[hub] outbound file too big: ${resolved}`); return null }
-    const dir = join(ccWorkdir(), "mp-outbox", chatId.slice(0, 16))
+    const dir = join(attachRoot(), "mp-outbox", chatId.slice(0, 16))
     try { mkdirSync(dir, { recursive: true }) } catch {}
     const name = basename(resolved)
     const dest = join(dir, `${Date.now()}_${name}`)
@@ -2252,6 +2380,13 @@ function readFileB64(path: string): { name: string; mime: string; b64: string; i
 // MP 客户端集合（/cc 路径连接的 MP 客户端）
 
 const mpClients = new Set<WebSocket>()
+/// 花园记忆文件夹 ↔ CC 家的 garden-memory/<楼层>/（garden-tree.ts）：帧转给它，盘上有动静时它自己比出待落的修改送回 app
+/// 用到才建（家目录这时才定：测试进程 import hub.ts 之后才改 MP_CC_WORKDIR）
+let gardenTreeInstance: GardenTreeSync<WebSocket> | null = null
+function gardenTree(): GardenTreeSync<WebSocket> {
+  return gardenTreeInstance ??= new GardenTreeSync<WebSocket>((ws, frame) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(frame)) },
+    { settleMs: process.env.MP_GARDEN_TREE_SETTLE_MS ? Number(process.env.MP_GARDEN_TREE_SETTLE_MS) : undefined })
+}
 const memoryReplies = new WeakMap<WebSocket, MemoryReplies>()
 function memoryRepliesFor(ws: WebSocket): MemoryReplies {
   let r = memoryReplies.get(ws)
@@ -2269,7 +2404,8 @@ function helloPayload(): string {
     codexHome: codexWorkdir(),
     agentWorkdir: agentWorkdirSetting(),
     tools: toolAvailability,
-    capabilities: [...HUB_CAPABILITIES, ...(ccMcpConfig() ? ["mcp"] : []), ...(deviceAuth ? ["device_auth"] : []), ...(hubConfig.opencli_enabled ? ["opencli"] : [])],
+    capabilities: [...HUB_CAPABILITIES, ...(ccMcpConfig() ? ["mcp"] : []), ...(deviceAuth ? ["device_auth"] : []), ...(hubConfig.opencli_enabled ? ["opencli"] : []), ...(folderMode ? ["folder", "folder_history"] : [])],
+    folder: folderMode ? { path: folderMode.folder, accounts: sessionAccounts.list.map((a) => ({ id: a.id, label: a.label })) } : undefined,
   })
 }
 
@@ -2411,7 +2547,7 @@ setTradingBroadcaster((frame) => {
 })
 // #endif
 // CC 小克 memory 同步（plan-cc-memory-sync）：文件夹一变只广播「变了」，不带内容，手机自己来拉
-watchMemoryDir(CC_MEMORY_DIR, () => {
+if (!folderMode) watchMemoryDir(CC_MEMORY_DIR, () => {
   const frame = JSON.stringify({ type: "cc_memory_changed" })
   for (const c of mpClients) {
     try { c.send(frame) } catch {}
@@ -2435,6 +2571,55 @@ export function pickPhoneClient(clients: Iterable<WebSocket>, info: Map<WebSocke
     if (i.lastSeen > bestSeen) { best = c; bestSeen = i.lastSeen }
   }
   return best
+}
+/// 每场对话最近一次是从哪种设备发来的（"ios" / "macos"，app 的 send 帧登记）：CC 动花园的记忆时发回那台设备上的花园
+export const lastSendPlatformByChat = new Map<string, string>()
+/// CC 动花园的记忆（/memory/cmd）发给哪个 app：记忆存在各台设备自己的花园里，必须到**有这场对话的那一台**，而且只到一台。
+/// 规矩在 memory-route.ts（先问一圈「是不是你的」，再只发给答是的那台）；这里只管发探问帧、记上一次的结果
+/// 上一次答「是我的」的那台（按对话；连接断了就失效）
+const memoryOwnerByChat = new Map<string, WebSocket>()
+/// 上一轮探问没回话的连接（在后台 / 版本太旧）：下一轮只等它一小会儿
+const memoryQuiet = new Set<WebSocket>()
+
+function probeMemoryClient(c: WebSocket, chatId: string | undefined, ms: number): Promise<ProbeAnswer> {
+  return new Promise((resolve) => {
+    const id = crypto.randomUUID()
+    const timer = setTimeout(() => { pocketPending.delete(id); resolve("silent") }, ms)
+    pocketPending.set(id, {
+      target: c,
+      timer,
+      resolve: (r: any) => {
+        clearTimeout(timer)
+        pocketPending.delete(id)
+        resolve(typeof r?.mine === "boolean" ? { mine: r.mine } : r?.error === "phone disconnected" ? "silent" : "unsupported")
+      },
+    })
+    try { c.send(JSON.stringify({ type: "memory_cmd", id, probe: true, chat_id: chatId })) }
+    catch { clearTimeout(timer); pocketPending.delete(id); resolve("silent") }
+  })
+}
+
+async function routeMemoryClient(chatId: string | undefined): Promise<{ target: WebSocket } | { error: string }> {
+  const candidates = [...mpClients].flatMap((c) => {
+    const i = clientInfoByWS.get(c)
+    return c.readyState === c.OPEN && i?.platform !== undefined ? [{ socket: c, platform: i.platform, lastSeen: i.lastSeen }] : []
+  })
+  const route = await routeMemoryCommand<WebSocket>({
+    chatId, candidates,
+    lastPlatform: chatId ? lastSendPlatformByChat.get(chatId) : undefined,
+    knownOwner: chatId ? memoryOwnerByChat.get(chatId) : undefined,
+    quiet: memoryQuiet,
+    probe: (socket, ms) => probeMemoryClient(socket, chatId, ms),
+  })
+  for (const [socket, answer] of route.answers) {
+    if (answer === "silent") memoryQuiet.add(socket); else memoryQuiet.delete(socket)
+  }
+  if ("target" in route && chatId) {
+    const answer = route.answers.get(route.target)
+    if (typeof answer === "object" && answer.mine) memoryOwnerByChat.set(chatId, route.target)
+  }
+  console.log(`[hub] memory route chat=${chatId ?? ""} candidates=${candidates.length} answers=${[...route.answers.values()].map((a) => typeof a === "object" ? (a.mine ? "mine" : "not-mine") : a).join(",")} → ${"target" in route ? "sent" : "none"}`)
+  return route
 }
 // MCP 客户端集合（/mcp 路径连接的 MCP server）
 const mcpClients = new Set<WebSocket>()
@@ -2801,7 +2986,8 @@ interface RecentReply {
 interface RecentEdit { chat_id: string; mp_msg_id: string; content: string; ts: number }
 const recentEdits: RecentEdit[] = []
 // pocket-browser / 本地推特: CC → /pocket/cmd 或 /twitter/cmd → hub 转发给 MP → 等回包（共用 pending 表）
-const pocketPending = new Map<string, { resolve: (v: any) => void; timer: ReturnType<typeof setTimeout> }>()
+/// target = 这一笔在等哪个连接回话：那个连接断了只让等它的失败（别的设备上的照等）
+const pocketPending = new Map<string, { resolve: (v: any) => void; timer: ReturnType<typeof setTimeout>; target?: WebSocket }>()
 const replyLogPath = join(SECRETS_DIR, "reply-log.json")
 const MAX_REPLY_LOG = 500   // 持久保留最近 N 条 reply，用于重连补发（换 WiFi/断网/hub 重启都不丢）
 const recentReplies: RecentReply[] = []
@@ -3398,7 +3584,7 @@ function loadHubState(): void {
 }
 
 const NUDGE = {
-  enabled: process.env.MP_CC_NUDGE_ENABLED !== "0",
+  enabled: process.env.MP_CC_NUDGE_ENABLED !== "0" && !folderMode,   // 催一句的话术是写给小克的
   idleMinMs: (Number(process.env.MP_CC_NUDGE_IDLE_MIN_SEC) || 15 * 60) * 1000,  // 默认 15min
   idleMaxMs: (Number(process.env.MP_CC_NUDGE_IDLE_MAX_SEC) || 30 * 60) * 1000,  // 默认 30min
   cooldownMs: (Number(process.env.MP_CC_NUDGE_COOLDOWN_SEC) || 60 * 60) * 1000, // 默认 1h
@@ -4054,6 +4240,20 @@ export function startHub(): WebSocketServer {
       res.end(JSON.stringify({ mpcc: 1, u, u2, t: HUB_TOKEN ?? "", ...relay, ...pairV2Fields(null) }))
       return
     }
+    // POST /folder/changed（仅 loopback，文件夹模式）：看板服务说「这几条 session 有变化」，转给连着的手机。没人连着就丢。
+    if (req.method === "POST" && path === "/folder/changed") {
+      if (!folderMode || !isTrustedLocal(req)) { res.writeHead(403); res.end("forbidden"); return }
+      let body = ""
+      req.on("data", (chunk) => { body += chunk; if (body.length > 64_000) req.destroy() })
+      req.on("end", () => {
+        let keys: string[] = []
+        try { const o = JSON.parse(body); if (Array.isArray(o?.keys)) keys = o.keys.filter((k: unknown) => typeof k === "string").slice(0, 200) } catch { /* 当成没带 */ }
+        const n = keys.length ? broadcastFrame(JSON.stringify({ type: "folder_changed", keys })) : 0
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ ok: true, sent: n }))
+      })
+      return
+    }
     // POST /thinking（仅 loopback）：Stop hook 回传当轮思考链。
     // 锚定到该 chat 最近一条 reply 的 mp_msg_id；锚不上（该轮没 reply）丢弃。
     if (req.method === "POST" && path === "/thinking") {
@@ -4321,8 +4521,10 @@ export function startHub(): WebSocketServer {
     }
     // POST /pocket/cmd（loopback-only）：CC 遥控手机 WebView——转发给 MP，等回包。
     // POST /twitter/cmd（loopback-only）：小克用本地推特（app 端 TwitterCCBridge）——同一套转发。
+    // POST /memory/cmd（loopback-only）：CC 用花园的记忆（app 端 MemoryCCBridge）——同一套转发；可能要等对方在审批卡上点，时限放到 120s。
     const appCmd = req.method === "POST" && path === "/pocket/cmd" ? { frame: "pocket_cmd", maxMs: 120000 }
       : req.method === "POST" && path === "/twitter/cmd" ? { frame: "twitter_cmd", maxMs: 30000 }
+      : req.method === "POST" && path === "/memory/cmd" ? { frame: "memory_cmd", maxMs: 120000 }
       : null
     if (appCmd) {
       if (!isTrustedLocal(req)) { res.writeHead(403); res.end("forbidden"); return }
@@ -4332,7 +4534,7 @@ export function startHub(): WebSocketServer {
         body += chunk
         if (body.length > 200_000) { overflow = true; res.writeHead(413); res.end(); req.destroy() }
       })
-      req.on("end", () => {
+      req.on("end", async () => {
         if (overflow) return
         let cmd: any
         try { cmd = JSON.parse(body) } catch { res.writeHead(400); res.end('{"ok":false,"error":"bad json"}'); return }
@@ -4340,6 +4542,13 @@ export function startHub(): WebSocketServer {
         if (appCmd.frame === "twitter_cmd") {
           target = pickPhoneClient(mpClients, clientInfoByWS)
           if (!target) { res.writeHead(503); res.end('{"ok":false,"error":"手机上的 app 没连着 hub（推特数据在手机上，只发手机）"}'); return }
+        } else if (appCmd.frame === "memory_cmd") {
+          // 先问一圈这场对话在哪台设备的花园里，只发给那一台（memory-route.ts）
+          let picked: { target: WebSocket } | { error: string }
+          try { picked = await routeMemoryClient(typeof cmd.chat_id === "string" ? cmd.chat_id : undefined) }
+          catch (e: any) { picked = { error: `找不到该发给哪台花园：${e?.message ?? e}` } }
+          if ("error" in picked) { res.writeHead(503, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: false, error: picked.error })); return }
+          target = picked.target
         } else {
           for (const c of mpClients) { if (c.readyState === c.OPEN) { target = c; break } }
         }
@@ -4352,9 +4561,12 @@ export function startHub(): WebSocketServer {
           res.end(JSON.stringify({ ok: false, error: "timeout" }))
         }, timeoutMs)
         pocketPending.set(id, {
+          target,
           resolve: (result: any) => {
             clearTimeout(timer)
             pocketPending.delete(id)
+            // 那台说这场对话不是它的（对话删了 / 换了设备）：下次重新问一圈
+            if (appCmd.frame === "memory_cmd" && result?.mine === false && typeof cmd.chat_id === "string") memoryOwnerByChat.delete(cmd.chat_id)
             res.writeHead(200, { "content-type": "application/json" })
             res.end(JSON.stringify(result))
           },
@@ -4362,7 +4574,7 @@ export function startHub(): WebSocketServer {
         })
         try {
           target.send(JSON.stringify({ type: appCmd.frame, id, ...cmd }))
-          console.log(`[hub] ${appCmd.frame} → MP id=${id.slice(0, 8)} action=${cmd.action ?? cmd.input?.action}`)
+          console.log(`[hub] ${appCmd.frame} → MP id=${id.slice(0, 8)} action=${cmd.tool ? `${cmd.tool}/` : ""}${cmd.action ?? cmd.input?.action ?? cmd.input?.op ?? ""}`)
         } catch (e: any) {
           clearTimeout(timer)
           pocketPending.delete(id)
@@ -4420,6 +4632,11 @@ export function startHub(): WebSocketServer {
         PORT = addr.port
       }
       afterListen?.()
+      // 文件夹模式：向看板服务登记一次（它没开也不要紧，手机第一次来要列表时会再登记）
+      if (folderRelay && !folderRegistered) {
+        folderRegistered = true
+        void folderRelay.register().then((e) => { if (e) console.warn(`[hub] 文件夹登记到看板服务没成：${e.error}`) })
+      }
       // Swift 父进程 parse 第一行 stdout 拿端口（Mac app 集成模式）。
       // 非集成模式（粟粟自己跑 master）也无副作用，多一行 JSON 日志。
       console.log(JSON.stringify({ event: "listening", host, port: PORT, scheme: "ws", paths: ["/cc", "/mcp", "/agora"] }))
@@ -4553,6 +4770,12 @@ export function startHub(): WebSocketServer {
       }
       clientInfoByWS.set(ws, seen)
 
+      // 文件夹模式：只属于家的功能整帧拒，不进任何处理分支（folder-mode.ts 的清单）
+      if (folderMode && typeof msg.type === "string" && folderRejectsFrame(msg.type)) {
+        ws.send(JSON.stringify({ type: "folder_unsupported", frame: msg.type, ...requestIdField(msg) }))
+        return
+      }
+
       if (msg.type === "client_info") {
         console.log(`[hub] client_info ← ${msg.platform}`)
       } else if (msg.type === "connect_report") {
@@ -4580,10 +4803,14 @@ export function startHub(): WebSocketServer {
         if (!admitted) return
         const targetSession = admitted.session
         try {
+          // 账号（folder-mode.ts）：帧里带了 account 就在这条会话第一次起之前定下；定过的不能换
+          const claim = sessionAccounts.claim(targetSession, (msg as any).account)
+          if (!claim.ok) throw new Error(claim.reason)
           // 思考强度（effort.ts）：记下想要的档位；会话跑着且档位不同 → claude 先发 /effort，codex 用同一 id 重启
           const restarting = sendWithEffort(targetSession, admitted.tag, msg.chat_id, (msg as any).effort, admitted.sc)
           if (restarting) await restarting
           recordUserActivity(targetSession, msg.chat_id)   // nudge：记 susu 活跃，重置静默计时
+          if (seen.platform && typeof msg.chat_id === "string") lastSendPlatformByChat.set(msg.chat_id, seen.platform)   // CC 动花园记忆时发回这台设备
           lastAppSendAt.set(msg.chat_id, Date.now())       // thinking 没带 message_id 时靠它认「这一轮的回复」
           streamLastInbound.set(targetSession, { chatId: msg.chat_id, messageId: msg.message_id })
           onLaPhaseEvent(targetSession, { kind: "send" })   // M4a：新一轮 → working（新 run_id / since_unix）
@@ -4603,8 +4830,13 @@ export function startHub(): WebSocketServer {
           ws.send(JSON.stringify({ type: "spawn_cc_err", session_name: sessionName, reason: "session_exists" }))
           return
         }
-        const transport = msg.transport === "stream" || msg.transport === "tmux" ? msg.transport : undefined
+        const transport = folderMode ? "tmux" : msg.transport === "stream" || msg.transport === "tmux" ? msg.transport : undefined
         const engine = sessionEngine(sessionName)
+        const claim = sessionAccounts.claim(sessionName, msg.account)
+        if (!claim.ok) {
+          ws.send(JSON.stringify({ type: "spawn_cc_err", session_name: sessionName, reason: claim.reason }))
+          return
+        }
         // stream 传输不起 tmux（判法同 spawnSession），缺 tmux 不该拦它
         const wantStream = engine === "claude" && (transport ?? transportOf(sessionName)) === "stream"
         const missing = missingToolReason(engine, !wantStream)
@@ -4702,7 +4934,8 @@ export function startHub(): WebSocketServer {
         // 以前没装 tmux 时这里抛出 → unhandledRejection → hub 整个退出）
         const code = newWindowCode([...terminalWindows.map(w => w.code), ...openingWindowCodes])
         openingWindowCodes.add(code)
-        const failure = missingToolReason(engine) ?? await spawnTerminalWindowSafely(code, engine)
+        const failure = (folderMode && engine === "codex" ? "文件夹模式第一版不支持 Codex" : null)
+          ?? missingToolReason(engine) ?? await spawnTerminalWindowSafely(code, engine)
         openingWindowCodes.delete(code)
         if (failure) {
           console.warn(`[hub] window open failed engine=${engine}: ${failure}`)
@@ -5116,10 +5349,10 @@ export function startHub(): WebSocketServer {
         if (typeof msg.word === "string" && msg.word.trim() && msg.word.length <= 64) {
           void runVocabArcheology(msg.word.trim().toLowerCase())
         }
-      } else if (msg.type === "pocket_result" || msg.type === "twitter_result") {
+      } else if (msg.type === "pocket_result" || msg.type === "twitter_result" || msg.type === "memory_result") {
         const pid = typeof msg.id === "string" ? msg.id : ""
         const p = pocketPending.get(pid)
-        if (p) p.resolve({ id: msg.id, ok: msg.ok, result: msg.result, error: msg.error })
+        if (p) p.resolve({ id: msg.id, ok: msg.ok, result: msg.result, error: msg.error, ...(typeof msg.mine === "boolean" ? { mine: msg.mine } : {}) })
       } else if (msg.type === "reading_status") {
         // CR-2 阅读在场信号：app 60s tick 上报快照 → 落 agent/reading-status.json
         // （AUTONOMY 触发时机的输入面；消费在 CR-4）。原样落盘，只做形状校验。
@@ -5140,6 +5373,13 @@ export function startHub(): WebSocketServer {
         // 楼层语音设置 → CLAUDE.md 标记块（app 发送前/设置改动时按内容去重同步）
         const r = writeVoiceInstructions(msg.content)
         try { ws.send(JSON.stringify({ type: "voice_instructions_result", ...r })) } catch {}
+      } else if (typeof msg.type === "string" && msg.type.startsWith("garden_tree_")) {
+        gardenTree().onFrame(ws, msg)
+      } else if (msg.type === "set_garden_memory") {
+        // 花园记忆 → CC 家的 garden-memory/<楼层>/（plan-cc-read-memory）：整份换掉；空列表 = 删掉这个楼层的
+        const r = writeGardenMemory(msg)
+        console.log(`[hub] set_garden_memory → ${r.ok ? `${r.files} 个文件` : `拒收（${r.reason}）`}`)
+        try { ws.send(JSON.stringify({ type: "garden_memory_result", ...r })) } catch {}
         // #if PERSONAL_APPS
       } else if (msg.type === "warroom_board") {
         // M3：iOS 军机处看板拉取（快照式——最近奏折 + 普查统计）
@@ -5163,6 +5403,11 @@ export function startHub(): WebSocketServer {
             try { ws.send(JSON.stringify({ type: "warroom_request_result", ok: false, error: String(e?.message ?? e) })) } catch {}
           })
         }
+      } else if (msg.type === "folder_req") {
+        // 文件夹楼层看历史：只转给本机看板服务的文件夹接口（folder-relay.ts）。列表里顺带告诉手机哪些 session 是这台 hub 自己开的（手机本地已经有对话，不用再同步一份）
+        const reqId = typeof msg.req_id === "string" ? { req_id: msg.req_id.slice(0, 100) } : {}
+        if (!folderRelay) { try { ws.send(JSON.stringify({ type: "folder_req_result", ok: false, code: "not-folder", error: "这台电脑不是文件夹模式", ...reqId })) } catch {} }
+        else void folderRelay.request(msg, (op) => (op === "sessions" ? { hub_sessions: folderHubSessions() } : {})).then((r) => { try { ws.send(JSON.stringify(r)) } catch {} })
       } else if (PM_FRAMES.has(msg.type)) {
         // 手机「开发」子应用：只转发给本机 session 看板服务 4793（pm-relay.ts，异步 + 超时，不阻塞消息循环）
         void pmRelay(msg).then((r) => { try { ws.send(JSON.stringify(r)) } catch {} })
@@ -5310,6 +5555,7 @@ export function startHub(): WebSocketServer {
     ws.on("close", (code, reason) => {
       mpClients.delete(ws)
       focusByClient.delete(ws)   // 连接断 = 不聚焦任何会话
+      gardenTreeInstance?.onClose(ws)
       clientInfoByWS.delete(ws)
       callInstallByWS.delete(ws)
       // L4: 兜底清理 terminal 订阅（用户切走 / app 后台 / 网络断 不会显式发 detach）
@@ -5323,10 +5569,13 @@ export function startHub(): WebSocketServer {
         }
       }
       for (const sessionName of terminalSizes.removeClient(ws)) void applyEffectiveSize(sessionName)   // T51
-      // pocket: MP 断开 → 所有等它回复的 pending 立即失败（单 client 场景全清）
+      // pocket / 推特 / 记忆：这个连接断开 → 等它回话的 pending 立即失败；等别的设备的照等（两台都连着时一台掉线不连累另一台）
       for (const [pid, p] of pocketPending) {
+        if (p.target !== undefined && p.target !== ws) continue
         clearTimeout(p.timer); p.resolve({ ok: false, error: "phone disconnected" }); pocketPending.delete(pid)
       }
+      memoryQuiet.delete(ws)
+      for (const [chat, owner] of memoryOwnerByChat) { if (owner === ws) memoryOwnerByChat.delete(chat) }
       console.log(`[hub] ${probeTs()} MP disconnected (total ${mpClients.size}) from ${remote} up=${Math.round((Date.now() - probeConnectedAt) / 1000)}s code=${code} reason=${remoteValueLabel(reason)}`)
     })
   }
@@ -5615,6 +5864,8 @@ export function startHub(): WebSocketServer {
     clearInterval(toolActivityTimer)
     clearInterval(spoolTimer)
     spoolScanner.close()
+    clearInterval(gardenTimer)
+    gardenWatch?.close()
     laScheduler.stop()
     laSchedulerRef = null
     agoraProtocol.close()
@@ -5629,6 +5880,19 @@ export function startHub(): WebSocketServer {
   void mkdir(THINKING_SPOOL_DIR, { recursive: true }).then(() => spoolScanner.arm(), () => {})
   setTimeout(() => void spoolScanner.tick(), 5_000)
   const spoolTimer = setInterval(() => void spoolScanner.tick(), 20_000)
+
+  // 花园记忆文件夹：CC 改了里面的文件（fs.watch 置脏）才扫盘比对；2 秒一拍只是把放稳了的修改送出去，没动静时什么都不做
+  const gardenRoot = join(ccWorkdir(), GARDEN_MEMORY_DIR)
+  let gardenWatch: FSWatcher | null = null
+  const gardenTimer = setInterval(() => {
+    if (folderMode) return   // 花园记忆文件夹是家里的东西，文件夹模式不盯、不扫
+    if (!gardenWatch && existsSync(gardenRoot)) {
+      try { gardenWatch = watch(gardenRoot, { recursive: true }, () => gardenTree().markDirty()); gardenWatch.on("error", () => { gardenWatch?.close(); gardenWatch = null }) } catch { gardenWatch = null }
+    }
+    if (!gardenWatch) gardenTree().markDirty()   // watch 挂不上：每一拍都当有动静
+    try { gardenTree().tick() } catch (e) { console.warn(`[hub] garden_tree tick 失败: ${e}`) }
+  }, 2_000)
+  gardenTimer.unref()
 
   // tmux 会话表后台刷新（plan-hub-instant-connect）：hasSession / list / paneTitles 读这份快照。
   // K1 开时 listen 前先等首份（有超时）：hub 刚起时也不用走同步 has-session / ls / list-panes；K1=0 完全是旧的启动路径
@@ -5722,7 +5986,7 @@ export function startHub(): WebSocketServer {
   // 跟 nudge 一样单选最活跃的那一个（成本原因，见 shouldKeepalive 上方那段），但不看
   // quiet hours——凌晨保暖数学上仍赚，且 ping 不走 bridge，app 里看不见，不会吵到她。
   // codex 不保：OpenAI 缓存机制/价格结构不同。
-  const KEEPALIVE_ENABLED = process.env.MP_CC_KEEPALIVE !== "0"
+  const KEEPALIVE_ENABLED = process.env.MP_CC_KEEPALIVE !== "0" && !folderMode
   const KEEPALIVE_IDLE_MS = (Number(process.env.MP_CC_KEEPALIVE_IDLE_MIN) || 50) * 60_000
   const KEEPALIVE_MAX_MS = (Number(process.env.MP_CC_KEEPALIVE_MAX_HOURS) || 12) * 3_600_000
   const KEEPALIVE_MAX_STREAK = Number(process.env.MP_CC_KEEPALIVE_MAX_STREAK) || 6
@@ -6060,6 +6324,6 @@ if (import.meta.main && process.argv.includes("--relay-connector")) {
 } else if (import.meta.main) {
   startHub()
   // AUTONOMY Phase 1：自主 agent 调度器（总开关默认关，app 写 agent/config.json 才动）
-  import("./agent-runner.ts").then(m => m.startAgentScheduler())
+  if (!folderMode) import("./agent-runner.ts").then(m => m.startAgentScheduler())
     .catch(e => console.warn(`[agent] scheduler 启动失败: ${e}`))
 }

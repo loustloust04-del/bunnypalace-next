@@ -3,7 +3,7 @@ import SwiftUI
 import SwiftData
 
 // MARK: - 记忆 v5 的二级页（设置 → 记忆；记忆 app「设置」格同一份）
-// 编号页同一个模板（plan §二）：开关 → 状态 → 模型 → 各自的行 → 本期花费。
+// 编号页同一个模板（plan §二）：开关 → 模型 → 各自的行（状态看设置顶上的状态卡 / 记忆日志，花费看写入预算 / 用量）。
 // 二级页只在 iOS 设标题（mac 设置窗由宿主按 SettingsRoute.title 给；右栏宿主里不带 navigationTitle）
 
 private struct MemorySubpageChrome: ViewModifier {
@@ -35,7 +35,7 @@ private func floorAssistantName(_ pm: ProfileManager?) -> String {
 }
 
 /// 一行：标题 + 一句话（副标题短、只描述功能）
-private struct SubRowLabel: View {
+struct SubRowLabel: View {
     @Environment(\.settingsMetrics) private var m
     let title: String
     var sub: String? = nil
@@ -83,16 +83,6 @@ struct LimitStepper: View {
 // MARK: - 本期花了多少（账本里这一类用途；后台读）
 
 enum MemoryWriterSpend {
-    /// 本期从哪起：写入预算开着按它的周期；关着按本月
-    static func since(now: Date = Date(), calendar: Calendar = .current) -> (Date, String) {
-        let store = WriteBudgetStore.shared
-        if let s = WriteBudgetStore.since(period: store.period, resetAt: store.resetAt, now: now, calendar: calendar) {
-            return (s, store.period == .week ? "这周" : "今天")
-        }
-        let month = calendar.dateInterval(of: .month, for: now)?.start ?? now
-        return (month, "这个月")
-    }
-
     static func kind(_ id: MemoryWriterID) -> UsageKind? {
         switch id {
         case .a2: return .summary
@@ -104,116 +94,16 @@ enum MemoryWriterSpend {
         }
     }
 
-    /// 后台：每类花了多少（wiki 种子不算写入预算，单列给 C3 页看）
+    /// 后台：写入预算里每类花了多少（写入预算页「花在哪」）
     static func load(since: Date) async -> [UsageKind: Double] {
         await Task.detached(priority: .utility) {
             let records = UsageLedger.shared.load(since: since)
             var out: [UsageKind: Double] = [:]
-            for k in WriteBudgetStore.kinds.union([.catalogSeed]) {
+            for k in WriteBudgetStore.kinds {
                 out[k] = GlobalBudgetStore.ledgerSpentUSD(records: records.filter { $0.kind == k }, since: since)
             }
             return out
         }.value
-    }
-}
-
-// MARK: - 状态行（点了跳日志里这一项最近那条）
-
-struct MemoryWriterStatusRow: View {
-    let id: MemoryWriterID
-    let profileId: String
-    @Environment(\.settingsMetrics) private var m
-    @State private var status: MemoryHealthStore.Status?
-    @State private var paused = false
-    @State private var showLog = false
-
-    var body: some View {
-        Button { showLog = true } label: {
-            HStack(spacing: 8) {
-                if let s = status, let kind = id.health {
-                    if !MemoryHealthStore.isOn(kind) {
-                        SubRowLabel(title: "状态", sub: "关着，没在写")
-                    } else if paused {
-                        SubRowLabel(title: "状态", sub: WriteBudgetStore.pausedText(period: WriteBudgetStore.shared.period))
-                    } else if s.needsAttention {
-                        SubRowLabel(title: "连续 \(s.failStreak) 次没写成", sub: MemoryHealthStatusView.failureDetail(s), titleColor: Theme.danger)
-                    } else {
-                        SubRowLabel(title: "状态", sub: s.lastOK.map { "上次写成 · \(MemoryHealthStatusView.relative($0))" } ?? "还没写过")
-                    }
-                } else {
-                    SubRowLabel(title: "状态", sub: " ")
-                }
-                Image(systemName: "chevron.right")
-                    .font(m.caption)
-                    .foregroundColor(Theme.textMuted)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .sheet(isPresented: $showLog) {
-            MemoryWriteLogSheet(profileId: profileId, focus: id)
-        }
-        .onAppear(perform: reload)
-        .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in reload() }
-    }
-
-    private func reload() {
-        guard let kind = id.health else { return }
-        status = MemoryHealthStore.status(kind, profileId: profileId)
-        Task {
-            let over = await Task.detached(priority: .utility) { WriteBudgetStore.exceeded() }.value
-            paused = over
-        }
-    }
-}
-
-/// C3 的状态行：在整理就写到哪了，没在整理写最近一条日志
-private struct CatalogStatusRow: View {
-    let profileId: String
-    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
-    @Environment(\.settingsMetrics) private var m
-    @AppStorage("mem_write_c3") private var writeC3 = true
-    @State private var runner = CatalogRunner.shared
-    @State private var latest: MemoryWriteLog.Entry?
-    @State private var paused = false
-    @State private var showLog = false
-
-    private var sub: String {
-        if runner.isRunning {
-            let topic = runner.currentTopic.map { "正在整理：\($0)" + (runner.round > 0 ? "（第 \(runner.round) 轮）" : "") } ?? "正在整理"
-            return topic + (runner.queued > 0 ? " · 后面排着 \(runner.queued) 次" : "")
-        }
-        if !writeC3 { return "关着，没在整理" }
-        if paused { return WriteBudgetStore.pausedText(period: WriteBudgetStore.shared.period) }
-        guard let e = latest else { return "还没整理过" }
-        return "\(MemoryHealthStatusView.relative(e.time)) · " + WikiStore.shown(e.note, user: profileManager?.currentProfile.userName ?? "")
-    }
-
-    var body: some View {
-        Button { showLog = true } label: {
-            HStack(spacing: 8) {
-                SubRowLabel(title: "状态", sub: sub, titleColor: latest?.ok == false && !runner.isRunning ? Theme.danger : Theme.textPrimary)
-                Image(systemName: "chevron.right")
-                    .font(m.caption)
-                    .foregroundColor(Theme.textMuted)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .sheet(isPresented: $showLog) {
-            MemoryWriteLogSheet(profileId: profileId, focus: .c3)
-        }
-        .task(id: runner.isRunning) { await reload() }
-        .onReceive(NotificationCenter.default.publisher(for: .memoryDidChange)) { _ in Task { await reload() } }
-    }
-
-    private func reload() async {
-        let pid = profileId
-        let (entry, over) = await Task.detached(priority: .utility) {
-            (MemoryWriteLog.latest(.c3, in: MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))), WriteBudgetStore.exceeded())
-        }.value
-        latest = entry
-        paused = over
     }
 }
 
@@ -549,7 +439,9 @@ struct MemoryWriterPage: View {
     @AppStorage("mem_self_daily_limit") private var selfDailyLimit = 12
     @AppStorage("mem_self_body_limit") private var selfBodyLimit = 800
     @AppStorage(FragmentWatch.everyKey) private var c2Every = FragmentWatch.defaultEvery
+    @AppStorage(FragmentWatch.wholeEveryKey) private var c2WholeEvery = FragmentWatch.defaultWholeEvery
     @AppStorage(FragmentPool.customPromptKey) private var customFragmentPrompt = ""
+    @AppStorage(FragmentPool.customWholePromptKey) private var customWholePrompt = ""
     @AppStorage("memoryExtractModelId") private var memoryExtractModelId = ""
     @AppStorage(FragmentModelRoute.key) private var c2Choice = ""
     @AppStorage("mem_write_c3") private var writeC3 = true
@@ -560,8 +452,6 @@ struct MemoryWriterPage: View {
     @AppStorage(CatalogSettings.maxRoundsKey) private var c3MaxRounds = CatalogSettings.defaultMaxRounds
     @AppStorage(CatalogSettings.sorterKey) private var c3Sorter = CatalogSettings.Sorter.code.rawValue
 
-    @State private var spent: [UsageKind: Double]? = nil
-    @State private var periodLabel = ""
     @State private var archiveCount = 0
     @State private var stopWordCount = 0
     @State private var selfCount = 0
@@ -576,16 +466,13 @@ struct MemoryWriterPage: View {
             Section {
                 if id.hasSwitch {
                     Toggle(isOn: Binding(get: { isOn }, set: { MemoryWriterSettings.set(id, $0) })) {
-                        SubRowLabel(title: "\(id.code) \(id.title(assistant: assistantName))", sub: id.subtitle(assistant: assistantName))
+                        SubRowLabel(title: "\(id.code) \(id.displayTitle(assistant: assistantName))", sub: id.subtitle(assistant: assistantName))
                     }
                     .tint(Theme.branchIndicator)
                 } else {
-                    SubRowLabel(title: "\(id.code) \(id.title(assistant: assistantName))", sub: id.subtitle(assistant: assistantName))
+                    SubRowLabel(title: "\(id.code) \(id.displayTitle(assistant: assistantName))", sub: id.subtitle(assistant: assistantName))
                 }
-                if id.health != nil {
-                    MemoryWriterStatusRow(id: id, profileId: profileId)
-                } else if id == .c3 {
-                    CatalogStatusRow(profileId: profileId)
+                if id == .c3 {
                     CatalogHealthRow(profileId: profileId)
                 }
             }
@@ -598,32 +485,9 @@ struct MemoryWriterPage: View {
 
             specificSections
 
-            if id.isBackground || id == .b1 {
-                Section("花费") {
-                    if id == .b1 {
-                        SubRowLabel(title: "本期", sub: "\(assistantName)本人调工具，不算写入预算")
-                    } else {
-                        HStack {
-                            SubRowLabel(title: periodLabel.isEmpty ? "本期" : periodLabel)
-                            Text(spentText)
-                                .font(m.caption.monospaced())
-                                .foregroundColor(Theme.textMuted)
-                        }
-                        if id == .c3 {
-                            HStack {
-                                SubRowLabel(title: UsageKind.catalogSeed.label, sub: "\(periodLabel.isEmpty ? "本期" : periodLabel)，另算，不占写入预算")
-                                Text(seedSpentText)
-                                    .font(m.caption.monospaced())
-                                    .foregroundColor(Theme.textMuted)
-                            }
-                        }
-                    }
-                }
-                .panelRowBackground()
-            }
             if id == .a3 { WindowSummaryRewriteSection() }
         }
-        .memorySubpage("\(id.code) \(id.title(assistant: assistantName))")
+        .memorySubpage("\(id.code) \(id.displayTitle(assistant: assistantName))")
         .sheet(isPresented: $showLog) {
             MemoryWriteLogSheet(profileId: profileId, focus: id)
         }
@@ -634,19 +498,6 @@ struct MemoryWriterPage: View {
     private var isOn: Bool {
         _ = (writeA2, writeA3, writeA4, writeB1, writeB4, writeC2, writeC3)
         return MemoryWriterSettings.isOn(id)
-    }
-
-    private var spentText: String {
-        guard let kind = MemoryWriterSpend.kind(id) else { return "" }
-        guard let spent else { return "…" }
-        let v = spent[kind] ?? 0
-        return v == 0 && localChoice != nil ? "$0.00 · 本机不花钱" : String(format: "$%.2f", v)
-    }
-
-    private var seedSpentText: String {
-        guard let spent else { return "…" }
-        let v = spent[.catalogSeed] ?? 0
-        return v == 0 && localChoice != nil ? "$0.00 · 本机不花钱" : String(format: "$%.2f", v)
     }
 
     /// A4 / C2 / C3 选了本机哪一款（A4 没选过 = 本机轻巧款）
@@ -665,23 +516,20 @@ struct MemoryWriterPage: View {
     private var modelRows: some View {
         switch id {
         case .a2, .a3:
-            WriterModelPicker(key: MemoryWriterModels.key(id), fallbackLabel: "跟「提取模型」", extractLabel: extractModelLabel,
+            WriterModelPicker(key: MemoryWriterModels.key(id), fallbackLabel: "跟默认模型", extractLabel: extractModelLabel,
                               allowLocal: false)
         case .a4:
             WriterModelPicker(key: TimelineModelRoute.key, fallbackLabel: "本机轻巧款 1.7B（默认）", extractLabel: extractModelLabel,
                               allowLocal: true, defaultLocal: true)
-            Text("只写一句主调和几个话题词；本机没装、跑不了或 app 在后台，这一次用提取模型")
-                .font(m.caption)
-                .foregroundColor(Theme.textMuted)
             if let local = localChoice {
                 if !LocalLLMService.isSupported {
-                    SubRowLabel(title: "本机模型", sub: "这台设备跑不了本机模型，先用提取模型")
+                    SubRowLabel(title: "本机模型", sub: "这台设备跑不了本机模型，先用默认模型")
                 } else if let model = AssistantLocalModel.catalog.first(where: { $0.id == local }) {
                     LocalModelDownloadRow(model: model, title: "下载本机模型")
                 }
             }
         case .c2, .c3:
-            WriterModelPicker(key: id == .c2 ? FragmentModelRoute.key : CatalogModelRoute.key, fallbackLabel: "跟「提取模型」",
+            WriterModelPicker(key: id == .c2 ? FragmentModelRoute.key : CatalogModelRoute.key, fallbackLabel: "跟默认模型",
                               extractLabel: extractModelLabel, allowLocal: true)
             if id == .c3, localChoice != nil {
                 Text("本机模型放不下写作规则，日常整理会报错")
@@ -691,7 +539,7 @@ struct MemoryWriterPage: View {
             // 选了哪个本机款就给哪个的下载行；没选本机就不出
             if let local = localChoice {
                 if !LocalLLMService.isSupported {
-                    SubRowLabel(title: "本机模型", sub: "这台设备跑不了本机模型，先用提取模型")
+                    SubRowLabel(title: "本机模型", sub: "这台设备跑不了本机模型，先用默认模型")
                 } else if let model = AssistantLocalModel.catalog.first(where: { $0.id == local }) {
                     LocalModelDownloadRow(model: model, title: "下载本机模型")
                 }
@@ -706,33 +554,9 @@ struct MemoryWriterPage: View {
     @ViewBuilder
     private var specificSections: some View {
         switch id {
-        case .a4:
-            Section {
-                SubRowLabel(title: "每天过了 05:00", sub: "第一次巡检把前一天各窗口拼成一条；读已经写好的上下文摘要，不另外去压")
-                SubRowLabel(title: "没压缩的那截", sub: "先列「N 条，没压缩」，等上下文摘要压完、下次拼那天时补上")
-            } header: {
-                Text("什么时候写")
-            } footer: {
-                Text("对话 ⋯ 里的「现在写」顺手拼今天；时间轴里长按一天能重写那天的主调")
-                    .font(m.caption)
-            }
-            .panelRowBackground()
         case .a2, .a3:
-            Section {
+            Section("什么时候写") {
                 TriggerRows(id: id)
-                if id == .a2 {
-                    SubRowLabel(title: "CC 窗口", sub: "满 60 条就写（只手动时不写）")
-                    SubRowLabel(title: "每天 05:00 切一刀", sub: "API 窗口也切（只手动时不写）")
-                    SubRowLabel(title: "尾段", sub: "每次收尾整段重写，被正式压缩后换成正式段")
-                }
-                if id == .a3 {
-                    SubRowLabel(title: "窗口总结", sub: "长度按窗口段数自动分档")
-                }
-            } header: {
-                Text("什么时候写")
-            } footer: {
-                Text("对话 ⋯ 里的「现在写」立刻写这个窗口")
-                    .font(m.caption)
             }
             .panelRowBackground()
         case .b1:
@@ -753,8 +577,6 @@ struct MemoryWriterPage: View {
                 LimitStepper(title: "自己主动记的每日上限", value: "\(selfDailyLimit) 条（你让记的、你改的都不算）",
                              number: $selfDailyLimit, range: 1...50)
                 LimitStepper(title: "每条正文上限", value: "\(selfBodyLimit) 字", number: $selfBodyLimit, range: 200...3000, step: 100)
-                SubRowLabel(title: "图数据库 · 联想召回", sub: "还没做")
-                    .opacity(0.5)
             }
             .panelRowBackground()
         case .c:
@@ -768,12 +590,18 @@ struct MemoryWriterPage: View {
             .panelRowBackground()
         case .c2:
             Section("怎么记") {
-                LimitStepper(title: "每满几条写一次", value: "\(c2Every) 条（两边加起来）", number: $c2Every,
-                             range: FragmentWatch.everyRange, step: 2)
+                // 整段写手（云上模型）攒一大截再写；本机模型走老写法，用老的那个数
+                if FragmentWatch.usesWhole(local: FragmentModelRoute.localModelId(choice: c2Choice) != nil) {
+                    LimitStepper(title: "每满几条写一次", value: "\(c2WholeEvery) 条（两边加起来）", number: $c2WholeEvery,
+                                 range: FragmentWatch.wholeEveryRange, step: 20)
+                } else {
+                    LimitStepper(title: "每满几条写一次", value: "\(c2Every) 条（两边加起来）", number: $c2Every,
+                                 range: FragmentWatch.everyRange, step: 2)
+                }
                 SettingsNavRow(.memoryExtractPrompt) {
-                    PromptEditorPage.memoryExtract
+                    ExtractPromptPage()
                 } label: {
-                    SubRowLabel(title: "提取提示词", sub: customFragmentPrompt.isEmpty ? "新版默认 · 每条最多 200 字" : "自定义保留 · 用默认模板并保存才换新版")
+                    SubRowLabel(title: "提取提示词", sub: extractPromptSub)
                 }
                 Button { showLog = true } label: {
                     HStack {
@@ -819,18 +647,23 @@ struct MemoryWriterPage: View {
         }
     }
 
+    /// 「提取提示词」那行：写法只看选没选本机模型（本机 = 旧写法）；她改过提示词只换前面那两个字
+    private var extractPromptSub: String {
+        _ = (customFragmentPrompt, customWholePrompt)
+        if FragmentWatch.usesWhole(local: localChoice != nil) {
+            return (FragmentPool.activeWholeTemplate() != nil ? "你改过的" : "默认") + " · 整段读完再写，写完再核对"
+        }
+        return (FragmentPool.activeCustomTemplate() != nil ? "你改过的" : "默认") + " · 旧写法"
+    }
+
+    /// 提取模型现在实际解析成谁（和写手运行时同一处；以前没选时只写「自动」，看不出背后是哪个模型）
     private var extractModelLabel: String {
-        guard !memoryExtractModelId.isEmpty,
-              let model = (providerManager?.enabledProviders ?? []).flatMap(\.models).first(where: { $0.id == memoryExtractModelId })
-        else { return "自动" }
-        return model.name
+        _ = memoryExtractModelId
+        return providerManager.map { MemoryWriterModels.extract(providers: $0).name } ?? "自动"
     }
 
     private func reload() async {
         let pid = profileId
-        let (since, label) = MemoryWriterSpend.since()
-        periodLabel = label
-        if id.isBackground { spent = await MemoryWriterSpend.load(since: since) }
         switch id {
         case .c:
             archiveCount = SwiftDataMemoryStore().listActive(profileId: pid, context: modelContext).count
@@ -871,9 +704,10 @@ private struct WriterModelPicker: View {
 
     private var label: String {
         if choice.isEmpty { return defaultLocal ? fallbackLabel : "\(fallbackLabel) · \(extractLabel)" }
-        if choice == FragmentModelRoute.extractChoice { return "跟「提取模型」 · \(extractLabel)" }
+        if choice == FragmentModelRoute.extractChoice { return "跟默认模型 · \(extractLabel)" }
         if choice.hasPrefix(FragmentModelRoute.localPrefix) { return FragmentModelRoute.localName(String(choice.dropFirst(FragmentModelRoute.localPrefix.count))) }
-        return cards.flatMap(\.models).first { $0.id == choice }?.name ?? "已停用的模型（现在按默认）"
+        // 选过的模型停用了：运行时跟默认模型（`FragmentModelRoute.resolve`），A4 也一样
+        return cards.flatMap(\.models).first { $0.id == choice }?.name ?? "跟默认模型 · \(extractLabel)"
     }
 
     var body: some View {
@@ -882,7 +716,7 @@ private struct WriterModelPicker: View {
                 Text(fallbackLabel).tag("")
                 if defaultLocal {
                     Text("本机聪明款 4B").tag(FragmentModelRoute.localPrefix + AssistantLocalModel.smart.id)
-                    Text("跟「提取模型」").tag(FragmentModelRoute.extractChoice)
+                    Text("跟默认模型").tag(FragmentModelRoute.extractChoice)
                 } else if allowLocal {
                     Text("本机聪明款 4B").tag(FragmentModelRoute.localPrefix + AssistantLocalModel.smart.id)
                     Text("本机轻巧款 1.7B").tag(FragmentModelRoute.localPrefix + AssistantLocalModel.light.id)
@@ -966,6 +800,7 @@ struct MemoryOpenWindowPage: View {
     @Environment(\.settingsMetrics) private var m
     @State private var checks: [MemoryWriterID: Bool] = [:]
     @State private var extras: [MemoryNoteItem: Bool] = [:]
+    @State private var everyRound = false
     @State private var noteOn = true
     @AppStorage("mem_inject_catalog") private var memInjectCatalog = false
     @AppStorage("mem_session_full_segments") private var sessionFullSegments = 2
@@ -995,15 +830,14 @@ struct MemoryOpenWindowPage: View {
                 if checked(.b4).wrappedValue {
                     LimitStepper(title: "带全文的最近几条", value: "\(selfRecentCount) 条（重要度 5 的另算，全部带）",
                                  number: $selfRecentCount, range: 1...30)
-                    LimitStepper(title: "最多占注入预算", value: "\(selfBudgetPercent)%（剩下的给档案）",
+                    LimitStepper(title: "最多占注入预算", value: "\(selfBudgetPercent)%（剩下的给原子事实和 wiki）",
                                  number: $selfBudgetPercent, range: 10...100, step: 10)
                 }
-                check("档案根索引", checked(.c))
+                check("原子事实每轮全带", everyRoundBinding, sub: "批过的原子事实每一轮都带（预算内）")
+                    .searchAnchor("leaf-mem-everyround")
+                check("wiki 目录", checked(.c))
                     .searchAnchor("leaf-mem-rootindex")
                 if checked(.c).wrappedValue {
-                    Text("每轮带档案目录（每页一行，不带正文）；聊到哪页才带那页由「自动想起」管。")
-                        .font(m.caption)
-                        .foregroundColor(Theme.textMuted)
                     Toggle(isOn: $memInjectCatalog) {
                         SubRowLabel(title: "命中的只带一行目录")
                     }
@@ -1046,8 +880,16 @@ struct MemoryOpenWindowPage: View {
             ($0, MemoryOpenWindow.isChecked($0, profileId: profileId))
         })
         let defaults = MemoryWindowChoices.defaults(profileId: profileId)
-        extras = Dictionary(uniqueKeysWithValues: [MemoryNoteItem.pending, .previousWindow, .pinned].map { ($0, defaults[$0]) })
+        extras = Dictionary(uniqueKeysWithValues: MemoryOpenWindow.noteExtras.map { ($0, defaults[$0]) })
+        everyRound = MemoryOpenWindow.everyRound(profileId: profileId)
         noteOn = MemoryOpenWindowNote.enabled(profileId: profileId)
+    }
+
+    private var everyRoundBinding: Binding<Bool> {
+        Binding(get: { everyRound }, set: { value in
+            MemoryOpenWindow.setEveryRound(value, profileId: profileId)
+            refreshChecks()
+        })
     }
 
     /// 段④ 纸条新增的三勾（楼层默认，新窗口起步用）
@@ -1089,8 +931,10 @@ struct MemoryOpenWindowPage: View {
 
 struct ArchiveTriggerPage: View {
     var searchTarget: String? = nil
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
     var body: some View {
-        RecallParametersPage(page: .archiveTrigger, searchTarget: searchTarget).memorySubpage("档案触发")
+        RecallParametersPage(page: .archiveTrigger, searchTarget: searchTarget)
+            .memorySubpage("系统推送给\(floorAssistantName(profileManager))")
             .searchAnchor("page-mem-archivetrigger")
     }
 }
@@ -1100,6 +944,129 @@ struct RecallBrowsePage: View {
     var body: some View {
         RecallParametersPage(page: .recallBrowse, searchTarget: searchTarget).memorySubpage("翻记忆")
             .searchAnchor("page-mem-recallbrowse")
+    }
+}
+
+// MARK: - 接口 › 和 CC 同步（原来一级页上那两张卡，原样搬进来）
+
+struct MemoryCCSyncPage: View {
+    var body: some View {
+        SettingsSectionList(.list) {
+            Section {
+                CCMemorySyncCard()
+            }
+            .panelRowBackground()
+            .listRowSeparator(.hidden)
+        }
+        .memorySubpage("和 CC 同步")
+    }
+}
+
+// MARK: - 审计台设置（粟粟 11-15：整理放这里；「C2 整理」那一节从 C2 页原样挪来）
+
+struct MemoryAuditSettingsPage: View {
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+    @Environment(\.settingsMetrics) private var m
+    @AppStorage(FragmentDream.enabledKey) private var c2Dream = true
+    @AppStorage(FragmentDream.reviewKey) private var c2DreamReview = true
+
+    var body: some View {
+        SettingsSectionList(.list) {
+            // 「C2 整理」（`FragmentDream`；不是 B3「小克做梦」）
+            Section {
+                Toggle(isOn: $c2Dream) {
+                    SubRowLabel(title: "写完自动整理一遍", sub: "每写成一批，给这批新条目下结论：留下、删掉、并进已有的、改对、拿不准")
+                }
+                .tint(Theme.branchIndicator)
+                Toggle(isOn: $c2DreamReview) {
+                    SubRowLabel(title: "整理留下的条目要我批", sub: "关 = 留下的直接算批过，只有拿不准的留在 Draft")
+                }
+                .tint(Theme.branchIndicator)
+                // 手动「重新整理」（`FragmentReorganize`）：不看上面「写完自动整理一遍」开没开；「要我批」对它照常生效
+                ReorganizeDraftsSettingsRows(profileId: profileManager?.currentProfile.id ?? "")
+            } header: {
+                Text(FragmentDream.actor).searchAnchor("leaf-mem-c2-organize")
+            } footer: {
+                Text("删掉、并进已有的、改对直接生效。本机模型不做。")
+                    .font(m.caption)
+            }
+            .panelRowBackground()
+        }
+        .memorySubpage("审计台设置")
+    }
+}
+
+// MARK: - 记忆系统说明（正文以后另写，粟粟 11-15）
+
+struct MemoryExplainerPage: View {
+    var body: some View {
+        SettingsSectionList(.list) {
+            Section {
+                SubRowLabel(title: "还没写")
+            }
+            .panelRowBackground()
+        }
+        .memorySubpage("记忆系统说明")
+    }
+}
+
+// MARK: - 设置 › 开发调试 › 记忆 · 没做完的（粟粟 11-15：还没做的 / 没弄完的都收这里）
+
+struct MemoryUnfinishedPage: View {
+    @Environment(ProfileManager.self) private var profileManager: ProfileManager?
+    @Environment(\.settingsMetrics) private var m
+    @AppStorage("mem_inject_vector") private var memInjectVector = false
+    @AppStorage("mem_inject_graph") private var memInjectGraph = false
+
+    private var assistantName: String { floorAssistantName(profileManager) }
+
+    var body: some View {
+        SettingsSectionList(.list) {
+            Section {
+                ForEach([MemoryWriterID.b2, .b3], id: \.self) { id in
+                    SubRowLabel(title: "\(id.code) \(id.title(assistant: assistantName))", sub: id.subtitle(assistant: assistantName))
+                        .opacity(0.5)
+                }
+                SubRowLabel(title: "图数据库 · 联想召回", sub: "还没做")
+                    .opacity(0.5)
+            }
+            .panelRowBackground()
+            Section {
+                MemorySwitchRow(title: "按意思找记忆", sub: "聊到意思相近的事也能想起来（第一次打开会下载本地模型）", isOn: $memInjectVector, tech: "向量检索")
+                    .onChange(of: memInjectVector) { _, on in
+                        if on { AppleMemoryEmbedder.shared.requestAssetsIfNeeded() }
+                    }
+                if memInjectVector {
+                    HStack(spacing: 8) {
+                        Text("向量模型")
+                            .font(m.caption)
+                            .foregroundColor(Theme.textMuted)
+                        if AppleMemoryEmbedder.shared.assetState == .downloading {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text(AppleMemoryEmbedder.shared.assetState.rawValue)
+                            .font(m.caption.weight(.medium))
+                            .foregroundColor(AppleMemoryEmbedder.shared.assetState == .ready ? Theme.branchIndicator : Theme.textSecondary)
+                        Spacer()
+                    }
+                }
+                MemorySwitchRow(title: "关联扩展", sub: "命中一条顺带它的关联记忆", isOn: $memInjectGraph)
+            }
+            .panelRowBackground()
+            .listRowSeparator(.hidden)
+            // v4-1 §九：按新规则重写 / 从备份恢复，只在 DEBUG 构建里（Q10）
+            #if DEBUG
+            MemoryRegenerationSection()
+            Section("还没做") {
+                Text("文件 / 发图历史、Moment（事件感知）、提取门槛、语境 tag、随机联想、记忆网关")
+                    .font(m.caption)
+                    .foregroundColor(Theme.textMuted)
+            }
+            .panelRowBackground()
+            .listRowSeparator(.hidden)
+            #endif
+        }
+        .memorySubpage("记忆 · 没做完的")
     }
 }
 
@@ -1118,39 +1085,34 @@ private struct RecallParametersPage: View {
         ScrollViewReader { proxy in
             SettingsSectionList(.list) {
                 if page == .archiveTrigger {
+                    // 一级页挪进来的两行（粟粟 11-15：一级只留总闸）
+                    Section {
+                        LimitStepper(title: "一轮最多几页", value: "\(tuning.maximumPages) 页",
+                                     number: Binding(get: { tuning.maximumPages }, set: { value in
+                                         var latest = RecallTuningStore.load(profileId: profileId)
+                                         latest.maximumPages = value
+                                         RecallTuningStore.save(latest, profileId: profileId)
+                                         tuning = RecallTuningStore.load(profileId: profileId)
+                                     }), range: 1...20)
+                            .searchAnchor("leaf-mem-maximumpages")
+                        MemorySwitchRow(title: "冷却", sub: "推送了你没接茬就先停几句",
+                                        isOn: Binding(get: { tuning.cooldownEnabled }, set: { value in
+                                            var latest = RecallTuningStore.load(profileId: profileId)
+                                            latest.cooldownEnabled = value
+                                            RecallTuningStore.save(latest, profileId: profileId)
+                                            tuning = RecallTuningStore.load(profileId: profileId)
+                                        }))
+                            .searchAnchor("leaf-mem-cooldown")
+                    }
+                    .panelRowBackground()
                     fieldGroup([.minimumEffectiveLength])
                     fieldGroup([.minimumSharedTerms, .activeOverlapThreshold])
                     fieldGroup([.cooldownTurns])
-                    fieldGroup([.identityLookbackMessages, .minimumHanTermLength, .minimumLatinTermLength])
-                    Section("全文兜底（还没接上）") {
-                        SubRowLabel(title: "页名没对上时搜全文",
-                                    sub: "一句话最多取几个词 \(defaults.maximumQueryTerms) · 命中至少几个词 \(defaults.minimumFullTextTerms) · 分量覆盖 \(String(format: "%.2f", defaults.fullTextCoverageThreshold))")
-                            .searchAnchor("leaf-mem-fulltextfallback")
-                    }
-                    .panelRowBackground()
-                    .opacity(0.5)
+                    fieldGroup([.minimumHanTermLength, .minimumLatinTermLength])
+                    fieldGroup([.maximumQueryTerms, .minimumFullTextTerms, .fullTextCoverageThreshold])
+                    fieldGroup([.maximumFragments])
                 } else {
                     fieldGroup([.maximumRecallCalls])
-                    Section("一次读多少") {
-                        SubRowLabel(title: "正文最多几个字 \(defaults.maximumBodyCharacters) · 连目录一共最多几个字 \(defaults.maximumResponseCharacters)")
-                            .searchAnchor("leaf-mem-readcharacters")
-                    }
-                    .panelRowBackground()
-                    .opacity(0.5)
-                    Section("每页多少") {
-                        SubRowLabel(title: "时间轴：一页 \(defaults.datePageDays) 天 · 最多 \(defaults.datePageEvents) 件事")
-                            .searchAnchor("leaf-mem-datepage")
-                        SubRowLabel(title: "窗口总结：一页 \(defaults.windowPageSegments) 段")
-                            .searchAnchor("leaf-mem-windowpage")
-                        SubRowLabel(title: "搜索：一页 \(defaults.searchPageResults) 条")
-                            .searchAnchor("leaf-mem-searchpage")
-                        SubRowLabel(title: "档案目录：一页 \(defaults.wikiIndexPageLines) 行 · 档案页记录：一页 \(defaults.wikiPageRecords) 条")
-                            .searchAnchor("leaf-mem-wikipage")
-                        SubRowLabel(title: "原文：一页 \(defaults.originalPageMessages) 条消息")
-                            .searchAnchor("leaf-mem-originalpage")
-                    }
-                    .panelRowBackground()
-                    .opacity(0.5)
                 }
                 Section {
                     Button("恢复本楼层默认") {
@@ -1160,12 +1122,6 @@ private struct RecallParametersPage: View {
                     }
                     .foregroundColor(Theme.branchIndicator)
                     .searchAnchor(page == .archiveTrigger ? "leaf-mem-archivereset" : "leaf-mem-browsereset")
-                } footer: {
-                    if page == .archiveTrigger {
-                        Text("只管这一个楼层，下一句生效。每一轮用了哪份数，记在那条消息的「想起来了」卡里。")
-                            .font(m.caption)
-                            .foregroundColor(Theme.textMuted)
-                    }
                 }
                 .panelRowBackground()
             }
@@ -1195,11 +1151,6 @@ private struct RecallParametersPage: View {
                 Text(fields[0].explanation.replacingOccurrences(of: "助手", with: assistantName))
                     .font(m.caption)
                     .foregroundColor(Theme.textMuted)
-                if fields[0] == .identityLookbackMessages {
-                    Text(RecallTuning.Field.minimumHanTermLength.explanation)
-                        .font(m.caption)
-                        .foregroundColor(Theme.textMuted)
-                }
             }
         }
         .panelRowBackground()
@@ -1236,7 +1187,7 @@ private struct RecallParametersPage: View {
         switch field {
         case .minimumEffectiveLength, .minimumHanTermLength: "字"
         case .cooldownTurns: "句"
-        case .identityLookbackMessages: "条"
+        case .maximumFragments: "条"
         case .maximumRecallCalls: "次"
         default: "个"
         }
@@ -1287,7 +1238,7 @@ struct WriteBudgetPage: View {
                 Section("花在哪") {
                     ForEach([MemoryWriterID.a2, .a3, .a4, .c2, .c3], id: \.self) { id in
                         HStack {
-                            SubRowLabel(title: "\(id.code) \(id.title(assistant: floorAssistantName(profileManager)))")
+                            SubRowLabel(title: "\(id.code) \(id.displayTitle(assistant: floorAssistantName(profileManager)))")
                             Text(spentText(id))
                                 .font(m.caption.monospaced())
                                 .foregroundColor(Theme.textMuted)
@@ -1368,7 +1319,7 @@ struct PendingListPage: View {
                         editText = item.text
                         editing = item
                     } label: {
-                        SubRowLabel(title: item.text, sub: "《\(titles[item.conversationId] ?? String(item.conversationId.prefix(8)))》\(item.day)")
+                        SubRowLabel(title: item.text, sub: "《\(titles[item.conversationId] ?? (item.conversationId == PendingStore.ccWindow ? "CC" : String(item.conversationId.prefix(8))))》\(item.day)")
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -1464,7 +1415,7 @@ struct MemoryArchiveListPage: View {
                     .font(m.body)
                 let q = query.trimmingCharacters(in: .whitespaces)
                 ForEach(memories.filter { q.isEmpty || $0.content.localizedCaseInsensitiveContains(q) }, id: \.id) { mem in
-                    SubRowLabel(title: mem.content, sub: MemoryDateText.short(mem.createdAt))
+                    SubRowLabel(title: mem.lineText, sub: MemoryDateText.short(mem.createdAt))
                 }
             }
             .panelRowBackground()
@@ -1524,15 +1475,24 @@ struct WriteMemoryNowButton: View {
 
     var body: some View {
         Button {
-            guard let pm = providerManager, let profile = profileManager?.currentProfile else { return }
-            let preset = presetManager?.preset(byId: profile.presetId) ?? Preset.balanced
-            let model = pm.resolveModel(conversationModelId: viewModel.selectedConversation?.selectedModelId,
-                                        profileModelId: profile.preferredModel,
-                                        globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
-            viewModel.writeMemoryNow(contextDepth: preset.sampling.contextDepth, profile: profile, model: model, providerManager: pm)
+            Self.run(viewModel: viewModel, profileManager: profileManager, providerManager: providerManager, presetManager: presetManager)
         } label: { Label("现在写", systemImage: "square.and.pencil") }
         .disabled(!memMaster)
     }
+
+    /// 按钮和对话菜单（`ConversationMenu`「记忆 ▸ 现在写记忆」）共用：写的是 viewModel 当前选中的对话
+    static func run(viewModel: ConversationViewModel, profileManager: ProfileManager?,
+                    providerManager: ProviderManager?, presetManager: PresetManager?) {
+        guard let pm = providerManager, let profile = profileManager?.currentProfile else { return }
+        let preset = presetManager?.preset(byId: profile.presetId) ?? Preset.balanced
+        let model = pm.resolveModel(conversationModelId: viewModel.selectedConversation?.selectedModelId,
+                                    profileModelId: profile.preferredModel,
+                                    globalFallbackId: UserDefaults.standard.string(forKey: "selectedChatModel"))
+        viewModel.writeMemoryNow(contextDepth: preset.sampling.contextDepth, profile: profile, model: model, providerManager: pm)
+    }
+
+    /// 总开关（`mem_master`，默认开）：关着时「现在写」灰掉
+    static var isEnabled: Bool { UserDefaults.standard.object(forKey: "mem_master") as? Bool ?? true }
 }
 
 // MARK: - 记忆日志（plan §十一）
@@ -1617,56 +1577,101 @@ enum MemoryWriteLogRunReader {
 
 struct MemoryWriteLogSheet: View {
     let profileId: String
-    /// 点状态卡某一行进来：跳到这一项最近那条
-    var focus: MemoryWriterID? = nil
+    /// 在这里撤了整理台的一笔（整理台从 ⋯ › 记忆日志 打开时用来刷新自己）
+    let onAuditChanged: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.settingsMetrics) private var m
+    @Environment(\.modelContext) private var modelContext
     @State private var entries: [MemoryWriteLog.Entry] = []
-    @State private var filter: MemoryWriterID? = nil
-    @State private var highlighted: UUID?
+    /// 她在整理台做的（`MemoryAuditLog`）：和 AI 写入按时间混排；撤回那一笔本身不单列，原来那行标 Undone
+    @State private var audit: [MemoryAuditLog.Entry] = []
+    @State private var auditOpen: Set<UUID> = []
+    @State private var auditNote: String?
+    @State private var filter: LogFilter
     @State private var loaded = false
     @State private var runDocument: MemoryWriteLogRunReader.Document?
     @State private var runError: String?
     @State private var openingRun = false
+    /// 点开的那次「C2 整理」的记录
+    @State private var dreamRecord: FragmentDreamRecord?
+    /// 点开的那次「详细度」重写的记录
+    @State private var detailRecord: CardDetailRecord?
+    @State private var dreamError: String?
+    @AppStorage("assistantName") private var assistantName = "助手"
 
-    private static let filters: [MemoryWriterID?] = [nil, .a2, .a3, .a4, .c2, .c3]
+    /// 详情页 ⋯「这条的记录」：只列动过这一条的那几笔
+    let card: UUID?
+
+    /// `focus`：从某一项写手进来，筛选直接选到那一项（打开永远在顶上，不滚到中间）
+    init(profileId: String, focus: MemoryWriterID? = nil, card: UUID? = nil, onAuditChanged: (() -> Void)? = nil) {
+        self.profileId = profileId
+        self.card = card
+        self.onAuditChanged = onAuditChanged
+        _filter = State(initialValue: Self.filter(focus: focus))
+    }
+
+    /// 上面那排：全部 / 她自己的操作 / 某一项写手
+    enum LogFilter: Hashable {
+        case all, you
+        case writer(MemoryWriterID)
+
+        var label: String {
+            switch self {
+            case .all: return "全部"
+            case .you: return "You"
+            case .writer(let w): return w.code
+            }
+        }
+    }
+
+    static let filters: [LogFilter] = [.all, .you] + [MemoryWriterID.a2, .a3, .a4, .c2, .c3].map(LogFilter.writer)
+
+    /// 带进来的那一项在那排里就选它，不在就「全部」
+    static func filter(focus: MemoryWriterID?) -> LogFilter {
+        guard let focus, filters.contains(.writer(focus)) else { return .all }
+        return .writer(focus)
+    }
 
     var body: some View {
         NavigationStack {
-            ScrollViewReader { proxy in
-                List {
-                    Section {
-                        Picker("筛", selection: $filter) {
-                            ForEach(Self.filters, id: \.self) { f in
-                                Text(f?.code ?? "全部").tag(f)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                    }
-                    .panelRowBackground()
-                    let shown = entries.filter { filter == nil || $0.writer == filter?.code }
-                    if loaded && shown.isEmpty {
-                        Section { Text("还没有记录").font(m.body).foregroundColor(Theme.textMuted) }
-                            .panelRowBackground()
-                    }
-                    ForEach(Self.days(shown), id: \.0) { day, rows in
-                        Section(day) {
-                            ForEach(rows) { e in
-                                row(e)
-                                    .id(e.id)
-                                    .listRowBackground(e.id == highlighted ? Theme.accent : Theme.mainBg)
-                            }
+            List {
+                Section {
+                    Picker("筛", selection: $filter) {
+                        ForEach(Self.filters, id: \.self) { f in
+                            Text(f.label).tag(f)
                         }
                     }
+                    .pickerStyle(.segmented)
                 }
-                .panelListStyle()
-                .scrollContentBackground(.hidden)
-                .toolPageBackground()
-                .onChange(of: loaded) { _, ok in
-                    guard ok, let id = highlighted else { return }
-                    DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
+                .panelRowBackground()
+                if let auditNote {
+                    Section { Text(auditNote).font(m.caption).foregroundColor(Theme.textSecondary) }
+                        .panelRowBackground()
+                }
+                let shown = Self.rows(entries, audit: audit, filter: filter, card: card)
+                if loaded && shown.isEmpty {
+                    Section { Text("还没有记录").font(m.body).foregroundColor(Theme.textMuted) }
+                        .panelRowBackground()
+                }
+                let undone = MemoryAuditLog.undone(audit)
+                ForEach(Self.days(shown, time: \.time), id: \.0) { day, rows in
+                    Section(day) {
+                        ForEach(rows) { r in
+                            switch r {
+                            case .ai(let e):
+                                row(e)
+                                    .listRowBackground(Theme.mainBg)
+                            case .you(let e):
+                                auditRow(e, undone: undone.contains(e.id))
+                                    .listRowBackground(Theme.mainBg)
+                            }
+                        }
+                    }
                 }
             }
+            .panelListStyle()
+            .scrollContentBackground(.hidden)
+            .toolPageBackground()
             .panelSheetTitle("记忆日志")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -1697,11 +1702,54 @@ struct MemoryWriteLogSheet: View {
         } message: {
             Text(runError ?? "")
         }
+        .sheet(item: $dreamRecord) { record in
+            FragmentDreamRecordSheet(record: record)
+                .environment(\.settingsMetrics, m)
+        }
+        .sheet(item: $detailRecord) { record in
+            CardDetailRecordSheet(record: record)
+                .environment(\.settingsMetrics, m)
+        }
+        .alert(dreamError == CardDetailRecord.expiredMessage ? CardDetailRewrite.name : FragmentDream.actor,
+               isPresented: Binding(get: { dreamError != nil }, set: { if !$0 { dreamError = nil } })) {
+            Button("好", role: .cancel) { dreamError = nil }
+        } message: {
+            Text(dreamError ?? "")
+        }
+    }
+
+    private func openDream(_ id: String) {
+        Task {
+            if CardDetailRecord.isId(id) {
+                let pid = profileId
+                let record = await Task.detached(priority: .userInitiated) {
+                    CardDetailRecord.load(id: id, memoryRoot: FileLibraryStore.memoryRoot(profileId: pid))
+                }.value
+                if let record { detailRecord = record } else { dreamError = CardDetailRecord.expiredMessage }
+            } else if let record = await FragmentDreamRecordReader.load(id: id, profileId: profileId) {
+                dreamRecord = record
+            } else {
+                dreamError = FragmentDreamRecordReader.expiredMessage
+            }
+        }
     }
 
     @ViewBuilder
     private func row(_ entry: MemoryWriteLog.Entry) -> some View {
-        if MemoryWriteLogRunReader.link(for: entry) != nil {
+        if let dream = entry.dream {
+            Button { openDream(dream) } label: {
+                HStack {
+                    rowContent(entry)
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right")
+                        .font(m.caption)
+                        .foregroundColor(Theme.textMuted)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("看这次发给模型的全文和每条的结论")
+        } else if MemoryWriteLogRunReader.link(for: entry) != nil {
             Button {
                 Task { await openRun(entry) }
             } label: {
@@ -1723,13 +1771,14 @@ struct MemoryWriteLogSheet: View {
     }
 
     private func rowContent(_ e: MemoryWriteLog.Entry) -> some View {
-        let name = MemoryWriterID(rawValue: e.writer.lowercased()).map { $0.title(assistant: "") } ?? ""
+        let name = MemoryWriterID(rawValue: e.writer.lowercased()).map { $0.displayTitle(assistant: "") } ?? ""
         var tail = [e.note, e.model].filter { !$0.isEmpty }
         if let c = e.costUSD { tail.append(String(format: "$%.3f", c)) }
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 5) {
                 if !e.ok { Circle().fill(Theme.danger).frame(width: 6, height: 6) }
-                Text("\(Self.time(e.time))　\(e.writer) \(name) · \(e.ok ? "写好了" : "没写成")")
+                Text(e.dream != nil ? "\(Self.time(e.time))　\(e.dream.map(CardDetailRecord.isId) == true ? CardDetailRewrite.name : FragmentDream.actor)\(e.ok ? "" : " · 没跑成")"
+                                    : "\(Self.time(e.time))　\(e.writer) \(name) · \(e.ok ? "写好了" : "没写成")")
                     .font(m.body)
                     .foregroundColor(e.ok ? Theme.textPrimary : Theme.danger)
             }
@@ -1756,28 +1805,188 @@ struct MemoryWriteLogSheet: View {
 
     private func load() async {
         let pid = profileId
-        let list = await Task.detached { MemoryWriteLog.entries(memoryRoot: FileLibraryStore.memoryRoot(profileId: pid)) }.value
+        let root = FileLibraryStore.memoryRoot(profileId: pid)
+        let (list, mine) = await Task.detached { () -> ([MemoryWriteLog.Entry], [MemoryAuditLog.Entry]) in
+            MemoryAuditLog.prune(memoryRoot: root)
+            return (MemoryWriteLog.entries(memoryRoot: root), MemoryAuditLog.load(memoryRoot: root))
+        }.value
         entries = list
-        if let focus { highlighted = MemoryWriteLog.latest(focus, in: list)?.id }
+        audit = mine
         loaded = true
+    }
+
+    /// 一行：AI 写入，或她在整理台的一笔
+    enum LogRow: Identifiable {
+        case ai(MemoryWriteLog.Entry)
+        case you(MemoryAuditLog.Entry)
+
+        var id: UUID {
+            switch self {
+            case .ai(let e): return e.id
+            case .you(let e): return e.id
+            }
+        }
+
+        var time: Date {
+            switch self {
+            case .ai(let e): return e.time
+            case .you(let e): return e.at
+            }
+        }
+    }
+
+    /// 「全部」= AI 写入 + 整理台记录里的每一笔（她的操作、「C2 整理」的结论、助手用 memory_card 动的）混排；You 只看她的操作；
+    /// 筛某一项写手时只看那一项（不带她的操作），C2 带上做梦的那几笔
+    /// `card` 给了 = 只看动过这一条的那几笔（AI 写入不按条记，不列）
+    static func rows(_ entries: [MemoryWriteLog.Entry], audit: [MemoryAuditLog.Entry], filter: LogFilter, card: UUID? = nil) -> [LogRow] {
+        if let card {
+            let mine = audit.filter { $0.action != .undo && $0.items.contains { $0.card == card } }
+            switch filter {
+            case .all: return mine.map(LogRow.you)
+            case .you: return mine.filter { $0.actor == MemoryAuditLog.you }.map(LogRow.you)
+            case .writer(let w): return w == .c2 ? mine.filter { $0.actor == FragmentDream.actor }.map(LogRow.you) : []
+            }
+        }
+        let shown = audit.filter { $0.action != .undo }
+        let dream = shown.filter { $0.actor == FragmentDream.actor }.map(LogRow.you)
+        switch filter {
+        case .all: return entries.map(LogRow.ai) + shown.map(LogRow.you)
+        case .you: return shown.filter { $0.actor == MemoryAuditLog.you }.map(LogRow.you)
+        case .writer(let w): return entries.filter { $0.writer == w.code }.map(LogRow.ai) + (w == .c2 ? dream : [])
+        }
     }
 
     /// 按天分组（新的在前）：今天 / 昨天 / 10-11
     static func days(_ list: [MemoryWriteLog.Entry], now: Date = Date(), calendar: Calendar = .current) -> [(String, [MemoryWriteLog.Entry])] {
+        days(list, time: \.time, now: now, calendar: calendar)
+    }
+
+    static func days<T>(_ list: [T], time: (T) -> Date, now: Date = Date(), calendar: Calendar = .current) -> [(String, [T])] {
         var order: [String] = []
-        var groups: [String: [MemoryWriteLog.Entry]] = [:]
-        for e in list.sorted(by: { $0.time > $1.time }) {
+        var groups: [String: [T]] = [:]
+        for e in list.sorted(by: { time($0) > time($1) }) {
+            let t = time(e)
             let key: String
-            if calendar.isDate(e.time, inSameDayAs: now) { key = "今天" }
-            else if let y = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(e.time, inSameDayAs: y) { key = "昨天" }
+            if calendar.isDate(t, inSameDayAs: now) { key = "今天" }
+            else if let y = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(t, inSameDayAs: y) { key = "昨天" }
             else {
-                let c = calendar.dateComponents([.month, .day], from: e.time)
+                let c = calendar.dateComponents([.month, .day], from: t)
                 key = String(format: "%02d-%02d", c.month ?? 0, c.day ?? 0)
             }
             if groups[key] == nil { order.append(key) }
             groups[key, default: []].append(e)
         }
         return order.map { ($0, groups[$0] ?? []) }
+    }
+
+    // MARK: 她在整理台的一笔（原整理台 History，11-12 v2 原型挪来这里）
+
+    /// 「You · Delete 12」+ 时间 · 整理台；点开看改前改后；能撤的行尾 Undo，撤过的标 Undone。
+    /// 「C2 整理」的一笔 =「C2 整理 · Merge」+ 模型给的理由，点开多一个「看发给模型的全文」
+    private func auditRow(_ entry: MemoryAuditLog.Entry, undone: Bool) -> some View {
+        let open = auditOpen.contains(entry.id)
+        let dream = entry.actor == FragmentDream.actor
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button {
+                    if open { auditOpen.remove(entry.id) } else { auditOpen.insert(entry.id) }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(dream || entry.label != nil ? "\(entry.actor) · \(entry.label ?? entry.action.rawValue)"
+                                   : "\(entry.actor) · \(entry.action.rawValue) \(entry.items.count)")
+                            .font(m.body.weight(.medium))
+                            .foregroundColor(undone ? Theme.textMuted : Theme.textPrimary)
+                            .strikethrough(undone, color: Theme.textMuted)
+                        Text("\(Self.time(entry.at))" + (dream ? "" : " · \(entry.via ?? "整理台")") + (undone ? " · Undone" : "") + (open ? " · Hide" : " · Show"))
+                            .font(m.caption)
+                            .foregroundColor(Theme.textMuted)
+                        if let note = entry.note {
+                            Text(note)
+                                .font(m.caption)
+                                .foregroundColor(Theme.textSecondary)
+                                .lineLimit(open ? nil : 2)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                if MemoryAuditLog.canUndo(entry, in: audit) {
+                    Button { undoAudit(entry) } label: {
+                        Text("Undo")
+                            .font(m.body.weight(.medium))
+                            .foregroundColor(Theme.textPrimary)
+                            .padding(.horizontal, 16)
+                            .frame(minHeight: 44)
+                            .background(Theme.textPrimary.opacity(0.08), in: Capsule())
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            if open {
+                ForEach(entry.items, id: \.card) { item in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.before.content)
+                            .foregroundColor(Theme.textSecondary)
+                        if let after = item.after, after.content != item.before.content {
+                            Text("→ " + after.content)
+                                .foregroundColor(Theme.textPrimary)
+                        }
+                        ForEach(Self.traitChanges(item.before.traits, item.after?.traits, assistant: assistantName), id: \.self) { line in
+                            Text(line)
+                                .foregroundColor(Theme.textPrimary)
+                        }
+                    }
+                    .font(m.caption)
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 10)
+                    .overlay(alignment: .leading) { Rectangle().fill(Theme.textMuted.opacity(0.4)).frame(width: 2) }
+                }
+                if let id = entry.dream {
+                    Button("看发给模型的全文") { openDream(id) }
+                        .font(m.caption)
+                        .foregroundColor(Theme.branchIndicator)
+                        .buttonStyle(.borderless)
+                        .frame(minHeight: 32)
+                }
+            }
+        }
+    }
+
+    /// 一张卡写手四项改前改后：变了的各一行（`Tags: #a #b → #a #c`、`Confidence: 60 → 85`），没有的写 —；
+    /// 两头有一头没记四项（加这一项之前的老记录 / 彻底删）就不出
+    static func traitChanges(_ before: MemoryAuditLog.Traits?, _ after: MemoryAuditLog.Traits?, assistant: String) -> [String] {
+        guard let before, let after else { return [] }
+        func show(_ t: MemoryAuditLog.Traits) -> [String] {
+            let tags = MemoryAudit.cleanedTags(t.keywords).map { "#" + $0 }.joined(separator: " ")
+            return [MemoryAudit.cleaned(t.subject) ?? "—",
+                    MemoryAuditTraits.origin(t.speaker, assistant: assistant) ?? "—",
+                    t.confidence.map(String.init) ?? "—",
+                    tags.isEmpty ? "—" : tags]
+        }
+        let labels = ["About", "Said by", "Confidence", "Tags"]
+        let (old, new) = (show(before), show(after))
+        return labels.indices.filter { old[$0] != new[$0] }.map { "\(labels[$0]): \(old[$0]) → \(new[$0])" }
+    }
+
+    private func undoAudit(_ entry: MemoryAuditLog.Entry) {
+        let root = FileLibraryStore.memoryRoot(profileId: profileId)
+        let result = MemoryAuditLog.undo(entry, profileId: profileId, context: modelContext)
+        do {
+            try modelContext.save()
+        } catch {
+            modelContext.rollback()
+            auditNote = "撤回失败：\(error.localizedDescription)"
+            return
+        }
+        if let undone = result.entry { try? MemoryAuditLog.append(undone, memoryRoot: root) }
+        auditNote = result.restored == 0 ? "一张都没撤：这些卡后来都动过了"
+            : (result.skipped == 0 ? nil : "撤回了 \(result.restored) 张，\(result.skipped) 张后来动过没撤")
+        NotificationCenter.default.post(name: .memoryDidChange, object: nil)
+        onAuditChanged?()
+        audit = MemoryAuditLog.load(memoryRoot: root)
     }
 
     private static func time(_ d: Date) -> String {

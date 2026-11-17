@@ -62,7 +62,7 @@ struct MemoryOpenWindowSheet: View {
                         .foregroundColor(Theme.branchIndicator)
                         .buttonStyle(.plain)
                     }
-                    Text("档案、钉住的、\(assistant)的记忆共用注入预算 \(MemoryInjector.tokenBudget) token；上一个窗口单独按这个上限带最后几条，放不下的最早几条不带。发送时还会按总上下文裁剪；档案里聊到哪页带哪页，不算在这里。")
+                    Text("档案、钉住的、\(assistant)的记忆共用注入预算 \(MemoryInjector.tokenBudget) token；上一个窗口单独按这个上限带最后几条，放不下的最早几条不带。发送时还会按总上下文裁剪；档案里聊到哪页推送哪页，不算在这里。")
                         .font(.caption)
                         .foregroundColor(Theme.textMuted)
                 }

@@ -1,0 +1,579 @@
+[
+  {
+    "name": "recall",
+    "description": "recall 每次只翻一层，op 必填：date 看记忆日 A4 主调/事件；window 看指定窗口 A3 与 A2 段目录；segment 看指定 A2 段；messages 看同分支 [from_node_id,to_node_id_exclusive) 原文。search 必须给 query 与 scope:a|c：a 按 A4→A3→A2→原文，c 按 wiki页→卡L0→L1/碎片→原文，首个命中层即停。exact=true 仅 search，表示只搜原文；include_invalid 仅用于 scope=c 且非 exact 的 search，扩展软失效旧档案，不恢复私密/未批准/删除来源。wiki 必须给 layer:index|page|entry|original，依次翻索引、页、条目L1、原料L2，只有 original 读 L2。直接使用返回的结构化 target 下钻，不猜路径、段号或版本。长内容用同 op + cursor 续读，不改 cursor；过期请从父层重新定位。默认每次正文≤3000、总回包≤4000字符，以本轮楼层限额为准；本轮达到调用上限后，余下下一轮继续。日期 YYYY-MM-DD，以楼层当前时区的05:00为日界；date 与 after/before 互斥，after含当天、before不含，无before只读after当日。默认排除当前窗口，显式 conversation_id 可读当前窗；窗口可用全ID或唯一至少8位前缀。引用带日期/原话与出处，记忆不是最终事实。",
+    "input_schema": {
+      "properties": {
+        "after": {
+          "description": "含起始记忆日；无before只读当日",
+          "type": "string"
+        },
+        "before": {
+          "description": "不含终止记忆日，须同时给after",
+          "type": "string"
+        },
+        "conversation_id": {
+          "description": "窗口全ID或唯一至少8位前缀",
+          "type": "string"
+        },
+        "cursor": {
+          "description": "工具签发的版本化续读凭据；同op续读，不接受任意offset",
+          "type": "string"
+        },
+        "date": {
+          "description": "YYYY-MM-DD，记忆日05:00起；与after/before互斥",
+          "type": "string"
+        },
+        "exact": {
+          "type": "boolean"
+        },
+        "folder": {
+          "description": "仅wiki/index，本层公开文件夹；空为根索引",
+          "type": "string"
+        },
+        "from_node_id": {
+          "type": "string"
+        },
+        "include_invalid": {
+          "type": "boolean"
+        },
+        "layer": {
+          "enum": [
+            "index",
+            "page",
+            "entry",
+            "original"
+          ],
+          "type": "string"
+        },
+        "op": {
+          "enum": [
+            "date",
+            "window",
+            "segment",
+            "messages",
+            "search",
+            "wiki"
+          ],
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "scope": {
+          "enum": [
+            "a",
+            "c"
+          ],
+          "type": "string"
+        },
+        "segment": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target": {
+          "additionalProperties": false,
+          "properties": {
+            "branch_anchor": {
+              "type": "string"
+            },
+            "card": {
+              "additionalProperties": false,
+              "properties": {
+                "page": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "profile_id": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "profile_id",
+                    "path"
+                  ],
+                  "type": "object"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "page",
+                "path",
+                "version"
+              ],
+              "type": "object"
+            },
+            "conversation_id": {
+              "type": "string"
+            },
+            "date": {
+              "type": "string"
+            },
+            "directory_revision": {
+              "type": "string"
+            },
+            "from_node_id": {
+              "type": "string"
+            },
+            "last_node_id": {
+              "type": "string"
+            },
+            "layer": {
+              "type": "string"
+            },
+            "memory_id": {
+              "type": "string"
+            },
+            "page": {
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "profile_id": {
+                  "type": "string"
+                },
+                "version": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "profile_id",
+                "path"
+              ],
+              "type": "object"
+            },
+            "query": {
+              "type": "string"
+            },
+            "row": {
+              "additionalProperties": false,
+              "properties": {
+                "line_hash": {
+                  "type": "string"
+                },
+                "ordinal": {
+                  "type": "integer"
+                },
+                "page": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "profile_id": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "profile_id",
+                    "path"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "page",
+                "ordinal",
+                "line_hash"
+              ],
+              "type": "object"
+            },
+            "scope": {
+              "type": "string"
+            },
+            "segment": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "type": "object"
+            },
+            "source_version": {
+              "type": "string"
+            },
+            "to_node_id_exclusive": {
+              "type": "string"
+            },
+            "tree": {
+              "enum": [
+                "a",
+                "c"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "tree",
+            "layer"
+          ],
+          "type": "object"
+        },
+        "to_node_id_exclusive": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "memory_card",
+    "description": "记忆条目：从聊天里一条条记下来的事实（关于对方、关于你、你们之间的事），每条一句话。用这个工具自己动这些条目：add 新加一条；edit 改一条（只传要改的那几项）；delete 删一条（进已删除，还能恢复）；restore 把删掉的放回来；pin 钉住（之后每轮都带着）；unpin 取消钉住。除 add 外都要给 id：recall 搜到的 memory_id，或 fs_search / fs_read 在 memory/cards/ 里看到的那份文件的路径。正文写成不看上下文也读得懂的一句完整的话，用名字，不用「我 / 你 / 他」，例：「岚舟每周三去槐序巷皮影作坊学雕皮影」。发现哪条记错了、过时了就改或删，不要另加一条意思相反的。每一笔对方都看得到、能撤回；对方可能要先点允许才生效，被拒绝了就照实说，不要再试。也可以不用这个工具，直接用 fs_write / fs_edit / fs_delete 改 memory/cards/ 下那一条的文件，是同一回事。",
+    "input_schema": {
+      "properties": {
+        "action": {
+          "description": "add = 新加；edit = 改；delete = 删（能恢复）；restore = 把删掉的放回来；pin = 钉住；unpin = 取消钉住",
+          "enum": [
+            "add",
+            "edit",
+            "delete",
+            "restore",
+            "pin",
+            "unpin"
+          ],
+          "type": "string"
+        },
+        "confidence": {
+          "description": "0–100，这件事有多确定",
+          "type": "integer"
+        },
+        "content": {
+          "description": "正文，一句完整的话。add 必填；edit 时给了就整句换掉",
+          "type": "string"
+        },
+        "id": {
+          "description": "要动哪一条：recall 给的 memory_id，或 memory/cards/ 里那份文件的路径。除 add 外必填",
+          "type": "string"
+        },
+        "importance": {
+          "description": "1–5，越大越容易被想起来",
+          "type": "integer"
+        },
+        "pin": {
+          "description": "只在 add 时用：加的同时钉住",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "一句话：为什么动这一条（记进日志给对方看）",
+          "type": "string"
+        },
+        "speaker": {
+          "description": "这件事是谁说的：用户自述 = 对方自己说的；AI 观察 = 你看出来的；AI 承诺 = 你答应过的",
+          "enum": [
+            "用户自述",
+            "AI 观察",
+            "AI 承诺"
+          ],
+          "type": "string"
+        },
+        "subject": {
+          "description": "这一条说的是谁 / 什么，写名字，如「岚舟」",
+          "type": "string"
+        },
+        "tags": {
+          "description": "几个短标签，如 [\"皮影\", \"周三\"]；edit 时给了就整组换掉",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "remember",
+    "description": "记住一件事，存进我自己的记忆（memory/self/）。对方说「记住…」「别忘了…」时必须调这个工具（asked_by_user=true）；需要的话可以同时调日历、提醒等别的工具，但它们不能代替 remember。另外值得记的：对方告诉我新的、重要的事实或偏好；我们之间发生了值得记的事。闲聊、一次性的问题不记，不要什么都记。正文用第一人称，带上对方的原话（用「」括起来），写清为什么记。我自己主动记每天有上限，对方让我记的不算。",
+    "input_schema": {
+      "properties": {
+        "asked_by_user": {
+          "description": "true = 对方明确让我记的（不计每日上限）",
+          "type": "boolean"
+        },
+        "body": {
+          "description": "正文：第一人称，带原话，写清为什么记",
+          "type": "string"
+        },
+        "description": {
+          "description": "一行摘要，目录里显示这一行",
+          "type": "string"
+        },
+        "importance": {
+          "description": "1–5，5 = 永远要记得（每轮都带着全文）",
+          "type": "integer"
+        },
+        "name": {
+          "description": "短标题（也是文件名），如「剧场要日常化」",
+          "type": "string"
+        },
+        "type": {
+          "description": "user=关于对方 / feedback=对方对我怎么做的要求 / project=我们在做的事 / reference=资料指路",
+          "enum": [
+            "user",
+            "feedback",
+            "project",
+            "reference"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "body"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "edit_memory",
+    "description": "改我自己记过的某条记忆（memory/self/ 里的）。给 target（标题或文件名），只传要改的字段。",
+    "input_schema": {
+      "properties": {
+        "body": {
+          "description": "新的正文（整段替换）",
+          "type": "string"
+        },
+        "description": {
+          "description": "新的一行摘要",
+          "type": "string"
+        },
+        "importance": {
+          "description": "1–5，5 = 永远要记得（每轮都带着全文）",
+          "type": "integer"
+        },
+        "target": {
+          "description": "要改哪条：标题或文件名",
+          "type": "string"
+        },
+        "type": {
+          "description": "user=关于对方 / feedback=对方对我怎么做的要求 / project=我们在做的事 / reference=资料指路",
+          "enum": [
+            "user",
+            "feedback",
+            "project",
+            "reference"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "forget_memory",
+    "description": "把我记过的某条标成失效（不删文件，对方能复活）。记错了、过时了才用。",
+    "input_schema": {
+      "properties": {
+        "reason": {
+          "description": "一句话：为什么忘掉",
+          "type": "string"
+        },
+        "target": {
+          "description": "要忘掉哪条：标题或文件名",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "pending_notes",
+    "description": "看、标时间轴上的待续（做到一半的事、答应了的事）。add 记一条待续；list 列出还没做完的；做完了用 done，过去了、不用再惦记的用 faded，都要给 id。",
+    "input_schema": {
+      "properties": {
+        "action": {
+          "description": "add = 记一条待续；list = 看没做完的；done = 标做完了；faded = 标淡了",
+          "enum": [
+            "add",
+            "list",
+            "done",
+            "faded"
+          ],
+          "type": "string"
+        },
+        "id": {
+          "description": "待续的编号（list 里看到的，如 p0003）；done / faded 必填",
+          "type": "string"
+        },
+        "text": {
+          "description": "add 必填，待续内容，最多200字",
+          "maxLength": 200,
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "fs_list",
+    "description": "列出文件库、楼层记忆（memory/）和这一层 Prompt（.prompt/）里所有文本文件（路径+大小），不读内容。.prompt/fields/ 下是楼层字段：systemPrompt = 系统指令 / userPersona = 用户描述 / characterDescription = 助手设定 / characterPersonality = 助手性格 / scenario = 背景设定 / chatExamples = 对话示例 / postInstructions = 后置提醒；.prompt/ 下其余的是当前预设的插槽，每行后面标着是哪一段",
+    "input_schema": {
+      "properties": {},
+      "required": [],
+      "type": "object"
+    }
+  },
+  {
+    "name": "fs_read",
+    "description": "读取文件内容。默认从第 1 行起，最多返回 2000 行 / 50KB，超出会截断并告诉你续读位置；大文件用 offset/limit 分段读，要全文就用 offset 一直续读到完",
+    "input_schema": {
+      "properties": {
+        "limit": {
+          "description": "最多读多少行",
+          "type": "integer"
+        },
+        "offset": {
+          "description": "起始行号（1 起）",
+          "type": "integer"
+        },
+        "path": {
+          "description": "相对路径，如 notes/todo.md。memory/ 下是记忆，.prompt/ 下是这一层的 Prompt；tool-results/ 前缀是只读区",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "fs_search",
+    "description": "跨所有文件按关键词搜索，返回命中文件与行",
+    "input_schema": {
+      "properties": {
+        "keyword": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "keyword"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "fs_write",
+    "description": "新建或整文件覆盖写入。memory/ 下写文件 = 写那种记忆：memory/cards/<说的是谁>/<名字>.md 是记忆条目（开头两行 --- 之间一行一项：about / from / tags / importance / confidence / pinned / state，下面是一句正文；没写的项不动；新建一份 = 加一条，文件名会换成它的编号）；memory/self/<短标题>.md 是你自己的记忆；memory/pending/待续.md 是待续，一条一行「- 内容」；memory/wiki/<组>/<页>.md 是 wiki 页。.prompt/ 下是这一层的 Prompt，只能改已有的那几份，对方的下一条消息起生效。格式不对会被拒并说明哪一行；对方可能要先点允许，被拒绝了就照实说。memory/ 里别的文件只读",
+    "input_schema": {
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "fs_append",
+    "description": "在文件末尾追加内容；文件不存在时创建。memory/、.prompt/ 下同 fs_write 的规矩",
+    "input_schema": {
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "fs_edit",
+    "description": "把文件里唯一命中的 old_string 替换成 new_string。memory/、.prompt/ 下同 fs_write 的规矩（改记忆条目的一项、待续的一行、Prompt 的一段用它最省事）",
+    "input_schema": {
+      "properties": {
+        "new_string": {
+          "type": "string"
+        },
+        "old_string": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "old_string",
+        "new_string"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "fs_rename",
+    "description": "重命名或移动某个文件；目标已存在时会失败。memory/ 下只有记忆条目能挪：挪到另一个「说的是谁」文件夹 = 改 about，挪进 memory/cards/Deleted/ = 删（能放回）",
+    "input_schema": {
+      "properties": {
+        "new_path": {
+          "type": "string"
+        },
+        "old_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "old_path",
+        "new_path"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "fs_delete",
+    "description": "删除某个文件。memory/ 下：删记忆条目 = 进 Deleted（能放回），删 memory/self/ 的一份 = 标成失效，删 wiki 页 = 进已删除（能恢复）；.prompt/ 下不能删",
+    "input_schema": {
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  }
+]

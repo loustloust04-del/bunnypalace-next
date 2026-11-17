@@ -57,14 +57,32 @@ enum CCBridgeEndpoints {
         defaults.set(backup, forKey: backupKey)
     }
 
+    /// 没显式配过 hub 时要不要补默认的本机地址（`ws://127.0.0.1:7890/cc`）。
+    /// 模拟器里直接启动的 app 不补：模拟器的回环就是这台 Mac，默认地址上是她正在用的 hub，测试装的花园不该自己连上去
+    /// （11-04 一台新装的模拟器把她的推送名改成了「助手」）。要连就显式配一个地址（设置里填主地址，或写 `ccBridgeBaseURLOverride`）。
+    /// 真机、Mac 不变；XCTest 宿主照旧算出这个地址（宿主本来就不真连，测试对着它断言）
+    static let allowsLocalFallback: Bool = {
+        #if targetEnvironment(simulator)
+        let simulator = true
+        #else
+        let simulator = false
+        #endif
+        return localFallbackAllowed(simulator: simulator, environment: ProcessInfo.processInfo.environment)
+    }()
+
+    static func localFallbackAllowed(simulator: Bool, environment: [String: String]) -> Bool {
+        !simulator || environment["XCTestConfigurationFilePath"] != nil
+    }
+
     /// [主, 备, 中继]。includeRelay=false 给中继不转的路径（/agora 等，中继一期只放 /cc 和 /health）。
     /// 什么都没配时才补默认本机地址（fallbackToLocal=false 时不补）；只配了中继不补，免得本机 hub 抢走竞速
-    static func configuredURLs(includeRelay: Bool = true, fallbackToLocal: Bool = true, defaults: UserDefaults = .standard) -> [URL] {
+    static func configuredURLs(includeRelay: Bool = true, fallbackToLocal: Bool = true, defaults: UserDefaults = .standard,
+                               localFallbackAllowed: Bool = allowsLocalFallback) -> [URL] {
         let override = defaults.string(forKey: overrideKey) ?? ""
         let backup = defaults.string(forKey: backupKey) ?? ""
         let relay = relayURL(defaults: defaults)
         var urls = [override, backup].filter { !$0.isEmpty }.compactMap(URL.init(string:))
-        if override.isEmpty, relay == nil, fallbackToLocal, let local = URL(string: APIProvider.ccBridge.baseURL) { urls.insert(local, at: 0) }
+        if override.isEmpty, relay == nil, fallbackToLocal, localFallbackAllowed, let local = URL(string: APIProvider.ccBridge.baseURL) { urls.insert(local, at: 0) }
         if includeRelay, let relay { urls.append(relay) }
         return urls
     }

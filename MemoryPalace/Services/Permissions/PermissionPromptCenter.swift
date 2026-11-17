@@ -29,7 +29,17 @@ final class PermissionPromptCenter {
         var approval: Approval? = nil
         /// true = 这张由对话里的审批卡显示（宿主不弹 sheet、不超时）；离开对话会改回 false 走弹窗
         var inline = false
+        /// 非 nil = 这张不是聊天里的工具调用，是 CC 在电脑上改了记忆文件夹里的文件（`GardenFolderInbox`）：
+        /// 卡上说清是哪一处、第几处；划走 = 以后再说（那一笔接着等，不算拒绝）
+        var folderChange: FolderChange? = nil
         let continuation: CheckedContinuation<Decision, Never>
+    }
+
+    /// CC 在电脑上改的一处：`what` = 动的是哪一份（如「修改 memory/cards/岚舟/3f9a1c2e.md」）；这一批等她点的共 `total` 处，这是第 `index` 处
+    struct FolderChange: Equatable {
+        let what: String
+        let index: Int
+        let total: Int
     }
 
     /// 审批卡要的信息：哪个对话、哪个工具、完整参数、能不能选「本对话都允许」
@@ -94,7 +104,7 @@ final class PermissionPromptCenter {
     /// `markPresented` 在卡片 `onAppear` 时才起。以前两者合一、从 `decide()` 起表，
     /// 卡还没弹出来就在烧秒数——那就是 BUG-9「点了允许却收到超时」的根因。
     func decide(_ domain: PermissionDomain, detail: String? = nil, secretLabels: String? = nil,
-                approval: Approval? = nil) async -> Decision {
+                approval: Approval? = nil, folderChange: FolderChange? = nil) async -> Decision {
         while pendingRequest != nil {
             do { try await Task.sleep(nanoseconds: 100_000_000) }
             catch { return .timedOut }
@@ -109,6 +119,7 @@ final class PermissionPromptCenter {
                 }
                 var req = Request(id: id, domain: domain, detail: detail, secretLabels: secretLabels, continuation: continuation)
                 req.approval = approval
+                req.folderChange = folderChange
                 // 正看着这个对话：卡出在对话底部，不弹窗、不超时（粟粟 10-03）
                 req.inline = approval != nil && approval?.conversationId == self.visibleConversationId
                 self.cancelTimers()

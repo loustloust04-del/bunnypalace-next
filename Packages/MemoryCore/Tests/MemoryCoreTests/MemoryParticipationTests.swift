@@ -12,8 +12,8 @@ final class MemoryParticipationTests: XCTestCase {
             archive: archive, previousWindow: previousWindow, pinned: pinned)
     }
 
-    /// 真实 legacy 形状（`MemoryWindowChoices.legacy()`）：previousWindow 恒假，
-    /// archive / pinned 同取 C 勾。
+    /// legacy 形状（`MemoryWindowChoices.legacy()`）：previousWindow 恒假，archive 取 C 勾；
+    /// pinned 在 app 里读楼层「钉住的」那一勾，这里的夹具让它同取 c（包只照传进来的值用）。
     private func legacyChoices(timeline: Bool = true, pending: Bool = true, selfMemory: Bool = true,
                                c: Bool = true) -> EffectiveMemoryParticipation.Choices {
         EffectiveMemoryParticipation.Choices(
@@ -25,12 +25,52 @@ final class MemoryParticipationTests: XCTestCase {
                           choices: EffectiveMemoryParticipation.Choices? = nil,
                           legacy: EffectiveMemoryParticipation.Choices? = nil,
                           a2Checked: Bool = true,
-                          archiveTrigger: Bool = true) -> EffectiveMemoryParticipation.Switches {
+                          archiveTrigger: Bool = true,
+                          everyRound: Bool = false) -> EffectiveMemoryParticipation.Switches {
         EffectiveMemoryParticipation.Switches(
             master: master, window: window, slot: slot,
             choices: choices,
             legacy: legacy ?? legacyChoices(),
-            a2Checked: a2Checked, archiveTrigger: archiveTrigger)
+            a2Checked: a2Checked, archiveTrigger: archiveTrigger, everyRound: everyRound)
+    }
+
+    // MARK: - 批过的记忆条目：候选 / 每轮全带
+
+    /// `cards` = 闸开着 &&（老窗 || 本窗「档案」勾着）；`everyRound` = cards && 楼层那一勾；`pages` = cards && 触发开。
+    /// wiki 目录（`archive`）只是另一段，不决定这三样。
+    func testCardsEveryRoundAndPagesAreIndependentOfTheRootIndexCheck() {
+        for c in [true, false] {
+            for trigger in [true, false] {
+                for every in [true, false] {
+                    let legacy = EffectiveMemoryParticipation(
+                        switches(choices: nil, legacy: legacyChoices(c: c), archiveTrigger: trigger, everyRound: every))
+                    XCTAssertTrue(legacy.cards, "老窗恒是候选")
+                    XCTAssertEqual(legacy.everyRound, every, "老窗：只听每轮全带那一勾（C \(c) · 触发 \(trigger)）")
+                    XCTAssertEqual(legacy.pages, trigger)
+                    XCTAssertEqual(legacy.archive, c, "wiki 目录跟 C 勾")
+                    for archive in [true, false] {
+                        let fresh = EffectiveMemoryParticipation(
+                            switches(choices: choices(archive: archive), legacy: legacyChoices(c: c),
+                                     archiveTrigger: trigger, everyRound: every))
+                        XCTAssertEqual(fresh.cards, archive, "新窗：本窗划掉档案 = 不是候选")
+                        XCTAssertEqual(fresh.everyRound, archive && every)
+                        XCTAssertEqual(fresh.pages, archive && trigger)
+                        XCTAssertEqual(fresh.archive, archive)
+                    }
+                }
+            }
+        }
+        for off in [switches(master: false, choices: choices(), everyRound: true),
+                    switches(window: false, choices: choices(), everyRound: true),
+                    switches(slot: false, choices: choices(), everyRound: true)] {
+            let p = EffectiveMemoryParticipation(off)
+            XCTAssertFalse(p.cards, "整体关着不带")
+            XCTAssertFalse(p.everyRound)
+        }
+        let p = EffectiveMemoryParticipation(switches(choices: choices(), everyRound: true))
+        XCTAssertEqual(RecallGateSnapshot(p, hiddenFragments: 0, hiddenTimeline: 0).everyRound, true)
+        XCTAssertEqual(RecallGateSnapshot(EffectiveMemoryParticipation(switches(choices: choices())),
+                                          hiddenFragments: 0, hiddenTimeline: 0).everyRound, false)
     }
 
     // MARK: - 第一行：master 关
