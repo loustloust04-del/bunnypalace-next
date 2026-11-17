@@ -179,7 +179,13 @@ struct RightPanelToolContent: View {
         case "cssChat":
             Page2ChatWebView(viewModel: viewModel)
         case RightPanelToolManager.gardenOSToolId:
-            NavigationStack { GardenOSSettingsView() }
+            // [Bunny patch BP-012] 用户 11-18：桌面「设置」App 固定打开改版前的完整设置树（带搜索、简洁 / Pro）；
+            // 粟粟的 gardenOS 设置在完整设置里「gardenOS 设置」一行仍可进。关掉兔兔开关恢复上游行为。
+            if UserDefaults.standard.object(forKey: "bunny.settingsApp.fullTree") as? Bool ?? true {
+                SettingsView()
+            } else {
+                NavigationStack { GardenOSSettingsView() }
+            }
         case "cinema":
             CinemaPanelView(viewModel: viewModel, profileId: profileManager?.currentProfile.id ?? "")
         #endif

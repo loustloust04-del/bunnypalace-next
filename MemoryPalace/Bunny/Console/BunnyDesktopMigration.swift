@@ -12,6 +12,7 @@ enum BunnyDesktopMigration {
     static let apps: [(toolId: String, doneKey: String)] = [
         ("bunnyConsole", "bunny.desktop.consoleIcon.v1"),
         ("bunnyMusic", "bunny.desktop.musicIcon.v1"),
+        (RightPanelToolManager.gardenOSToolId, "bunny.desktop.settingsIcon.v1"),   // 设置 App：老桌面可能没摆
     ]
 
     static func runIfNeeded(tools: RightPanelToolManager) {
