@@ -832,10 +832,15 @@ final class ConversationViewModel {
         #endif
         // [Bunny patch BP-010] 原写法把整段对话的节点全取进内存再找：大肥兔迁来的长对话（QQ 线上万条）在主线程卡 10 秒以上
         // （黑匣子 11-13 记录）。改为在 SQL 里按 ccMessageId 精确取 1 条；取不到再按时间倒序取最近 1 条助手回复。语义不变。
+        // 11-22 补：只按 conversationId 过滤用不上 (profileId, conversationId) 索引，SQLite 会全表扫描并读穿大正文（仍卡 20 秒）；
+        // 先从对话表取 profileId（对话表小），再带上它查节点，走索引。
         let cid = ccMessageId
-        var exact = FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> { $0.conversationId == chatId && $0.ccMessageId == cid })
+        var convDesc = FetchDescriptor<Conversation>(predicate: #Predicate<Conversation> { $0.id == chatId })
+        convDesc.fetchLimit = 1
+        let pid = (try? context.fetch(convDesc))?.first?.profileId ?? ""
+        var exact = FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> { $0.profileId == pid && $0.conversationId == chatId && $0.ccMessageId == cid })
         exact.fetchLimit = 1
-        var latest = FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> { $0.conversationId == chatId && $0.role == "assistant" },
+        var latest = FetchDescriptor<MessageNode>(predicate: #Predicate<MessageNode> { $0.profileId == pid && $0.conversationId == chatId && $0.role == "assistant" },
                                                   sortBy: [SortDescriptor(\.createTime, order: .reverse)])
         latest.fetchLimit = 1
         let node = (try? context.fetch(exact))?.first ?? (try? context.fetch(latest))?.first
